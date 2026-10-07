@@ -90,6 +90,6 @@ export const T3ProjectFile = Schema.Struct({
 }).annotate({
   title: "KM Code project file",
   description:
-    "Checked-in project configuration for KM Code (t3.json at the repository root). See https://github.com/kmccleary3301/t3code for documentation.",
+    "Checked-in project configuration for KM Code (t3.json at the repository root). See https://github.com/kmccleary3301/kmcode for documentation.",
 });
 export type T3ProjectFile = typeof T3ProjectFile.Type;

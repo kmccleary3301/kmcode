@@ -2,7 +2,7 @@ import type { DesktopUpdateActionResult, DesktopUpdateState } from "@t3tools/con
 
 export type DesktopUpdateButtonAction = "download" | "install" | "none";
 
-const DESKTOP_RELEASES_URL = "https://github.com/kmccleary3301/t3code/releases";
+const DESKTOP_RELEASES_URL = "https://github.com/kmccleary3301/kmcode/releases";
 
 /**
  * The main process fills `downloadedVersion` from the updater's `update-downloaded`

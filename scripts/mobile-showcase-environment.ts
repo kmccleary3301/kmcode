@@ -130,7 +130,7 @@ export const SHOWCASE_PROJECTS = [
     id: "t3code",
     title: "KM Code",
     directory: "t3code",
-    repositoryUrl: "https://github.com/kmccleary3301/t3code.git",
+    repositoryUrl: "https://github.com/kmccleary3301/kmcode.git",
     favicon: PROJECT_FAVICONS.t3code,
   },
   {
@@ -322,7 +322,7 @@ async function seedT3CodeWorkspace(workspaceRoot: string): Promise<void> {
   );
   await initializeRepository({
     workspaceRoot,
-    repositoryUrl: "https://github.com/kmccleary3301/t3code.git",
+    repositoryUrl: "https://github.com/kmccleary3301/kmcode.git",
     commitMessage: "Show connected environments",
   });
   await runGit(workspaceRoot, ["checkout", "-b", "feat/remote-command-center"]);

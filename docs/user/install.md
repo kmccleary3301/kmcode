@@ -36,11 +36,11 @@ curl -fsSL https://github.com/pingdotgg/t3code/releases/latest/download/install.
 ```
 
 For earlier Pi + OMP fork releases, use the owner-controlled
-[`kmccleary3301/t3code`](https://github.com/kmccleary3301/t3code) release channel:
+[`kmccleary3301/kmcode`](https://github.com/kmccleary3301/kmcode) release channel:
 
 ```sh
-curl -fsSL https://github.com/kmccleary3301/t3code/releases/latest/download/install.sh |
-  sh -s -- --profile pi-omp --repository kmccleary3301/t3code
+curl -fsSL https://github.com/kmccleary3301/kmcode/releases/latest/download/install.sh |
+  sh -s -- --profile pi-omp --repository kmccleary3301/kmcode
 ```
 
 Do not point the private installer at the official T3 release repository. For a pinned,
@@ -48,14 +48,14 @@ auditable install of the published `fork-v0.0.47` release, download the verifica
 that exact release, verify the installer, then run it locally:
 
 ```sh
-base=https://github.com/kmccleary3301/t3code/releases/download/fork-v0.0.47
+base=https://github.com/kmccleary3301/kmcode/releases/download/fork-v0.0.47
 curl -fsSLO "$base/install.sh"
 curl -fsSLO "$base/RELEASE-MANIFEST.json"
 curl -fsSLO "$base/SHA256SUMS"
 expected=$(awk '$2 == "./install.sh" { print $1 }' SHA256SUMS)
 actual=$(shasum -a 256 install.sh | awk '{ print $1 }') # use sha256sum on Linux
 test "$actual" = "$expected"
-sh install.sh --profile pi-omp --repository kmccleary3301/t3code --version 0.0.47
+sh install.sh --profile pi-omp --repository kmccleary3301/kmcode --version 0.0.47
 ```
 
 The recorded `fork-v0.0.47` installer SHA-256 is
@@ -81,7 +81,7 @@ It does not install Node.js or the native provider runtimes.
 ## Desktop App
 
 Build KM Code from this fork, or use its
-[GitHub Releases](https://github.com/kmccleary3301/t3code/releases).
+[GitHub Releases](https://github.com/kmccleary3301/kmcode/releases).
 Earlier releases predate the KM Code rebrand.
 
 For a local macOS Apple Silicon archive after installing dependencies:
@@ -102,14 +102,14 @@ fork-owned signing credentials and `--signed`.
 An update may require macOS Keychain approval before saved credentials can be read.
 
 The private Pi + OMP
-[`fork-v0.0.47`](https://github.com/kmccleary3301/t3code/releases/tag/fork-v0.0.47)
+[`fork-v0.0.47`](https://github.com/kmccleary3301/kmcode/releases/tag/fork-v0.0.47)
 release includes macOS arm64/x64, Linux arm64/x64, and Windows x64 desktop artifacts. Its
 `SHA256SUMS` and GitHub build provenance are verified. The current target-host
 install/update/rollback/uninstall lifecycle passed all five jobs in
-[`32721583970`](https://github.com/kmccleary3301/t3code/actions/runs/32721583970).
+[`32721583970`](https://github.com/kmccleary3301/kmcode/actions/runs/32721583970).
 Signing and notarization credentials are not
 configured, so the installers are unsigned and the
-[`macOS arm64 DMG`](https://github.com/kmccleary3301/t3code/releases/download/fork-v0.0.47/T3-Code-Pi-OMP-0.0.47-arm64.dmg)
+[`macOS arm64 DMG`](https://github.com/kmccleary3301/kmcode/releases/download/fork-v0.0.47/T3-Code-Pi-OMP-0.0.47-arm64.dmg)
 is not notarized. Treat `fork-v0.0.47` as an unsigned personal build; `fork-v0.0.39` had a
 desktop asset-selection defect.
 

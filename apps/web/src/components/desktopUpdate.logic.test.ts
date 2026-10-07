@@ -187,10 +187,10 @@ describe("getDesktopUpdateActionError", () => {
 describe("desktop update UI helpers", () => {
   it("routes versioned updates to the fork release listing without fabricating a tag", () => {
     expect(getDesktopUpdateReleaseUrl("0.0.30")).toBe(
-      "https://github.com/kmccleary3301/t3code/releases",
+      "https://github.com/kmccleary3301/kmcode/releases",
     );
     expect(getDesktopUpdateReleaseUrl("0.0.30-nightly.20260728.931")).toBe(
-      "https://github.com/kmccleary3301/t3code/releases",
+      "https://github.com/kmccleary3301/kmcode/releases",
     );
   });
 

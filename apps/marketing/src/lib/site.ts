@@ -1,4 +1,4 @@
-export const GITHUB_REPOSITORY_URL = "https://github.com/kmccleary3301/t3code";
+export const GITHUB_REPOSITORY_URL = "https://github.com/kmccleary3301/kmcode";
 
 // These are the upstream T3 Code mobile apps, not KM Code distributions.
 export const IOS_APP_STORE_URL =

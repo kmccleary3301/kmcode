@@ -50,7 +50,7 @@ Tip: Use `npx t3@latest --help` for the full CLI reference.
 ### Desktop app
 
 These package-manager commands install upstream T3 Code, not KM Code. Fork releases are
-published separately at [kmccleary3301/t3code](https://github.com/kmccleary3301/t3code/releases);
+published separately at [kmccleary3301/kmcode](https://github.com/kmccleary3301/kmcode/releases);
 earlier fork artifacts still carry T3 Code branding.
 
 #### Windows (`winget`)
@@ -131,6 +131,6 @@ vp i
 
 Read [CONTRIBUTING.md](./CONTRIBUTING.md) before reporting a bug or opening a PR.
 
-For fork issues, use [kmccleary3301/t3code](https://github.com/kmccleary3301/t3code/issues).
+For fork issues, use [kmccleary3301/kmcode](https://github.com/kmccleary3301/kmcode/issues).
 Upstream feature proposals belong in [T3 Code Ideas](https://github.com/pingdotgg/t3code/discussions/categories/ideas).
 The [T3 Code Discord](https://discord.gg/jn4EGJjrvv) is an upstream community, not KM Code support.

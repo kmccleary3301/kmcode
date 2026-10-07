@@ -1,4 +1,4 @@
-const REPO = "kmccleary3301/t3code";
+const REPO = "kmccleary3301/kmcode";
 
 export const RELEASES_URL = `https://github.com/${REPO}/releases`;
 

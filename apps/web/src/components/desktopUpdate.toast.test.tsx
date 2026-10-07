@@ -71,7 +71,7 @@ describe("showDesktopUpdateDownloadedToast", () => {
     const link = findReleaseNotesLink(getDescription());
     link?.props.onClick?.();
     await vi.waitFor(() => {
-      expect(openExternal).toHaveBeenCalledWith("https://github.com/kmccleary3301/t3code/releases");
+      expect(openExternal).toHaveBeenCalledWith("https://github.com/kmccleary3301/kmcode/releases");
     });
     expect(testState.addToast).toHaveBeenCalledTimes(1);
   });
@@ -87,7 +87,7 @@ describe("showDesktopUpdateDownloadedToast", () => {
     findReleaseNotesLink(getDescription())?.props.onClick?.();
 
     await vi.waitFor(() => {
-      expect(openExternal).toHaveBeenCalledWith("https://github.com/kmccleary3301/t3code/releases");
+      expect(openExternal).toHaveBeenCalledWith("https://github.com/kmccleary3301/kmcode/releases");
     });
   });
 

@@ -87,7 +87,7 @@ authenticated.
   to the host, so this produces an arm64 DMG on Apple Silicon. Use `dist:desktop:dmg:arm64` or
   `dist:desktop:dmg:x64`, or pass `--arch <arm64|x64|universal>`, to force one.
 - `vp run dist:desktop:pi-omp:dmg`: Builds the production Pi + OMP macOS DMG with
-  `kmccleary3301/t3code` baked in as the updater repository. This is the local daily-driver build;
+  `kmccleary3301/kmcode` baked in as the updater repository. This is the local daily-driver build;
   it uses the production app name, bundle ID, URL scheme, icon, and state directory rather than Dev.
 - `vp run dist:desktop:linux`: Builds a Linux AppImage into `./release`.
 - `vp run dist:desktop:win`: Builds a Windows NSIS installer into `./release`. `:arm64` and `:x64`

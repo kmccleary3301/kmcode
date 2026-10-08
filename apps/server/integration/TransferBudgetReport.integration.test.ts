@@ -9,6 +9,7 @@ import {
   formatTransferBudgetResult,
   transferBudgetViolations,
   type TransferBudgetRun,
+  type WebSocketCatchUpMeasurement,
 } from "./TransferBudgetReport.integration.ts";
 
 const httpMeasurement = (wireBytes: number): HttpTransferMeasurement => ({
@@ -24,70 +25,64 @@ const httpMeasurement = (wireBytes: number): HttpTransferMeasurement => ({
 const webSocketMeasurement = (
   overrides?: Partial<WebSocketTransferTotals>,
 ): WebSocketTransferTotals => ({
-  wireBytes: 6_900,
-  decodedBytes: 57_000,
-  messages: 20,
-  largestMessageBytes: 6_500,
+  wireBytes: 1_800,
+  decodedBytes: 25_000,
+  messages: 6,
+  largestMessageBytes: 600,
   ...overrides,
+});
+
+const catchUpMeasurement = (mode: "replay" | "snapshot"): WebSocketCatchUpMeasurement => ({
+  ...webSocketMeasurement(),
+  mode,
 });
 
 const run = (overrides?: Partial<TransferBudgetRun>): TransferBudgetRun => ({
   provider: ProviderDriverKind.make("codex"),
-  threadSnapshot: httpMeasurement(7_100),
-  resumedThreadSnapshot: httpMeasurement(7_100),
+  threadSnapshot: httpMeasurement(4_500),
   measuredTurnWebSocket: webSocketMeasurement(),
-  fanoutClients: 2,
+  shellSnapshot: httpMeasurement(1_000),
+  measuredTurnShellWebSocket: webSocketMeasurement(),
+  measuredTurnSecondClientWebSocket: webSocketMeasurement(),
+  reconnectThread: catchUpMeasurement("replay"),
+  reconnectShell: catchUpMeasurement("replay"),
+  measuredTurnSqlStatements: 5,
+  reconnectSqlStatements: 2,
   ...overrides,
 });
 
-it("binds the machine report to an exact source head", () => {
-  const sourceHead = "a".repeat(40);
-  const result = JSON.parse(formatTransferBudgetResult([run()], sourceHead));
-  assert.equal(result.schemaVersion, 2);
-  assert.equal(result.sourceHead, sourceHead);
-  assert.throws(() => formatTransferBudgetResult([run()], "stale"), /full Git SHA/);
+it("formats the machine report with expected schema version and providers", () => {
+  const result = JSON.parse(formatTransferBudgetResult([run()]));
+  assert.equal(result.schemaVersion, 1);
+  assert.equal(result.scenario.id, "thread-transfer-v2");
+  assert.isDefined(result.providers.codex);
+  assert.equal(result.providers.codex.ceiling.totalWireBytes, 7_000);
+});
+
+it("passes when measurements are within budget", () => {
+  assert.deepEqual(transferBudgetViolations([run()]), []);
 });
 
 it("fails when a retained large result exceeds the cold bootstrap ceiling", () => {
-  assert.deepEqual(transferBudgetViolations([run()]), []);
-  assert.deepEqual(transferBudgetViolations([run({ threadSnapshot: httpMeasurement(7_501) })]), [
-    "codex: thread snapshot wire bytes was 7501, maximum 7500",
+  assert.deepEqual(transferBudgetViolations([run({ threadSnapshot: httpMeasurement(5_001) })]), [
+    "codex: thread snapshot wire bytes was 5001, maximum 5000",
   ]);
 });
 
-it("fails when a resumed client replays a full snapshot", () => {
+it("fails when turn messages exceed the message ceiling", () => {
   assert.deepEqual(
-    transferBudgetViolations([run({ resumedThreadSnapshot: httpMeasurement(7_501) })]),
-    ["codex: resumed thread snapshot wire bytes was 7501, maximum 7500"],
+    transferBudgetViolations([
+      run({ measuredTurnWebSocket: webSocketMeasurement({ messages: 9 }) }),
+    ]),
+    ["codex: measured-turn WebSocket messages was 9, maximum 8"],
   );
 });
 
-it("fails when duplicated task events exceed the message ceiling", () => {
+it("fails when turn wire bytes exceed the budget", () => {
   assert.deepEqual(
     transferBudgetViolations([
-      run({ measuredTurnWebSocket: webSocketMeasurement({ messages: 22 }) }),
+      run({ measuredTurnWebSocket: webSocketMeasurement({ wireBytes: 2_001 }) }),
     ]),
-    ["codex: measured-turn WebSocket messages was 22, maximum 21"],
-  );
-});
-
-it("fails when frame, decoded, or fanout ceilings regress", () => {
-  assert.deepEqual(
-    transferBudgetViolations([
-      run({
-        measuredTurnWebSocket: webSocketMeasurement({
-          wireBytes: 8_001,
-          decodedBytes: 68_001,
-          largestMessageBytes: 18_001,
-        }),
-        fanoutClients: 3,
-      }),
-    ]),
-    [
-      "codex: measured-turn WebSocket wire bytes was 8001, maximum 8000",
-      "codex: measured-turn WebSocket decoded bytes was 68001, maximum 68000",
-      "codex: measured-turn largest WebSocket message bytes was 18001, maximum 18000",
-      "codex: fanout clients was 3, maximum 2",
-    ],
+    ["codex: measured-turn WebSocket wire bytes was 2001, maximum 2000"],
   );
 });

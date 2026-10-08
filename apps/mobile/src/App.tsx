@@ -1,4 +1,5 @@
 import Constants from "expo-constants";
+import { PermissionUpdateNotice } from "./components/PermissionUpdateNotice";
 import * as Linking from "expo-linking";
 import * as SplashScreen from "expo-splash-screen";
 import { useEffect, useState } from "react";
@@ -10,7 +11,7 @@ import { createStaticNavigation } from "@react-navigation/native";
 import { RegistryContext } from "@effect/atom-react";
 import { useAtomValue } from "@effect/atom-react";
 import * as Effect from "effect/Effect";
-import { AsyncResult } from "effect/unstable/reactivity";
+import { AsyncResult } from "effect/reactivity";
 import { ThreadArrangementHost } from "./features/threads/ThreadArrangementSheet";
 import { ConfirmDialogHost } from "./components/ConfirmDialogHost";
 import { CloudAuthProvider } from "./features/cloud/CloudAuthProvider";
@@ -39,6 +40,8 @@ import { OverlayPortalHost } from "./components/OverlayPortal";
 import { shouldHandleAppLink } from "./lib/appLinking";
 import { useMobileNavigationTheme } from "./lib/useMobileNavigationTheme";
 import { SubscriptionUsageCoordinator } from "./widgets/SubscriptionUsageCoordinator";
+import { VoiceInputProvider } from "./features/voice-input/VoiceInputProvider";
+import { GlobalVoiceInputControl } from "./features/voice-input/GlobalVoiceInputControl";
 
 import "../global.css";
 
@@ -241,25 +244,28 @@ function AppContent() {
     <>
       <SplashScreenCoordinator />
       <SubscriptionUsageCoordinator />
+      <PermissionUpdateNotice />
       <GestureHandlerRootView className="flex-1">
         <KeyboardProvider statusBarTranslucent>
           <SafeAreaProvider>
-            <StatusBar barStyle={themeAppearance === "dark" ? "light-content" : "dark-content"} />
-            {/* The navigation theme drives the NATIVE header appearance: native-stack
+            <VoiceInputProvider>
+              <StatusBar barStyle={themeAppearance === "dark" ? "light-content" : "dark-content"} />
+              {/* The navigation theme drives the NATIVE header appearance: native-stack
                 forwards `dark` as the nav bar's overrideUserInterfaceStyle. Without
                 this, React Navigation defaults to its light theme and every native
                 header (glass buttons, title, materials) is forced light even when
                 the system is in dark mode. */}
-            <View style={{ flex: 1 }}>
-              <IncomingShareProvider>
-                <Navigation linking={appLinking} theme={navigationTheme} />
-              </IncomingShareProvider>
-              <ConfirmDialogHost />
-              <ThreadArrangementHost />
-            </View>
-            {/* Anchored-menu overlays render here — in-window, so the
+              <GlobalVoiceInputControl>
+                <IncomingShareProvider>
+                  <Navigation linking={appLinking} theme={navigationTheme} />
+                </IncomingShareProvider>
+                <ConfirmDialogHost />
+                <ThreadArrangementHost />
+              </GlobalVoiceInputControl>
+              {/* Anchored-menu overlays render here — in-window, so the
                 keyboard stays up while a dropdown is open. */}
-            <OverlayPortalHost />
+              <OverlayPortalHost />
+            </VoiceInputProvider>
           </SafeAreaProvider>
         </KeyboardProvider>
       </GestureHandlerRootView>

@@ -2,8 +2,8 @@
 
 Orchestration records intent and state without knowing which provider runs a thread. Provider
 protocols, account ownership, permissions, and capabilities belong at the
-[adapter boundary](../../apps/server/src/provider/Services/ProviderAdapter.ts). Normalize there
-instead of spreading provider checks through reactors and clients.
+[adapter boundary](../../apps/server/src/orchestration-v2/ProviderAdapter.ts). Normalize there
+instead of spreading provider checks through orchestration and clients.
 
 A driver kind identifies an integration; an instance identifies one configuration and account
 lifecycle. Route work by instance, so two accounts using the same driver do not share mutable
@@ -11,16 +11,30 @@ session or catalog state.
 
 ## Process and account isolation
 
-T3-managed OpenCode chat uses one server per thread. Its MCP registrations are directory-scoped, while
-T3's MCP connection is thread-scoped. Sharing a chat server between threads in one directory would
-let them replace each other's connection. Catalog and text-generation work can share the
-[instance-owned helper](../../apps/server/src/provider/OpenCodeServerOwner.ts), which closes
-after an idle period. External OpenCode servers remain externally owned and can require an
-external restart to pick up configuration changes.
+The `opencode` driver probes the installed version and runs the 1.x or 2.x runtime. OpenCode's MCP
+registrations are directory-scoped, while T3's MCP connection is thread-scoped, so threads in one
+directory must not share one T3 MCP entry.
 
-OpenCode also stores persistent approval grants per directory. Automatic full-access replies use
-`once` so they cannot widen a supervised thread's permissions on a shared external server.
-See the [adapter](../../apps/server/src/provider/Layers/OpenCodeAdapter.ts).
+- **1.x** uses one T3-managed chat server per thread, so threads cannot replace each other's
+  connection. Catalog and text-generation work can share the
+  [instance-owned helper](../../apps/server/src/provider/OpenCodeServerOwner.ts), which closes
+  after an idle period. See the [1.x adapter](../../apps/server/src/orchestration-v2/Adapters/OpenCodeAdapterV2.ts).
+- **2.x** serves every directory from one
+  [server per instance](../../apps/server/src/provider/opencode2/OpenCode2Server.ts). Each thread
+  registers its own `t3-code-<thread>` MCP entry, and session permission rules deny every other
+  thread's entry. See the [2.x adapter](../../apps/server/src/orchestration-v2/Adapters/OpenCode2AdapterV2.ts).
+
+External OpenCode servers remain externally owned and can require an external restart to pick up
+configuration changes. OpenCode stores "always" approval grants for the whole project. Automatic
+full-access replies use `once` so they cannot widen a supervised thread's permissions on a shared
+server. On 2.x, a session-wide approval also replies `once` and becomes T3's own rule on that session.
+
+Pi runs the user's own `pi` install in RPC mode and owns native extension, package, and project
+trust discovery. T3 injects only its namespaced MCP bridge, so a Pi session behaves as it does in
+the Pi TUI. Pi session files back native resume, rollback, and same-instance thread forks.
+Forks use Pi's CLI in the destination directory because RPC session switching retains the source
+session's cwd. Provider switches still use portable handoff summaries.
+See the [adapter](../../apps/server/src/orchestration-v2/Adapters/PiAdapterV2.ts).
 
 Pi and Oh My Pi use separate driver kinds and settings schemas, while sharing the native Pi-family
 adapter boundary. Each instance keeps its configured binary, agent directory, environment, launch
@@ -43,7 +57,7 @@ and removal must respect those leases instead of replacing executables under a r
 ## Setup must not happen as a health-check side effect
 
 Opening a provider session can start MCP servers, run hooks, or launch a login browser.
-[Grok probes](../../apps/server/src/provider/Layers/GrokProvider.ts) avoid authentication and
+[Grok probes](../../apps/server/src/provider/GrokProvider.ts) avoid authentication and
 session creation for this reason. Antigravity likewise reserves authenticated catalog sessions for
 explicit setup or model refresh; background checks use initialization only.
 
@@ -73,26 +87,22 @@ See [helper constraints](../../apps/server/src/textGeneration/AntigravityTextGen
 
 The web command palette and mobile **Native Sessions** sheet discover durable Pi and OMP sessions
 from every connected environment with an enabled, installed Pi-family provider instance.
-[`NativeSessionCatalog`][native-catalog] reads each instance's primary session files across their
-recorded working directories; nested subagent transcripts stay out of the catalog. Session directory
-resolution honors `--session-dir`, `PI_CODING_AGENT_SESSION_DIR`, the configured agent directory or
-`PI_CODING_AGENT_DIR`, OMP profiles, then the runtime default under `~/.pi/agent/sessions` or
-`~/.omp/agent/sessions`.
+[`NativeSessionStore`][native-store] reads each instance's session files: one JSONL file per
+session, either under `<sessions>/<cwd-slug>/` or directly in an explicit `--session-dir`. OMP's
+per-session subagent directories (named after the session file) never appear as sessions. The
+sessions directory resolves from `--session-dir`, `PI_CODING_AGENT_SESSION_DIR`,
+`PI_CODING_AGENT_DIR`, then the runtime default: `~/.pi/agent/sessions`, or for OMP
+`~/.omp/profiles/<profile>/agent/sessions` when `--profile`, `OMP_PROFILE`, or `PI_PROFILE` names
+a profile and `~/.omp/agent/sessions` otherwise.
 
-Attachment is one atomic server operation. [`NativeSessionCoordinator`][native-coordinator] resolves
-or registers the project for the session's normalized working directory, claims a deterministic T3
-thread for the provider-instance/session pair, starts one native process, reconciles JSONL history,
-and returns both IDs. A server semaphore serializes competing lifecycle requests; the persisted
-provider binding and deterministic thread ID preserve ownership across reconnects and host restarts.
-Pi resumes the exact ID with `--session`; OMP uses `--resume`.
-An unavailable recorded working directory fails before process spawn instead of leaving an attachment
-request pending.
-
-History reconciliation follows the active JSONL parent chain and imports user, system, assistant,
-and tool records through `thread.native-history-imported`. It reuses live message, turn, and activity
-identities when source evidence matches; repeated text alone is not an identity. Assistant messages
-remain distinct across tool rounds. Reopening upserts newly appended history without duplicating
-prior transcript records or work groups.
+[`NativeSessionCoordinator`][native-coordinator] opens a session as a KM Code thread. A thread whose
+provider thread is already bound to the session file (one KM Code started, or an earlier import) is
+reused and unarchived; otherwise the coordinator registers the project for the session's working
+directory, creates a thread bound to the file, and imports the active branch's user and assistant
+messages. The next turn resumes the runtime on that file, so native history and KM Code stay one
+conversation. Rename writes the title the way each runtime does (OMP rewrites its fixed-width title
+slot in place; Pi appends a `session_info` entry) and renames the thread; fork, stop, and archive
+act on the bound thread. Mutations are serialized and wait for server startup.
 
 Tool previews are bounded, but expanded details load the native arguments and results from durable
 activity data, including text, structured content, and supported images. OMP image blob references
@@ -134,16 +144,17 @@ existing thread push notifications without a provider-specific notification path
 
 ## Provider updates run only through the owning installer
 
-A one-click update is offered only when the resolved executable's path proves which installer owns
-it. Homebrew and npm are proven by the real path (symlinks followed): a versioned keg or cask under
+A package manager runs only when the resolved executable's path proves it owns the install. Homebrew
+and npm are proven by the real path (symlinks followed): a versioned keg or cask under
 `brew --prefix`, or `<prefix>/lib/node_modules/<pkg>/` (Windows: the shim beside `node_modules`).
-Native installer layouts and the global bin directories of pnpm, Bun, and Vite+ may match on either
-the resolved path or its real target, since those installers place real files or their own symlinks
-there. Cursor and Grok are the exception: their only updater is the CLI itself, which detects its
-own installer, so any resolved executable runs `<binary> update`. Anything unproven stays
-manual-only but still reports the version gap. npm updates pin
-`--prefix` because the `npm` on `PATH` can belong to a different Node than the one that owns the
-provider. Homebrew
+Native installer layouts and the global directories of pnpm, Bun, Yarn, and Vite+ may match on
+either the resolved path or its real target, since those installers place real files or their own
+symlinks there. Volta is proven by its `volta-shim` link plus the package's image directory. When
+nothing is proven, the provider's own updater (`claude update`, `codex update`, `opencode upgrade`,
+`pi update --self`, `grok update`) runs instead, because each one detects its installer itself;
+the runner's version check catches an updater that exits 0 without updating. Mise installs stay
+manual-only because their version is pinned in mise's config. npm updates pin `--prefix` because the
+`npm` on `PATH` can belong to a different Node than the one that owns the provider. Homebrew
 compares against `brew info` since casks trail npm by hours; native installs share npm's version
 train, so the registry stays authoritative for them.
 See the [resolver](../../apps/server/src/provider/providerMaintenance.ts).
@@ -156,14 +167,26 @@ with a readable, current version.
 ## Protocol traps
 
 Codex async questions arrive as notifications and are answered with a new user message. There is
-no pending RPC response to send. Blocking questions still use the request/response path. The
-[adapter](../../apps/server/src/provider/Layers/CodexAdapter.ts) distinguishes them; the
-[decider](../../apps/server/src/orchestration/decider.ts) records an async answer and its user
-message together.
+no pending RPC response to send. The
+[adapter](../../apps/server/src/orchestration-v2/Adapters/CodexAdapterV2.ts) persists them as
+`user_input_request` turn items and runtime requests with `responseCapability: { type: "message" }`.
+Their execution nodes do not block the run. Web, desktop, and mobile use their normal question
+panels, and requests remain pending after a turn finishes, a provider exits, or the server restarts.
 
-An async question can outlive the turn or a server restart. The engine reads that request's
-durable activity before resolving it because the in-memory command snapshot omits old activities.
-Do not infer that a request has disappeared merely because it is outside the recent window.
+`runtime-request.respond` reads the persisted request and question item, validates required
+answers, and commits the resolution and a user message in one transaction. Repeating the same
+command returns its receipt without posting the answer twice. The normal message path starts or
+resumes a run, queues behind active work, or steers when the adapter supports it. Blocking questions
+retain the provider's live response path. Do not infer that a request has disappeared merely because
+it is outside the recent history window.
+
+Native `/goal` state belongs to the provider and is mirrored on the provider thread. Codex starts
+the next goal turn on its own milliseconds after the last one completes, so the
+[adapter](../../apps/server/src/orchestration-v2/Adapters/CodexAdapterV2.ts) keeps the run open
+and adds that turn to it. One run can therefore own several native turns. `/goal` commands that
+start no Codex turn settle on a provider turn without a native ref, which native rollback must
+not count. Claude's SDK mode emits no goal events; its adapter reads goal state from the
+synthetic command output and Stop hook feedback in the transcript.
 
 Capabilities must describe what the provider can actually do. Antigravity can capture workspace
 checkpoints but cannot roll back its conversation. The [checkpoint boundary](./overview.md#turn-completion-and-checkpoints)
@@ -172,8 +195,9 @@ also survive normalization; a display label is not necessarily a valid reply.
 
 ## Attachments and stored history
 
-Attachments live outside the project workspace. [ProviderService](../../apps/server/src/provider/Layers/ProviderService.ts)
-puts their environment-local paths in turn input and lets adapters choose native input formats.
+Attachments live outside the project workspace. The
+[attachment boundary](../../apps/server/src/orchestration-v2/AttachmentClaims.ts) validates and claims
+uploads for a thread; adapters choose native input formats for those environment-local files.
 A path in the prompt does not grant filesystem access. Keep provider sandbox and approval rules
 in force; copying uploads into the project to bypass them changes that boundary.
 
@@ -182,10 +206,25 @@ file-bearing messages, and an image-only server can fail the entire environment'
 replaying one such event. Rollouts and downgrades must account for persisted history as well as
 current client support.
 
+## Provider diagnostics
+
+Native event logs retain lifecycle events, responses, and failures. Token deltas and duplicate raw
+frames are filtered before adapters copy or redact payloads. The filter accepts both legacy native
+events and v2 protocol envelopes; decode failures remain visible through diagnostic frames.
+
+Log payloads have a 64 KiB encoded budget. Large or deeply nested payloads become structural
+summaries that retain routing identifiers, methods, status, and error fields. Traversal is bounded
+before redaction and serialization, so logging a large response does not require several full
+copies. These limits apply to diagnostics; provider event handling is unchanged.
+
+Codex resumes with metadata-only reads when it needs a thread's identity and update time. Its
+initialization capabilities opt out of `turn/diff/updated`: T3 derives diffs from checkpoints.
+The logger filters those notifications before traversal when an older provider still sends them.
+
 Model classification has its own [manifest constraints](./model-manifest.md). Assistant-reference
 handling is documented under [citations](./assistant-citations.md).
 
 [pi]: ../../apps/server/src/provider/Drivers/PiDriver.ts
 [omp]: ../../apps/server/src/provider/Drivers/OmpDriver.ts
-[native-catalog]: ../../apps/server/src/provider/piFamily/NativeSessionCatalog.ts
-[native-coordinator]: ../../apps/server/src/provider/Layers/NativeSessionCoordinator.ts
+[native-store]: ../../apps/server/src/provider/NativeSessionStore.ts
+[native-coordinator]: ../../apps/server/src/provider/NativeSessionCoordinator.ts

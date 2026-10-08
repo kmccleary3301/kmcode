@@ -2,9 +2,7 @@
 import * as NodeFS from "node:fs";
 import * as NodePath from "node:path";
 
-const root = NodePath.resolve(
-  process.env.T3_RELATIVE_IMPORT_SCOPE ?? "apps/server/src/provider/piFamily",
-);
+const root = NodePath.resolve(process.env.T3_RELATIVE_IMPORT_SCOPE ?? "apps/server/src");
 const ignoredDirectories = new Set([
   ".git",
   ".repos",

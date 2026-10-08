@@ -1,5 +1,5 @@
 import { Cause } from "effect";
-import { AsyncResult } from "effect/unstable/reactivity";
+import { AsyncResult } from "effect/reactivity";
 import { useCallback, useState } from "react";
 import { Alert, Platform, Pressable, ScrollView, View } from "react-native";
 import { useNavigation, type StaticScreenProps } from "@react-navigation/native";

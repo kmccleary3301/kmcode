@@ -12,7 +12,7 @@
     "dev:desktop": "node scripts/dev-runner.ts dev:desktop",
     "migrate-dev-db": "node apps/server/scripts/migrate-dev-db.ts",
     "private-state-canary": "node apps/server/scripts/private-state-canary.ts",
-    "test-pi-omp": "vp test run apps/server/src/provider/piFamily/NativeTraceCorpus.test.ts apps/server/src/provider/piFamily/NativeTraceReplay.test.ts apps/server/integration/TransferBudgetReport.integration.test.ts apps/server/src/server.test.ts -t \"reports thread HTTP and WebSocket transfer budgets|keeps authenticated .* thread subscribers converged across bounded reconnect replay\"",
+    "test-pi-omp": "vp test run apps/server/src/orchestration-v2/Adapters/PiAdapterV2.test.ts apps/server/src/orchestration-v2/Adapters/OmpAdapterV2.test.ts apps/server/src/orchestration-v2/Adapters/piT3McpInjection.test.ts apps/server/src/provider/NativeSessionStore.test.ts apps/server/src/provider/PiProvider.test.ts apps/server/src/provider/PiCommands.test.ts apps/server/src/textGeneration/PiTextGeneration.test.ts apps/server/integration/nativeRuntimeLifecycle.integration.test.ts",
     "start": "vp run --filter t3 start",
     "start:desktop": "vp run --filter @t3tools/desktop start",
     "start:marketing": "vp run --filter @t3tools/marketing preview",
@@ -40,6 +40,7 @@
     "knip:production": "knip --production --preprocessor ./scripts/knip-schemas.ts",
     "lint:mobile": "node scripts/mobile-native-static-check.ts",
     "test": "vp run -r test",
+    "test:perf:v2-wire": "vp test run apps/server/src/orchestration-v2/WireProjection.test.ts apps/server/src/orchestration-v2/threadHistoryPaging.test.ts apps/server/src/orchestration-v2/ThreadStream.test.ts apps/server/src/orchestration-v2/ThreadTransportPerformance.test.ts apps/server/src/orchestration-v2/ShellStream.test.ts apps/server/src/orchestration-v2/CommandPolicy.test.ts apps/server/src/orchestration-v2/runtimeLayer.test.ts apps/server/src/ws.test.ts packages/contracts/src/environmentHttp.test.ts packages/contracts/src/orchestrationV2.test.ts packages/client-runtime/src/operations/commands.test.ts packages/client-runtime/src/operations/commands.performance.test.ts packages/client-runtime/src/state/boundedThreadSnapshotHttp.test.ts packages/client-runtime/src/state/threadHistoryController.test.ts packages/client-runtime/src/state/threadHistoryMerge.test.ts packages/client-runtime/src/state/threadDetail.test.ts packages/client-runtime/src/state/threads-sync.test.ts packages/client-runtime/src/state/shellReducer.test.ts",
     "test:resource-monitor": "cargo test --locked --manifest-path native/resource-monitor/Cargo.toml",
     "test:desktop-smoke": "vp run --filter @t3tools/desktop smoke-test",
     "fmt": "vp fmt",
@@ -59,6 +60,7 @@
     "sync:repos": "node scripts/sync-reference-repos.ts"
   },
   "devDependencies": {
+    "@coderabbitai/config": "1.1.0",
     "@effect/tsgo": "catalog:",
     "@shadcn/lint": "0.1.5",
     "@types/node": "catalog:",

@@ -1,4 +1,4 @@
-import { ConnectionOnboarding, type SshConnectionInput } from "@t3tools/client-runtime/connection";
+import { ConnectionOnboarding } from "@t3tools/client-runtime/connection";
 import {
   createAtomCommandScheduler,
   createRuntimeCommand,
@@ -13,10 +13,20 @@ const onboardingScheduler = createAtomCommandScheduler();
 export const connectPairingUrl = createRuntimeCommand(connectionAtomRuntime, {
   label: "mobile:connection:connect-pairing-url",
   scheduler: onboardingScheduler,
-  concurrency: { mode: "singleFlight", key: (pairingUrl: string) => pairingUrl },
-  execute: (pairingUrl: string) =>
-    ConnectionOnboarding.pipe(
-      Effect.flatMap((onboarding) => onboarding.registerPairing({ pairingUrl })),
+  concurrency: {
+    mode: "singleFlight",
+    // Adding a route to a different machine with the same link is its own
+    // operation: it must check its own expected machine.
+    key: (input: { readonly pairingUrl: string; readonly expectedEnvironmentId?: EnvironmentId }) =>
+      JSON.stringify([input.pairingUrl, input.expectedEnvironmentId ?? null]),
+  },
+  execute: (input: {
+    readonly pairingUrl: string;
+    /** Set when adding a route to this saved machine. */
+    readonly expectedEnvironmentId?: EnvironmentId;
+  }) =>
+    ConnectionOnboarding.ConnectionOnboarding.pipe(
+      Effect.flatMap((onboarding) => onboarding.registerPairing(input)),
     ),
 });
 
@@ -25,11 +35,13 @@ export const connectSsh = createRuntimeCommand(connectionAtomRuntime, {
   scheduler: onboardingScheduler,
   concurrency: {
     mode: "singleFlight",
-    key: (input: SshConnectionInput) =>
+    key: (input: ConnectionOnboarding.SshConnectionInput) =>
       `${input.target.hostname}:${input.target.port ?? 22}:${input.target.username ?? ""}`,
   },
-  execute: (input: SshConnectionInput) =>
-    ConnectionOnboarding.pipe(Effect.flatMap((onboarding) => onboarding.registerSsh(input))),
+  execute: (input: ConnectionOnboarding.SshConnectionInput) =>
+    ConnectionOnboarding.ConnectionOnboarding.pipe(
+      Effect.flatMap((onboarding) => onboarding.registerSsh(input)),
+    ),
 });
 
 export const updateBearerConnection = createRuntimeCommand(connectionAtomRuntime, {
@@ -43,5 +55,8 @@ export const updateBearerConnection = createRuntimeCommand(connectionAtomRuntime
     readonly environmentId: EnvironmentId;
     readonly label: string;
     readonly httpBaseUrl: string;
-  }) => ConnectionOnboarding.pipe(Effect.flatMap((onboarding) => onboarding.updateBearer(input))),
+  }) =>
+    ConnectionOnboarding.ConnectionOnboarding.pipe(
+      Effect.flatMap((onboarding) => onboarding.updateBearer(input)),
+    ),
 });

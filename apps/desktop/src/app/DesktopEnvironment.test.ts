@@ -20,7 +20,7 @@ const defaultInput = {
   runningUnderArm64Translation: false,
 } satisfies DesktopEnvironment.MakeDesktopEnvironmentInput;
 
-const makeEnvironmentLayer = (
+const layerEnvironment = (
   overrides: Partial<DesktopEnvironment.MakeDesktopEnvironmentInput> = {},
   env: Record<string, string | undefined> = {},
 ) =>
@@ -36,8 +36,7 @@ const makeEnvironmentLayer = (
 const makeEnvironment = (
   overrides: Partial<DesktopEnvironment.MakeDesktopEnvironmentInput> = {},
   env: Record<string, string | undefined> = {},
-) =>
-  DesktopEnvironment.DesktopEnvironment.pipe(Effect.provide(makeEnvironmentLayer(overrides, env)));
+) => DesktopEnvironment.DesktopEnvironment.pipe(Effect.provide(layerEnvironment(overrides, env)));
 
 describe("DesktopEnvironment", () => {
   it.effect("derives state paths and development identity inside Effect", () =>
@@ -114,7 +113,7 @@ describe("DesktopEnvironment", () => {
 
       assert.equal(environment.isDevelopment, false);
       assert.equal(environment.displayName, "KM Code");
-      assert.equal(environment.legacyUserDataDirName, "T3 Code (Alpha)");
+      assert.equal(environment.productIdentity.legacyStableDisplayName, "T3 Code (Alpha)");
       assert.equal(environment.stateDir, "/tmp/t3/userdata");
       assert.equal(environment.logDir, "/tmp/t3/userdata/logs");
       assert.equal(environment.browserArtifactsDir, "/tmp/t3/userdata/browser-artifacts");
@@ -138,9 +137,12 @@ describe("DesktopEnvironment", () => {
       );
 
       assert.equal(nightly.displayName, "KM Code (Nightly)");
-      assert.equal(nightly.legacyUserDataDirName, "T3 Code (Alpha)");
+      assert.equal(nightly.productIdentity.legacyStableDisplayName, "T3 Code (Alpha)");
       assert.equal(piDevelopment.displayName, "KM Code (Dev)");
-      assert.equal(piDevelopment.legacyUserDataDirName, "T3 Code Pi + OMP (Dev)");
+      assert.equal(
+        piDevelopment.productIdentity.legacyDevelopmentDisplayName,
+        "T3 Code Pi + OMP (Dev)",
+      );
     }),
   );
 

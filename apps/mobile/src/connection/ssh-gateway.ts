@@ -4,11 +4,7 @@ import {
   ConnectionTransientError,
 } from "@t3tools/client-runtime/connection";
 import { fetchRemoteEnvironmentDescriptor } from "@t3tools/client-runtime/environment";
-import {
-  SshEnvironmentGateway,
-  type ClientPresentation,
-  type MobileSshCredentials,
-} from "@t3tools/client-runtime/platform";
+import { ClientCapabilities } from "@t3tools/client-runtime/platform";
 import type {
   DesktopSshEnvironmentBootstrap,
   DesktopSshEnvironmentTarget,
@@ -21,9 +17,10 @@ import {
   buildRemoteStopScript,
   remoteStateKey,
 } from "@t3tools/ssh/remote-scripts";
+import * as Crypto from "effect/Crypto";
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
-import * as HttpClient from "effect/unstable/http/HttpClient";
+import * as HttpClient from "effect/http/HttpClient";
 import type * as SecureStorage from "../persistence/mobile-secure-storage";
 import type { MobileSshNative } from "./nativeSsh";
 
@@ -55,12 +52,13 @@ const decodeCredentials = Schema.decodeUnknownEffect(
 export function makeMobileSshGateway(input: {
   readonly storage: SecureStorage.MobileSecureStorage["Service"];
   readonly httpClient: HttpClient.HttpClient;
-  readonly presentation: ClientPresentation["Service"];
+  readonly presentation: ClientCapabilities.ClientPresentation["Service"];
+  readonly crypto: Crypto.Crypto;
   readonly native: MobileSshNative;
 }) {
   const sessions = new Map<string, string>();
-  const credentialsKey = (target: DesktopSshEnvironmentTarget) =>
-    `t3code.ssh.credentials.${remoteStateKey(target)}`;
+  const stateKey = (target: DesktopSshEnvironmentTarget) =>
+    remoteStateKey(target).pipe(Effect.provideService(Crypto.Crypto, input.crypto));
   const mapError = (cause: unknown) => {
     const detail = cause instanceof Error ? cause.message : String(cause);
     return detail.includes("HOST_KEY") ||
@@ -75,7 +73,8 @@ export function makeMobileSshGateway(input: {
       detail: "The SSH server returned an invalid KM Code response.",
     });
   const readCredentials = (target: DesktopSshEnvironmentTarget) =>
-    input.storage.getItem(credentialsKey(target)).pipe(
+    stateKey(target).pipe(
+      Effect.flatMap((key) => input.storage.getItem(`t3code.ssh.credentials.${key}`)),
       Effect.mapError(mapError),
       Effect.flatMap((value) =>
         value === null
@@ -91,7 +90,10 @@ export function makeMobileSshGateway(input: {
             ),
       ),
     );
-  const connect = (target: DesktopSshEnvironmentTarget, credentials: MobileSshCredentials) =>
+  const connect = (
+    target: DesktopSshEnvironmentTarget,
+    credentials: ClientCapabilities.MobileSshCredentials,
+  ) =>
     Effect.tryPromise({
       try: () =>
         input.native.connect(
@@ -138,7 +140,7 @@ export function makeMobileSshGateway(input: {
 
   const establish = (
     target: DesktopSshEnvironmentTarget,
-    credentials: MobileSshCredentials,
+    credentials: ClientCapabilities.MobileSshCredentials,
     options: {
       readonly expectedEnvironmentId?: EnvironmentId;
       readonly rememberCredentials: boolean;
@@ -152,7 +154,7 @@ export function makeMobileSshGateway(input: {
             detail: "Confirm this SSH host fingerprint before connecting.",
           });
         }
-        const key = remoteStateKey(target);
+        const key = yield* stateKey(target);
         const previous = sessions.get(key);
         if (previous !== undefined) yield* closeSession(key, previous);
         // Native connect has a deadline. Register its result before honoring cancellation so it cannot leak.
@@ -192,7 +194,7 @@ export function makeMobileSshGateway(input: {
             const pairingOutput = yield* exec(
               sessionId,
               "sh -s",
-              buildRemotePairingScript(target, { installedCli: true }),
+              buildRemotePairingScript(key, { installedCli: true }),
             );
             const pairing = yield* jsonObject(pairingOutput).pipe(
               Effect.flatMap(decodePairing),
@@ -201,7 +203,6 @@ export function makeMobileSshGateway(input: {
             const access = yield* bootstrapRemoteBearerSession({
               httpBaseUrl,
               credential: pairing.credential,
-              scopes: input.presentation.scopes,
               clientMetadata: input.presentation.metadata,
             }).pipe(
               Effect.provideService(HttpClient.HttpClient, input.httpClient),
@@ -209,7 +210,7 @@ export function makeMobileSshGateway(input: {
             );
             if (options.rememberCredentials) {
               yield* input.storage
-                .setItem(credentialsKey(target), JSON.stringify(credentials))
+                .setItem(`t3code.ssh.credentials.${key}`, JSON.stringify(credentials))
                 .pipe(Effect.mapError(mapError));
             }
             const bootstrap: DesktopSshEnvironmentBootstrap = {
@@ -231,8 +232,8 @@ export function makeMobileSshGateway(input: {
       }),
     );
 
-  return SshEnvironmentGateway.of({
-    provision: (target, options) =>
+  return ClientCapabilities.SshEnvironmentGateway.of({
+    provision: (target, expectedEnvironmentId, options) =>
       options?.credentials === undefined
         ? Effect.fail(
             new ConnectionBlockedError({
@@ -240,7 +241,10 @@ export function makeMobileSshGateway(input: {
               detail: "SSH credentials are required.",
             }),
           )
-        : establish(target, options.credentials, { rememberCredentials: true }),
+        : establish(target, options.credentials, {
+            ...(expectedEnvironmentId === undefined ? {} : { expectedEnvironmentId }),
+            rememberCredentials: true,
+          }),
     prepare: ({ target, expectedEnvironmentId }) =>
       Effect.gen(function* () {
         const credentials = yield* readCredentials(target);
@@ -259,7 +263,7 @@ export function makeMobileSshGateway(input: {
     disconnect: (target) =>
       Effect.uninterruptibleMask((restore) =>
         Effect.gen(function* () {
-          const key = remoteStateKey(target);
+          const key = yield* stateKey(target);
           let sessionId = sessions.get(key);
           if (sessionId === undefined) {
             const credentials = yield* readCredentials(target);
@@ -267,7 +271,7 @@ export function makeMobileSshGateway(input: {
             sessionId = (yield* connect(target, credentials)).sessionId;
             sessions.set(key, sessionId);
           }
-          yield* restore(exec(sessionId, "sh -s", buildRemoteStopScript(target))).pipe(
+          yield* restore(exec(sessionId, "sh -s", buildRemoteStopScript(key))).pipe(
             Effect.ensuring(closeSession(key, sessionId).pipe(Effect.orDie)),
           );
         }),

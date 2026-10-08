@@ -24,6 +24,11 @@ const highlighterPromiseCache = new Map<string, Promise<DiffsHighlighter>>();
 const registeredSyntaxThemeNames = new Set<string>();
 let activeSyntaxThemeName: string | null = null;
 let activeSyntaxThemeKey: string | null = null;
+/** Bundled palettes for themes that define no syntax token colors. */
+const FALLBACK_SYNTAX_THEME_NAMES = {
+  light: "github-light",
+  dark: "github-dark",
+} as const;
 
 function syntaxThemeRegistration(name: string, variant: NormalizedAppearanceVariant) {
   return {
@@ -49,9 +54,12 @@ export function registerNormalizedSyntaxTheme(
 ): string {
   const profileHash = hashNormalizedAppearanceProfile(profile);
   const key = `${profileHash}:${variant.id}`;
-  const name = `t3-appearance-${profileHash.slice(0, 16)}-${variant.id}`;
+  const hasTokenColors = variant.syntax.tokens.length > 0;
+  const name = hasTokenColors
+    ? `t3-appearance-${profileHash.slice(0, 16)}-${variant.id}`
+    : FALLBACK_SYNTAX_THEME_NAMES[variant.appearance];
   if (activeSyntaxThemeKey === key && activeSyntaxThemeName === name) return name;
-  if (!registeredSyntaxThemeNames.has(name)) {
+  if (hasTokenColors && !registeredSyntaxThemeNames.has(name)) {
     registerCustomTheme(name, () => Promise.resolve(syntaxThemeRegistration(name, variant)));
     registeredSyntaxThemeNames.add(name);
   }

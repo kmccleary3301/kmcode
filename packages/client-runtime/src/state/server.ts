@@ -981,12 +981,34 @@ export function createServerEnvironmentAtoms<R, E>(
     scheduler: configScheduler,
     concurrency: configConcurrency,
   });
+  const modelRoles = createEnvironmentRpcQueryAtomFamily(runtime, {
+    label: "environment-data:server:model-roles",
+    tag: WS_METHODS.providerModelRoles,
+    staleTimeMs: 0,
+  });
 
   return {
     configValueAtom,
     updateStateAtom,
     settingsValueAtom,
     providersValueAtom,
+    modelRoles,
+    setModelRole: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:server:set-model-role",
+      tag: WS_METHODS.providerSetModelRole,
+      scheduler: configScheduler,
+      concurrency: configConcurrency,
+      // A reopened picker reads the cached roles query, not the write result.
+      onSuccess: ({ environmentId, input }, registry) =>
+        Effect.sync(() =>
+          registry.refresh(
+            modelRoles({
+              environmentId,
+              input: { providerInstanceId: input.providerInstanceId },
+            }),
+          ),
+        ),
+    }),
     nativeSessions: createEnvironmentRpcQueryAtomFamily(runtime, {
       label: "environment-data:server:native-sessions",
       tag: WS_METHODS.serverListNativeSessions,

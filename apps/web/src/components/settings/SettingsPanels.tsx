@@ -128,7 +128,12 @@ import {
   TYPOGRAPHY_ADVANCED_STORAGE_KEY,
 } from "../../appearanceFonts";
 import { AppearanceCustomizationManager } from "./AppearanceCustomizationManager";
-import { CodeFontPreview, PromptFontPreview, TerminalFontPreview } from "./SettingsFontPreviews";
+import {
+  CodeFontPreview,
+  PromptFontPreview,
+  TerminalFontPreview,
+  TextFontPreview,
+} from "./SettingsFontPreviews";
 import { discoverInstalledFonts, FontFamilyPicker, useFontEnumeration } from "./FontFamilyPicker";
 import {
   NumberField,
@@ -695,6 +700,7 @@ export function useSettingsRestore(onRestored?: () => void) {
       settings.contextWindowMeterEnabled,
       settings.fontFamilyCode,
       settings.fontFamilyComposer,
+      settings.fontFamilyText,
       settings.fontFamilySans,
       settings.fontFamilyTerminal,
       settings.fontSizeCode,
@@ -835,6 +841,7 @@ export function useSettingsRestore(onRestored?: () => void) {
       textGenerationModelSelection: DEFAULT_UNIFIED_SETTINGS.textGenerationModelSelection,
       fontFamilySans: DEFAULT_UNIFIED_SETTINGS.fontFamilySans,
       fontFamilyComposer: DEFAULT_UNIFIED_SETTINGS.fontFamilyComposer,
+      fontFamilyText: DEFAULT_UNIFIED_SETTINGS.fontFamilyText,
       fontFamilyCode: DEFAULT_UNIFIED_SETTINGS.fontFamilyCode,
       fontFamilyTerminal: DEFAULT_UNIFIED_SETTINGS.fontFamilyTerminal,
       fontSizeInterface: DEFAULT_UNIFIED_SETTINGS.fontSizeInterface,
@@ -1572,6 +1579,24 @@ function InterfaceFontRow({ preview }: { preview?: ReactNode }) {
   );
 }
 
+function TextFontRow() {
+  const settings = useScopedSettings();
+  const updateSettings = useUpdateScopedSettings();
+  const defaults = useFontDefaultFamilies();
+  return (
+    <FontFamilySettingsRow
+      {...searchableSetting("text-font")}
+      description="Requests, replies, thinking, and Markdown. Code keeps the monospace font."
+      defaultFamily={defaults.interfaceFamily}
+      defaultValue={DEFAULT_UNIFIED_SETTINGS.fontFamilyText}
+      value={settings.fontFamilyText}
+      onValueChange={(fontFamilyText) => updateSettings({ fontFamilyText })}
+      onReset={() => updateSettings({ fontFamilyText: DEFAULT_UNIFIED_SETTINGS.fontFamilyText })}
+      preview={<TextFontPreview />}
+    />
+  );
+}
+
 function PromptFontRow() {
   const settings = useScopedSettings();
   const updateSettings = useUpdateScopedSettings();
@@ -1744,6 +1769,7 @@ function FontSettingsGroup() {
   return (
     <>
       <InterfaceFontRow />
+      <TextFontRow />
       <PromptFontRow />
       <CodeFontRow />
       <TerminalFontRow />
@@ -1762,6 +1788,7 @@ function SimpleFontRows() {
   return (
     <>
       <InterfaceFontRow preview={<PromptFontPreview />} />
+      <TextFontRow />
       <CodeFontRow
         title="Monospace font"
         description="Code blocks, diffs, file previews, and the terminal."
@@ -1867,7 +1894,8 @@ function FontFamilySettingsRow({
   onValueChange: (value: string) => void;
   onReset: () => void;
   requireMonospace?: boolean;
-  size: {
+  /** Omitted for families without their own size preference. */
+  size?: {
     label: string;
     min: number;
     max: number;
@@ -1931,7 +1959,7 @@ function FontFamilySettingsRow({
     onReset();
   };
   const resetAction =
-    value !== defaultValue || size.value !== size.defaultValue ? (
+    value !== defaultValue || (size !== undefined && size.value !== size.defaultValue) ? (
       <SettingResetButton label={title.toLowerCase()} onClick={resetToDefault} />
     ) : null;
   const fontEnumeration = useFontEnumeration();
@@ -2002,29 +2030,31 @@ function FontFamilySettingsRow({
   const control = (
     <div className="flex w-full items-center gap-2 sm:w-auto">
       <div className="min-w-0 flex-1 sm:w-44 sm:flex-none">{familyControl}</div>
-      <Select
-        value={String(size.value)}
-        onValueChange={(next) => {
-          if (typeof next !== "string") return;
-          const parsed = Number(next);
-          if (Number.isInteger(parsed) && parsed >= size.min && parsed <= size.max) {
-            size.onChange(parsed);
-          }
-        }}
-      >
-        <SelectTrigger size="sm" className="w-22 shrink-0" aria-label={size.label}>
-          <SelectValue>{size.value} px</SelectValue>
-        </SelectTrigger>
-        <SelectPopup align="end" alignItemWithTrigger={false}>
-          {Array.from({ length: size.max - size.min + 1 }, (_, index) => size.min + index).map(
-            (px) => (
-              <SelectItem hideIndicator key={px} value={String(px)}>
-                {px} px
-              </SelectItem>
-            ),
-          )}
-        </SelectPopup>
-      </Select>
+      {size !== undefined ? (
+        <Select
+          value={String(size.value)}
+          onValueChange={(next) => {
+            if (typeof next !== "string") return;
+            const parsed = Number(next);
+            if (Number.isInteger(parsed) && parsed >= size.min && parsed <= size.max) {
+              size.onChange(parsed);
+            }
+          }}
+        >
+          <SelectTrigger size="sm" className="w-22 shrink-0" aria-label={size.label}>
+            <SelectValue>{size.value} px</SelectValue>
+          </SelectTrigger>
+          <SelectPopup align="end" alignItemWithTrigger={false}>
+            {Array.from({ length: size.max - size.min + 1 }, (_, index) => size.min + index).map(
+              (px) => (
+                <SelectItem hideIndicator key={px} value={String(px)}>
+                  {px} px
+                </SelectItem>
+              ),
+            )}
+          </SelectPopup>
+        </Select>
+      ) : null}
     </div>
   );
   return (

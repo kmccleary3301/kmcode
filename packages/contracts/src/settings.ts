@@ -396,6 +396,8 @@ export const ClientSettingsSchema = Schema.Struct({
   ),
   fontFamilyCode: FontFamilyPreference.pipe(Schema.withDecodingDefault(Effect.succeed(""))),
   fontFamilyComposer: FontFamilyPreference.pipe(Schema.withDecodingDefault(Effect.succeed(""))),
+  /** Rendered requests, replies and Markdown; empty follows the interface font. */
+  fontFamilyText: FontFamilyPreference.pipe(Schema.withDecodingDefault(Effect.succeed(""))),
   fontFamilySans: FontFamilyPreference.pipe(Schema.withDecodingDefault(Effect.succeed(""))),
   fontFamilyTerminal: FontFamilyPreference.pipe(Schema.withDecodingDefault(Effect.succeed(""))),
   // Grayscale `-webkit-font-smoothing: antialiased` (thinner strokes);
@@ -425,6 +427,15 @@ export const ClientSettingsSchema = Schema.Struct({
     Schema.Struct({
       provider: ProviderInstanceId,
       model: TrimmedNonEmptyString,
+    }),
+  ).pipe(Schema.withDecodingDefault(Effect.succeed([]))),
+  // Models picked in the composer, most recent first (capped by the picker).
+  // Biases picker ordering toward models the user already reaches for.
+  recentModels: Schema.Array(
+    Schema.Struct({
+      provider: ProviderInstanceId,
+      model: TrimmedNonEmptyString,
+      usedAt: Schema.Number,
     }),
   ).pipe(Schema.withDecodingDefault(Effect.succeed([]))),
   providerModelPreferences: Schema.Record(
@@ -1884,6 +1895,7 @@ export const ClientSettingsPatch = Schema.Struct({
   fontSizeTerminal: Schema.optionalKey(TerminalFontSize),
   fontFamilyCode: Schema.optionalKey(FontFamilyPreference),
   fontFamilyComposer: Schema.optionalKey(FontFamilyPreference),
+  fontFamilyText: Schema.optionalKey(FontFamilyPreference),
   fontFamilySans: Schema.optionalKey(FontFamilyPreference),
   fontFamilyTerminal: Schema.optionalKey(FontFamilyPreference),
   fontSmoothing: Schema.optionalKey(Schema.Boolean),
@@ -1893,6 +1905,15 @@ export const ClientSettingsPatch = Schema.Struct({
       Schema.Struct({
         provider: ProviderInstanceId,
         model: TrimmedNonEmptyString,
+      }),
+    ),
+  ),
+  recentModels: Schema.optionalKey(
+    Schema.Array(
+      Schema.Struct({
+        provider: ProviderInstanceId,
+        model: TrimmedNonEmptyString,
+        usedAt: Schema.Number,
       }),
     ),
   ),

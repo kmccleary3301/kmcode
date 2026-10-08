@@ -27,6 +27,10 @@
       "types": "./src/themePalettes.ts",
       "import": "./src/themePalettes.ts"
     },
+    "./themeCatalog": {
+      "types": "./src/themeCatalog.ts",
+      "import": "./src/themeCatalog.ts"
+    },
     "./themePreview": {
       "types": "./src/themePreview.ts",
       "import": "./src/themePreview.ts"

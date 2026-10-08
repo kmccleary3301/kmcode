@@ -18,7 +18,7 @@ import {
 } from "@t3tools/contracts";
 
 export const DEFAULT_SANS_FONT_STACK =
-  '-apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif';
+  '"Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif';
 
 // Concrete names first: some engines alias `ui-monospace` to the
 // proportional system UI font, which would break every code surface.
@@ -89,6 +89,8 @@ export function appearanceFontStack(custom: string, defaultStack: string): strin
 
 export interface AppearanceFontPreferences {
   readonly sans: string;
+  /** Rendered Markdown: requests, replies, thinking, and turn previews. */
+  readonly text: string;
   readonly code: string;
   readonly composer: string;
   readonly sizeInterface: number;
@@ -113,8 +115,10 @@ export function applyAppearanceFontVariables(
   const families: ReadonlyArray<readonly [variable: string, custom: string, fallback: string]> = [
     ["--font-sans", preferences.sans, DEFAULT_SANS_FONT_STACK],
     ["--font-mono", preferences.code, DEFAULT_CODE_FONT_STACK],
-    // The composer falls back to whatever the sans preference resolves to.
+    // The composer and Markdown fall back to whatever the sans preference resolves to.
     ["--font-composer", preferences.composer, "var(--font-sans)"],
+    ["--font-markdown", preferences.text, "var(--font-sans)"],
+    ["--font-heading", preferences.text, "var(--font-sans)"],
   ];
   for (const [variable, custom, fallback] of families) {
     const list = cssFontFamilies(custom);
@@ -142,7 +146,6 @@ export function applyAppearanceFontVariables(
     root.style.removeProperty("-webkit-font-smoothing");
   }
 }
-
 function clampFontSize(value: number, minimum: number, maximum: number, fallback: number): number {
   if (!Number.isFinite(value)) return fallback;
   return Math.min(maximum, Math.max(minimum, Math.round(value)));

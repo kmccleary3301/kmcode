@@ -27,6 +27,7 @@ import { HostProcessEnvironment } from "@t3tools/shared/hostProcess";
 import { getModelSelectionStringOptionValue } from "@t3tools/shared/model";
 import {
   defaultInstanceIdForDriver,
+  ORCHESTRATION_V2_SUBAGENT_LIVE_CONTENT_MAX_LENGTH,
   OmpSettings,
   PiSettings,
   ProviderDriverKind,
@@ -41,6 +42,7 @@ import {
   type OrchestrationV2ProviderThread,
   type OrchestrationV2ProviderTurn,
   type OrchestrationV2RuntimeRequest,
+  type OrchestrationV2SubagentLiveContent,
   type OrchestrationV2TurnItem,
   type OrchestrationV2UserInputQuestion,
   type ProviderApprovalDecision,
@@ -62,7 +64,6 @@ import { ChildProcessSpawner } from "effect/process";
 
 import { resolveAttachmentPath } from "../../attachmentStore.ts";
 import * as ServerConfig from "../../config.ts";
-import { mcpToolPresentation } from "../../provider/McpToolPresentation.ts";
 import * as McpProviderSession from "../../mcp/McpProviderSession.ts";
 import {
   expandPiSkillReference,
@@ -90,6 +91,7 @@ import {
   type PiRpcConnection,
   type PiRpcRecord,
 } from "./PiRpc.ts";
+import { piToolTurnItemFields } from "./PiToolTurnItem.ts";
 import {
   buildPiRpcLaunch,
   materializePiT3McpExtension,
@@ -110,6 +112,13 @@ const DEFAULT_OMP_SETTINGS = Schema.decodeSync(OmpSettings)({});
 const PI_INHERIT_MODEL_SLUG = "default";
 
 const STREAM_FLUSH_MS = 50;
+
+/** OMP progress statuses after which a child agent produces no further output. */
+const PI_SUBAGENT_FINISHED_STATUSES: Record<string, true> = {
+  completed: true,
+  failed: true,
+  aborted: true,
+};
 const PI_REQUEST_TIMEOUT_MS = 15_000;
 // Session lifecycle hooks reload extensions, MCP servers and language servers.
 const PI_SESSION_TIMEOUT_MS = 60_000;
@@ -260,6 +269,25 @@ interface PiStreamItemState {
   readonly startedAt: DateTime.Utc;
 }
 
+type PiSubagentTurnItem = Extract<OrchestrationV2TurnItem, { readonly type: "subagent" }>;
+
+/** A tool call whose arguments are still streaming inside the assistant message. */
+interface PiToolPreviewState {
+  toolName?: string | undefined;
+  args?: unknown;
+  flushScheduled: boolean;
+  /** Execution events own the item once Pi starts running the tool. */
+  executing: boolean;
+}
+
+/** An OMP child agent, keyed by its subagent id, observed through subagent RPC frames. */
+interface PiSubagentLiveState {
+  nativeTaskId?: string | undefined;
+  transcriptFile?: string | undefined;
+  liveContent?: OrchestrationV2SubagentLiveContent | undefined;
+  flushScheduled: boolean;
+}
+
 type PiCompactionStatus = "running" | "completed" | "failed" | "cancelled";
 
 interface PiCompactionState {
@@ -302,6 +330,10 @@ interface ActivePiTurn {
    * tool keeps one start timestamp and reports a real duration.
    */
   readonly toolStartedAt: Map<string, DateTime.Utc>;
+  readonly toolPreviews: Record<string, PiToolPreviewState>;
+  readonly subagentLive: Record<string, PiSubagentLiveState>;
+  /** Last emitted subagent item per native task, re-sent when only its live preview changes. */
+  readonly subagentItems: Record<string, PiSubagentTurnItem>;
   interrupted: boolean;
   /**
    * Whether any agent run activity was observed. Command-only prompts (pure
@@ -439,6 +471,22 @@ export function makePiAdapterV2(
             }),
         ),
       );
+      // OMP streams child-agent events only on request; they feed the live
+      // preview on subagent items. Pi has no subagent registry to subscribe to.
+      if (driver === "omp") {
+        yield* connection
+          .request({ type: "set_subagent_subscription", level: "events" }, PI_REQUEST_TIMEOUT_MS)
+          .pipe(
+            Effect.tapError((error) =>
+              Effect.logWarning("OMP subagent event subscription failed", {
+                providerSessionId: input.providerSessionId,
+                errorTag: error._tag,
+              }),
+            ),
+            Effect.ignore,
+            Effect.forkIn(scope),
+          );
+      }
       const discoverSkillNames = connection
         .request({ type: "get_commands" }, PI_SKILL_DISCOVERY_TIMEOUT_MS)
         .pipe(
@@ -934,14 +982,16 @@ export function makePiAdapterV2(
       const emitToolItem = Effect.fnUntraced(function* (
         turn: ActivePiTurn,
         event: PiRpcRecord,
-        phase: "start" | "update" | "end",
+        phase: "preview" | "start" | "update" | "end",
       ) {
         const toolCallId = recordString(event, "toolCallId");
         const toolName = recordString(event, "toolName") ?? "tool";
         if (toolCallId === undefined) return;
-        if (phase === "start") {
+        if (phase === "preview" || phase === "start") {
           turn.toolArgs.set(toolCallId, event["args"]);
         }
+        const preview = turn.toolPreviews[toolCallId];
+        if (preview !== undefined && phase !== "preview") preview.executing = true;
         const args = event["args"] ?? turn.toolArgs.get(toolCallId);
         const emittedAt = yield* DateTime.now;
         const startedAt = turn.toolStartedAt.get(toolCallId) ?? emittedAt;
@@ -968,65 +1018,23 @@ export function makePiAdapterV2(
           startedAt,
           completed ? emittedAt : null,
         );
-        const shared = {
-          ...base,
-          status,
-          completedAt: completed ? emittedAt : null,
-        } as const;
-        if (toolName === "bash") {
-          const exitCode = recordNumber(recordField(resultRecord, "details"), "exitCode");
-          yield* emit({
-            type: "turn_item.updated",
-            driver,
-            turnItem: {
-              ...shared,
-              title: toolName,
-              type: "command_execution",
-              input: recordString(args, "command") ?? "",
-              ...(outputText.length > 0 ? { output: outputText } : {}),
-              ...(exitCode === undefined ? {} : { exitCode }),
-            },
-          });
-          return;
-        }
-        if (toolName === "edit" || toolName === "write") {
-          const fileName = recordString(args, "path") ?? recordString(args, "file_path");
-          if (fileName !== undefined) {
-            // edit reports a unified patch in its result details; write only
-            // carries the new content in its args. A failed call keeps its error.
-            const diffStr =
-              recordString(recordField(resultRecord, "details"), "patch") ??
-              (isError && outputText.trim().length > 0 ? outputText : undefined);
-            const newStr = toolName === "write" ? recordString(args, "content") : undefined;
-            yield* emit({
-              type: "turn_item.updated",
-              driver,
-              turnItem: {
-                ...shared,
-                title: toolName,
-                type: "file_change",
-                fileName,
-                ...(diffStr === undefined ? {} : { diffStr }),
-                ...(newStr === undefined ? {} : { newStr }),
-              },
-            });
-            return;
-          }
-        }
         yield* emit({
           type: "turn_item.updated",
           driver,
           turnItem: {
-            ...shared,
-            title: toolName,
-            type: "dynamic_tool",
-            ...mcpToolPresentation({ toolName }),
-            toolName,
-            input: args ?? {},
-            ...(outputText.length > 0 ? { output: outputText } : {}),
+            ...base,
+            status,
+            completedAt: completed ? emittedAt : null,
+            ...piToolTurnItemFields({
+              toolName,
+              args,
+              outputText,
+              details: recordField(resultRecord, "details"),
+              isError,
+            }),
           },
         });
-        if (toolName === "subagent" || toolName === "task") {
+        if ((toolName === "subagent" || toolName === "task") && phase !== "preview") {
           yield* emitSubagentTasks(turn, toolCallId, resultRecord, completed, args);
         }
       });
@@ -1050,6 +1058,16 @@ export function makePiAdapterV2(
           recordField(recordField(resultRecord, "details"), "reports") ??
           recordField(resultRecord, "reports") ??
           (Array.isArray(resultRecord) ? resultRecord : undefined);
+        // OMP reports running children only as progress until their results land.
+        const progressEntries = recordField(recordField(resultRecord, "details"), "progress");
+        if (
+          !completed &&
+          Array.isArray(progressEntries) &&
+          progressEntries.length > 0 &&
+          (!Array.isArray(results) || results.length === 0)
+        ) {
+          results = progressEntries;
+        }
         if (!Array.isArray(results) && args !== undefined) {
           const tasks = recordField(args, "tasks");
           if (Array.isArray(tasks)) {
@@ -1075,7 +1093,10 @@ export function makePiAdapterV2(
           });
           const startedAt = turn.toolStartedAt.get(nativeTaskId) ?? emittedAt;
           turn.toolStartedAt.set(nativeTaskId, startedAt);
-          const finished = completed || recordField(result, "finished") === true;
+          const finished =
+            completed ||
+            recordField(result, "finished") === true ||
+            PI_SUBAGENT_FINISHED_STATUSES[recordString(result, "status") ?? ""] === true;
           const stopReason = recordString(result, "stopReason") ?? recordString(result, "status");
           const interrupted = finished && (stopReason === "aborted" || stopReason === "cancelled");
           const failed =
@@ -1095,6 +1116,12 @@ export function makePiAdapterV2(
           const progress =
             !finished && outputText.length > 0 ? { progress: outputText.slice(0, 200) } : {};
           const resultText = finished && outputText.length > 0 ? outputText.slice(0, 10_000) : null;
+          const nativeSubagentId = recordString(result, "id");
+          const live =
+            nativeSubagentId === undefined
+              ? undefined
+              : (turn.subagentLive[nativeSubagentId] ??= { flushScheduled: false });
+          if (live !== undefined) live.nativeTaskId = nativeTaskId;
           yield* emit({
             type: "subagent.updated",
             driver,
@@ -1121,27 +1148,88 @@ export function makePiAdapterV2(
               updatedAt: emittedAt,
             },
           });
-          yield* emit({
-            type: "turn_item.updated",
+          const turnItem: PiSubagentTurnItem = {
+            ...baseItemFields(turn, nativeTaskId, startedAt, emittedAt),
+            status,
+            title: agent,
+            completedAt: finished ? emittedAt : null,
+            type: "subagent",
+            subagentId,
+            origin: "provider_native",
             driver,
-            turnItem: {
-              ...baseItemFields(turn, nativeTaskId, startedAt, emittedAt),
-              status,
-              title: agent,
-              completedAt: finished ? emittedAt : null,
-              type: "subagent",
-              subagentId,
-              origin: "provider_native",
-              driver,
-              providerInstanceId: options.instanceId,
-              childThreadId: null,
-              prompt: task,
-              ...progress,
-              result: resultText,
-            },
-          });
+            providerInstanceId: options.instanceId,
+            childThreadId: null,
+            prompt: task,
+            ...progress,
+            result: resultText,
+            ...(live?.transcriptFile === undefined ? {} : { transcriptFile: live.transcriptFile }),
+            ...(status === "running" && live?.liveContent !== undefined
+              ? { liveContent: live.liveContent }
+              : {}),
+          };
+          turn.subagentItems[nativeTaskId] = turnItem;
+          yield* emit({ type: "turn_item.updated", driver, turnItem });
         }
       });
+
+      /** Re-sends a running subagent item with its newest transcript file and live preview. */
+      const emitSubagentLive = (turn: ActivePiTurn, live: PiSubagentLiveState) =>
+        Effect.gen(function* () {
+          live.flushScheduled = false;
+          const nativeTaskId = live.nativeTaskId;
+          const item = nativeTaskId === undefined ? undefined : turn.subagentItems[nativeTaskId];
+          if (
+            nativeTaskId === undefined ||
+            item === undefined ||
+            item.status !== "running" ||
+            threadState?.activeTurn !== turn
+          ) {
+            return;
+          }
+          const turnItem: PiSubagentTurnItem = {
+            ...item,
+            updatedAt: yield* DateTime.now,
+            ...(live.transcriptFile === undefined ? {} : { transcriptFile: live.transcriptFile }),
+            ...(live.liveContent === undefined ? {} : { liveContent: live.liveContent }),
+          };
+          turn.subagentItems[nativeTaskId] = turnItem;
+          yield* emit({ type: "turn_item.updated", driver, turnItem });
+        });
+
+      const scheduleSubagentLive = (turn: ActivePiTurn, live: PiSubagentLiveState) =>
+        Effect.gen(function* () {
+          if (live.flushScheduled) return;
+          live.flushScheduled = true;
+          yield* Effect.sleep(Duration.millis(STREAM_FLUSH_MS)).pipe(
+            Effect.andThen(Effect.suspend(() => emitSubagentLive(turn, live))),
+            Effect.forkIn(scope),
+          );
+        });
+
+      /** Shows a tool call while the model is still writing its arguments. */
+      const emitToolPreview = (turn: ActivePiTurn, toolCallId: string) =>
+        Effect.suspend(() => {
+          const preview = turn.toolPreviews[toolCallId];
+          if (preview === undefined) return Effect.void;
+          preview.flushScheduled = false;
+          if (preview.executing || threadState?.activeTurn !== turn) return Effect.void;
+          return emitToolItem(
+            turn,
+            { toolCallId, toolName: preview.toolName, args: preview.args },
+            "preview",
+          );
+        });
+
+      const scheduleToolPreview = (turn: ActivePiTurn, toolCallId: string) =>
+        Effect.gen(function* () {
+          const preview = turn.toolPreviews[toolCallId];
+          if (preview === undefined || preview.flushScheduled) return;
+          preview.flushScheduled = true;
+          yield* Effect.sleep(Duration.millis(STREAM_FLUSH_MS)).pipe(
+            Effect.andThen(emitToolPreview(turn, toolCallId)),
+            Effect.forkIn(scope),
+          );
+        });
 
       // ── extension UI prompts ──────────────────────────────
 
@@ -1432,6 +1520,16 @@ export function makePiAdapterV2(
         state.activeTurn = null;
         const completedAt = yield* DateTime.now;
         yield* completeOpenStreamItems(turn);
+        // A call whose arguments streamed but which never ran (aborted mid-message)
+        // must not stay running in the timeline.
+        for (const [toolCallId, preview] of Object.entries(turn.toolPreviews)) {
+          if (preview.executing) continue;
+          yield* emitToolItem(
+            turn,
+            { toolCallId, toolName: preview.toolName, args: preview.args, isError: true },
+            "end",
+          );
+        }
         if (turn.activeCompaction !== null) {
           const status = turn.interrupted
             ? "cancelled"
@@ -1625,6 +1723,30 @@ export function makePiAdapterV2(
               );
               return;
             }
+            if (
+              deltaType === "toolcall_start" ||
+              deltaType === "toolcall_delta" ||
+              deltaType === "toolcall_end"
+            ) {
+              const content = recordField(recordField(delta, "partial"), "content");
+              const part =
+                recordField(delta, "toolCall") ??
+                (Array.isArray(content) ? content[contentIndex] : undefined);
+              const toolCallId = recordString(part, "id");
+              if (toolCallId === undefined) return;
+              // A tool call closes the text and thinking written before it.
+              if (deltaType === "toolcall_start") yield* completeOpenStreamItems(turn);
+              const preview = (turn.toolPreviews[toolCallId] ??= {
+                flushScheduled: false,
+                executing: false,
+              });
+              preview.toolName = recordString(part, "name") ?? preview.toolName;
+              preview.args = recordField(part, "arguments") ?? preview.args;
+              yield* deltaType === "toolcall_delta"
+                ? scheduleToolPreview(turn, toolCallId)
+                : emitToolPreview(turn, toolCallId);
+              return;
+            }
             return;
           }
           case "message_end": {
@@ -1638,6 +1760,28 @@ export function makePiAdapterV2(
                 class: "provider_error",
               });
             }
+            return;
+          }
+          case "subagent_lifecycle":
+          case "subagent_progress":
+          case "subagent_event": {
+            if (turn === null) return;
+            const payload = recordField(event, "payload");
+            const subagentId =
+              recordString(payload, "id") ?? recordString(recordField(payload, "progress"), "id");
+            if (subagentId === undefined) return;
+            const live = (turn.subagentLive[subagentId] ??= { flushScheduled: false });
+            const parentToolCallId = recordString(payload, "parentToolCallId");
+            const index = recordNumber(payload, "index");
+            if (live.nativeTaskId === undefined && parentToolCallId !== undefined) {
+              live.nativeTaskId = `${parentToolCallId}:subagent:${index ?? 0}`;
+            }
+            live.transcriptFile = recordString(payload, "sessionFile") ?? live.transcriptFile;
+            if (event["type"] === "subagent_event") {
+              live.liveContent =
+                piSubagentLiveContent(recordField(payload, "event")) ?? live.liveContent;
+            }
+            yield* scheduleSubagentLive(turn, live);
             return;
           }
           case "tool_execution_start":
@@ -2360,6 +2504,9 @@ export function makePiAdapterV2(
               streamItems: new Map(),
               toolArgs: new Map(),
               toolStartedAt: new Map(),
+              toolPreviews: {},
+              subagentLive: {},
+              subagentItems: {},
               interrupted: false,
               sawAgentActivity: false,
               promptMayBeCommandOnly:
@@ -2906,14 +3053,81 @@ function piSubagentOutput(result: unknown): string {
     if (failure !== undefined && failure.length > 0) return failure;
   }
   const messages = recordField(result, "messages");
-  if (!Array.isArray(messages)) return "";
-  for (let index = messages.length - 1; index >= 0; index -= 1) {
-    const message = messages[index];
-    if (recordString(message, "role") !== "assistant") continue;
-    const text = contentText(recordField(message, "content"));
-    if (text.length > 0) return text;
+  if (Array.isArray(messages)) {
+    for (let index = messages.length - 1; index >= 0; index -= 1) {
+      const message = messages[index];
+      if (recordString(message, "role") !== "assistant") continue;
+      const text = contentText(recordField(message, "content"));
+      if (text.length > 0) return text;
+    }
   }
-  return "";
+  // OMP progress entries carry recent output lines and the agent's last intent.
+  const recentOutput = recordField(result, "recentOutput");
+  const latestLine = Array.isArray(recentOutput)
+    ? recentOutput.findLast((line) => typeof line === "string" && line.trim().length > 0)
+    : undefined;
+  if (typeof latestLine === "string") return latestLine;
+  return recordString(result, "lastIntent") ?? "";
+}
+
+function piToolPreviewText(toolName: string | undefined, args: unknown): string {
+  const name = toolName ?? "tool";
+  return args === undefined ? name : `${name} ${JSON.stringify(args)}`;
+}
+
+/**
+ * Latest bounded preview of a child agent's output from one OMP `subagent_event`.
+ * Message updates carry the partial message, so the preview is the current
+ * content block rather than an accumulation of deltas.
+ */
+function piSubagentLiveContent(event: unknown): OrchestrationV2SubagentLiveContent | undefined {
+  const type = recordString(event, "type");
+  let kind: OrchestrationV2SubagentLiveContent["kind"];
+  let text: string | undefined;
+  if (type === "message_update") {
+    const update = recordField(event, "assistantMessageEvent");
+    const updateType = recordString(update, "type") ?? "";
+    const contentIndex = recordNumber(update, "contentIndex");
+    const content = recordField(
+      recordField(update, "partial") ?? recordField(event, "message"),
+      "content",
+    );
+    const part =
+      contentIndex !== undefined && Array.isArray(content) ? content[contentIndex] : undefined;
+    if (updateType.startsWith("thinking_")) {
+      kind = "reasoning";
+      text = recordString(part, "thinking");
+    } else if (updateType.startsWith("text_")) {
+      kind = "assistant";
+      text = recordString(part, "text");
+    } else if (updateType.startsWith("toolcall_")) {
+      kind = "tool";
+      text = piToolPreviewText(recordString(part, "name"), recordField(part, "arguments"));
+    } else {
+      return undefined;
+    }
+  } else if (
+    type === "tool_execution_start" ||
+    type === "tool_execution_update" ||
+    type === "tool_execution_end"
+  ) {
+    kind = "tool";
+    const output = contentText(
+      recordField(
+        recordField(event, type === "tool_execution_end" ? "result" : "partialResult"),
+        "content",
+      ),
+    );
+    text =
+      output.length > 0
+        ? output
+        : piToolPreviewText(recordString(event, "toolName"), recordField(event, "args"));
+  } else {
+    return undefined;
+  }
+  if (text === undefined || text.length === 0) return undefined;
+  const max = ORCHESTRATION_V2_SUBAGENT_LIVE_CONTENT_MAX_LENGTH;
+  return text.length > max ? { kind, text: text.slice(-max), truncated: true } : { kind, text };
 }
 
 function piExtensionDisplayName(extensionPath: string | undefined): string {

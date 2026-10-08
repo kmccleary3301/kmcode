@@ -60,13 +60,12 @@ export function resolveSidebarRowAccessibility(input: {
   };
 }
 
-// Visible sidebar rows are prewarmed into the thread-detail cache so opening a
-// nearby thread usually reuses an already-hot subscription. Each prewarmed
-// thread holds a live, fully hydrated detail subscription (all messages and
-// activities, growing as agents work) for as long as the row stays visible,
-// so this limit is a direct renderer-heap and server-load multiplier — keep
-// it small; cold opens still render instantly from the cached snapshot.
-const SIDEBAR_THREAD_PREWARM_LIMIT = 3;
+// One nearby sidebar row stays hot. A prewarmed row owns a live, fully
+// hydrated detail subscription whose messages and activities keep growing;
+// the active thread has its own subscription, so prewarming more rows
+// multiplies renderer heap and server work without improving the selected
+// thread. Cold rows still open from their cached snapshot.
+const SIDEBAR_THREAD_PREWARM_LIMIT = 1;
 // A small buffer keeps the next few rows warm without leasing every row that
 // content-visibility leaves mounted below the scroll viewport.
 const SIDEBAR_ROW_SUBSCRIPTION_OVERSCAN_PX = 160;

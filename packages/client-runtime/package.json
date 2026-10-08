@@ -15,6 +15,10 @@
       "types": "./src/handoff.ts",
       "default": "./src/handoff.ts"
     },
+    "./activity-details": {
+      "types": "./src/activityDetails.ts",
+      "default": "./src/activityDetails.ts"
+    },
     "./device/stream": {
       "types": "./src/device/stream.ts",
       "default": "./src/device/stream.ts"
@@ -279,6 +283,14 @@
       "types": "./src/state/subagentRuntime.ts",
       "default": "./src/state/subagentRuntime.ts"
     },
+    "./subagentTranscript": {
+      "types": "./src/subagentTranscript.ts",
+      "default": "./src/subagentTranscript.ts"
+    },
+    "./subagent-transcript": {
+      "types": "./src/subagentTranscript.ts",
+      "default": "./src/subagentTranscript.ts"
+    },
     "./state/thread-sort": {
       "types": "./src/state/threadSort.ts",
       "default": "./src/state/threadSort.ts"
@@ -355,6 +367,14 @@
       "types": "./src/work-log/scrollAnchor.ts",
       "default": "./src/work-log/scrollAnchor.ts"
     },
+    "./streaming-reveal": {
+      "types": "./src/streamingReveal.ts",
+      "default": "./src/streamingReveal.ts"
+    },
+    "./streaming-reveal/react": {
+      "types": "./src/streamingRevealReact.ts",
+      "default": "./src/streamingRevealReact.ts"
+    },
     "./thread-pull-request-compatibility": {
       "types": "./src/threadPullRequestCompatibility.ts",
       "default": "./src/threadPullRequestCompatibility.ts"
@@ -423,8 +443,18 @@
   "devDependencies": {
     "@effect/vitest": "catalog:",
     "@types/css-tree": "2.3.10",
+    "@types/react": "~19.3.0",
     "@types/three": "0.180.0",
     "micromark-util-types": "^2.0.2",
+    "react": "19.2.6",
     "vite-plus": "catalog:"
+  },
+  "peerDependencies": {
+    "react": "^19.2.6"
+  },
+  "peerDependenciesMeta": {
+    "react": {
+      "optional": true
+    }
   }
 }

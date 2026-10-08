@@ -1,11 +1,12 @@
 export const BRAND_ASSET_PATHS = {
+  androidAdaptiveBackgroundSvg: "apps/mobile/assets/android-icon-background.svg",
+  androidAdaptiveBackgroundPng: "apps/mobile/assets/android-icon-background.png",
   androidAdaptiveForegroundSvg: "apps/mobile/assets/android-icon-foreground.svg",
   androidAdaptiveForegroundPng: "apps/mobile/assets/android-icon-foreground.png",
   androidMonochromeSvg: "apps/mobile/assets/android-icon-mark.svg",
   androidMonochromePng: "apps/mobile/assets/android-icon-mark.png",
   androidNotificationSvg: "apps/mobile/assets/android-notification-icon.svg",
   androidNotificationPng: "apps/mobile/assets/android-notification-icon.png",
-
   developmentIconComposerProject: "assets/dev/app-icon.icon",
   developmentIosIconPng: "assets/dev/blueprint-ios-1024.png",
   developmentUniversalIconPng: "assets/dev/blueprint-universal-1024.png",
@@ -49,7 +50,7 @@ export function resolveWebAssetBrandForChannel(channel: WebAssetChannel): WebAss
 }
 
 export function resolveWebAssetBrandForPackageVersion(version: string): WebAssetBrand {
-  return version.includes("-nightly.") ? "nightly" : "production";
+  return /^[^-+]+-(?:nightly|preview)\./.test(version) ? "nightly" : "production";
 }
 
 export interface IconOverride {

@@ -20,8 +20,10 @@ import * as Path from "effect/Path";
 
 import * as DesktopAppSettings from "../settings/DesktopAppSettings.ts";
 import * as DesktopConfig from "./DesktopConfig.ts";
+import { resolveLinuxDesktopEntryName } from "./DesktopEarlyElectronStartup.ts";
 import { resolveDesktopBaseDir, resolveDesktopStateDir } from "./DesktopStatePaths.ts";
 import { isNightlyDesktopVersion } from "../updates/updateChannels.ts";
+import type { OtlpProtocol } from "@t3tools/shared/observability";
 
 declare const __T3CODE_BUILD_PRODUCT_PROFILE__: string | undefined;
 
@@ -69,15 +71,23 @@ export class DesktopEnvironment extends Context.Service<
     // extracts on demand (see DesktopWslServerTree).
     readonly serverRoot: string;
     readonly backendEntryPath: string;
+    // Built web client the packaged renderer is served from over t3code://app.
+    readonly clientAssetsDir: string;
     readonly backendCwd: string;
     readonly preloadPath: string;
+    // Preload that turns on the V8 compile cache for the local backend.
+    readonly compileCachePath: string;
     readonly appUpdateYmlPath: string;
     readonly devServerUrl: Option.Option<URL>;
     readonly devRemoteT3ServerEntryPath: Option.Option<string>;
     readonly configuredBackendPort: Option.Option<number>;
     readonly commitHashOverride: Option.Option<string>;
     readonly otlpTracesUrl: Option.Option<string>;
+    readonly otlpMetricsUrl: Option.Option<string>;
+    readonly otlpLogsUrl: Option.Option<string>;
     readonly otlpExportIntervalMs: number;
+    readonly otlpHeaders: Option.Option<Record<string, string>>;
+    readonly otlpProtocol: OtlpProtocol;
     readonly branding: DesktopAppBranding;
     readonly displayName: string;
     readonly appUserModelId: string;
@@ -110,7 +120,7 @@ function resolveDesktopAppStageLabel(input: {
   return "Local";
 }
 
-function resolveDesktopAppBranding(input: {
+export function resolveDesktopAppBranding(input: {
   readonly profile: ProductProfile;
   readonly isDevelopment: boolean;
   readonly appVersion: string;
@@ -240,8 +250,10 @@ const make = Effect.fn("desktop.environment.make")(function* (
     appRoot,
     serverRoot,
     backendEntryPath: path.join(serverRoot, "apps/server/dist/bin.mjs"),
+    clientAssetsDir: path.join(serverRoot, "apps/server/dist/client"),
     backendCwd: input.isPackaged ? homeDirectory : appRoot,
     preloadPath: path.join(input.dirname, "preload.cjs"),
+    compileCachePath: path.join(input.dirname, "compileCache.cjs"),
     appUpdateYmlPath: input.isPackaged
       ? path.join(resourcesPath, "app-update.yml")
       : path.join(input.appPath, "dev-app-update.yml"),
@@ -250,7 +262,11 @@ const make = Effect.fn("desktop.environment.make")(function* (
     configuredBackendPort: config.configuredBackendPort,
     commitHashOverride: config.commitHashOverride,
     otlpTracesUrl: config.otlpTracesUrl,
+    otlpMetricsUrl: config.otlpMetricsUrl,
+    otlpLogsUrl: config.otlpLogsUrl,
     otlpExportIntervalMs: config.otlpExportIntervalMs,
+    otlpHeaders: config.otlpHeaders,
+    otlpProtocol: config.otlpProtocol,
     branding,
     displayName,
     productProfile,
@@ -259,9 +275,7 @@ const make = Effect.fn("desktop.environment.make")(function* (
     appUserModelId: Option.getOrElse(config.appUserModelIdOverride, () =>
       isDevelopment ? `${productIdentity.bundleIdentifier}.dev` : productIdentity.bundleIdentifier,
     ),
-    linuxDesktopEntryName: isDevelopment
-      ? `${productIdentity.linuxWmClass}-dev.desktop`
-      : productIdentity.linuxDesktopEntryName,
+    linuxDesktopEntryName: resolveLinuxDesktopEntryName(isDevelopment, productIdentity.profile),
     linuxWmClass: isDevelopment
       ? `${productIdentity.linuxWmClass}-dev`
       : productIdentity.linuxWmClass,

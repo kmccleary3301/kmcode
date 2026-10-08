@@ -1,9 +1,12 @@
+import { projectQuestionToolInput } from "@t3tools/shared/toolActivity";
 import type {
   OrchestrationEvent,
   OrchestrationThreadActivity,
   OrchestrationThreadDetailSnapshot,
 } from "@t3tools/contracts";
 import { isProviderCommandCatalog } from "@t3tools/shared/providerSlashCommandCompletion";
+import { isWorkspaceImagePreviewPath } from "@t3tools/shared/filePreview";
+import { extractJsonObject } from "@t3tools/shared/schemaJson";
 
 function asRecord(value: unknown): Record<string, unknown> | null {
   return value !== null && typeof value === "object" && !Array.isArray(value)
@@ -144,23 +147,45 @@ function projectCommandValue(data: Record<string, unknown>): unknown {
   return undefined;
 }
 
-function summarizeToolTextOutput(value: string): string | null {
-  const lines: string[] = [];
-  for (const rawLine of value.split(/\r?\n/u)) {
-    const line = rawLine.replace(/\s+/g, " ").trim();
-    if (line.length > 0) {
-      lines.push(line);
-    }
+function projectViewedImagePath(data: Record<string, unknown>): string | undefined {
+  const directPath = asTrimmedString(data.imagePath);
+  if (directPath && isWorkspaceImagePreviewPath(directPath)) {
+    return directPath;
   }
 
-  const firstLine = lines.find((line) => line !== "```");
-  if (firstLine) {
-    return firstLine.length <= 84 ? firstLine : `${firstLine.slice(0, 83).trimEnd()}…`;
+  const toolName = asTrimmedString(data.toolName)?.toLowerCase();
+  if (toolName !== "read" && toolName !== "read file") {
+    return undefined;
   }
-  if (lines.length > 1) {
-    return `${lines.length.toLocaleString()} lines`;
+  const input = asRecord(data.input);
+  const inputPath = asTrimmedString(input?.file_path) ?? asTrimmedString(input?.path);
+  return inputPath && isWorkspaceImagePreviewPath(inputPath) ? inputPath : undefined;
+}
+
+function summarizeToolTextOutput(value: string): string | null {
+  let meaningfulLineCount = 0;
+  let offset = 0;
+
+  while (offset <= value.length) {
+    const newlineIndex = value.indexOf("\n", offset);
+    const lineEnd = newlineIndex === -1 ? value.length : newlineIndex;
+    const line = value.slice(offset, lineEnd).replace(/\s+/g, " ").trim();
+    if (line.length > 0) {
+      meaningfulLineCount += 1;
+      if (line !== "```") {
+        const summary = line.length <= 84 ? line : `${line.slice(0, 83).trimEnd()}…`;
+        // V8 can retain the full tool output behind a short sliced string.
+        // Join a tiny character array so the returned preview owns its bytes.
+        return Array.from(summary).join("");
+      }
+    }
+    if (newlineIndex === -1) {
+      break;
+    }
+    offset = newlineIndex + 1;
   }
-  return null;
+
+  return meaningfulLineCount > 1 ? `${meaningfulLineCount.toLocaleString()} lines` : null;
 }
 
 /**
@@ -218,6 +243,70 @@ function summarizeMcpResult(result: unknown): Record<string, unknown> | undefine
   const text = extractMcpResultText(result);
   const summary = text ? summarizeToolTextOutput(text) : null;
   return summary ? { content: summary } : undefined;
+}
+
+/** Reuse the page URL already returned by preview tools before slimming their output. */
+function projectPreviewToolMetadata(data: Record<string, unknown>, status: unknown) {
+  const item = asRecord(data.item);
+  const name = item ? `mcp__${item.server}__${item.tool}` : (data.toolName ?? data.tool);
+  if (
+    typeof name !== "string" ||
+    !/^(?:mcp__)?(?:t3-code|t3_code|t3code)_{1,2}preview_(?:open|navigate|status|snapshot|click|type|press|scroll|resize|set_appearance|evaluate|wait_for|recording_start|recording_stop)$/.test(
+      name,
+    )
+  )
+    return {};
+  const state = asRecord(data.state);
+  const result = item?.result ?? data.result ?? state?.output;
+  const record = asRecord(result);
+  if (
+    status === "failed" ||
+    status === "declined" ||
+    state?.status === "error" ||
+    item?.error != null ||
+    record?.isError === true ||
+    record?.is_error === true
+  )
+    return {};
+
+  let page = record;
+  let output: unknown = result;
+  for (let depth = 0; depth < 3; depth += 1) {
+    if (page?.isError === true || page?.is_error === true) return {};
+    const structured = asRecord(page?.structuredContent);
+    if (structured) {
+      page = structured;
+      break;
+    }
+    const text = extractMcpResultText(output)?.slice(0, 2 * 1024 * 1024);
+    if (!text) break;
+    try {
+      page = asRecord(JSON.parse(extractJsonObject(text)));
+    } catch {
+      // A truncated MCP envelope can still contain a complete first text block.
+      const firstBlock = /^\s*\{\s*"content"\s*:\s*\[\s*/.exec(text);
+      if (!firstBlock) return {};
+      try {
+        const block = asRecord(JSON.parse(extractJsonObject(text.slice(firstBlock[0].length))));
+        page = block?.type === "text" ? { content: [block] } : null;
+      } catch {
+        return {};
+      }
+    }
+    output = page;
+  }
+  const rawUrl = asTrimmedString(
+    asRecord(page?.toolIcon)?.pageUrl ??
+      (/preview_(?:open|navigate|status|snapshot)$/.test(name) ? page?.url : undefined),
+  );
+  if (!rawUrl || rawUrl.length > 4096) return {};
+  try {
+    const url = new URL(rawUrl);
+    if (url.protocol !== "http:" && url.protocol !== "https:") return {};
+    return { toolIcon: { _tag: "website", pageUrl: url.href } };
+  } catch {
+    return {};
+  }
 }
 
 /**
@@ -314,13 +403,34 @@ function projectGenericToolCallData(data: Record<string, unknown>): Record<strin
     projectedData.item = projectedItem;
   }
 
+  const imagePath = projectViewedImagePath(data);
+  if (imagePath) {
+    projectedData.imagePath = imagePath;
+  }
+
+  const changedFiles: string[] = [];
+  collectChangedFiles(data, changedFiles, new Set<string>(), 0);
+  if (changedFiles.length > 0) {
+    projectedData.files = changedFiles.map((path) => ({ path }));
+  }
+
   if ("toolCallId" in data) {
     projectedData.toolCallId = data.toolCallId;
   }
   if ("kind" in data) {
     projectedData.kind = data.kind;
   }
-  const rawOutput = projectRawOutput(data.rawOutput);
+  if ("toolName" in data) {
+    projectedData.toolName = data.toolName;
+  }
+  const fallbackText =
+    asTrimmedString(asRecord(data.result)?.content) ??
+    asTrimmedString(data.output) ??
+    asTrimmedString(data.content);
+  const fallbackSummary = fallbackText ? summarizeToolTextOutput(fallbackText) : null;
+  const rawOutput =
+    projectRawOutput(data.rawOutput) ??
+    (fallbackSummary ? { content: fallbackSummary } : undefined);
   if (rawOutput) {
     projectedData.rawOutput = rawOutput;
   }
@@ -400,17 +510,22 @@ export function projectActivityPayload(
   }
 
   const itemStatus = asRecord(data.item)?.status;
-  const projectedPayload =
+  const statusPayload =
     payload.status === "completed" && (itemStatus === "failed" || itemStatus === "declined")
       ? { ...payload, status: itemStatus }
       : payload;
+  const projectedPayload = {
+    ...projectPreviewToolMetadata(data, statusPayload.status),
+    ...statusPayload,
+  };
+  const questionInput = projectQuestionToolInput(data, payload.title);
 
   if (payload.itemType === "mcp_tool_call") {
     return {
       ...activity,
       payload: {
         ...projectedPayload,
-        data: projectMcpToolCallData(data),
+        data: { ...projectMcpToolCallData(data), ...questionInput },
       },
     };
   }
@@ -420,12 +535,12 @@ export function projectActivityPayload(
       ...activity,
       payload: {
         ...projectedPayload,
-        data: projectGenericToolCallData(data),
+        data: { ...projectGenericToolCallData(data), ...questionInput },
       },
     };
   }
 
-  const projectedData: Record<string, unknown> = {};
+  const projectedData: Record<string, unknown> = { ...questionInput };
   const item = projectCommandData(data);
   if (item) {
     projectedData.item = item;
@@ -433,6 +548,10 @@ export function projectActivityPayload(
   const command = projectCommandValue(data);
   if (command !== undefined) {
     projectedData.command = command;
+  }
+  const imagePath = projectViewedImagePath(data);
+  if (imagePath) {
+    projectedData.imagePath = imagePath;
   }
 
   const changedFiles: string[] = [];
@@ -448,8 +567,14 @@ export function projectActivityPayload(
   if ("kind" in data) {
     projectedData.kind = data.kind;
   }
+  if ("toolName" in data) {
+    projectedData.toolName = data.toolName;
+  }
 
-  const rawOutput = projectRawOutput(data.rawOutput) ?? projectAcpContent(data.content);
+  const rawOutput =
+    projectRawOutput(data.rawOutput) ??
+    projectAcpContent(data.content) ??
+    (payload.itemType === "command_execution" ? summarizeMcpResult(data.result) : undefined);
   if (rawOutput) {
     projectedData.rawOutput = rawOutput;
   }
@@ -511,33 +636,19 @@ function dropStaleContextWindowActivities(
 
 /**
  * Identity used to retain only the newest lifecycle row for each call in a
- * thread snapshot. Prefer the runtime item id, then the legacy nested id, and
- * finally the itemType/title/detail triple. Rows without any identity remain
- * untouched.
+ * thread snapshot. Prefer the runtime item id, then the legacy nested id.
+ * KM Code clients collapse lifecycle rows by call identity only, since
+ * separate calls can share a display label, so rows without an id remain
+ * untouched here too.
  */
 function toolLifecycleIdentity(activity: OrchestrationThreadActivity): string | null {
   const payload = asRecord(activity.payload);
   if (!payload) {
     return null;
   }
-
   const toolCallId =
     asTrimmedString(payload.toolCallId) ?? asTrimmedString(asRecord(payload.data)?.toolCallId);
-  if (toolCallId) {
-    return `id:${toolCallId}`;
-  }
-
-  const itemType = asTrimmedString(payload.itemType) ?? "";
-  // Mirrors the clients' `normalizeCompactToolLabel`: a completion's title may
-  // gain a trailing "complete"/"completed" the in-flight updates lack.
-  const label = (asTrimmedString(payload.title) ?? activity.summary)
-    .replace(/\s+(?:complete|completed)\s*$/iu, "")
-    .trim();
-  const detail = asTrimmedString(payload.detail) ?? "";
-  if (itemType.length === 0 && label.length === 0 && detail.length === 0) {
-    return null;
-  }
-  return [itemType, label, detail].join("");
+  return toolCallId ? `id:${toolCallId}` : null;
 }
 
 /**
@@ -555,9 +666,6 @@ function toolLifecycleIdentity(activity: OrchestrationThreadActivity): string | 
  * update within the turn — a later update belongs to a subsequent call that
  * reuses the same identity and is still in flight. Rows without a lifecycle
  * identity pass through, matching the clients, which never collapse them.
- * Live `thread.activity-appended` events are untouched: updates still stream
- * in real time and the completion supersedes them on the client as before.
- *
  * Deliberate divergence from client collapse: clients fold only *adjacent*
  * lifecycle rows, so a superseded update separated from its completion by an
  * interleaved parallel call renders as its own row today, and this drop
@@ -584,7 +692,7 @@ function dropSupersededToolUpdatedActivities(
     if (!identity) {
       continue;
     }
-    const key = `${activity.turnId ?? ""} ${identity}`;
+    const key = `${activity.turnId ?? ""}\u0000${identity}`;
     const indices = completionIndicesByKey.get(key);
     if (indices) {
       indices.push(index);
@@ -604,7 +712,7 @@ function dropSupersededToolUpdatedActivities(
     if (!identity) {
       return true;
     }
-    const indices = completionIndicesByKey.get(`${activity.turnId ?? ""} ${identity}`);
+    const indices = completionIndicesByKey.get(`${activity.turnId ?? ""}\u0000${identity}`);
     return !indices?.some((completionIndex) => completionIndex > index);
   });
 }
@@ -632,11 +740,17 @@ function dropStaleCommandCatalogActivities(
 
 export function projectThreadDetailSnapshot(
   snapshot: OrchestrationThreadDetailSnapshot,
+  reasoningMessages = true,
 ): OrchestrationThreadDetailSnapshot {
   return {
     ...snapshot,
     thread: {
       ...snapshot.thread,
+      messages: reasoningMessages
+        ? snapshot.thread.messages
+        : snapshot.thread.messages.map((message) =>
+            message.role === "reasoning" ? { ...message, role: "system" as const } : message,
+          ),
       activities: dropSupersededToolUpdatedActivities(
         dropStaleContextWindowActivities(
           dropStaleCommandCatalogActivities(snapshot.thread.activities),
@@ -646,7 +760,19 @@ export function projectThreadDetailSnapshot(
   };
 }
 
-export function projectActivityEvent(event: OrchestrationEvent): OrchestrationEvent {
+export function projectActivityEvent(
+  event: OrchestrationEvent,
+  reasoningMessages = true,
+): OrchestrationEvent {
+  // Preserve sequence watermarks and message identities for clients whose role
+  // decoder predates reasoning. Filtering would strand their history pages.
+  if (
+    !reasoningMessages &&
+    event.type === "thread.message-sent" &&
+    event.payload.role === "reasoning"
+  ) {
+    return { ...event, payload: { ...event.payload, role: "system" } };
+  }
   if (event.type !== "thread.activity-appended") {
     return event;
   }

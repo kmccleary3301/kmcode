@@ -672,17 +672,15 @@ describe("native history identity reconciliation", () => {
         currentTurn: null,
         identities,
       });
-    const lateProgress = ["ProofA", "ProofB"].map(
-      (taskId): OrchestrationThreadActivity => ({
-        id: EventId.make(`progress-${taskId}`),
-        tone: "info",
-        kind: "task.progress",
-        summary: "Running child",
-        payload: { taskId, taskType: "subagent", status: "running", toolUseId: "task-call" },
-        turnId: liveTurnId,
-        createdAt: "2026-08-01T12:00:02.500Z",
-      }),
-    );
+    const lateProgress = ["ProofA", "ProofB"].map((taskId): OrchestrationThreadActivity => ({
+      id: EventId.make(`progress-${taskId}`),
+      tone: "info",
+      kind: "task.progress",
+      summary: "Running child",
+      payload: { taskId, taskType: "subagent", status: "running", toolUseId: "task-call" },
+      turnId: liveTurnId,
+      createdAt: "2026-08-01T12:00:02.500Z",
+    }));
     existingActivities.push(...lateProgress, {
       id: EventId.make("live-child-a-repeat"),
       tone: "info",

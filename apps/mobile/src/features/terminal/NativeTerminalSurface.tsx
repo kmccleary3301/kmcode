@@ -6,6 +6,7 @@ import {
   View,
   type LayoutChangeEvent,
   type NativeSyntheticEvent,
+  type TextInputInstance,
   type TextStyle,
   type ViewProps,
 } from "react-native";
@@ -39,6 +40,8 @@ interface TerminalSurfaceProps extends ViewProps {
   readonly isRunning: boolean;
   readonly autoFocus?: boolean;
   readonly keyboardFocusRequest?: number;
+  readonly captureRequest?: number;
+  readonly onCapture?: (text: string) => void;
   readonly theme?: TerminalTheme;
   readonly onInput: (data: string) => void;
   readonly onResize: (size: { readonly cols: number; readonly rows: number }) => void;
@@ -92,7 +95,7 @@ const FallbackTerminalSurface = memo(function FallbackTerminalSurface(props: Ter
     letterSpacing: terminalLetterSpacing,
     fontVariant: nativeLigatureVariant(theme.ligatures ?? terminalTypography.ligatures),
   } satisfies TextStyle;
-  const inputRef = useRef<TextInput>(null);
+  const inputRef = useRef<TextInputInstance>(null);
   const inputTextRef = useRef("");
   const [inputText, setInputText] = useState("");
   const statusLabel = props.isRunning
@@ -266,6 +269,8 @@ export const TerminalSurface = memo(function TerminalSurface(props: TerminalSurf
           themeConfig={buildGhosttyThemeConfig(theme)}
           onInput={handleNativeInput}
           onResize={handleNativeResize}
+          captureRequest={props.captureRequest}
+          onCapture={(event) => props.onCapture?.(event.nativeEvent.text)}
         />
       </View>
     );

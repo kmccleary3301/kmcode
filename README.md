@@ -6,14 +6,14 @@ The fork keeps T3 Code's engine, provider integrations, package identities, and 
 protocols compatible while changing the product identity and artwork to KM Code.
 
 It supports native Pi and OMP sessions alongside Claude Code, Codex, Cursor, Grok Build,
-and OpenCode. Install and configure the provider runtimes on the host machine.
+OpenCode, and Google Antigravity. If they're set up on your computer, KM Code can control them.
 
 This fork preserves T3 Code attribution and upstream license terms; see [`LICENSE`](./LICENSE).
 
 ## Installation
 
 > [!WARNING]
-> Install and authenticate at least one provider before use:
+> KM Code currently supports Pi, OMP, Codex, Claude, Cursor, Grok Build, OpenCode, and Antigravity. Install and authenticate at least one provider before use:
 >
 > - Pi: install [Pi](https://github.com/earendil-works/pi) and configure its models and accounts
 > - OMP: install [Oh My Pi](https://github.com/can1357/oh-my-pi) and configure its models and accounts
@@ -22,6 +22,7 @@ This fork preserves T3 Code attribution and upstream license terms; see [`LICENS
 > - Cursor: install [Cursor CLI](https://cursor.com/cli) and run `agent login`
 > - Grok Build: install [Grok Build CLI](https://x.ai/cli) and run `grok login`
 > - OpenCode: install [OpenCode](https://opencode.ai) and run `opencode auth login`
+> - Antigravity: enable it in Settings, then use **Install Antigravity** and **Sign in with Google**. No CLI is required.
 
 ### Build KM Code
 
@@ -40,17 +41,25 @@ Existing package identifiers, connection protocols, and user-data paths are reta
 The public `t3` npm package installs upstream T3 Code, not the KM Code fork:
 
 ```bash
-npx t3@latest
+curl -fsSL https://t3.codes/install.sh | sh
+```
+
+On Windows, in PowerShell:
+
+```powershell
+irm https://t3.codes/install.ps1 | iex
 ```
 
 This launches the upstream server and web app. It does not include unpublished KM Code changes.
 
-Tip: Use `npx t3@latest --help` for the full CLI reference.
+Then run `t3` to start the server and open the local web app. `t3 service install` keeps it running in the background, `t3 update` moves to a newer release, and `t3 --help` has the full reference.
+
+To try it once without installing, run `npx t3@latest` instead.
 
 ### Desktop app
 
 These package-manager commands install upstream T3 Code, not KM Code. Fork releases are
-published separately at [kmccleary3301/t3code](https://github.com/kmccleary3301/t3code/releases);
+published separately at [kmccleary3301/kmcode](https://github.com/kmccleary3301/kmcode/releases);
 earlier fork artifacts still carry T3 Code branding.
 
 #### Windows (`winget`)
@@ -63,6 +72,14 @@ winget install T3Tools.T3Code
 
 ```bash
 brew install --cask t3-code
+```
+
+#### Debian, Ubuntu (`.deb`)
+
+Download the `.deb` from [GitHub Releases](https://github.com/pingdotgg/t3code/releases), then:
+
+```bash
+sudo apt install ./T3-Code-*.deb
 ```
 
 #### Arch Linux (AUR)
@@ -94,12 +111,12 @@ Full docs live in [docs/](./docs). There's no docs site yet.
 - [Install and first run](./docs/user/install.md)
 - [Permission modes](./docs/user/permission-modes.md)
 - [Keyboard shortcuts](./docs/user/keybindings.md)
-- [Customize a project icon](./docs/user/project-settings.md)
+- [Project settings](./docs/user/project-settings.md)
 - [Remote access from a phone or another machine](./docs/user/remote-access.md)
 - [Keeping app and server in sync](./docs/user/updating.md)
 - [Source control integrations](./docs/user/source-control.md)
 - Multiple accounts: [Codex](./docs/user/providers-codex.md) · [Claude](./docs/user/providers-claude.md)
-- Linux: [run KM Code as a background service](./docs/user/background-service.md)
+- [Run KM Code as a background service](./docs/user/background-service.md)
 
 Building from source? Start at [docs/internals/overview.md](./docs/internals/overview.md).
 
@@ -131,6 +148,6 @@ vp i
 
 Read [CONTRIBUTING.md](./CONTRIBUTING.md) before reporting a bug or opening a PR.
 
-For fork issues, use [kmccleary3301/t3code](https://github.com/kmccleary3301/t3code/issues).
+For fork issues, use [kmccleary3301/kmcode](https://github.com/kmccleary3301/kmcode/issues).
 Upstream feature proposals belong in [T3 Code Ideas](https://github.com/pingdotgg/t3code/discussions/categories/ideas).
 The [T3 Code Discord](https://discord.gg/jn4EGJjrvv) is an upstream community, not KM Code support.

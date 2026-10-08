@@ -2,7 +2,7 @@ import type { DesktopUpdateActionResult, DesktopUpdateState } from "@t3tools/con
 
 export type DesktopUpdateButtonAction = "download" | "install" | "none";
 
-const DESKTOP_RELEASES_URL = "https://github.com/kmccleary3301/t3code/releases";
+const DESKTOP_RELEASES_URL = "https://github.com/kmccleary3301/kmcode/releases";
 
 /**
  * The main process fills `downloadedVersion` from the updater's `update-downloaded`
@@ -16,6 +16,10 @@ export function getDesktopUpdateDownloadedVersion(state: DesktopUpdateState): st
 /** Release listing for a downloaded build when profile-specific tag metadata is unavailable. */
 export function getDesktopUpdateReleaseUrl(version: string | null): string | null {
   return version?.trim() ? DESKTOP_RELEASES_URL : null;
+}
+
+export function getDesktopUpdateReleaseHistoryUrl(): string {
+  return DESKTOP_RELEASES_URL;
 }
 
 export function resolveDesktopUpdateButtonAction(
@@ -38,16 +42,6 @@ export function resolveDesktopUpdateButtonAction(
     }
   }
   return "none";
-}
-
-export function shouldShowDesktopUpdateButton(state: DesktopUpdateState | null): boolean {
-  if (!state || !state.enabled) {
-    return false;
-  }
-  if (state.status === "downloading") {
-    return true;
-  }
-  return resolveDesktopUpdateButtonAction(state) !== "none";
 }
 
 export function shouldShowArm64IntelBuildWarning(state: DesktopUpdateState | null): boolean {
@@ -116,11 +110,6 @@ export function getDesktopUpdateActionError(result: DesktopUpdateActionResult): 
 
 export function shouldToastDesktopUpdateActionResult(result: DesktopUpdateActionResult): boolean {
   return getDesktopUpdateActionError(result) !== null;
-}
-
-export function shouldHighlightDesktopUpdateError(state: DesktopUpdateState | null): boolean {
-  if (!state || state.status !== "error") return false;
-  return state.errorContext === "download" || state.errorContext === "install";
 }
 
 export function canCheckForUpdate(state: DesktopUpdateState | null): boolean {

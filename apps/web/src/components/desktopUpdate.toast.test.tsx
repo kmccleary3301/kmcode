@@ -50,6 +50,7 @@ function downloadedState(overrides: Partial<DesktopUpdateState> = {}): DesktopUp
     availableVersion: "0.0.30",
     downloadedVersion: "0.0.30",
     releaseNotes: [],
+    omittedReleaseCount: 0,
     downloadPercent: 100,
     checkedAt: null,
     message: null,
@@ -71,7 +72,7 @@ describe("showDesktopUpdateDownloadedToast", () => {
     const link = findReleaseNotesLink(getDescription());
     link?.props.onClick?.();
     await vi.waitFor(() => {
-      expect(openExternal).toHaveBeenCalledWith("https://github.com/kmccleary3301/t3code/releases");
+      expect(openExternal).toHaveBeenCalledWith("https://github.com/kmccleary3301/kmcode/releases");
     });
     expect(testState.addToast).toHaveBeenCalledTimes(1);
   });
@@ -87,7 +88,7 @@ describe("showDesktopUpdateDownloadedToast", () => {
     findReleaseNotesLink(getDescription())?.props.onClick?.();
 
     await vi.waitFor(() => {
-      expect(openExternal).toHaveBeenCalledWith("https://github.com/kmccleary3301/t3code/releases");
+      expect(openExternal).toHaveBeenCalledWith("https://github.com/kmccleary3301/kmcode/releases");
     });
   });
 

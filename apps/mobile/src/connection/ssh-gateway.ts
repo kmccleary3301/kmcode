@@ -164,7 +164,7 @@ export function makeMobileSshGateway(input: {
             const launchOutput = yield* exec(
               sessionId,
               `sh -l -s -- ${key}`,
-              buildRemoteLaunchScript({ allowPackageInstall: false }),
+              buildRemoteLaunchScript({ installedCli: true }),
             );
             const launch = yield* jsonObject(launchOutput).pipe(
               Effect.flatMap(decodeLaunch),
@@ -192,7 +192,7 @@ export function makeMobileSshGateway(input: {
             const pairingOutput = yield* exec(
               sessionId,
               "sh -s",
-              buildRemotePairingScript(target, { allowPackageInstall: false }),
+              buildRemotePairingScript(target, { installedCli: true }),
             );
             const pairing = yield* jsonObject(pairingOutput).pipe(
               Effect.flatMap(decodePairing),

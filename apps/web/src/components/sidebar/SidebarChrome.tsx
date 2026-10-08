@@ -1,12 +1,7 @@
-import {
-  ArrowLeftIcon,
-  ChartNoAxesColumnIcon,
-  GitPullRequestIcon,
-  SettingsIcon,
-} from "lucide-react";
+import { ArrowLeftIcon, ChartNoAxesColumnIcon, SettingsIcon } from "lucide-react";
 import type { ReactNode } from "react";
 import { memo, useCallback } from "react";
-import { Link, useCanGoBack, useLocation, useNavigate } from "@tanstack/react-router";
+import { Link, useLocation, useNavigate } from "@tanstack/react-router";
 
 import { useEnvironmentIdentificationMode } from "../../hooks/useSettings";
 import { cn } from "../../lib/utils";
@@ -14,14 +9,12 @@ import { useEnvironments } from "../../state/environments";
 import {
   resolveEnvironmentIdentificationPillLabel,
   resolveSidebarStageBackdropVariant,
-  resolveSidebarStageFocusRingOffsetClass,
   SidebarStageBackdrop,
   useEnvironmentStageLabel,
 } from "../SidebarStageBackdrop";
 import { Badge } from "../ui/badge";
 import {
   SidebarFooter,
-  SidebarHeader,
   SidebarMenu,
   SidebarMenuButton,
   SidebarMenuItem,
@@ -29,8 +22,13 @@ import {
   useSidebar,
 } from "../ui/sidebar";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
+import { readPullRequestListPreferences } from "../pullRequest/pullRequestListPreferences";
+import { isSidebarUtilityPage, useNavigateToMainApp } from "./mainAppLocation";
+import { SidebarThreadUndoNotice } from "./SidebarThreadUndoNotice";
 import { SidebarProviderUpdatePill } from "./SidebarProviderUpdatePill";
 import { SidebarUpdateArchitectureWarning, SidebarUpdatePill } from "./SidebarUpdatePill";
+import { PullRequestGlyph } from "~/components/pullRequest/pullRequestIcons";
+import { T3Wordmark } from "../T3Wordmark";
 
 export const SidebarChromeHeader = memo(function SidebarChromeHeader({
   isElectron,
@@ -49,9 +47,10 @@ export const SidebarChromeHeader = memo(function SidebarChromeHeader({
       : null;
 
   return (
-    <SidebarHeader
+    // The titlebar row, not a padded SidebarHeader: it aligns to the window controls.
+    <div
       className={cn(
-        "@container/sidebar-header relative h-[var(--workspace-topbar-height)] shrink-0 flex-row items-center px-3 py-0 md:px-0 overflow-visible",
+        "@container/sidebar-header relative flex h-[var(--workspace-topbar-height)] shrink-0 flex-row items-center gap-2 px-3 md:px-0",
         isElectron && "drag-region",
       )}
       data-t3-surface="sidebar-header"
@@ -59,17 +58,14 @@ export const SidebarChromeHeader = memo(function SidebarChromeHeader({
     >
       {backdropVariant ? <SidebarStageBackdrop variant={backdropVariant} /> : null}
       <SidebarTrigger
-        className={cn(
-          "relative z-10 md:hidden",
-          backdropVariant &&
-            "focus-visible:ring-white/90 [&_svg]:stroke-white/90! [&_svg]:opacity-100! [&_svg]:hover:stroke-white! [:hover,[data-pressed]]:bg-white/15",
-          backdropVariant && resolveSidebarStageFocusRingOffsetClass(backdropVariant),
-        )}
+        // Over the stage artwork: the media viewer's control-on-imagery treatment.
+        variant={backdropVariant ? "media-navigation" : "ghost"}
+        className="relative top-auto z-10 translate-y-0 md:hidden"
       />
       <SidebarBrand onBackdrop={backdropVariant !== null} />
       {pillLabel ? (
         <Badge
-          className="relative z-10 ml-1 rounded-full px-1.5 text-muted-foreground"
+          className="relative z-10 ml-1 hidden @[15rem]/sidebar-header:inline-flex"
           data-environment-identification="pill"
           size="sm"
           variant="secondary"
@@ -77,7 +73,7 @@ export const SidebarChromeHeader = memo(function SidebarChromeHeader({
           {pillLabel}
         </Badge>
       ) : null}
-    </SidebarHeader>
+    </div>
   );
 });
 
@@ -86,47 +82,29 @@ function SidebarBrand({ onBackdrop }: { onBackdrop: boolean }) {
     <Link
       aria-label="Go to threads"
       className={cn(
-        "relative z-10 ml-[var(--workspace-titlebar-content-left)] hidden h-full w-fit min-w-0 shrink-0 items-center gap-2 overflow-visible rounded-md outline-hidden ring-ring focus-visible:ring-2 md:flex",
+        "relative z-10 ml-[var(--workspace-titlebar-content-left)] hidden h-7 w-fit min-w-0 shrink-0 items-center gap-1 overflow-visible rounded-md outline-hidden ring-ring focus-visible:ring-2 md:flex",
         onBackdrop ? "text-white" : "text-foreground",
       )}
       to="/"
     >
-      <div className="flex items-center gap-1.5">
-        <KMMark />
+      <div className="flex items-center gap-1">
+        <T3Wordmark aria-label="KM" className="h-[11px] w-auto shrink-0" />
         <span
           className={cn(
-            "truncate text-[18px] font-bold tracking-tight leading-none",
-            onBackdrop ? "text-white/85" : "text-foreground/90",
+            "truncate text-base font-bold tracking-tight leading-none",
+            onBackdrop ? "text-white/90" : "text-foreground",
           )}
         >
           Code
         </span>
       </div>
-      <div className="relative flex size-7 shrink-0 items-center justify-center overflow-visible">
-        <img
-          src="/mascot/kyle-mascot-256.png"
-          alt="Kyle"
-          className="size-7 shrink-0 rounded-full object-cover select-none shadow-sm border-2 border-white/20 bg-background/50 transition-all duration-200 hover:scale-125 hover:shadow-md hover:border-white/50 active:scale-95"
-          draggable={false}
-        />
-      </div>
-    </Link>
-  );
-}
-
-function KMMark() {
-  return (
-    <svg
-      aria-label="KM"
-      className="h-[15px] w-auto shrink-0"
-      viewBox="-12.25 29.5 152.5 72"
-      xmlns="http://www.w3.org/2000/svg"
-    >
-      <path
-        d="M3.7977 83.9321 2.9451 65.8061 35.5076 31.5000H53.0290L23.6886 63.0513L14.8902 72.3757ZM-10.2517 99.5000V31.5000H5.3688V99.5000ZM36.3098 99.5000 12.0780 69.9119 22.4274 58.6882 54.6821 99.5000ZM61.6341 99.5000V31.5000H74.6181L103.5766 79.5285H96.7161L125.1319 31.5000H138.1160L138.2517 99.5000H123.5207L123.3850 54.1818H126.1603L103.4024 92.2663H96.3476L73.1057 54.1818H76.3651V99.5000Z"
-        fill="currentColor"
+      <img
+        src="/mascot/kyle-head.png"
+        alt="Kyle"
+        className="h-[18px] w-auto shrink-0 object-contain select-none transition-transform duration-200 hover:scale-115 active:scale-95"
+        draggable={false}
       />
-    </svg>
+    </Link>
   );
 }
 
@@ -157,19 +135,10 @@ function SidebarUtilityItem({
 
 export const SidebarUtilityMenu = memo(function SidebarUtilityMenu() {
   const navigate = useNavigate();
-  const canGoBack = useCanGoBack();
+  const navigateToMainApp = useNavigateToMainApp();
   const { isMobile, setOpenMobile } = useSidebar();
-  const currentFooterPage = useLocation({
-    select: (location) =>
-      /^\/settings(?:\/|$)/.test(location.pathname)
-        ? "settings"
-        : /^\/projects\/[^/]+\/?$/.test(location.pathname)
-          ? "project-settings"
-          : location.pathname === "/usage"
-            ? "usage"
-            : location.pathname === "/pull-requests"
-              ? "pull-requests"
-              : null,
+  const isOnUtilityPage = useLocation({
+    select: (location) => isSidebarUtilityPage(location.pathname),
   });
   const { environments } = useEnvironments();
   // The page reads every connected server, so one of them offering pull requests is enough for
@@ -184,7 +153,10 @@ export const SidebarUtilityMenu = memo(function SidebarUtilityMenu() {
   }, [isMobile, setOpenMobile]);
   const handlePullRequestsClick = useCallback(() => {
     closeMobileSidebar();
-    void navigate({ to: "/pull-requests", search: { involvement: "all", state: "open" } });
+    void navigate({
+      to: "/pull-requests",
+      search: readPullRequestListPreferences(),
+    });
   }, [closeMobileSidebar, navigate]);
   const handleSettingsClick = useCallback(() => {
     closeMobileSidebar();
@@ -200,16 +172,12 @@ export const SidebarUtilityMenu = memo(function SidebarUtilityMenu() {
 
   const handleBackClick = useCallback(() => {
     closeMobileSidebar();
-    if (canGoBack) {
-      window.history.back();
-      return;
-    }
-    void navigate({ to: "/" });
-  }, [canGoBack, closeMobileSidebar, navigate]);
+    void navigateToMainApp();
+  }, [closeMobileSidebar, navigateToMainApp]);
 
   return (
     <SidebarMenu className="flex-row items-center">
-      {currentFooterPage ? (
+      {isOnUtilityPage ? (
         <SidebarMenuItem className="min-w-0 flex-1">
           <SidebarMenuButton onClick={handleBackClick}>
             <ArrowLeftIcon />
@@ -225,7 +193,7 @@ export const SidebarUtilityMenu = memo(function SidebarUtilityMenu() {
           />
           {pullRequestsSupported ? (
             <SidebarUtilityItem
-              icon={<GitPullRequestIcon />}
+              icon={<PullRequestGlyph.pullRequest />}
               label="Pull Requests"
               onClick={handlePullRequestsClick}
             />
@@ -244,7 +212,8 @@ export const SidebarUtilityMenu = memo(function SidebarUtilityMenu() {
 
 export const SidebarChromeFooter = memo(function SidebarChromeFooter() {
   return (
-    <SidebarFooter className="p-[var(--sidebar-content-inset)]" data-t3-surface="toolbar">
+    <SidebarFooter data-t3-surface="toolbar">
+      <SidebarThreadUndoNotice />
       <SidebarProviderUpdatePill />
       <SidebarUpdateArchitectureWarning />
       <SidebarUtilityMenu />

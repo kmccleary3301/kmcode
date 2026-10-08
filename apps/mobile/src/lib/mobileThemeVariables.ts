@@ -1,10 +1,9 @@
 import defaultThemeVariables from "../../generated-uniwind-default-theme-variables.json";
-import legacyThemeVariables from "../../generated-uniwind-legacy-theme-variables.json";
-
 import {
+  DEFAULT_MOBILE_THEME_ID,
   getMobileThemeVariables,
-  isDefaultMobileThemeId,
   isLegacyMobileThemeId,
+  themeColorWithAlpha,
   type MobileThemeAppearance,
   type MobileThemeId,
   type MobileThemeVariables,
@@ -13,32 +12,56 @@ import {
 const defaults = defaultThemeVariables as Readonly<
   Record<MobileThemeAppearance, MobileThemeVariables>
 >;
-const legacyDefaults = legacyThemeVariables as Readonly<
-  Record<MobileThemeAppearance, MobileThemeVariables>
->;
 
 export type MobileRuntimeVariables = Readonly<Record<string, string | number>>;
 
 /**
  * Complete palette for native and third-party APIs that cannot consume a
- * Uniwind className. The standard palette is generated from global.css; custom
- * palettes share the same source that generates their registered CSS themes.
+ * Uniwind className. Every palette shares the source that generates its
+ * registered CSS theme.
  */
 export function getMobileThemeRuntimeVariables(
   themeId: MobileThemeId,
   appearance: MobileThemeAppearance,
+  platform: string = "web",
 ): MobileThemeVariables {
-  return isLegacyMobileThemeId(themeId)
-    ? legacyDefaults[appearance]
-    : isDefaultMobileThemeId(themeId)
+  // Material You layers system colors over the neutral T3 Code palette. That
+  // palette's drawer matches its canvas, so its frame uses the row-hover tone.
+  const usesNeutralPalette = isLegacyMobileThemeId(themeId) || themeId === "material-you";
+  const variables =
+    themeId === DEFAULT_MOBILE_THEME_ID
       ? defaults[appearance]
-      : getMobileThemeVariables(themeId, appearance);
+      : getMobileThemeVariables(usesNeutralPalette ? "t3-code" : themeId, appearance);
+  // Android's frame surrounds the sidebar and chat panes. Light iPad sidebars
+  // reuse that stronger tonal fill; dark sidebars retain the shared black pane
+  // beneath the near-black chat canvas. System colors replace these roles later.
+  const frame = themeColorWithAlpha(
+    variables[usesNeutralPalette ? "--color-row-hover" : "--color-drawer"],
+    1,
+  );
+  if (platform === "ios" && usesNeutralPalette && appearance === "light") {
+    return {
+      ...variables,
+      "--color-header": frame,
+      "--color-header-foreground": variables["--color-drawer-foreground"],
+      "--color-drawer": frame,
+      "--color-drawer-foreground-muted": variables["--color-foreground-muted"],
+    };
+  }
+  if (platform !== "android") return variables;
+
+  return {
+    ...variables,
+    "--color-header": frame,
+    "--color-header-foreground": variables["--color-drawer-foreground"],
+  };
 }
 
 export function resolveMobileThemeRuntimeVariables(
   themeId: MobileThemeId,
   appearance: MobileThemeAppearance,
   portableProfileVariables?: MobileRuntimeVariables,
+  platform: string = "web",
 ): MobileRuntimeVariables {
-  return portableProfileVariables ?? getMobileThemeRuntimeVariables(themeId, appearance);
+  return portableProfileVariables ?? getMobileThemeRuntimeVariables(themeId, appearance, platform);
 }

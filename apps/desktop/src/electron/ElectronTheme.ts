@@ -77,7 +77,7 @@ export function resolveNativeAppearance(
   };
 }
 
-export class ElectronThemeSetSourceError extends Schema.TaggedErrorClass<ElectronThemeSetSourceError>()(
+export class ElectronThemeSetSourceError extends Schema.TaggedError<ElectronThemeSetSourceError>()(
   "ElectronThemeSetSourceError",
   {
     source: DesktopThemeSchema,
@@ -89,8 +89,6 @@ export class ElectronThemeSetSourceError extends Schema.TaggedErrorClass<Electro
   }
 }
 
-export const isElectronThemeSetSourceError = Schema.is(ElectronThemeSetSourceError);
-
 export class ElectronTheme extends Context.Service<
   ElectronTheme,
   {
@@ -100,6 +98,7 @@ export class ElectronTheme extends Context.Service<
   }
 >()("@t3tools/desktop/electron/ElectronTheme") {}
 
+/** @public Service construction is part of the canonical Effect module API. */
 export const make = ElectronTheme.of({
   shouldUseDarkColors: Effect.sync(() => Electron.nativeTheme.shouldUseDarkColors),
   setSource: (theme) =>

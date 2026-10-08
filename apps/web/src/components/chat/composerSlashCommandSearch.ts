@@ -88,6 +88,12 @@ type SlashCommandItem = Extract<
   { type: "slash-command" | "provider-slash-command" }
 >;
 
+/**
+ * A provider expands a slash command only when it opens the whole message;
+ * anywhere else it reaches the agent as literal text, so it is not offered
+ * there. Built-ins apply locally on selection and skills insert a `$` mention
+ * the server dispatches from any position, so both stay available.
+ */
 export function slashCommandItemsForPromptPosition(
   items: ReadonlyArray<SlashSearchItem>,
   isAtPromptStart: boolean,
@@ -95,7 +101,7 @@ export function slashCommandItemsForPromptPosition(
   if (isAtPromptStart) {
     return [...items];
   }
-  return items.filter((item) => item.type !== "skill");
+  return items.filter((item) => item.type !== "provider-slash-command");
 }
 export function mergeSlashCommandItems(
   builtInItems: ReadonlyArray<SlashCommandItem>,
@@ -136,18 +142,16 @@ export function buildProviderSlashArgumentItems(input: {
   if (!completions) return null;
 
   return {
-    items: completions.items.map(
-      (completion): SlashSearchItem => ({
-        id: `provider-slash-argument:${input.provider}:${completion.key}`,
-        type: "provider-slash-argument",
-        provider: input.provider,
-        command: completion.command,
-        insertText: completion.insertText,
-        searchValue: completion.searchValue,
-        label: completion.label,
-        description: completion.description,
-      }),
-    ),
+    items: completions.items.map((completion): SlashSearchItem => ({
+      id: `provider-slash-argument:${input.provider}:${completion.key}`,
+      type: "provider-slash-argument",
+      provider: input.provider,
+      command: completion.command,
+      insertText: completion.insertText,
+      searchValue: completion.searchValue,
+      label: completion.label,
+      description: completion.description,
+    })),
     searchQuery: completions.searchQuery,
   };
 }

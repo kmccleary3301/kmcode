@@ -12,7 +12,7 @@ import {
 import {
   ChatAttachment,
   ModelSelection,
-  PROVIDER_SEND_TURN_MAX_ATTACHMENTS,
+  getProviderAttachmentLimitError,
   PROVIDER_SEND_TURN_MAX_INPUT_CHARS,
   ProviderApprovalDecision,
   ProviderApprovalPolicy,
@@ -20,6 +20,7 @@ import {
   ProviderRequestKind,
   ProviderSandboxMode,
   ProviderUserInputAnswers,
+  UserInputAttachments,
   RuntimeMode,
 } from "./orchestration.ts";
 import { ProviderInstanceId, ProviderDriverKind } from "./providerInstance.ts";
@@ -212,7 +213,7 @@ export const ProviderSubagentTranscriptReadResult = Schema.Struct({
 });
 export type ProviderSubagentTranscriptReadResult = typeof ProviderSubagentTranscriptReadResult.Type;
 
-export class ProviderNativeSessionError extends Schema.TaggedErrorClass<ProviderNativeSessionError>()(
+export class ProviderNativeSessionError extends Schema.TaggedError<ProviderNativeSessionError>()(
   "ProviderNativeSessionError",
   {
     code: Schema.Literals(["unsupported", "not_found", "invalid", "native"]),
@@ -226,7 +227,7 @@ export const ProviderNativeCommandErrorCode = Schema.Literals([
 ]);
 export type ProviderNativeCommandErrorCode = typeof ProviderNativeCommandErrorCode.Type;
 
-export class ProviderNativeCommandError extends Schema.TaggedErrorClass<ProviderNativeCommandError>()(
+export class ProviderNativeCommandError extends Schema.TaggedError<ProviderNativeCommandError>()(
   "ProviderNativeCommandError",
   {
     code: ProviderNativeCommandErrorCode,
@@ -236,11 +237,16 @@ export class ProviderNativeCommandError extends Schema.TaggedErrorClass<Provider
 
 export const ProviderSendTurnInput = Schema.Struct({
   threadId: ThreadId,
+  /** Internal recovery signal. Allows an empty turn only for adapters that
+      explicitly support promptless continuation. */
+  continuation: Schema.optional(Schema.Boolean),
   input: Schema.optional(
     TrimmedNonEmptyString.check(Schema.isMaxLength(PROVIDER_SEND_TURN_MAX_INPUT_CHARS)),
   ),
   attachments: Schema.optional(
-    Schema.Array(ChatAttachment).check(Schema.isMaxLength(PROVIDER_SEND_TURN_MAX_ATTACHMENTS)),
+    Schema.Array(ChatAttachment).check(
+      Schema.makeFilter((attachments) => getProviderAttachmentLimitError(attachments) ?? true),
+    ),
   ),
   modelSelection: Schema.optional(ModelSelection),
   interactionMode: Schema.optional(ProviderInteractionMode),
@@ -276,6 +282,7 @@ export const ProviderRespondToUserInputInput = Schema.Struct({
   threadId: ThreadId,
   requestId: ApprovalRequestId,
   answers: ProviderUserInputAnswers,
+  attachmentsByQuestionId: Schema.optional(UserInputAttachments),
 });
 export type ProviderRespondToUserInputInput = typeof ProviderRespondToUserInputInput.Type;
 
@@ -290,7 +297,7 @@ export const ProviderUploadFeedbackResult = Schema.Struct({
 });
 export type ProviderUploadFeedbackResult = typeof ProviderUploadFeedbackResult.Type;
 
-export class ProviderUploadFeedbackError extends Schema.TaggedErrorClass<ProviderUploadFeedbackError>()(
+export class ProviderUploadFeedbackError extends Schema.TaggedError<ProviderUploadFeedbackError>()(
   "ProviderUploadFeedbackError",
   {
     threadId: ThreadId,

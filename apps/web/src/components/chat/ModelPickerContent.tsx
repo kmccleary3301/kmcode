@@ -885,10 +885,12 @@ export const ModelPickerContent = memo(function ModelPickerContent(props: {
     () => filteredItemKeys.length * MODEL_LIST_ESTIMATED_ITEM_SIZE,
   );
   const [searchHeight, setSearchHeight] = useState(0);
-  useLayoutEffect(
-    () => modelListRef.current?.getState().listen("totalSize", setModelListContentSize),
-    [],
-  );
+  // The roles panel replaces the list, so the list remounts on return and needs a fresh listener.
+  const modelListMounted = rolesInstanceId === null;
+  useLayoutEffect(() => {
+    if (!modelListMounted) return;
+    return modelListRef.current?.getState().listen("totalSize", setModelListContentSize);
+  }, [modelListMounted]);
   // Fit the list to its rows plus the combobox list `py-1` and LegendList `py-1.5`.
   const modelListHeight =
     filteredItemKeys.length === 0 ? 0 : `calc(${modelListContentSize}px + var(--spacing) * 5)`;

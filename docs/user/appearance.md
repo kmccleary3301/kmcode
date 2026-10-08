@@ -113,10 +113,10 @@ Themes without their own syntax colors highlight code with a bundled light or da
 The default Typography settings show three font families:
 
 - **Interface font** controls app navigation, settings, buttons, and other UI text.
-- **Text font** controls assistant replies and other rendered Markdown, including headings. Unset, it follows the interface font. Inline and fenced code keep the monospace font.
+- **Text font** controls assistant replies and other rendered Markdown, including headings. Unset, it uses the active theme's Markdown and heading fonts. Inline and fenced code keep the monospace font.
 - **Monospace font** controls code blocks, inline code, diffs, file previews, and terminal output. Advanced settings can override the prompt composer and terminal separately.
 
-KM Code bundles Inter on web and desktop and uses it as the default interface and Markdown font.
+KM Code bundles Inter on web and desktop. It is the default Markdown font and the first choice in the built-in sans-serif stack.
 
 A package can set interface, composer, code, terminal, markdown, label, and heading typography. Explicit client font preferences take precedence over package defaults; clearing a family restores the package's choice. KM Code reports each failed family/style/weight descriptor separately and falls back through the declared family list. Use **Retry failed fonts** after correcting an installed or package font.
 

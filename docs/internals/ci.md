@@ -23,14 +23,17 @@ need:
     exists and exports the expected bridge, passkey, protocol, and WebSocket
     symbols.
 - **Test** runs on Ubuntu 24.04. `vp run test` runs the workspace test scripts, followed by the
-  resource-monitor Rust tests. The job also runs the focused Pi/OMP protocol fixture tests
-  (`ProtocolContract`, `NativeAdapter`, `OmpChunkAssembler`, and `StrictJsonlDecoder`). These
-  fixtures spawn the current Node process; they do not download or invoke stock Pi or OMP binaries.
-- **Pi OMP Focused Gate** runs on Ubuntu 24.04 within twelve minutes. It replays the scrubbed Pi
-  and OMP corpora, runs the deterministic native replay through the T3 authenticated HTTP and
-  WebSocket surfaces, runs credential-free spawned-process smoke for both dialects, exercises the
-  transfer-budget and authenticated reconnect-convergence tests, and records a deterministic
-  performance baseline. Its artifact contains aggregate transfer/performance data only.
+  resource-monitor Rust tests. The Pi and OMP adapter tests (`PiAdapterV2`, `OmpAdapterV2`) drive
+  scripted RPC peers in the current Node process; they do not download or invoke stock binaries.
+- **Pi OMP Focused Gate** runs on Ubuntu 24.04. It installs stock npm Pi and OMP at exact versions
+  and integrity hashes, records their provenance, and runs
+  `apps/server/integration/nativeRuntimeLifecycle.integration.test.ts`: a real KM Code server over
+  authenticated HTTP and WebSocket drives each runtime against a local OpenAI-compatible model
+  through root turn, native tool call, interrupt, resume, native-session listing/open/rename/
+  archive, and recovery after a killed runtime process. It then runs the Pi/OMP adapter,
+  native-session, provider, and text-generation tests, the transfer-budget gates, and a
+  deterministic performance baseline. Its artifact contains sanitized test outcomes, provenance,
+  and aggregate transfer/performance data only.
 - **Mobile Native Static Analysis** runs on macOS 26 because the mobile native
   toolchain and `apps/mobile/Brewfile` are macOS-only. It installs those tools
   and runs `vp run lint:mobile`. This is not a mobile simulator/device test and
@@ -41,11 +44,10 @@ need:
   release-workflow, publish, and installer invariants. It does not publish,
   sign, notarize, build an Electron artifact, or use release credentials.
 
-The Check job runs `vp run check:ts-relative-imports` against the provider/decoder/projector scope
-(`apps/server/src/provider/piFamily`) and `vp run check:workflow-action-pins`. The former requires
-explicit relative source extensions under the provider scope; the latter requires immutable action
-SHAs with revision comments and verifies the workflow-run publisher checks out only the trusted
-default branch.
+The Check job runs `vp run check:ts-relative-imports` against `apps/server/src` and
+`vp run check:workflow-action-pins`. The former requires explicit relative source extensions; the
+latter requires immutable action SHAs with revision comments and verifies the workflow-run
+publisher checks out only the trusted default branch.
 
 These jobs use GitHub-hosted runner labels so they execute in the owner-controlled fork without
 requiring the upstream Blacksmith runner integration. The production relay workflow skips fork
@@ -83,19 +85,18 @@ name when `T3_PRODUCT_PROFILE` is absent. Neither path infers behavior from a pr
 
 ### Native runtime lanes
 
-Native releases pass two gates: a coarse stable-version band, then the actual RPC contract. A
-version match alone never marks a provider ready.
+Native releases pass two gates: a minimum version, then the actual RPC contract. A version match
+alone never marks a provider ready.
 
-| Runtime lane                   | Validated identity                                                                                                                                                               | Protocol proof                                                                                | Support status                                  |
-| ------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------- | ----------------------------------------------- |
-| Pi stock                       | `0.84.4`; npm SRI `sha512-jmOlrqUmvhh/siNWFRXjYLJzhKFIHNsAQaysRwzQPQFnPAaV/vhqHsLH/MBsIISA1Rjj7WTUFR3nJrpXoLx39w==`                                                              | Pi RPC v1; strict LF JSONL; model/state discovery                                             | Supported in `>=0.84.2 <0.85.0`                 |
-| OMP stock                      | `18.0.10`; binary SHA-256 `bf026b63aa3b0acb0afbed8083f76bcec134bf56ffdbbe80fb73a7e079fe278a`                                                                                     | ready v1, v1/v2 advertisement, v2 negotiation, bounded chunk transport, model/state discovery | Supported in `>=17.3.7 <19.0.0`                 |
-| OMP extended integration build | `17.3.7`; binary SHA-256 `6a912163e0e2f63ae89ca14dd382b683f15126e783202c68aa783c5fb970f9e1`; archived fixture `c1434d85392024aab964220b3c3fd27afe1241d13d5488dac84b489d1f052b0d` | Stock OMP contract plus explicit capabilities for checkpoints and advanced task control       | Supported; advertised extensions remain enabled |
+| Runtime lane | Validated identity                                                                                                  | Protocol proof                                                 | Support status       |
+| ------------ | ------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------- | -------------------- |
+| Pi stock     | `0.84.4`; npm SRI `sha512-jmOlrqUmvhh/siNWFRXjYLJzhKFIHNsAQaysRwzQPQFnPAaV/vhqHsLH/MBsIISA1Rjj7WTUFR3nJrpXoLx39w==` | Pi RPC; strict LF JSONL; `get_entries` and `agent_settled`     | Supported `>=0.80.5` |
+| OMP stock    | `18.8.4`; npm SRI `sha512-MIiecZZbQT45Lnn1fJwq2gCG2+LBJwQ0cyQodqIPxnzcIRgawapLEaYZn/zXBo+0tn2oCZO6QiJrgKHe1OrsHg==` | `ready` frame, protocol v2 negotiation, `rpc_chunk` reassembly | Supported `>=18.8.3` |
 
-The current Pi and OMP stock releases were exercised credential-free through their real native
-processes on macOS arm64. CI repeats the current-release core matrix on Linux x64 and retains the
-exact `0.84.2` / `17.3.7` replay corpus and extended integration lane as regressions. These gates
-do not replace authenticated root-turn evidence.
+The focused gate runs the lifecycle matrix against these exact packages on every relevant pull
+request; the release lifecycle repeats it on macOS, Linux, and Windows and then drives the installed
+release artifact through a root turn on each runtime. These gates are credential-free and do not
+replace authenticated root-turn evidence.
 
 ### Node and package manager
 
@@ -105,62 +106,24 @@ installation and tasks.
 
 ### Pi and OMP runtime protocol baseline
 
-The adapter applies a version band only as an outer safety boundary. Readiness comes from the
-wire contract, with optional capability discovery refining the baseline.
+Both runtimes run through one adapter and RPC transport, parameterized by a dialect
+(`apps/server/src/provider/piDialect.ts`).
 
-- **Both runtimes:** RPC is strict LF-delimited JSON. Responses correlate by request ID. For a
-  native id-less response, T3 correlates only when exactly one pending request has the same command;
-  ambiguity remains unhandled and times out. Malformed lines become runtime errors, process exit
-  fails pending work, and unknown events remain diagnostic raw envelopes.
-- **Pi:** accepted `0.84.x` releases use protocol v1 with no `ready` frame, negotiation, or chunked
-  transport. Successful model/state discovery proves the stock model switching, thinking,
-  commands, session tree/fork/compact, and portable UI contract.
-- **OMP:** accepted `17.x` and `18.x` releases must emit a valid `ready` frame (initial protocol v1,
-  support for v1/v2, 1 MiB frame and 64 MiB reassembled-message limits), then negotiate protocol
-  v2. Successful model/state discovery proves the stock model, thinking, commands, session
-  tree/fork/compact, portable UI, subagent lifecycle, and child-transcript contract.
-- **Capability refinement:** `get_capabilities` is best effort. A successful object response
-  overrides baseline booleans. A native unknown-command failure leaves the stock contract intact;
-  malformed successful data fails closed. Native checkpoints, complete-turn rollback, nested
-  tasks, workflows, background tasks, and targeted cancellation remain disabled unless explicitly
-  advertised.
-- **Version boundaries:** Pi prereleases, Pi `0.85.0+`, OMP prereleases, and OMP `19.0.0+` fail
-  before launch. Patch releases inside the Pi band and minor releases inside the OMP major band
-  proceed to RPC validation, avoiding release-by-release exact pins.
+- **Both runtimes:** RPC is strict LF-delimited JSON with responses correlated by request ID.
+  Process exit fails pending work. Sessions resume by switching to their native session file, so a
+  restarted runtime continues the same history.
+- **Pi:** `0.80.5` is the first published release with both `get_entries` (rollback boundaries) and
+  `agent_settled` (turn terminalization); older releases fail before launch.
+- **OMP:** the runtime must emit a `ready` frame; the adapter then negotiates protocol v2 and
+  reassembles `rpc_chunk` frames with `OmpChunkAssembler`. `18.8.3` is the first release verified
+  against that negotiation and chunked model discovery.
 
-### Native trace replay layers and fixture governance
+### Replay fixtures
 
-Native trace evidence has one owner and one oracle at each boundary. A test must enter at the
-lowest layer named by its claim; parsed-object fixtures cannot prove byte framing or assembly.
-
-| Layer                                          | Owner                                             | Oracle                                                                                        |
-| ---------------------------------------------- | ------------------------------------------------- | --------------------------------------------------------------------------------------------- |
-| Raw stdin/stdout/stderr bytes and process exit | `NativeAdapter` plus `BoundedNativeTraceRecorder` | Ordered chunk hashes, byte lengths, stream names, and one terminal exit record                |
-| Decoded JSONL envelopes                        | `StrictJsonlDecoder`                              | Explicit frame types, request IDs, malformed/truncated outcome, and decoder completion        |
-| Reassembled OMP messages                       | `OmpChunkAssembler`                               | Message identity, chunk order/count, complete payload hash, and zero pending messages         |
-| Normalized adapter events                      | `PiFamilyEventProjector`                          | Manifest-owned `adapterEventTypes` and terminal adapter status                                |
-| Canonical provider events                      | `NativeAdapter.eventForProjection`                | Manifest-owned canonical event sequence, lifecycle, output marker, and terminal status        |
-| Persisted canonical state                      | Provider runtime ingestion and projectors         | Independently declared state/task/checkpoint invariants and state hashes in their owner tests |
-| HTTP bootstrap snapshot                        | Server read-model/bootstrap services              | Existing bootstrap contract and transfer-budget fixtures                                      |
-| WebSocket update stream                        | Server update transport and client runtime        | Existing ordered update, resume, deduplication, and convergence fixtures                      |
-
-Raw captures are private temporary artifacts with mode-0700 directories and mode-0600 files. They
-must never enter git. A committed fixture is a scrubbed structural replay subject, not evidence of
-the model's real output. It must declare runtime/version/binary provenance, normalization and
-redaction schema versions, reviewed redaction status, capture mode (`native-recorder` for a
-non-synthetic capture or `synthetic-replay` for a generated fixture), expected outcome hash, and
-whether it is generated or synthetic. `validateNativeTraceCorpus` rejects duplicate IDs, missing or
-inconsistent provenance, bad chunk/hash/length/sequence data, unsupported schemas, truncation,
-unreviewed redaction, leak findings, and expected outcomes bound to another fixture.
-
-The committed corpus is intentionally minimal: handshake fixtures are **minimal** and root-turn
-fixtures are **typical**. Stress and error behavior stays generated in focused tests until a
-privacy-safe exact capture is needed; generated cases must never be relabeled as native captures.
-Every committed fixture is capped at 1 MiB by `NativeTraceCorpus.test.ts`. Replace a fixture only
-when its pinned binary/protocol changes or the old case no longer covers its declared behavior.
-Replacement requires fresh provenance, deterministic scrub/review, hashes, focused replay, and
-independent review. A source protocol, projector contract, normalization schema, or redaction
-schema change invalidates the affected fixture review even when its JSON still parses.
+`apps/server/scripts/nativeTraceFixtures.ts` holds small synthetic Pi and OMP traces, including a
+chunked OMP stream. `performance-baseline.ts` replays them through `OmpChunkAssembler` and the
+JSONL decoder to record deterministic decode/replay timings with generous ceilings. They are
+generated fixtures, not native captures, and must never be relabeled as such.
 
 ### Release artifact targets
 

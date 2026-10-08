@@ -1,18 +1,16 @@
 /**
- * KM Code schema changes live outside upstream's numbered migration ids.
+ * Removes migration records older KM Code builds left in upstream's ledger.
  *
  * Upstream's migrator keys on `migration_id` and skips every id at or below
- * the latest recorded one. Fork builds used to record their own migrations in
- * that id space, and upstream later claimed the same ids, so those databases
- * silently skipped upstream migrations. Fork migrations now run from their own
- * name-keyed ledger, and `reconcileForkMigrationLedger` removes the fork
- * records older builds left in upstream's ledger before the migrator runs.
+ * the latest recorded one. Fork builds recorded their own migrations in that
+ * id space, and upstream later claimed the same ids, so those databases
+ * silently skipped upstream migrations. KM Code keeps no schema of its own;
+ * this runs before the migrator so its ledger matches upstream's again.
  */
 import * as Effect from "effect/Effect";
-import * as Migrator from "effect/unstable/sql/Migrator";
-import * as SqlClient from "effect/unstable/sql/SqlClient";
+import * as Migrator from "effect/sql/Migrator";
+import * as SqlClient from "effect/sql/SqlClient";
 
-import ProjectionTurnNativeCheckpoint from "./ForkMigrations/ProjectionTurnNativeCheckpoint.ts";
 import AuthSessionClientConnection from "./Migrations/041_AuthSessionClientConnection.ts";
 import ClearAutomaticProjectModelDefaults from "./Migrations/044_ClearAutomaticProjectModelDefaults.ts";
 import ProjectionProjectsAutoPull from "./Migrations/045_ProjectionProjectsAutoPull.ts";
@@ -40,10 +38,6 @@ const DISPLACED_UPSTREAM_MIGRATIONS: Readonly<Record<number, typeof AuthSessionC
     45: ProjectionProjectsAutoPull,
     46: RepairAutomaticSettlementTimestamps,
   };
-
-const forkMigrations = [
-  ["ProjectionTurnNativeCheckpoint", ProjectionTurnNativeCheckpoint],
-] as const;
 
 export const reconcileForkMigrationLedger = Effect.fn("reconcileForkMigrationLedger")(function* (
   manifest: ReadonlyArray<readonly [number, string]>,
@@ -90,24 +84,4 @@ export const reconcileForkMigrationLedger = Effect.fn("reconcileForkMigrationLed
       return executed;
     }),
   );
-});
-
-export const runForkMigrations = Effect.fn("runForkMigrations")(function* () {
-  const sql = yield* SqlClient.SqlClient;
-  yield* sql`
-    CREATE TABLE IF NOT EXISTS kmcode_migrations (
-      name TEXT PRIMARY KEY NOT NULL,
-      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-    )
-  `;
-  const recorded = yield* sql<{ readonly name: string }>`SELECT name FROM kmcode_migrations`;
-  const executed: Array<string> = [];
-  for (const [name, migration] of forkMigrations) {
-    if (recorded.some((row) => row.name === name)) continue;
-    yield* sql.withTransaction(
-      migration.pipe(Effect.andThen(sql`INSERT INTO kmcode_migrations (name) VALUES (${name})`)),
-    );
-    executed.push(name);
-  }
-  return executed;
 });

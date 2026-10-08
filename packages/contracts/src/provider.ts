@@ -10,10 +10,12 @@ import {
   TurnId,
 } from "./baseSchemas.ts";
 import {
-  ChatAttachment,
-  ModelSelection,
   getProviderAttachmentLimitError,
   PROVIDER_SEND_TURN_MAX_INPUT_CHARS,
+  ChatAttachment,
+} from "./chatAttachment.ts";
+import { ModelSelection } from "./modelSelection.ts";
+import {
   ProviderApprovalDecision,
   ProviderApprovalPolicy,
   ProviderInteractionMode,
@@ -22,7 +24,7 @@ import {
   ProviderUserInputAnswers,
   UserInputAttachments,
   RuntimeMode,
-} from "./orchestration.ts";
+} from "./providerPolicy.ts";
 import { ProviderInstanceId, ProviderDriverKind } from "./providerInstance.ts";
 
 const ProviderSessionStatus = Schema.Literals([
@@ -95,17 +97,6 @@ export const ProviderNativeSessionListRequest = Schema.Struct({
   providerInstanceId: ProviderInstanceId,
 });
 export type ProviderNativeSessionListRequest = typeof ProviderNativeSessionListRequest.Type;
-export const ProviderNativeSessionListInput = Schema.Struct({
-  providerInstanceId: ProviderInstanceId,
-  cwd: Schema.optional(TrimmedNonEmptyString),
-});
-export type ProviderNativeSessionListInput = typeof ProviderNativeSessionListInput.Type;
-
-export const ProviderNativeCommandsInput = Schema.Struct({
-  providerInstanceId: ProviderInstanceId,
-  workspaceRoot: AbsolutePath,
-});
-export type ProviderNativeCommandsInput = typeof ProviderNativeCommandsInput.Type;
 
 export const ProviderNativeSessionListResult = Schema.Struct({
   sessions: Schema.Array(ProviderNativeSessionSummary),
@@ -115,7 +106,6 @@ export type ProviderNativeSessionListResult = typeof ProviderNativeSessionListRe
 export const ProviderNativeSessionOpenInput = Schema.Struct({
   providerInstanceId: ProviderInstanceId,
   sessionId: TrimmedNonEmptyString,
-  indexOnly: Schema.optional(Schema.Boolean),
 });
 export type ProviderNativeSessionOpenInput = typeof ProviderNativeSessionOpenInput.Type;
 
@@ -173,64 +163,10 @@ export const ProviderNativeSessionArchiveResult = Schema.Struct({
 });
 export type ProviderNativeSessionArchiveResult = typeof ProviderNativeSessionArchiveResult.Type;
 
-export const ProviderNativeSessionResumeCursor = Schema.Struct({
-  kind: Schema.Literal("native-session"),
-  runtime: ProviderNativeSessionRuntime,
-  sessionId: TrimmedNonEmptyString,
-});
-export type ProviderNativeSessionResumeCursor = typeof ProviderNativeSessionResumeCursor.Type;
-
-export const ProviderSubagentTranscriptEntryKind = Schema.Literals([
-  "user",
-  "assistant",
-  "reasoning",
-  "tool",
-  "system",
-]);
-export type ProviderSubagentTranscriptEntryKind = typeof ProviderSubagentTranscriptEntryKind.Type;
-
-export const ProviderSubagentTranscriptEntry = Schema.Struct({
-  id: TrimmedNonEmptyString,
-  kind: ProviderSubagentTranscriptEntryKind,
-  text: TrimmedNonEmptyString,
-  timestamp: IsoDateTime,
-  toolName: Schema.optional(TrimmedNonEmptyString),
-  isError: Schema.optional(Schema.Boolean),
-});
-export type ProviderSubagentTranscriptEntry = typeof ProviderSubagentTranscriptEntry.Type;
-
-export const ProviderSubagentTranscriptReadInput = Schema.Struct({
-  threadId: ThreadId,
-  subagentId: TrimmedNonEmptyString,
-  cursor: Schema.optional(TrimmedNonEmptyString),
-});
-export type ProviderSubagentTranscriptReadInput = typeof ProviderSubagentTranscriptReadInput.Type;
-
-export const ProviderSubagentTranscriptReadResult = Schema.Struct({
-  entries: Schema.Array(ProviderSubagentTranscriptEntry),
-  nextCursor: TrimmedNonEmptyString,
-  reset: Schema.Boolean,
-});
-export type ProviderSubagentTranscriptReadResult = typeof ProviderSubagentTranscriptReadResult.Type;
-
 export class ProviderNativeSessionError extends Schema.TaggedError<ProviderNativeSessionError>()(
   "ProviderNativeSessionError",
   {
     code: Schema.Literals(["unsupported", "not_found", "invalid", "native"]),
-    message: TrimmedNonEmptyString,
-  },
-) {}
-export const ProviderNativeCommandErrorCode = Schema.Literals([
-  "unknown",
-  "unsupported",
-  "discovery",
-]);
-export type ProviderNativeCommandErrorCode = typeof ProviderNativeCommandErrorCode.Type;
-
-export class ProviderNativeCommandError extends Schema.TaggedError<ProviderNativeCommandError>()(
-  "ProviderNativeCommandError",
-  {
-    code: ProviderNativeCommandErrorCode,
     message: TrimmedNonEmptyString,
   },
 ) {}

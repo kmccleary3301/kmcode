@@ -8,8 +8,8 @@ import { ProviderInstanceId, WS_METHODS, WsRpcGroup } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Schema from "effect/Schema";
-import { RpcClient, RpcSerialization } from "effect/unstable/rpc";
-import * as Socket from "effect/unstable/socket/Socket";
+import { RpcClient, RpcSerialization } from "effect/rpc";
+import * as Socket from "effect/socket/Socket";
 
 interface Options {
   readonly baseDirectory: string;
@@ -171,7 +171,6 @@ async function main(): Promise<void> {
                 const opened = yield* client[WS_METHODS.serverOpenNativeSession]({
                   providerInstanceId,
                   sessionId: session.sessionId,
-                  indexOnly: true,
                 }).pipe(
                   Effect.map((value) => ({ ok: true as const, value })),
                   Effect.catch((error) =>

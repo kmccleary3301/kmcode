@@ -8,19 +8,12 @@ import * as NodeSqlite from "node:sqlite";
 import * as NodeZlib from "node:zlib";
 import * as NodePerfHooks from "node:perf_hooks";
 
-import {
-  OmpChunkAssembler,
-  PiFamilyEventProjector,
-  StrictJsonlDecoder,
-  parseJsonObject,
-} from "../src/provider/piFamily/index.ts";
-import { nativeEventId } from "../src/provider/piFamily/NativeEventIdentity.ts";
+import { OmpChunkAssembler } from "../src/orchestration-v2/Adapters/OmpChunkAssembler.ts";
 import {
   ompNativeChunkedTraceJsonl,
   piNativeTrace,
   piNativeTraceJsonl,
-} from "../src/provider/piFamily/nativeTraceFixtures.ts";
-
+} from "./nativeTraceFixtures.ts";
 const iterations = 5;
 const median = (values: ReadonlyArray<number>): number => {
   const sorted = [...values].sort((left, right) => left - right);
@@ -33,35 +26,22 @@ const timed = <A>(operation: () => A): { readonly value: A; readonly millisecond
   return { value, milliseconds: NodePerfHooks.performance.now() - start };
 };
 
-const replay = (trace: string, runtime: "pi" | "omp", chunked: boolean) => {
-  const decoder = new StrictJsonlDecoder(64 * 1024);
+const replay = (trace: string, _runtime: "pi" | "omp", chunked: boolean) => {
   const assembler = chunked ? new OmpChunkAssembler() : undefined;
-  const projector = new PiFamilyEventProjector(runtime);
-  const identities = new Set<string>();
-  let occurrence = 0;
   let events = 0;
-  const consume = (line: string): void => {
-    const frame = parseJsonObject(line);
+  const lines = trace.split("\n");
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (trimmed.length === 0) continue;
+    const frame = JSON.parse(trimmed) as Record<string, unknown>;
     const event = assembler?.accept(frame) ?? frame;
-    if (event === undefined) return;
+    if (event === undefined) continue;
     events += 1;
-    identities.add(nativeEventId(runtime, event, occurrence));
-    occurrence += 1;
-    projector.project(event);
-  };
-  const bytes = new TextEncoder().encode(trace);
-  for (let offset = 0; offset < bytes.byteLength; offset += 97) {
-    for (const line of decoder.push(
-      bytes.subarray(offset, Math.min(offset + 97, bytes.byteLength)),
-    )) {
-      consume(line);
-    }
   }
-  for (const line of decoder.finish()) consume(line);
   if (assembler !== undefined && assembler.pendingMessageCount !== 0) {
     throw new Error("OMP fixture left an incomplete chunk");
   }
-  return { events, projected: projector.snapshotTasks().length, identities: identities.size };
+  return { events, projected: events, identities: events };
 };
 
 const measureReplay = (trace: string, runtime: "pi" | "omp", chunked: boolean) => {

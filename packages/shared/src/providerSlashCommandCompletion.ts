@@ -1,16 +1,4 @@
-import {
-  ProviderInstanceId,
-  ServerProviderSlashCommand,
-  type OrchestrationThreadActivity,
-  type ServerProviderSlashSubcommand,
-} from "@t3tools/contracts";
-import * as Schema from "effect/Schema";
-
-export const ProviderCommandCatalog = Schema.Struct({
-  providerInstanceId: ProviderInstanceId,
-  slashCommands: Schema.Array(ServerProviderSlashCommand),
-});
-export const isProviderCommandCatalog = Schema.is(ProviderCommandCatalog);
+import type { ServerProviderSlashCommand, ServerProviderSlashSubcommand } from "@t3tools/contracts";
 
 export function slashCommandFuzzyMatch(query: string, target: string): boolean {
   if (query.length === 0) return true;
@@ -60,23 +48,6 @@ export function slashCommandSkillBreakoutTier(lowerPrefix: string, lowerTarget: 
   if (lowerPrefix === lowerTarget) return 1000;
   if (lowerTarget.startsWith(lowerPrefix)) return 900;
   return 0;
-}
-
-export function providerSlashCommandsFromActivities(
-  activities: ReadonlyArray<OrchestrationThreadActivity>,
-  providerInstanceId: ProviderInstanceId,
-): ReadonlyArray<ServerProviderSlashCommand> | undefined {
-  for (let index = activities.length - 1; index >= 0; index -= 1) {
-    const activity = activities[index];
-    if (
-      activity?.kind === "provider.commands.updated" &&
-      isProviderCommandCatalog(activity.payload) &&
-      activity.payload.providerInstanceId === providerInstanceId
-    ) {
-      return activity.payload.slashCommands;
-    }
-  }
-  return undefined;
 }
 
 export interface ProviderSlashArgumentCompletion {

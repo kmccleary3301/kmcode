@@ -1,6 +1,5 @@
 import {
   type AuthClientPresentationMetadata,
-  type AuthEnvironmentScope,
   type DesktopSshEnvironmentBootstrap,
   type DesktopSshEnvironmentTarget,
   EnvironmentId,
@@ -51,7 +50,6 @@ export class ClientPresentation extends Context.Service<
   ClientPresentation,
   {
     readonly metadata: AuthClientPresentationMetadata;
-    readonly scopes: ReadonlyArray<AuthEnvironmentScope>;
   }
 >()("@t3tools/client-runtime/platform/capabilities/ClientPresentation") {}
 
@@ -65,8 +63,14 @@ export class PrimaryEnvironmentAuth extends Context.Service<
 export class SshEnvironmentGateway extends Context.Service<
   SshEnvironmentGateway,
   {
+    /**
+     * Starts or reuses the remote server and pairs with it. With
+     * `expectedEnvironmentId`, a server that is a different machine fails
+     * before its one-time pairing credential is spent.
+     */
     readonly provision: (
       target: DesktopSshEnvironmentTarget,
+      expectedEnvironmentId?: EnvironmentId,
       options?: { readonly credentials?: MobileSshCredentials },
     ) => Effect.Effect<ProvisionedSshEnvironment, ConnectionAttemptError>;
     readonly prepare: (input: {

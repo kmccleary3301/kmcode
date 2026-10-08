@@ -5,7 +5,6 @@ import { DRIVER_OPTION_BY_VALUE } from "./providerDriverMeta";
 import {
   deriveProviderSettingsFields,
   nextProviderConfigWithFieldValue,
-  readProviderConfigString,
 } from "./ProviderSettingsForm";
 
 describe("ProviderSettingsForm helpers", () => {
@@ -27,14 +26,12 @@ describe("ProviderSettingsForm helpers", () => {
 
     expect(pi).toMatchObject({ label: "Pi" });
     expect(omp).toMatchObject({ label: "Oh My Pi" });
-    expect(deriveProviderSettingsFields(pi!).map((field) => field.key)).toEqual([
-      "binaryPath",
-      "workingDirectory",
-      "agentDirectory",
-      "environment",
-      "launchArguments",
-      "trustMode",
-    ]);
+    for (const option of [pi, omp]) {
+      expect(deriveProviderSettingsFields(option!).map((field) => field.key)).toEqual([
+        "binaryPath",
+        "launchArgs",
+      ]);
+    }
   });
 
   it("sources labels and descriptions from schema annotations", () => {
@@ -50,6 +47,42 @@ describe("ProviderSettingsForm helpers", () => {
       description: "Stored in plain text on disk.",
       control: "password",
     });
+  });
+
+  it("uses a dedicated environment field instead of legacy Cursor CLI settings", () => {
+    const cursor = DRIVER_OPTION_BY_VALUE[ProviderDriverKind.make("cursor")];
+
+    expect(cursor).toBeDefined();
+    expect(deriveProviderSettingsFields(cursor!)).toEqual([]);
+    expect(cursor?.environmentFields).toEqual([
+      {
+        name: "CURSOR_API_KEY",
+        label: "Cursor API key",
+        description: "Optional. Overrides browser sign-in for this provider.",
+        placeholder: "Paste API key",
+        sensitive: true,
+      },
+    ]);
+  });
+
+  it("exposes ACP Registry as an instance-only configurable driver", () => {
+    const acpRegistry = DRIVER_OPTION_BY_VALUE[ProviderDriverKind.make("acpRegistry")];
+
+    expect(acpRegistry).toBeDefined();
+    expect(acpRegistry?.hasDefaultInstance).toBe(false);
+    expect(deriveProviderSettingsFields(acpRegistry!).map((field) => field.key)).toEqual([
+      "source",
+      "agentId",
+      "commandPath",
+      "authMethodId",
+    ]);
+  });
+
+  it("shows the local executable without registry identity or authentication fields", () => {
+    const acpRegistry = DRIVER_OPTION_BY_VALUE[ProviderDriverKind.make("acpRegistry")];
+    expect(
+      deriveProviderSettingsFields(acpRegistry!, { source: "local" }).map((field) => field.key),
+    ).toEqual(["source", "commandPath"]);
   });
 
   it("derives a select control with its choices for the Antigravity sign-in method", () => {
@@ -166,54 +199,5 @@ describe("ProviderSettingsForm helpers", () => {
     );
 
     expect(next).toEqual({ experimental: false });
-  });
-
-  it("round-trips Pi-family structured values without flattening them", () => {
-    const pi = DRIVER_OPTION_BY_VALUE[ProviderDriverKind.make("pi")];
-    expect(pi).toBeDefined();
-    const fields = deriveProviderSettingsFields(pi!);
-    const environment = fields.find((field) => field.key === "environment");
-    const launchArguments = fields.find((field) => field.key === "launchArguments");
-    expect(environment?.valueFormat).toBe("json");
-    expect(launchArguments?.valueFormat).toBe("json");
-
-    const current = {
-      opaqueForkSetting: { keep: true },
-      environment: { PI_PROFILE: "work", EMPTY: "" },
-      launchArguments: ["--model", "reasoning", "--flag=value"],
-    };
-    expect(readProviderConfigString(current, "environment", environment?.valueFormat)).toContain(
-      '"PI_PROFILE": "work"',
-    );
-    expect(
-      nextProviderConfigWithFieldValue(
-        current,
-        environment!,
-        '{ "PI_PROFILE": "personal", "EMPTY": "" }',
-      ),
-    ).toEqual({
-      opaqueForkSetting: { keep: true },
-      environment: { PI_PROFILE: "personal", EMPTY: "" },
-      launchArguments: ["--model", "reasoning", "--flag=value"],
-    });
-    expect(
-      nextProviderConfigWithFieldValue(current, launchArguments!, '[ "--model", "fast" ]'),
-    ).toEqual({
-      opaqueForkSetting: { keep: true },
-      environment: { PI_PROFILE: "work", EMPTY: "" },
-      launchArguments: ["--model", "fast"],
-    });
-  });
-
-  it("keeps the last valid structured value while JSON is incomplete", () => {
-    const field = {
-      key: "launchArguments",
-      control: "textarea" as const,
-      label: "Launch arguments",
-      clearWhenEmpty: "omit" as const,
-      valueFormat: "json" as const,
-    };
-    const current = { launchArguments: ["--model", "reasoning"], opaque: "keep" };
-    expect(nextProviderConfigWithFieldValue(current, field, '[ "--model",')).toEqual(current);
   });
 });

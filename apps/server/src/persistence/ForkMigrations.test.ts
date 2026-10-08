@@ -1,7 +1,6 @@
 import { assert, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
-import * as Layer from "effect/Layer";
-import * as SqlClient from "effect/unstable/sql/SqlClient";
+import * as SqlClient from "effect/sql/SqlClient";
 
 import { migrationManifest, runMigrations } from "./Migrations.ts";
 import * as NodeSqliteClient from "@t3tools/shared/nodeSqliteClient";
@@ -47,7 +46,7 @@ for (const history of FORK_HISTORIES) {
   it.layer(NodeSqliteClient.layer({ filename: ":memory:" }))(
     `fork migration ledger from ${history.label}`,
     (it) => {
-      it.effect("converges on upstream's ledger and schema plus the fork's own", () =>
+      it.effect("converges on upstream's ledger and schema", () =>
         Effect.gen(function* () {
           const sql = yield* SqlClient.SqlClient;
           // Projects predate every history's divergence from upstream.
@@ -118,14 +117,6 @@ for (const history of FORK_HISTORIES) {
             ledger.map((row) => [row.migration_id, row.name]),
             migrationManifest.map(([id, name]) => [id, name]),
           );
-          const forkLedger = yield* sql<{ readonly name: string }>`
-            SELECT name FROM kmcode_migrations
-          `;
-          assert.deepStrictEqual(
-            forkLedger.map((row) => row.name),
-            ["ProjectionTurnNativeCheckpoint"],
-          );
-
           const columns = (table: string) =>
             sql<{ readonly name: string }>`SELECT name FROM pragma_table_info(${table})`.pipe(
               Effect.map((rows) => rows.map((row) => row.name)),
@@ -135,7 +126,6 @@ for (const history of FORK_HISTORIES) {
             "client_app_version",
           ]);
           assert.include(yield* columns("projection_projects"), "auto_pull");
-          assert.include(yield* columns("projection_turns"), "native_checkpoint_json");
 
           const projects = yield* sql<{
             readonly projectId: string;
@@ -156,26 +146,3 @@ for (const history of FORK_HISTORIES) {
     },
   );
 }
-
-it.layer(Layer.mergeAll(NodeSqliteClient.layer({ filename: ":memory:" })))(
-  "fork migration ledger on a fresh database",
-  (it) => {
-    it.effect("adds the fork's schema without touching upstream's ledger", () =>
-      Effect.gen(function* () {
-        const sql = yield* SqlClient.SqlClient;
-        const executed = yield* runMigrations();
-        assert.deepStrictEqual(
-          executed.map(([id, name]) => [id, name]),
-          migrationManifest.map(([id, name]) => [id, name]),
-        );
-        const columns = yield* sql<{ readonly name: string }>`
-          SELECT name FROM pragma_table_info('projection_turns')
-        `;
-        assert.include(
-          columns.map((column) => column.name),
-          "native_checkpoint_json",
-        );
-      }),
-    );
-  },
-);

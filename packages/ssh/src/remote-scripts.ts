@@ -1,10 +1,12 @@
 // Remote launch/pairing/stop shell scripts for SSH transports. Kept free of
 // Node-only imports so the mobile SSH gateway can share them with the desktop
 // tunnel.
-import { sha256 } from "@noble/hashes/sha2";
 import type { DesktopSshEnvironmentTarget } from "@t3tools/contracts";
 import { cliReleaseDownloadBaseUrl } from "@t3tools/shared/cliRelease";
 import { satisfiesSemverRange } from "@t3tools/shared/semver";
+import * as Crypto from "effect/Crypto";
+import * as Effect from "effect/Effect";
+import * as Hex from "effect/encoding/Hex";
 import * as Schema from "effect/Schema";
 
 export const DEFAULT_REMOTE_PORT = 3773;
@@ -51,22 +53,20 @@ export function isNodeScriptRunner(runner: RemoteT3RunnerOptions | undefined): b
   return Boolean(runner?.nodeScriptPath?.trim());
 }
 
-const remoteNodeEngineCheckMain = function remoteNodeEngineCheckMain() {
+function buildRemoteNodeEngineCheckScript(): string {
+  return `${satisfiesSemverRange.toString()}
+(function remoteNodeEngineCheckMain() {
   const range = process.argv[2] || "";
   const rawVersion =
     process.versions && process.versions.node ? process.versions.node : process.version;
 
   if (!satisfiesSemverRange(rawVersion, range)) {
     process.stderr.write(
-      "Remote node " + rawVersion + " does not satisfy required range " + range + ".\n",
+      "Remote node " + rawVersion + " does not satisfy required range " + range + ".\\n",
     );
     process.exit(1);
   }
-};
-
-function buildRemoteNodeEngineCheckScript(): string {
-  return `${satisfiesSemverRange.toString()}
-(${remoteNodeEngineCheckMain.toString()})();`;
+})();`;
 }
 function stripTrailingNewlines(value: string): string {
   return value.replace(/\n+$/u, "");
@@ -702,38 +702,38 @@ export function buildRemoteLaunchScript(input?: RemoteT3RunnerOptions): string {
   });
 }
 
-export function buildRemotePairingScript(
-  target: DesktopSshEnvironmentTarget,
-  input?: RemoteT3RunnerOptions,
-): string {
+export function buildRemotePairingScript(stateKey: string, input?: RemoteT3RunnerOptions): string {
   return applyScriptPlaceholders(REMOTE_PAIRING_SCRIPT, {
-    T3_STATE_KEY: remoteStateKey(target),
+    T3_STATE_KEY: stateKey,
     T3_RUNNER_SCRIPT: stripTrailingNewlines(buildRemoteT3RunnerScript(input)),
   });
 }
 
-export function buildRemoteStopScript(target: DesktopSshEnvironmentTarget): string {
+export function buildRemoteStopScript(stateKey: string): string {
   return applyScriptPlaceholders(REMOTE_STOP_SCRIPT, {
-    T3_STATE_KEY: remoteStateKey(target),
+    T3_STATE_KEY: stateKey,
   });
 }
 
-export function buildRemoteLogTailScript(target: DesktopSshEnvironmentTarget): string {
+export function buildRemoteLogTailScript(stateKey: string): string {
   return applyScriptPlaceholders(REMOTE_LOG_TAIL_SCRIPT, {
-    T3_STATE_KEY: remoteStateKey(target),
+    T3_STATE_KEY: stateKey,
   });
 }
 
-export function remoteStateKey(target: DesktopSshEnvironmentTarget): string {
-  // Same digest as sha256(targetConnectionKey(target)) without node:crypto, so
-  // React Native transports can import this module.
-  return [
-    ...sha256(
-      new TextEncoder().encode(
-        `${target.alias}\u0000${target.hostname}\u0000${target.username ?? ""}\u0000${target.port ?? ""}`,
-      ),
-    ).subarray(0, 8),
-  ]
-    .map((byte) => byte.toString(16).padStart(2, "0"))
-    .join("");
+const encoder = new TextEncoder();
+
+export function targetConnectionKey(target: DesktopSshEnvironmentTarget): string {
+  return `${target.alias}\u0000${target.hostname}\u0000${target.username ?? ""}\u0000${target.port ?? ""}`;
 }
+
+/** Names the remote state directory for a target: the first 16 hex chars of its SHA-256 key. */
+export const remoteStateKey = Effect.fn("ssh/command.remoteStateKey")(function* (
+  target: DesktopSshEnvironmentTarget,
+): Effect.fn.Return<string, never, Crypto.Crypto> {
+  const crypto = yield* Crypto.Crypto;
+  const digest = yield* crypto
+    .digest("SHA-256", encoder.encode(targetConnectionKey(target)))
+    .pipe(Effect.orDie);
+  return Hex.encode(digest).slice(0, 16);
+});

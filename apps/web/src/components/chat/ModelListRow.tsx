@@ -14,6 +14,9 @@ import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 import { cn } from "~/lib/utils";
 import { modelPickerModelKey } from "./modelPickerKeys";
 import { ProviderInstanceIcon } from "./ProviderInstanceIcon";
+import { ompRoleLabel } from "./ompModelRoles";
+
+const MAX_VISIBLE_ROLE_CHIPS = 2;
 
 export const ModelListRow = memo(function ModelListRow(props: {
   index: number;
@@ -41,11 +44,17 @@ export const ModelListRow = memo(function ModelListRow(props: {
   unavailable?: boolean;
   jumpLabel?: string | null;
   disabledReason?: string | null;
-  onToggleFavorite: () => void;
+  /** OMP roles bound to this model. */
+  roles?: ReadonlyArray<string> | undefined;
+  /** Omitted while the list picks a model for an OMP role. */
+  onToggleFavorite?: (() => void) | undefined;
 }) {
   const providerLabel = props.model.subProvider
     ? `${props.providerDisplayName} · ${props.model.subProvider}`
     : props.providerDisplayName;
+  const roles = props.roles ?? [];
+  const hiddenRoleCount = roles.length - MAX_VISIBLE_ROLE_CHIPS;
+  const onToggleFavorite = props.onToggleFavorite;
 
   const row = (
     <ComboboxItem
@@ -101,40 +110,61 @@ export const ModelListRow = memo(function ModelListRow(props: {
       </div>
 
       <div className="flex shrink-0 items-center gap-1.5">
+        {roles.length > 0 ? (
+          <Tooltip>
+            <TooltipTrigger
+              render={<span className="flex items-center gap-0.5" data-model-picker-role-chips />}
+            >
+              {roles.slice(0, MAX_VISIBLE_ROLE_CHIPS).map((role) => (
+                <Badge key={role} size="sm" variant={role === "default" ? "info" : "secondary"}>
+                  {ompRoleLabel(role)}
+                </Badge>
+              ))}
+              {hiddenRoleCount > 0 ? (
+                <span className="text-3xs text-muted-foreground">+{hiddenRoleCount}</span>
+              ) : null}
+            </TooltipTrigger>
+            <TooltipPopup side="top" align="center">
+              OMP roles: {roles.map(ompRoleLabel).join(", ")}
+            </TooltipPopup>
+          </Tooltip>
+        ) : null}
         {props.showSelection && props.isSelected ? (
           <CheckIcon className="size-3.5" aria-hidden="true" />
         ) : null}
         {props.jumpLabel ? <Kbd>{props.jumpLabel}</Kbd> : null}
-        <Tooltip>
-          <TooltipTrigger
-            render={
-              <Button
-                size="icon-xs"
-                variant="ghost-muted"
-                className="-mr-1 shrink-0"
-                onClick={(event) => {
-                  event.stopPropagation();
-                  props.onToggleFavorite();
-                }}
-                onKeyDown={(event) => {
-                  event.stopPropagation();
-                }}
-                disabled={Boolean(props.disabledReason)}
-                aria-label={props.isFavorite ? "Remove from favorites" : "Add to favorites"}
-              >
-                <StarIcon
-                  className={cn(
-                    "size-3.5 sm:size-3",
-                    props.isFavorite && "fill-current text-warning",
-                  )}
-                />
-              </Button>
-            }
-          />
-          <TooltipPopup side="top" align="center">
-            {props.isFavorite ? "Remove from favorites" : "Add to favorites"}
-          </TooltipPopup>
-        </Tooltip>
+        {onToggleFavorite ? (
+          <Tooltip>
+            <TooltipTrigger
+              render={
+                <Button
+                  size="icon-xs"
+                  variant="ghost-muted"
+                  className="-mr-1 shrink-0"
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    onToggleFavorite();
+                  }}
+                  onKeyDown={(event) => {
+                    event.stopPropagation();
+                  }}
+                  disabled={Boolean(props.disabledReason)}
+                  aria-label={props.isFavorite ? "Remove from favorites" : "Add to favorites"}
+                >
+                  <StarIcon
+                    className={cn(
+                      "size-3.5 sm:size-3",
+                      props.isFavorite && "fill-current text-warning",
+                    )}
+                  />
+                </Button>
+              }
+            />
+            <TooltipPopup side="top" align="center">
+              {props.isFavorite ? "Remove from favorites" : "Add to favorites"}
+            </TooltipPopup>
+          </Tooltip>
+        ) : null}
       </div>
     </ComboboxItem>
   );

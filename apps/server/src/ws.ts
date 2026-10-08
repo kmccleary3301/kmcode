@@ -2189,6 +2189,8 @@ const layerWsRpc = (
           enqueueNativeSessionCommand(nativeSessionCoordinator.stop(input)),
         [WS_METHODS.serverArchiveNativeSession]: (input) =>
           enqueueNativeSessionCommand(nativeSessionCoordinator.archive(input)),
+        [WS_METHODS.providerModelRoles]: (input) => nativeSessionCoordinator.modelRoles(input),
+        [WS_METHODS.providerSetModelRole]: (input) => nativeSessionCoordinator.setModelRole(input),
         [WS_METHODS.serverRefreshProviders]: (input) =>
           Effect.gen(function* () {
             // Only explicit catalog refreshes bypass T3's caches. Workspace

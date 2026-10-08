@@ -427,6 +427,15 @@ export const ClientSettingsSchema = Schema.Struct({
       model: TrimmedNonEmptyString,
     }),
   ).pipe(Schema.withDecodingDefault(Effect.succeed([]))),
+  // Models picked in the composer, most recent first (capped by the picker).
+  // Biases picker ordering toward models the user already reaches for.
+  recentModels: Schema.Array(
+    Schema.Struct({
+      provider: ProviderInstanceId,
+      model: TrimmedNonEmptyString,
+      usedAt: Schema.Number,
+    }),
+  ).pipe(Schema.withDecodingDefault(Effect.succeed([]))),
   providerModelPreferences: Schema.Record(
     ProviderInstanceId,
     Schema.Struct({
@@ -1893,6 +1902,15 @@ export const ClientSettingsPatch = Schema.Struct({
       Schema.Struct({
         provider: ProviderInstanceId,
         model: TrimmedNonEmptyString,
+      }),
+    ),
+  ),
+  recentModels: Schema.optionalKey(
+    Schema.Array(
+      Schema.Struct({
+        provider: ProviderInstanceId,
+        model: TrimmedNonEmptyString,
+        usedAt: Schema.Number,
       }),
     ),
   ),

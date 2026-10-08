@@ -987,6 +987,17 @@ export function createServerEnvironmentAtoms<R, E>(
     updateStateAtom,
     settingsValueAtom,
     providersValueAtom,
+    modelRoles: createEnvironmentRpcQueryAtomFamily(runtime, {
+      label: "environment-data:server:model-roles",
+      tag: WS_METHODS.providerModelRoles,
+      staleTimeMs: 0,
+    }),
+    setModelRole: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:server:set-model-role",
+      tag: WS_METHODS.providerSetModelRole,
+      scheduler: configScheduler,
+      concurrency: configConcurrency,
+    }),
     nativeSessions: createEnvironmentRpcQueryAtomFamily(runtime, {
       label: "environment-data:server:native-sessions",
       tag: WS_METHODS.serverListNativeSessions,

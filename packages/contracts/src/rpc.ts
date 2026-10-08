@@ -155,6 +155,10 @@ import {
 } from "./provider.ts";
 import { ProviderInstanceId, ProviderInstanceMutation } from "./providerInstance.ts";
 import {
+  ProviderModelRoleError,
+  ProviderModelRolesInput,
+  ProviderModelRolesResult,
+  ProviderSetModelRoleInput,
   ProviderNativeSessionArchiveInput,
   ProviderNativeSessionArchiveResult,
   ProviderNativeSessionError,
@@ -486,6 +490,8 @@ export const WS_METHODS = {
   serverForkNativeSession: "server.forkNativeSession",
   serverStopNativeSession: "server.stopNativeSession",
   serverArchiveNativeSession: "server.archiveNativeSession",
+  providerModelRoles: "provider.modelRoles",
+  providerSetModelRole: "provider.setModelRole",
   serverSearchAcpRegistry: "server.searchAcpRegistry",
   serverPrepareAcpRegistryAgent: "server.prepareAcpRegistryAgent",
   serverUninstallAcpRegistryManagedBinary: "server.uninstallAcpRegistryManagedBinary",
@@ -800,6 +806,18 @@ export const WsServerArchiveNativeSessionRpc = Rpc.make(WS_METHODS.serverArchive
   payload: ProviderNativeSessionArchiveInput,
   success: ProviderNativeSessionArchiveResult,
   error: Schema.Union([ProviderNativeSessionError, EnvironmentAuthorizationError]),
+});
+
+export const WsProviderModelRolesRpc = Rpc.make(WS_METHODS.providerModelRoles, {
+  payload: ProviderModelRolesInput,
+  success: ProviderModelRolesResult,
+  error: Schema.Union([ProviderModelRoleError, EnvironmentAuthorizationError]),
+});
+
+export const WsProviderSetModelRoleRpc = Rpc.make(WS_METHODS.providerSetModelRole, {
+  payload: ProviderSetModelRoleInput,
+  success: ProviderModelRolesResult,
+  error: Schema.Union([ProviderModelRoleError, EnvironmentAuthorizationError]),
 });
 
 const WsServerSearchAcpRegistryRpc = Rpc.make(WS_METHODS.serverSearchAcpRegistry, {
@@ -1872,6 +1890,8 @@ export const WsRpcGroup = RpcGroup.make(
   WsServerForkNativeSessionRpc,
   WsServerStopNativeSessionRpc,
   WsServerArchiveNativeSessionRpc,
+  WsProviderModelRolesRpc,
+  WsProviderSetModelRoleRpc,
   WsServerSearchAcpRegistryRpc,
   WsServerPrepareAcpRegistryAgentRpc,
   WsServerUninstallAcpRegistryManagedBinaryRpc,

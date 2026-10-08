@@ -15,7 +15,11 @@ import {
   type OrchestrationV2AppThread,
   type OrchestrationV2ProviderThread,
   type OrchestrationV2ServerCommand,
+  ProviderModelRoleError,
+  type ProviderModelRolesInput,
+  type ProviderModelRolesResult,
   type ProviderInstanceId,
+  type ProviderSetModelRoleInput,
   type ProviderNativeSessionArchiveInput,
   type ProviderNativeSessionArchiveResult,
   ProviderNativeSessionError,
@@ -57,9 +61,16 @@ import { messageEvents } from "../project/AgentSessionImporter.ts";
 import * as ProjectService from "../project/ProjectService.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import {
+  readModelRoles,
+  readRecentModels,
+  writeModelRole,
+  type ModelRolesSnapshot,
+} from "./NativeModelRoles.ts";
+import {
   listNativeSessionFiles,
   readNativeHistory,
   readNativeSessionFile,
+  resolveNativeAgentDirectory,
   writeNativeSessionTitle,
   type NativeSessionFile,
   type NativeSessionLocation,
@@ -92,6 +103,12 @@ export interface NativeSessionCoordinatorShape {
   readonly archive: (
     input: ProviderNativeSessionArchiveInput,
   ) => Effect.Effect<ProviderNativeSessionArchiveResult, ProviderNativeSessionError>;
+  readonly modelRoles: (
+    input: ProviderModelRolesInput,
+  ) => Effect.Effect<ProviderModelRolesResult, ProviderModelRoleError>;
+  readonly setModelRole: (
+    input: ProviderSetModelRoleInput,
+  ) => Effect.Effect<ProviderModelRolesResult, ProviderModelRoleError>;
 }
 
 interface NativeInstance {
@@ -103,6 +120,7 @@ interface NativeInstance {
 }
 
 const isNativeSessionError = Schema.is(ProviderNativeSessionError);
+const isModelRoleError = Schema.is(ProviderModelRoleError);
 
 function asNativeSessionError(message: string) {
   return (cause: unknown): ProviderNativeSessionError => {
@@ -536,7 +554,75 @@ const make = Effect.gen(function* () {
       return { threadId };
     }).pipe(mutations.withPermits(1));
 
-  return { list, open, rename, fork, stop, archive } satisfies NativeSessionCoordinatorShape;
+  /** OMP only: Pi has no model roles. Instance errors keep their meaning as role errors. */
+  const resolveModelRoleAgentDir = (providerInstanceId: ProviderInstanceId) =>
+    resolveInstance(providerInstanceId).pipe(
+      Effect.mapError(
+        (error) =>
+          new ProviderModelRoleError({
+            code:
+              error.code === "not_found" ? "unknown" : error.code === "native" ? "io" : error.code,
+            message: error.message,
+          }),
+      ),
+      Effect.flatMap((instance) =>
+        instance.dialect === OMP_DIALECT
+          ? Effect.succeed(resolveNativeAgentDirectory(instance.location))
+          : Effect.fail(
+              new ProviderModelRoleError({
+                code: "unsupported",
+                message: `${instance.dialect.displayName} does not support model roles.`,
+              }),
+            ),
+      ),
+    );
+
+  const asModelRoleError = (cause: unknown): ProviderModelRoleError =>
+    isModelRoleError(cause)
+      ? cause
+      : new ProviderModelRoleError({
+          code: "io",
+          message: cause instanceof Error ? cause.message : "Model role config failed.",
+        });
+
+  /** Role bindings plus OMP's own usage history, which biases the picker's MRU order. */
+  const roleResult = (
+    providerInstanceId: ProviderInstanceId,
+    run: (agentDir: string) => Promise<ModelRolesSnapshot>,
+  ) =>
+    Effect.gen(function* () {
+      const agentDir = yield* resolveModelRoleAgentDir(providerInstanceId);
+      const snapshot = yield* Effect.tryPromise({
+        try: () => run(agentDir),
+        catch: asModelRoleError,
+      });
+      const recentModels = yield* Effect.promise(() => readRecentModels(agentDir));
+      return {
+        providerInstanceId,
+        configPath: snapshot.configPath,
+        roles: snapshot.roles,
+        recentModels,
+      } satisfies ProviderModelRolesResult;
+    });
+
+  const modelRoles: NativeSessionCoordinatorShape["modelRoles"] = (input) =>
+    roleResult(input.providerInstanceId, readModelRoles);
+
+  const setModelRole: NativeSessionCoordinatorShape["setModelRole"] = (input) =>
+    roleResult(input.providerInstanceId, (agentDir) =>
+      writeModelRole(agentDir, input.role, input.model, input.thinkingLevel),
+    );
+
+  return {
+    list,
+    open,
+    rename,
+    fork,
+    stop,
+    archive,
+    modelRoles,
+    setModelRole,
+  } satisfies NativeSessionCoordinatorShape;
 });
 
 /**

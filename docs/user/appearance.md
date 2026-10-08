@@ -36,6 +36,20 @@ The main sidebar, right panel, and terminal drawer open and close immediately by
 in your operating system. Moving between threads always snaps to the selected thread's panel state
 without replaying its transitions.
 
+## Transcript
+
+Web and desktop typeset math written between `$$` delimiters: inline in a sentence, or as a
+display block on its own lines. A single `$` stays literal, so prices and `$skill` mentions are
+unaffected. Put diagrams in `mermaid` or `svg` fences. Graphics render once the message finishes
+streaming; use the source toggle to inspect their markup. A graphic that does not parse keeps its
+source. Model-authored SVG renders as an isolated image, never inside the application page.
+
+Streaming replies reveal text at a steady pace. With reduced motion enabled in your operating
+system, text appears as soon as it arrives.
+
+On mobile, **Search** above the conversation finds prompts, answers, and tool calls in the
+thread and scrolls to the selected entry. Mobile shows the source of math and diagram fences.
+
 ## Custom themes
 
 On web and desktop, choose **Create theme** to adjust a palette, or import a T3 Code or VS Code

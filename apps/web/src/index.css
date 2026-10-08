@@ -1,3 +1,4 @@
+@import "./transcript.css";
 @import "tailwindcss";
 
 @custom-variant dark (&:is(.dark, .dark *));

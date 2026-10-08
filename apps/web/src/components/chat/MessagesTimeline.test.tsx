@@ -1459,7 +1459,7 @@ describe("MessagesTimeline", () => {
       />,
     );
 
-    expect(markup).toContain('class="pb-1.5" data-timeline-row-id="turn-fold:');
+    expect(markup).toContain('pb-1.5" data-timeline-row-id="turn-fold:');
     expect(markup).toContain('data-timeline-row-kind="turn-fold"');
   });
 

@@ -558,7 +558,10 @@ const CHAT_MARKDOWN_SANITIZE_SCHEMA = {
 
 // Single-dollar inline math would swallow `$skill` chips and amounts like `$20k`,
 // so inline math uses `$$...$$`; `$$` fences on their own lines are display math.
-const CHAT_MARKDOWN_MATH = [remarkMath, { singleDollarTextMath: false }] as const;
+const CHAT_MARKDOWN_MATH: NonNullable<ReactMarkdownOptions["remarkPlugins"]>[number] = [
+  remarkMath,
+  { singleDollarTextMath: false },
+];
 
 const CHAT_MARKDOWN_REMARK_PLUGINS = [
   remarkGfm,
@@ -585,10 +588,10 @@ const CHAT_MARKDOWN_REMARK_PLUGINS_WITH_BREAKS = [
 
 // KaTeX runs after sanitizing, so its MathML survives; `trust: false` keeps
 // TeX commands such as \href from producing links.
-const CHAT_MARKDOWN_KATEX = [
+const CHAT_MARKDOWN_KATEX: NonNullable<ReactMarkdownOptions["rehypePlugins"]>[number] = [
   rehypeKatex,
   { trust: false, strict: "error", throwOnError: false },
-] as const;
+];
 
 const CHAT_MARKDOWN_REHYPE_PLUGINS = [
   rehypePreserveBareAnchorPlaceholders,

@@ -119,6 +119,10 @@ const PI_SUBAGENT_FINISHED_STATUSES: Record<string, true> = {
   failed: true,
   aborted: true,
 };
+/** One `<task-result>` block in OMP's background job delivery (`async-result` message). */
+const PI_TASK_RESULT_PATTERN =
+  /<task-result id="([^"]+)"[^>]*?\sstatus="([^"]+)"[^>]*>([\s\S]*?)<\/task-result>/g;
+const PI_TASK_RESULT_OUTPUT_PATTERN = /<output>([\s\S]*?)<\/output>/;
 const PI_REQUEST_TIMEOUT_MS = 15_000;
 // Session lifecycle hooks reload extensions, MCP servers and language servers.
 const PI_SESSION_TIMEOUT_MS = 60_000;
@@ -331,6 +335,12 @@ interface ActivePiTurn {
    */
   readonly toolStartedAt: Map<string, DateTime.Utc>;
   readonly toolPreviews: Record<string, PiToolPreviewState>;
+  /**
+   * Tool calls that already returned. OMP's async `task` keeps sending
+   * `tool_execution_update` for its background job after the call ends; those
+   * update the subagents but must not reopen the finished tool item.
+   */
+  readonly endedTools: Record<string, true>;
   readonly subagentLive: Record<string, PiSubagentLiveState>;
   /** Last emitted subagent item per native task, re-sent when only its live preview changes. */
   readonly subagentItems: Record<string, PiSubagentTurnItem>;
@@ -997,6 +1007,13 @@ export function makePiAdapterV2(
         const startedAt = turn.toolStartedAt.get(toolCallId) ?? emittedAt;
         turn.toolStartedAt.set(toolCallId, startedAt);
         const completed = phase === "end";
+        if (turn.endedTools[toolCallId] === true && !completed) {
+          if (toolName === "subagent" || toolName === "task") {
+            yield* emitSubagentTasks(turn, toolCallId, event["partialResult"], false, args);
+          }
+          return;
+        }
+        if (completed) turn.endedTools[toolCallId] = true;
         const isError = event["isError"] === true;
         const resultRecord = completed ? event["result"] : event["partialResult"];
         const outputText = contentText(recordField(resultRecord, "content"));
@@ -1752,7 +1769,72 @@ export function makePiAdapterV2(
           case "message_end": {
             if (turn === null) return;
             const message = event["message"];
-            if (recordString(message, "role") !== "assistant") return;
+            const role = recordString(message, "role");
+            if (role === "custom" && recordString(message, "customType") === "async-result") {
+              // OMP stops streaming a background task's tool updates once the
+              // agent yields, so the job delivery is the only completion signal.
+              const delivered =
+                recordString(message, "content") ?? contentText(recordField(message, "content"));
+              const completedAt = yield* DateTime.now;
+              for (const [, jobId = "", nativeStatus = "", body = ""] of delivered.matchAll(
+                PI_TASK_RESULT_PATTERN,
+              )) {
+                const nativeTaskId = turn.subagentLive[jobId]?.nativeTaskId;
+                const item =
+                  nativeTaskId === undefined ? undefined : turn.subagentItems[nativeTaskId];
+                if (nativeTaskId === undefined || item === undefined || item.status !== "running") {
+                  continue;
+                }
+                const status =
+                  nativeStatus === "failed"
+                    ? "failed"
+                    : nativeStatus === "aborted" || nativeStatus === "cancelled"
+                      ? "interrupted"
+                      : "completed";
+                const output = (PI_TASK_RESULT_OUTPUT_PATTERN.exec(body)?.[1] ?? "").trim();
+                const result = output.length > 0 ? output.slice(0, 10_000) : null;
+                const { progress: _progress, liveContent: _liveContent, ...settledItem } = item;
+                yield* emit({
+                  type: "subagent.updated",
+                  driver,
+                  subagent: {
+                    id: item.subagentId,
+                    threadId: turn.turnInput.threadId,
+                    runId: turn.turnInput.runId,
+                    parentNodeId: idAllocator.derive.nodeFromProviderItem({
+                      driver,
+                      nativeItemId: nativeTaskId.slice(0, nativeTaskId.lastIndexOf(":subagent:")),
+                    }),
+                    origin: "provider_native",
+                    createdBy: "agent",
+                    driver,
+                    providerInstanceId: options.instanceId,
+                    providerThreadId: turn.turnInput.providerThread.id,
+                    childThreadId: null,
+                    nativeTaskRef: providerRef(nativeTaskId),
+                    prompt: item.prompt,
+                    title: item.title,
+                    model: null,
+                    status,
+                    result,
+                    startedAt: item.startedAt,
+                    completedAt,
+                    updatedAt: completedAt,
+                  },
+                });
+                const turnItem: PiSubagentTurnItem = {
+                  ...settledItem,
+                  status,
+                  result,
+                  completedAt,
+                  updatedAt: completedAt,
+                };
+                turn.subagentItems[nativeTaskId] = turnItem;
+                yield* emit({ type: "turn_item.updated", driver, turnItem });
+              }
+              return;
+            }
+            if (role !== "assistant") return;
             yield* completeOpenStreamItems(turn);
             if (recordString(message, "stopReason") === "error" && turn.failure === null) {
               turn.failure = makeProviderFailure({
@@ -2505,6 +2587,7 @@ export function makePiAdapterV2(
               toolArgs: new Map(),
               toolStartedAt: new Map(),
               toolPreviews: {},
+              endedTools: {},
               subagentLive: {},
               subagentItems: {},
               interrupted: false,

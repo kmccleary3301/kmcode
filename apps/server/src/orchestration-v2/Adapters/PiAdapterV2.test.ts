@@ -1474,6 +1474,100 @@ describe("PiAdapterV2", () => {
     }).pipe(Effect.scoped, Effect.provide(layerTest)),
   );
 
+  it.effect("keeps an async OMP task call completed while its background subagent finishes", () =>
+    Effect.gen(function* () {
+      const fake = yield* makeFakePi;
+      const { runtime, takeEvent } = yield* openRuntime(
+        fake,
+        "default",
+        THREAD_ID,
+        SESSION_ID,
+        undefined,
+        OMP_DIALECT,
+      );
+      const providerThread = yield* runtime.ensureThread({
+        threadId: THREAD_ID,
+        modelSelection: modelSelection("default"),
+        runtimePolicy,
+      });
+      yield* startTurn(runtime, providerThread);
+      yield* fake.takeRequest("prompt");
+      yield* fake.emit({ type: "agent_start" });
+      const progressEntry = { index: 0, id: "Scout", agent: "scout", task: "read package.json" };
+      const taskItem = (event: ProviderAdapterV2Event) =>
+        event.type === "turn_item.updated" &&
+        event.turnItem.type === "dynamic_tool" &&
+        event.turnItem.toolName === "task"
+          ? event.turnItem
+          : undefined;
+      const subagentItem = (event: ProviderAdapterV2Event) =>
+        event.type === "turn_item.updated" && event.turnItem.type === "subagent"
+          ? event.turnItem
+          : undefined;
+      yield* fake.emit({
+        type: "tool_execution_start",
+        toolCallId: "call_async_task",
+        toolName: "task",
+        args: { tasks: [{ id: "Scout", assignment: "read package.json" }] },
+      });
+      // The async call returns at once; the job keeps reporting on the same tool call id.
+      yield* fake.emit({
+        type: "tool_execution_end",
+        toolCallId: "call_async_task",
+        toolName: "task",
+        isError: false,
+        result: {
+          content: [{ type: "text", text: "Spawned agent `Scout` (job `Scout`)." }],
+          details: {
+            results: [],
+            progress: [{ ...progressEntry, status: "pending" }],
+            async: { state: "running", jobId: "Scout", type: "task" },
+          },
+        },
+      });
+      assert.equal(
+        taskItem(yield* takeEvent((event) => taskItem(event)?.status === "completed"))?.status,
+        "completed",
+      );
+      yield* fake.emit({
+        type: "tool_execution_update",
+        toolCallId: "call_async_task",
+        toolName: "task",
+        partialResult: {
+          content: [{ type: "text", text: "Running background task Scout..." }],
+          details: {
+            results: [],
+            progress: [{ ...progressEntry, status: "running", recentOutput: ["reading"] }],
+            async: { state: "running", jobId: "Scout", type: "task" },
+          },
+        },
+      });
+      const running = yield* takeEvent(
+        (event) => taskItem(event) !== undefined || subagentItem(event) !== undefined,
+      );
+      assert.equal(subagentItem(running)?.status, "running");
+      // Once the agent yields, OMP sends no further tool updates; the job's
+      // result arrives as an `async-result` delivery that starts a new agent run.
+      yield* fake.emit({ type: "agent_start" });
+      yield* fake.emit({
+        type: "message_end",
+        message: {
+          role: "custom",
+          customType: "async-result",
+          content:
+            '<system-notice>\nBackground job Scout has completed.\n<task-result id="Scout" agent="task" status="completed" duration="4.0s">\n<meta lines="1" size="9B" />\n<output>\n@t3tools\n</output>\n</task-result>\n</system-notice>',
+          details: { jobs: [{ jobId: "Scout", type: "task", label: "Scout" }] },
+        },
+      });
+      const finished = yield* takeEvent(
+        (event) => taskItem(event) !== undefined || subagentItem(event) !== undefined,
+      );
+      assert.equal(subagentItem(finished)?.status, "completed");
+      assert.equal(subagentItem(finished)?.id, subagentItem(running)?.id);
+      assert.equal(subagentItem(finished)?.result, "@t3tools");
+    }).pipe(Effect.scoped, Effect.provide(layerTest)),
+  );
+
   it.effect("persists edit patches and write content on file change items", () =>
     Effect.gen(function* () {
       const fake = yield* makeFakePi;

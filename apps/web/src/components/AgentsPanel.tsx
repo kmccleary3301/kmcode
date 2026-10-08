@@ -158,6 +158,7 @@ function SubagentTranscriptBody({
     readonly entriesById: Record<string, OrchestrationV2SubagentTranscriptEntry>;
     readonly order: ReadonlyArray<string>;
   }>({ entriesById: {}, order: [] });
+  const [appliedResult, setAppliedResult] = useState<unknown>(null);
   const endRef = useRef<HTMLDivElement>(null);
 
   const result = useAtomValue(
@@ -171,26 +172,30 @@ function SubagentTranscriptBody({
     }),
   );
 
-  useEffect(() => {
-    if (result._tag !== "Success") return;
-    const page = result.value;
-    setTranscriptState((current) => {
-      const baseMap = page.reset ? {} : { ...current.entriesById };
-      const baseOrder = page.reset ? [] : [...current.order];
-      let changed = page.reset && current.order.length > 0;
-      for (const entry of page.entries) {
-        if (!baseMap[entry.id]) {
-          baseMap[entry.id] = entry;
-          baseOrder.push(entry.id);
-          changed = true;
+  // Each page arrives as a new atom result; fold it in while rendering rather
+  // than in an effect, so the accumulated transcript never lags a render.
+  if (result !== appliedResult) {
+    setAppliedResult(result);
+    if (result._tag === "Success") {
+      const page = result.value;
+      setTranscriptState((current) => {
+        const baseMap = page.reset ? {} : { ...current.entriesById };
+        const baseOrder = page.reset ? [] : [...current.order];
+        let changed = page.reset && current.order.length > 0;
+        for (const entry of page.entries) {
+          if (!baseMap[entry.id]) {
+            baseMap[entry.id] = entry;
+            baseOrder.push(entry.id);
+            changed = true;
+          }
         }
+        return changed ? { entriesById: baseMap, order: baseOrder } : current;
+      });
+      if (page.nextCursor !== cursor) {
+        setCursor(page.nextCursor);
       }
-      return changed ? { entriesById: baseMap, order: baseOrder } : current;
-    });
-    if (page.nextCursor !== cursor) {
-      setCursor(page.nextCursor);
     }
-  }, [cursor, result]);
+  }
 
   const entries = useMemo(
     () => transcriptState.order.map((id) => transcriptState.entriesById[id]!),
@@ -203,9 +208,10 @@ function SubagentTranscriptBody({
     [environmentId, threadId],
   );
 
+  const entryCount = entries.length;
   useEffect(() => {
-    endRef.current?.scrollIntoView({ block: "end" });
-  }, [entries.length]);
+    if (entryCount > 0) endRef.current?.scrollIntoView({ block: "end" });
+  }, [entryCount]);
 
   if (entries.length === 0 && result._tag === "Failure") {
     return (

@@ -71,7 +71,7 @@ export function encodePngIco(images: ReadonlyArray<PngIconImage>): Buffer {
 
   return Buffer.concat([header, ...images.map((image) => image.contents)]);
 }
-export class IconExportSourceMissingError extends Schema.TaggedErrorClass<IconExportSourceMissingError>()(
+export class IconExportSourceMissingError extends Schema.TaggedError<IconExportSourceMissingError>()(
   "IconExportSourceMissingError",
   {
     sourcePath: Schema.String,

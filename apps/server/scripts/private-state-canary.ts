@@ -20,7 +20,7 @@ import * as Layer from "effect/Layer";
 
 import { ServerConfig } from "../src/config.ts";
 import { runMigrations } from "../src/persistence/Migrations.ts";
-import * as NodeSqliteClient from "../src/persistence/NodeSqliteClient.ts";
+import * as NodeSqliteClient from "@t3tools/shared/nodeSqliteClient";
 import { OrchestrationEventStoreLive } from "../src/persistence/Layers/OrchestrationEventStore.ts";
 import { makeSqlitePersistenceLive } from "../src/persistence/Layers/Sqlite.ts";
 import { OrchestrationProjectionPipeline } from "../src/orchestration/Services/ProjectionPipeline.ts";

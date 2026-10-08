@@ -47,6 +47,7 @@ const DEVELOPMENT_ASSETS = {
   androidAdaptiveBackground,
   androidAdaptiveForeground,
   androidAdaptiveBackgroundColor: "#171411",
+  androidSplashIcon: fromRepoRoot(BRAND_ASSET_PATHS.developmentIosIconPng),
   androidMonochromeIcon: fromRepoRoot(BRAND_ASSET_PATHS.androidMonochromePng),
   androidNotificationIcon: fromRepoRoot(BRAND_ASSET_PATHS.androidNotificationPng),
   androidNotificationColor: "#E6B486",
@@ -59,6 +60,7 @@ const PREVIEW_ASSETS = {
   androidAdaptiveBackground,
   androidAdaptiveForeground,
   androidAdaptiveBackgroundColor: "#171411",
+  androidSplashIcon: fromRepoRoot(BRAND_ASSET_PATHS.nightlyIosIconPng),
   androidMonochromeIcon: fromRepoRoot(BRAND_ASSET_PATHS.androidMonochromePng),
   androidNotificationIcon: fromRepoRoot(BRAND_ASSET_PATHS.androidNotificationPng),
   androidNotificationColor: "#E6B486",
@@ -71,6 +73,7 @@ const RELEASE_ASSETS = {
   androidAdaptiveBackground,
   androidAdaptiveForeground,
   androidAdaptiveBackgroundColor: "#171411",
+  androidSplashIcon: fromRepoRoot(BRAND_ASSET_PATHS.productionIosIconPng),
   androidMonochromeIcon: fromRepoRoot(BRAND_ASSET_PATHS.androidMonochromePng),
   androidNotificationIcon: fromRepoRoot(BRAND_ASSET_PATHS.androidNotificationPng),
   androidNotificationColor: "#E6B486",
@@ -142,12 +145,66 @@ const widgetsPlugin: NonNullable<ExpoConfig["plugins"]>[number] = [
     // Agent activity can update many times an hour; without the
     // frequent-updates entitlement iOS throttles the update budget sooner.
     frequentUpdates: true,
+    enableAndroid: true,
     widgets: [
+      {
+        name: "SubscriptionUsage",
+        displayName: "Subscription usage",
+        description: "Subscription quotas from your connected T3 Code environments.",
+        ios: {
+          configuration: {
+            title: "Subscription usage",
+            description:
+              "Both shows Session and Weekly when available. The Lock Screen shows the tightest selected limit.",
+            parameters: {
+              codexPeriod: {
+                title: "Codex limits",
+                type: "enum",
+                default: "auto",
+                values: [
+                  { name: "Both", value: "auto" },
+                  { name: "Session", value: "session" },
+                  { name: "Weekly", value: "weekly" },
+                ],
+              },
+              claudePeriod: {
+                title: "Claude limits",
+                type: "enum",
+                default: "auto",
+                values: [
+                  { name: "Both", value: "auto" },
+                  { name: "Session", value: "session" },
+                  { name: "Weekly", value: "weekly" },
+                ],
+              },
+            },
+          },
+          supportedFamilies: [
+            "systemSmall",
+            "systemMedium",
+            "systemLarge",
+            "systemExtraLarge",
+            "accessoryRectangular",
+          ],
+        },
+        android: {
+          minWidth: 250,
+          minHeight: 180,
+          targetCellWidth: 4,
+          targetCellHeight: 3,
+          resizeMode: "both",
+          // Embeds the layout in the APK so the widget renders before the app
+          // has run once; the app replaces it with stored props on publish.
+          initialLayout: "./src/widgets/SubscriptionUsage.android.tsx",
+        },
+      },
       {
         name: "AgentActivity",
         displayName: "Agent Activity",
         description: `Shows the current state of active ${productIdentity.baseName} agents.`,
-        supportedFamilies: ["systemSmall", "systemMedium", "accessoryRectangular"],
+        // Live Activity companion; there is no Android presentation for it.
+        android: null,
+        ios: { supportedFamilies: ["systemSmall", "systemMedium", "accessoryRectangular"] },
       },
     ],
   },
@@ -188,7 +245,7 @@ const config: ExpoConfig = {
   slug: isPiOmpProfile ? "km-code-pi-omp" : "km-code",
   platforms: ["ios", "android"],
   scheme: variant.scheme,
-  version: "1.0.4",
+  version: "1.4.0",
   runtimeVersion: {
     // Development manifests resolve on every launch, so avoid fingerprint's
     // expensive native-project calculation there. Preview and production stay
@@ -214,6 +271,9 @@ const config: ExpoConfig = {
       `applinks:${variant.relyingParty}`,
       `webcredentials:${variant.relyingParty}`,
     ],
+    entitlements: {
+      "keychain-access-groups": [`$(AppIdentifierPrefix)${variant.iosBundleIdentifier}`],
+    },
     infoPlist: {
       NSAppTransportSecurity: {
         NSAllowsArbitraryLoads: true,
@@ -241,6 +301,9 @@ const config: ExpoConfig = {
   android: {
     icon: variant.assets.appIcon,
     package: variant.androidPackage,
+    ...(repoEnv.T3CODE_ANDROID_GOOGLE_SERVICES_FILE
+      ? { googleServicesFile: repoEnv.T3CODE_ANDROID_GOOGLE_SERVICES_FILE }
+      : {}),
     adaptiveIcon: {
       backgroundColor: variant.assets.androidAdaptiveBackgroundColor,
       backgroundImage: variant.assets.androidAdaptiveBackground,
@@ -307,6 +370,7 @@ const config: ExpoConfig = {
           shortcut_icon: {
             foregroundImage: variant.assets.androidAdaptiveForeground,
             backgroundColor: variant.assets.androidAdaptiveBackgroundColor,
+            backgroundImage: variant.assets.androidAdaptiveBackground,
           },
         },
       },
@@ -341,11 +405,27 @@ const config: ExpoConfig = {
           image: variant.assets.splashIcon,
           backgroundColor: "#171411",
         },
+        android: {
+          // Android 12+ masks the splash icon to a circle over the central two thirds of
+          // its 288dp canvas, so the iOS export's corners get cut. A full-canvas image of
+          // the composed adaptive layers puts the wordmark in the same frame the launcher
+          // icon uses.
+          image: variant.assets.androidSplashIcon,
+          imageWidth: 288,
+          dark: { image: variant.assets.androidSplashIcon },
+        },
       },
     ],
     [
       "expo-build-properties",
       {
+        android: {
+          // Keep the supported floor explicit and covered by native notification tests.
+          minSdkVersion: 24,
+          // kotlinx-io uses Kotlin 2.3's return-value checker annotation, while
+          // SDK 58 builds with Kotlin 2.2. It has no runtime behavior.
+          extraProguardRules: "-dontwarn kotlin.MustUseReturnValues",
+        },
         ios: {
           deploymentTarget: "18.0",
           // AppCheckCore 11.3+ includes Swift and needs module maps for these Objective-C dependencies.
@@ -363,9 +443,9 @@ const config: ExpoConfig = {
     // would delete the asset catalog) and its xcodeproj mod creates the widget
     // target (which must exist before the compile phase can be attached).
     ...(!isIosPersonalTeamBuild ? ["./plugins/withWidgetLogoAsset.cjs", widgetsPlugin] : []),
-    "./plugins/withIosSceneLifecycle.cjs",
     "./plugins/withAndroidCleartextTraffic.cjs",
     "./plugins/withAndroidGradleHeap.cjs",
+    "./plugins/withAndroidInputBackground.cjs",
     "./plugins/withAndroidModernPopupMenu.cjs",
     "./plugins/withAndroidModernAlertDialog.cjs",
     "./plugins/withAndroidPredictiveBackCompat.cjs",

@@ -1,6 +1,5 @@
-import { BUILT_IN_THEMES, getThemeColorsForAppearance } from "@t3tools/shared/themePalettes";
-
 import {
+  getMobileThemeColors,
   getMobileThemeVariables,
   isLegacyMobileThemeId,
   themeColorToNativeColor,
@@ -31,17 +30,37 @@ export interface TerminalTheme {
   readonly ligatures?: boolean;
   readonly featureSettings?: Readonly<Record<string, number>>;
   readonly variableAxes?: Readonly<Record<string, number>>;
-  readonly palette: readonly string[];
+  /** The 16 ANSI colors, in order. A fixed tuple so indexed reads are never undefined. */
+  readonly palette: TerminalPalette;
 }
+
+type TerminalPalette = readonly [
+  string,
+  string,
+  string,
+  string,
+  string,
+  string,
+  string,
+  string,
+  string,
+  string,
+  string,
+  string,
+  string,
+  string,
+  string,
+  string,
+];
 
 const PIERRE_LIGHT_THEME: TerminalTheme = {
   // Pierre terminal palette with the app's shared screen background.
-  background: "#f2f2f7",
+  background: "#fcfcfc",
   foreground: "#6C6C71",
   mutedForeground: "#8E8E95",
   border: "#eeeeef",
   cursorForeground: "#009fff",
-  cursorBackground: "#f2f2f7",
+  cursorBackground: "#fcfcfc",
   palette: [
     "#1F1F21",
     "#ff2e3f",
@@ -90,7 +109,7 @@ const PIERRE_DARK_THEME: TerminalTheme = {
   ],
 };
 
-export function getPierreTerminalTheme(scheme: TerminalAppearanceScheme): TerminalTheme {
+function getPierreTerminalTheme(scheme: TerminalAppearanceScheme): TerminalTheme {
   return scheme === "light" ? PIERRE_LIGHT_THEME : PIERRE_DARK_THEME;
 }
 
@@ -99,11 +118,9 @@ export function getMobileTerminalTheme(
   scheme: TerminalAppearanceScheme,
 ): TerminalTheme {
   const base = getPierreTerminalTheme(scheme);
-  if (isLegacyMobileThemeId(themeId)) return base;
-
-  const theme = BUILT_IN_THEMES.find((candidate) => candidate.id === themeId) ?? BUILT_IN_THEMES[0];
-  const palette = getThemeColorsForAppearance(theme, scheme) ?? theme.colors;
-  const colors = getMobileThemeVariables(themeId, scheme);
+  const paletteId = themeId === "material-you" ? "t3-code" : themeId;
+  const palette = getMobileThemeColors(paletteId, scheme);
+  const colors = getMobileThemeVariables(paletteId, scheme);
   const background = themeColorToNativeColor(palette.terminalBackground);
   return {
     ...base,
@@ -139,7 +156,7 @@ export function getProfileTerminalTheme(
     ligatures: theme.ligatures,
     featureSettings: theme.featureSettings,
     variableAxes: theme.variableAxes,
-    palette: theme.palette,
+    palette: theme.palette as unknown as TerminalPalette,
   };
 }
 

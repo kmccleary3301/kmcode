@@ -901,14 +901,11 @@ describe("appearance migration", () => {
     expect(second.revision).toBe(first.revision);
   });
   it("caps oversized legacy libraries and finalizes migration once", async () => {
-    const themes = Array.from(
-      { length: 300 },
-      (_, index): ThemeDefinition => ({
-        ...T3_CHAT_THEME,
-        id: `legacy-theme-${index}`,
-        label: `Legacy Theme ${index}`,
-      }),
-    );
+    const themes = Array.from({ length: 300 }, (_, index): ThemeDefinition => ({
+      ...T3_CHAT_THEME,
+      id: `legacy-theme-${index}`,
+      label: `Legacy Theme ${index}`,
+    }));
     const migrated = await migrateAppearanceState(
       createEmptyAppearanceState(),
       { read: async () => themes },

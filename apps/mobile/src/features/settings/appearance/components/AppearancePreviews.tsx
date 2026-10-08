@@ -5,7 +5,6 @@ import {
   resolveMarkdownFontSizes,
   resolveMobileCodeSurface,
 } from "../../../../lib/appearancePreferences";
-import { useUniwindTheme } from "../../../../lib/useUniwindTheme";
 import { getMobileTerminalTheme, getProfileTerminalTheme } from "../../../terminal/terminalTheme";
 import { useAppearancePreferences } from "../AppearancePreferencesProvider";
 
@@ -161,18 +160,14 @@ export function CodeAppearancePreview(props: {
   const surface = resolveMobileCodeSurface(props.fontSize);
   const { appearanceOutput } = useAppearancePreferences();
   const codeTypography = appearanceOutput.typographyPreferences.code;
-  const theme = useUniwindTheme();
-  const lineNumberColor = theme["--color-icon-subtle"];
-  const keywordColor = theme["--color-md-link"];
   const codeFontFamily = codeTypography.family;
   const codeLetterSpacing = surface.fontSize * codeTypography.letterSpacingEm;
 
   const lineNumber = (line: CodePreviewLine, index: number) => (
     <Text
-      className="text-right"
+      className="text-right text-icon-subtle"
       key={line.id}
       style={{
-        color: lineNumberColor,
         fontFamily: codeFontFamily,
         fontSize: surface.lineNumberFontSize,
         letterSpacing: codeLetterSpacing,
@@ -199,8 +194,8 @@ export function CodeAppearancePreview(props: {
       {line.tokens.map((token) => (
         <Text
           key={token.text}
+          className={token.keyword ? "text-md-link" : undefined}
           style={{
-            color: token.keyword ? keywordColor : undefined,
             fontFamily: codeFontFamily,
             fontSize: surface.fontSize,
             letterSpacing: codeLetterSpacing,

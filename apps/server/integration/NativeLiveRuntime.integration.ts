@@ -446,7 +446,7 @@ export const makeNativeLiveModelServer = Effect.tryPromise<NativeLiveModelServer
   return promise;
 });
 
-class NativeLiveRuntimeError extends Schema.TaggedErrorClass<NativeLiveRuntimeError>()(
+class NativeLiveRuntimeError extends Schema.TaggedError<NativeLiveRuntimeError>()(
   "NativeLiveRuntimeError",
   { cause: Schema.Defect() },
 ) {}

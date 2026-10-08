@@ -3,17 +3,19 @@ import {
   startTransition,
   use,
   useCallback,
+  useEffect,
+  useState,
   useLayoutEffect,
   useMemo,
   useRef,
   type ReactNode,
 } from "react";
-import { Appearance, useColorScheme } from "react-native";
+import { AppState, Appearance, Platform, useColorScheme } from "react-native";
 
 import { useAtomSet, useAtomValue } from "@effect/atom-react";
 import { AsyncResult } from "effect/unstable/reactivity";
 
-import { ScopedTheme, Uniwind } from "uniwind";
+import { ScopedTheme, ScopedVariables, Uniwind } from "uniwind";
 
 import {
   resolveAppearance,
@@ -31,6 +33,10 @@ import {
 } from "../../../lib/mobileAppearanceAdapter";
 import { mobilePreferencesAtom, updateMobilePreferencesAtom } from "../../../state/preferences";
 import type { Preferences } from "../../../persistence/mobile-preferences";
+import { isSystemColorsAvailable, readSystemColorPalettes } from "../../../lib/materialYouPalette";
+import { materialYouPaletteToMobileThemeVariables } from "../../../lib/materialYouTheme";
+import { getMobileThemeRuntimeVariables } from "../../../lib/mobileThemeVariables";
+import type { MobileThemeVariables } from "../../../lib/mobileTheme";
 import {
   createMobileThemePairPatch,
   createMobileThemeSelectionPatch,
@@ -46,7 +52,6 @@ import {
   getMobileUniwindThemeName,
   type MobileThemeRuntimeState,
 } from "../../../lib/mobileThemeRuntime";
-import { cacheTerminalFontSize } from "../../terminal/terminalUiState";
 import { resolveMobileThemeRuntimeVariables } from "../../../lib/mobileThemeVariables";
 
 interface AppearancePreferencesContextValue {
@@ -58,6 +63,13 @@ interface AppearancePreferencesContextValue {
   readonly themeIds: MobileThemeIds;
   readonly themeMode: MobileThemeMode;
   readonly themeAppearance: MobileThemeAppearance;
+  readonly systemColorsAvailable: boolean;
+  readonly systemColorsActive: boolean;
+  readonly themeVariables: MobileThemeVariables;
+  readonly themeVariablesByAppearance: Readonly<
+    Record<MobileThemeAppearance, MobileThemeVariables>
+  >;
+  readonly systemColorPalettes: ReturnType<typeof readSystemColorPalettes>;
   readonly isReady: boolean;
   readonly setThemeIdForAppearance: (
     appearance: MobileThemeAppearance,
@@ -106,6 +118,39 @@ export function AppearancePreferencesProvider(props: {
     [resolvedThemeIds.dark, resolvedThemeIds.light],
   );
   const themeId = themeIds[themeAppearance];
+  const systemColorsActive = themeId === "material-you" && isSystemColorsAvailable;
+  const [systemColorPalettes, setSystemColorPalettes] = useState(readSystemColorPalettes);
+  useEffect(() => {
+    if (!isSystemColorsAvailable) return;
+    const refresh = () => {
+      const next = readSystemColorPalettes();
+      setSystemColorPalettes((previous) =>
+        JSON.stringify(previous) === JSON.stringify(next) ? previous : next,
+      );
+    };
+    const subscription = AppState.addEventListener("change", (state) => {
+      if (state === "active") refresh();
+    });
+    const focusSubscription = AppState.addEventListener("focus", refresh);
+    return () => {
+      subscription.remove();
+      focusSubscription.remove();
+    };
+  }, []);
+  const themeVariablesByAppearance = useMemo(() => {
+    const resolve = (appearance: MobileThemeAppearance) => {
+      const base = getMobileThemeRuntimeVariables(themeIds[appearance], appearance, Platform.OS);
+      return themeIds[appearance] === "material-you" && systemColorPalettes
+        ? materialYouPaletteToMobileThemeVariables(
+            systemColorPalettes[appearance],
+            appearance,
+            base,
+          )
+        : base;
+    };
+    return { light: resolve("light"), dark: resolve("dark") };
+  }, [themeIds, systemColorPalettes]);
+  const themeVariables = themeVariablesByAppearance[themeAppearance];
   const activeThemeName = getMobileUniwindThemeName(themeId, themeAppearance);
   const uniwindVariables = useMemo(
     () =>
@@ -177,21 +222,7 @@ export function AppearancePreferencesProvider(props: {
     selectedThemeIdsRef.current = themeIds;
     syncThemeRuntime(runtimeState);
     Uniwind.updateCSSVariables(activeThemeName, uniwindVariables);
-    cacheTerminalFontSize(
-      appearance.isTerminalFontSizeCustom
-        ? appearance.terminalFontSize
-        : appearanceOutput.rendererPalettes.terminal.fontSize,
-    );
-  }, [
-    activeThemeName,
-    appearance.terminalFontSize,
-    appearance.isTerminalFontSizeCustom,
-    uniwindVariables,
-    appearanceOutput.rendererPalettes.terminal.fontSize,
-    runtimeState,
-    syncThemeRuntime,
-    themeIds,
-  ]);
+  }, [activeThemeName, runtimeState, syncThemeRuntime, themeIds, uniwindVariables]);
 
   const setThemeIdForAppearance = useCallback(
     (appearance: MobileThemeAppearance, value: MobileThemeId) => {
@@ -284,6 +315,11 @@ export function AppearancePreferencesProvider(props: {
       themeIds,
       themeMode,
       themeAppearance,
+      systemColorsAvailable: isSystemColorsAvailable,
+      systemColorsActive,
+      themeVariables,
+      themeVariablesByAppearance,
+      systemColorPalettes,
       isReady,
       setThemeIdForAppearance,
       setThemeIdForBothAppearances,
@@ -301,6 +337,10 @@ export function AppearancePreferencesProvider(props: {
       themeIds,
       themeMode,
       themeAppearance,
+      systemColorsActive,
+      themeVariables,
+      themeVariablesByAppearance,
+      systemColorPalettes,
       isReady,
       setThemeIdForAppearance,
       setThemeIdForBothAppearances,
@@ -314,7 +354,9 @@ export function AppearancePreferencesProvider(props: {
 
   return (
     <AppearancePreferencesContext.Provider value={value}>
-      <ScopedTheme theme={activeThemeName}>{props.children}</ScopedTheme>
+      <ScopedTheme theme={activeThemeName}>
+        <ScopedVariables variables={themeVariables}>{props.children}</ScopedVariables>
+      </ScopedTheme>
     </AppearancePreferencesContext.Provider>
   );
 }

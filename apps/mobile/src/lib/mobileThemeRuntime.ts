@@ -49,11 +49,11 @@ export function getMobileUniwindThemeName(
   themeId: MobileThemeId,
   appearance: MobileThemeAppearance,
 ): MobileUniwindThemeName {
-  return isLegacyMobileThemeId(themeId)
-    ? `${themeId}-${appearance}`
-    : isDefaultMobileThemeId(themeId)
-      ? appearance
-      : `${themeId}-${appearance}`;
+  // Material You draws on the neutral T3 Code palette, like its runtime variables.
+  if (isLegacyMobileThemeId(themeId) || themeId === "material-you") {
+    return `${LEGACY_MOBILE_DEFAULT_THEME_ID}-${appearance}`;
+  }
+  return isDefaultMobileThemeId(themeId) ? appearance : `${themeId}-${appearance}`;
 }
 
 /**

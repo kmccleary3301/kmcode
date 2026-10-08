@@ -184,6 +184,52 @@ describe("projectActivityPayload", () => {
     });
   });
 
+  it("projects a Claude Bash result for the web and mobile expanded rows", () => {
+    const command = `printf 'first line\nsecond line'\n&& printf done`;
+    const source: OrchestrationThreadActivity = {
+      ...makeActivity("claude-bash", "command_execution", {}),
+      summary: "Command run",
+      payload: {
+        itemType: "command_execution",
+        title: "Command run",
+        detail: `Bash: ${command}`,
+        status: "completed",
+        data: {
+          toolName: "Bash",
+          input: { command },
+          result: {
+            type: "tool_result",
+            tool_use_id: "toolu_1",
+            content: [
+              { type: "text", text: "first output line" },
+              { type: "text", text: "x".repeat(5_000) },
+            ],
+          },
+        },
+      },
+    };
+    const projected = projectActivityPayload(source);
+
+    expect(projected.payload).toMatchObject({
+      data: {
+        toolName: "Bash",
+        command,
+        rawOutput: { content: "first output line" },
+      },
+    });
+
+    const [webEntry] = deriveWorkLogEntries([projected]);
+    expect(webEntry).toMatchObject({ command, detail: "first output line" });
+
+    const [mobileGroup] = buildThreadFeed(makeThread([projected]));
+    expect(mobileGroup?.type).toBe("activity-group");
+    if (mobileGroup?.type !== "activity-group") return;
+    const [mobileRow] = mobileGroup.activities;
+    expect(mobileRow).toMatchObject({ detail: command, canExpand: true });
+    expect(mobileRow?.getFullDetail()).toBe(`${command}\n\nfirst output line`);
+    expect(mobileRow?.getCopyText()).toBe(`Command run\n${command}\n\nfirst output line`);
+  });
+
   it("slims MCP tool data to the fields the expanded row renders", () => {
     expect(projectActivityPayload(fixtures[4]!).payload).toEqual({
       itemType: "mcp_tool_call",
@@ -201,9 +247,30 @@ describe("projectActivityPayload", () => {
     });
   });
 
-  it("keeps current web and mobile derived output identical for every tool item type", () => {
+  it("keeps current web and mobile derived fields for every tool item type", () => {
     for (const activity of fixtures) {
       const projected = projectActivityPayload(activity);
+      if (activity === fixtures[0]) {
+        expect(deriveWorkLogEntries([projected])).toMatchObject([
+          {
+            command: "pnpm test",
+            rawCommand: 'bash -lc "pnpm test"',
+            detail: "first useful line",
+          },
+        ]);
+        expect(comparableThreadFeed([projected])).toMatchObject([
+          {
+            type: "activity-group",
+            activities: [
+              {
+                detail: "pnpm test",
+                fullDetail: 'bash -lc "pnpm test"\n\nfirst useful line',
+              },
+            ],
+          },
+        ]);
+        continue;
+      }
       if (activity === fixtures[4]) {
         // MCP is the one deliberate difference: the expanded row's toolData
         // loses result bulk but keeps the rendered identity fields.
@@ -331,9 +398,11 @@ describe("superseded tool.updated snapshot dedup", () => {
   }
 
   it("drops updates a later completion supersedes in the same turn", () => {
-    const update1 = makeToolLifecycleActivity("upd-1", "tool.updated");
-    const update2 = makeToolLifecycleActivity("upd-2", "tool.updated");
-    const completed = makeToolLifecycleActivity("done-1", "tool.completed");
+    const update1 = makeToolLifecycleActivity("upd-1", "tool.updated", { toolCallId: "call-a" });
+    const update2 = makeToolLifecycleActivity("upd-2", "tool.updated", { toolCallId: "call-a" });
+    const completed = makeToolLifecycleActivity("done-1", "tool.completed", {
+      toolCallId: "call-a",
+    });
 
     expect(projectedIds([update1, update2, completed])).toEqual([completed.id]);
   });
@@ -352,10 +421,17 @@ describe("superseded tool.updated snapshot dedup", () => {
   });
 
   it("keeps updates with no matching completion", () => {
-    const inFlight = makeToolLifecycleActivity("upd-live", "tool.updated", { title: "Running" });
-    const other = makeToolLifecycleActivity("upd-other", "tool.updated", { title: "Reading" });
+    const inFlight = makeToolLifecycleActivity("upd-live", "tool.updated", {
+      title: "Running",
+      toolCallId: "call-live",
+    });
+    const other = makeToolLifecycleActivity("upd-other", "tool.updated", {
+      title: "Reading",
+      toolCallId: "call-read",
+    });
     const completed = makeToolLifecycleActivity("done-other", "tool.completed", {
       title: "Reading",
+      toolCallId: "call-read",
     });
 
     expect(projectedIds([inFlight, other, completed])).toEqual([inFlight.id, completed.id]);
@@ -386,9 +462,13 @@ describe("superseded tool.updated snapshot dedup", () => {
   it("keeps an update whose completion lives in another turn", () => {
     // A live thread.reverted can discard the completing turn while keeping
     // the updating one, which would leave the call unrepresented.
-    const update = makeToolLifecycleActivity("upd-kept", "tool.updated", { turn: "turn-kept" });
+    const update = makeToolLifecycleActivity("upd-kept", "tool.updated", {
+      turn: "turn-kept",
+      toolCallId: "call-a",
+    });
     const completed = makeToolLifecycleActivity("done-later", "tool.completed", {
       turn: "turn-reverted",
+      toolCallId: "call-a",
     });
 
     expect(projectedIds([update, completed])).toEqual([update.id, completed.id]);
@@ -396,8 +476,12 @@ describe("superseded tool.updated snapshot dedup", () => {
 
   it("keeps an update that follows its completion", () => {
     // A later update under the same identity is the next call, still in flight.
-    const completed = makeToolLifecycleActivity("done-first", "tool.completed");
-    const nextCall = makeToolLifecycleActivity("upd-next", "tool.updated");
+    const completed = makeToolLifecycleActivity("done-first", "tool.completed", {
+      toolCallId: "call-a",
+    });
+    const nextCall = makeToolLifecycleActivity("upd-next", "tool.updated", {
+      toolCallId: "call-a",
+    });
 
     expect(projectedIds([completed, nextCall])).toEqual([completed.id, nextCall.id]);
   });
@@ -422,10 +506,14 @@ describe("superseded tool.updated snapshot dedup", () => {
   });
 
   it("leaves the collapsed work log identical to the full history", () => {
+    // An id'd call collapses on both sides; id-less rows sharing a label stay
+    // separate on both sides, since distinct calls can share a label.
     const activities = [
-      makeToolLifecycleActivity("upd-1", "tool.updated", { detail: "writing" }),
-      makeToolLifecycleActivity("upd-2", "tool.updated", { detail: "writing" }),
-      makeToolLifecycleActivity("done-1", "tool.completed", { detail: "writing" }),
+      makeToolLifecycleActivity("upd-1", "tool.updated", { toolCallId: "call-a" }),
+      makeToolLifecycleActivity("upd-2", "tool.updated", { toolCallId: "call-a" }),
+      makeToolLifecycleActivity("done-1", "tool.completed", { toolCallId: "call-a" }),
+      makeToolLifecycleActivity("upd-3", "tool.updated", { detail: "writing" }),
+      makeToolLifecycleActivity("done-3", "tool.completed", { detail: "writing" }),
     ];
     const projected = projectThreadDetailSnapshot({
       snapshotSequence: 7,
@@ -434,8 +522,11 @@ describe("superseded tool.updated snapshot dedup", () => {
 
     const before = deriveWorkLogEntries(activities);
     const after = deriveWorkLogEntries(projected.thread.activities);
-    expect(after).toHaveLength(before.length);
-    expect(after.map((entry) => entry.label)).toEqual(before.map((entry) => entry.label));
+    expect(before).toHaveLength(3);
+    // Every fixture row shares one timestamp, so only membership is comparable.
+    expect(after.map((entry) => entry.id).toSorted()).toEqual(
+      before.map((entry) => entry.id).toSorted(),
+    );
   });
 });
 

@@ -102,8 +102,9 @@ function resolveServerUrl(options: Options): string {
 function wsProtocolLayer(url: string, token: string) {
   const webSocketConstructorLayer = Layer.succeed(
     Socket.WebSocketConstructor,
+    // Socket.makeWebSocket only ever passes its `protocols` option here.
     (socketUrl, protocols) =>
-      new NodeSocket.NodeWS.WebSocket(socketUrl, protocols, {
+      new NodeSocket.NodeWS.WebSocket(socketUrl, protocols as string | string[] | undefined, {
         headers: { authorization: `Bearer ${token}` },
       }) as unknown as globalThis.WebSocket,
   );

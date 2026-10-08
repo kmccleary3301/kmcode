@@ -209,17 +209,15 @@ export function buildMobileSlashCommandItems(input: {
 }): SlashCommandItem[] {
   const argumentCompletions = buildProviderSlashArgumentCompletions(input);
   if (argumentCompletions) {
-    const items = argumentCompletions.items.map(
-      (completion): SlashCommandItem => ({
-        id: `provider-slash-argument:${completion.key}`,
-        type: "provider-slash-argument",
-        command: completion.command,
-        insertText: completion.insertText,
-        searchValue: completion.searchValue,
-        label: completion.label,
-        description: completion.description,
-      }),
-    );
+    const items = argumentCompletions.items.map((completion): SlashCommandItem => ({
+      id: `provider-slash-argument:${completion.key}`,
+      type: "provider-slash-argument",
+      command: completion.command,
+      insertText: completion.insertText,
+      searchValue: completion.searchValue,
+      label: completion.label,
+      description: completion.description,
+    }));
     return searchSlashCommandItems(items, argumentCompletions.searchQuery);
   }
 

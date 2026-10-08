@@ -68,3 +68,14 @@ The tracked generated assets across all platforms include:
 - `apps/web/public/{favicon.ico,favicon-16x16.png,favicon-32x32.png,apple-touch-icon.png}`
 
 The existing filenames remain stable for package, URL, and native consumers.
+
+## Android launcher and splash artwork
+
+Android masks the central 72dp of a 108dp adaptive canvas, and the Android 12+ splash screen masks
+the central two thirds of a 288dp canvas. The Android splash artwork is rendered by `vp run icons:export:android`:
+
+- `apps/mobile/assets/android-icon-foreground.png`: the transparent foreground mark, sized to stay inside the safe zone
+- `apps/mobile/assets/android-icon-background-dev.png` and `-nightly.png`: full-bleed variant artwork
+- `apps/mobile/assets/android-splash-icon-*.png`: the layers composed into one 288dp image so the splash mask reproduces the launcher framing
+
+`android-icon-mark.png` remains a flat silhouette for Android's monochrome themed icon.

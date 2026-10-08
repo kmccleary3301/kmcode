@@ -78,8 +78,8 @@ describe("icon export", () => {
     const pixels = rendered.pixels;
     assert.isTrue(pixels.length === 64 * 64 * 4);
     const centerOffset = (32 * 64 + 32) * 4;
-    assert.isTrue(pixels[centerOffset] > 100, "expected red channel to be rendered");
-    assert.isTrue(pixels[centerOffset + 3] > 100, "expected alpha channel to be rendered");
+    assert.isTrue((pixels[centerOffset] ?? 0) > 100, "expected red channel to be rendered");
+    assert.isTrue((pixels[centerOffset + 3] ?? 0) > 100, "expected alpha channel to be rendered");
   });
 
   it("throws IconExportSourceMissingError when a layer source is missing", () => {

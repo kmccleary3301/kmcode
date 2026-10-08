@@ -20,7 +20,7 @@ export type CliRunner = "npx" | "pnpm dlx" | "bunx";
  * Detection is best-effort; callers must fail closed to the product package
  * selected by the profile or the executable path.
  */
-export function detectCliRunner(entryPath: string): CliRunner | null {
+function detectCliRunner(entryPath: string): CliRunner | null {
   const path = entryPath.replaceAll("\\", "/");
   if (path.includes("/_npx/")) {
     return "npx";
@@ -61,7 +61,8 @@ function resolveCliPackageName(entryPath: string): string {
  * channel from the running version.
  */
 export function suggestedPackageSpec(version: string, packageName = "t3"): string {
-  return version.includes("-nightly.") ? `${packageName}@nightly` : packageName;
+  const channel = /^[^-+]+-(nightly|preview)\./.exec(version)?.[1];
+  return channel === undefined ? packageName : `${packageName}@${channel}`;
 }
 
 /**

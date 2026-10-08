@@ -191,6 +191,7 @@ import * as PortScanner from "./preview/PortScanner.ts";
 import * as WorkspaceEntries from "./workspace/WorkspaceEntries.ts";
 import * as WorkspaceFileSystem from "./workspace/WorkspaceFileSystem.ts";
 import { readWorkflowScript } from "./orchestration-v2/workflowScriptQuery.ts";
+import { readSubagentTranscript } from "./orchestration-v2/SubagentTranscriptReader.ts";
 import * as WorkspacePaths from "./workspace/WorkspacePaths.ts";
 import * as VcsStatusBroadcaster from "./vcs/VcsStatusBroadcaster.ts";
 import * as VcsProvisioningService from "./vcs/VcsProvisioningService.ts";
@@ -1889,6 +1890,8 @@ const layerWsRpc = (
                 }),
             ),
           ),
+        [ORCHESTRATION_V2_WS_METHODS.getSubagentTranscript]: (input) =>
+          readSubagentTranscript(input).pipe(Effect.provideService(SqlClient.SqlClient, sql)),
         [ORCHESTRATION_V2_WS_METHODS.getTurnDiff]: (input) =>
           checkpointDiffQuery.getTurnDiff(input).pipe(
             Effect.mapError(

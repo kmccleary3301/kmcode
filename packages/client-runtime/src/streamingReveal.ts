@@ -1,11 +1,45 @@
 const REVEAL_INTERVAL_MS = 1000 / 30;
 const MIN_CATCH_UP_GRAPHEMES = 3;
 const MAX_REVEAL_BACKLOG = 8;
-let graphemeSegmenter: Intl.Segmenter | undefined;
+const COMBINING_MARK = /\p{M}/u;
 
-function segmenter(): Intl.Segmenter | undefined {
-  if (typeof Intl === "undefined" || typeof Intl.Segmenter !== "function") return undefined;
-  return (graphemeSegmenter ??= new Intl.Segmenter(undefined, { granularity: "grapheme" }));
+/**
+ * Approximate extended-grapheme ends from `offset` on, as absolute string
+ * offsets. Hermes has no Intl.Segmenter, so web and mobile share this: marks,
+ * variation selectors, skin-tone modifiers, and tag characters extend a
+ * cluster; ZWJ joins the next code point; regional indicators pair into flags;
+ * CRLF stays whole.
+ */
+function clusterEnds(text: string, offset: number): number[] {
+  const ends: number[] = [];
+  let joinNext = false;
+  let regionalRun = 0;
+  let previous = -1;
+  for (let index = offset; index < text.length;) {
+    const codePoint = text.codePointAt(index) ?? 0;
+    const width = codePoint > 0xffff ? 2 : 1;
+    const regional = codePoint >= 0x1f1e6 && codePoint <= 0x1f1ff;
+    const extend =
+      codePoint === 0x200d ||
+      (codePoint >= 0xfe00 && codePoint <= 0xfe0f) ||
+      (codePoint >= 0x1f3fb && codePoint <= 0x1f3ff) ||
+      (codePoint >= 0xe0020 && codePoint <= 0xe007f) ||
+      (codePoint >= 0xe0100 && codePoint <= 0xe01ef) ||
+      COMBINING_MARK.test(String.fromCodePoint(codePoint));
+    const continues =
+      ends.length > 0 &&
+      (extend ||
+        joinNext ||
+        (regional && regionalRun % 2 === 1) ||
+        (previous === 0x0d && codePoint === 0x0a));
+    index += width;
+    if (continues) ends[ends.length - 1] = index;
+    else ends.push(index);
+    joinNext = codePoint === 0x200d;
+    regionalRun = regional ? regionalRun + 1 : 0;
+    previous = codePoint;
+  }
+  return ends;
 }
 
 export function revealGraphemeCatchUp(backlog: number): number {
@@ -14,14 +48,8 @@ export function revealGraphemeCatchUp(backlog: number): number {
 
 export function revealGraphemePrefix(text: string, graphemeCount: number): string {
   if (graphemeCount <= 0 || text.length === 0) return "";
-  const splitter = segmenter();
-  // Without Unicode segmentation, snap the complete string rather than split a cluster.
-  if (!splitter) return text;
-  let count = 0;
-  for (const part of splitter.segment(text)) {
-    if (++count >= graphemeCount) return text.slice(0, part.index + part.segment.length);
-  }
-  return text;
+  const ends = clusterEnds(text, 0);
+  return text.slice(0, ends[Math.min(graphemeCount, ends.length) - 1] ?? 0);
 }
 
 export interface StreamingRevealSnapshot {
@@ -68,15 +96,7 @@ export function createStreamingRevealController(): StreamingRevealController {
       commonVisibleEnd = common;
       boundaries.length = 0;
     }
-    const splitter = segmenter();
-    if (splitter) {
-      for (const part of splitter.segment(nextTarget.slice(offset))) {
-        boundaries.push(offset + part.index + part.segment.length);
-      }
-    } else {
-      boundaries.length = 0;
-      if (nextTarget.length > 0) boundaries.push(nextTarget.length);
-    }
+    for (const end of clusterEnds(nextTarget, offset)) boundaries.push(end);
     target = nextTarget;
     visibleCount = Math.min(visibleCount, boundaries.length);
     while (visibleCount > 0 && (boundaries[visibleCount - 1] ?? 0) > commonVisibleEnd)

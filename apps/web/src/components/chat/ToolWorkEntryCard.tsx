@@ -248,8 +248,8 @@ export function ToolStreamOutput({ workEntry }: { readonly workEntry: ToolWorkEn
           aria-label="Copy output"
           onClick={() => copyToClipboard(text)}
         >
-          <CopyIcon className="icon copy-icon size-3.5" aria-hidden />
-          <span className="copy-status">{isCopied ? "Copied" : "Copy"}</span>
+          <CopyIcon className="icon size-3.5" aria-hidden />
+          <span>{isCopied ? "Copied" : "Copy"}</span>
         </button>
       </div>
       <div className="cell-body">
@@ -452,8 +452,8 @@ export function ToolWorkEntryCard(props: {
             }}
             onKeyDown={(event) => event.stopPropagation()}
           >
-            <CopyIcon className="icon copy-icon size-3.5" aria-hidden />
-            <span className="copy-status">{isCopied ? "Copied" : "Copy"}</span>
+            <CopyIcon className="icon size-3.5" aria-hidden />
+            <span>{isCopied ? "Copied" : "Copy"}</span>
           </button>
         </div>
       </div>
@@ -476,7 +476,7 @@ export function ToolWorkEntryCard(props: {
           ) : streamText !== null ? (
             <ToolStreamOutput workEntry={entry} />
           ) : expandedBody !== null ? (
-            <section className="tool-pane-section tool-io-input">
+            <section className="tool-pane-section">
               <div className="tool-call-content">
                 <pre className="tool-code">
                   <code>{expandedBody}</code>

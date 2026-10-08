@@ -2,13 +2,15 @@ import {
   formatProviderSubagentStatus,
   type ProviderSubagentStatus,
 } from "@t3tools/client-runtime/state/thread-execution";
+import type { OrchestrationV2SubagentLiveContent } from "@t3tools/contracts";
 import { isOrchestrationV2WorkActive } from "@t3tools/contracts";
-import { ArrowUpLeftIcon } from "lucide-react";
+import { ArrowUpLeftIcon, BotIcon } from "lucide-react";
 import { useLayoutEffect, useRef } from "react";
 
 import type { ProviderInstanceEntry } from "../../providerInstances";
 import { Button } from "../ui/button";
 import { ProviderInstanceIcon } from "./ProviderInstanceIcon";
+import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 
 /**
  * Stands in for the composer on a provider-native subagent thread. The
@@ -26,6 +28,8 @@ export function ProviderSubagentBar(props: {
   /** Null until the subagent's root turn arrives. */
   readonly status: ProviderSubagentStatus | null;
   readonly onOpenParent: (() => void) | null;
+  readonly onOpenAgents?: (() => void) | null;
+  readonly liveContent?: OrchestrationV2SubagentLiveContent | null;
 }) {
   const statusRef = useRef<HTMLSpanElement>(null);
   const { status } = props;
@@ -81,7 +85,36 @@ export function ProviderSubagentBar(props: {
       <span role="status" className="sr-only">
         {`${modelDescription} subagent: ${announcement}`}
       </span>
+      {props.liveContent ? (
+        <Tooltip>
+          <TooltipTrigger
+            render={
+              <span className="flex max-w-xs min-w-0 cursor-default items-center gap-1.5 truncate text-xs text-muted-foreground/80">
+                <span className="shrink-0 font-mono text-3xs uppercase text-muted-foreground">
+                  {props.liveContent.kind}:
+                </span>
+                <span className="truncate">{props.liveContent.text}</span>
+              </span>
+            }
+          />
+          <TooltipPopup>
+            <div className="mb-1 font-semibold uppercase text-3xs text-foreground/80">
+              Live {props.liveContent.kind}
+              {props.liveContent.truncated ? " (truncated)" : ""}
+            </div>
+            <div className="max-w-sm whitespace-pre-wrap break-words font-mono text-xs">
+              {props.liveContent.text}
+            </div>
+          </TooltipPopup>
+        </Tooltip>
+      ) : null}
       <span className="ms-auto shrink-0 text-muted-foreground max-sm:hidden">Runs on its own</span>
+      {props.onOpenAgents ? (
+        <Button size="sm" variant="ghost" onClick={props.onOpenAgents}>
+          <BotIcon className="size-4" />
+          Agents
+        </Button>
+      ) : null}
       {props.onOpenParent ? (
         <Button size="sm" variant="ghost" onClick={props.onOpenParent}>
           <ArrowUpLeftIcon />

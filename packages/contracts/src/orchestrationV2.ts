@@ -1348,6 +1348,57 @@ const OrchestrationV2SubagentNativeFields = {
   transcriptFile: Schema.optional(TrimmedNonEmptyString),
 } as const;
 
+export const ORCHESTRATION_V2_SUBAGENT_TRANSCRIPT_TEXT_MAX_LENGTH = 8_192;
+
+export const OrchestrationV2SubagentTranscriptEntryKind = Schema.Literals([
+  "user",
+  "assistant",
+  "reasoning",
+  "tool",
+  "system",
+]);
+export type OrchestrationV2SubagentTranscriptEntryKind =
+  typeof OrchestrationV2SubagentTranscriptEntryKind.Type;
+
+export const OrchestrationV2SubagentTranscriptEntry = Schema.Struct({
+  id: TrimmedNonEmptyString,
+  kind: OrchestrationV2SubagentTranscriptEntryKind,
+  text: Schema.String.check(
+    Schema.isMaxLength(ORCHESTRATION_V2_SUBAGENT_TRANSCRIPT_TEXT_MAX_LENGTH),
+  ),
+  timestamp: IsoDateTime,
+  toolName: Schema.optional(TrimmedNonEmptyString),
+  isError: Schema.optional(Schema.Boolean),
+  truncated: Schema.optional(Schema.Boolean),
+  tool: Schema.optional(
+    Schema.Struct({
+      phase: Schema.Literals(["call", "result"]),
+      callId: Schema.optional(TrimmedNonEmptyString),
+      arguments: Schema.optional(Schema.Unknown),
+      result: Schema.optional(Schema.Unknown),
+    }),
+  ),
+});
+export type OrchestrationV2SubagentTranscriptEntry =
+  typeof OrchestrationV2SubagentTranscriptEntry.Type;
+
+export const OrchestrationV2GetSubagentTranscriptInput = Schema.Struct({
+  threadId: ThreadId,
+  turnItemId: Schema.optional(TurnItemId),
+  subagentId: Schema.optional(TrimmedNonEmptyString),
+  cursor: Schema.optional(TrimmedNonEmptyString),
+});
+export type OrchestrationV2GetSubagentTranscriptInput =
+  typeof OrchestrationV2GetSubagentTranscriptInput.Type;
+
+export const OrchestrationV2GetSubagentTranscriptResult = Schema.Struct({
+  entries: Schema.Array(OrchestrationV2SubagentTranscriptEntry),
+  nextCursor: TrimmedNonEmptyString,
+  reset: Schema.Boolean,
+});
+export type OrchestrationV2GetSubagentTranscriptResult =
+  typeof OrchestrationV2GetSubagentTranscriptResult.Type;
+
 export const OrchestrationV2FileSearchResult = Schema.Struct({
   fileName: TrimmedNonEmptyString,
   line: Schema.optional(PositiveInt),
@@ -3164,6 +3215,7 @@ export const ORCHESTRATION_V2_WS_METHODS = {
   subscribeArchivedShell: "orchestration.subscribeArchivedShell",
   subscribeShell: "orchestration.subscribeShell",
   subscribeThread: "orchestration.subscribeThread",
+  getSubagentTranscript: "orchestration.getSubagentTranscript",
 } as const;
 
 export const OrchestrationV2ArchivedShellSnapshot = Schema.Struct({
@@ -3503,6 +3555,18 @@ export class OrchestrationGetWorkflowScriptError extends Schema.TaggedError<Orch
   }
 }
 
+export class OrchestrationV2GetSubagentTranscriptError extends Schema.TaggedError<OrchestrationV2GetSubagentTranscriptError>()(
+  "OrchestrationV2GetSubagentTranscriptError",
+  {
+    reason: Schema.Literals(["not-found", "no-transcript-file", "file-not-found", "read-failed"]),
+    threadId: ThreadId,
+    turnItemId: Schema.optional(TurnItemId),
+    subagentId: Schema.optional(TrimmedNonEmptyString),
+    message: Schema.String,
+    cause: Schema.optional(Schema.Defect()),
+  },
+) {}
+
 export const OrchestrationV2RpcSchemas = {
   dispatchCommand: {
     input: OrchestrationV2Command,
@@ -3531,6 +3595,10 @@ export const OrchestrationV2RpcSchemas = {
   getTurnItem: {
     input: OrchestrationV2GetTurnItemInput,
     output: OrchestrationV2GetTurnItemResult,
+  },
+  getSubagentTranscript: {
+    input: OrchestrationV2GetSubagentTranscriptInput,
+    output: OrchestrationV2GetSubagentTranscriptResult,
   },
   launchThread: {
     input: OrchestrationV2ThreadLaunchInput,

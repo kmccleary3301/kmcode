@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from "vite-plus/test";
+import { describe, expect, it } from "vite-plus/test";
 
 import {
   createStreamingRevealController,
@@ -60,14 +60,13 @@ describe("streaming reveal", () => {
     expect(controller.tick().text).toBe("e\u0301");
   });
 
-  it("snaps safely when Unicode segmentation is unavailable", () => {
-    vi.stubGlobal("Intl", { Segmenter: undefined });
-    try {
-      const controller = createStreamingRevealController();
-      controller.updateTarget("👩‍💻e\u0301");
-      expect(controller.tick()).toEqual({ text: "👩‍💻e\u0301", complete: true });
-    } finally {
-      vi.unstubAllGlobals();
-    }
+  it("keeps flags, skin tones, and CRLF whole without Intl.Segmenter", () => {
+    const text = "🇺🇸🇫🇷👍🏽\r\nx";
+
+    expect(revealGraphemePrefix(text, 1)).toBe("🇺🇸");
+    expect(revealGraphemePrefix(text, 2)).toBe("🇺🇸🇫🇷");
+    expect(revealGraphemePrefix(text, 3)).toBe("🇺🇸🇫🇷👍🏽");
+    expect(revealGraphemePrefix(text, 4)).toBe("🇺🇸🇫🇷👍🏽\r\n");
+    expect(revealGraphemePrefix(text, 5)).toBe(text);
   });
 });

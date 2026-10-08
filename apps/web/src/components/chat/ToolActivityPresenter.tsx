@@ -263,13 +263,7 @@ function DiffRow(props: {
   );
   if (props.hashLine) {
     return (
-      <div
-        className={cn(
-          "tool-diff-row",
-          `tool-diff-row--${props.row.kind}`,
-          "tool-diff-row--hashline",
-        )}
-      >
+      <div className={cn("tool-diff-row", `tool-diff-row--${props.row.kind}`)}>
         <span>{props.row.newLine ?? props.row.oldLine ?? ""}</span>
         {code}
       </div>
@@ -288,11 +282,7 @@ function DiffBlock(props: { readonly block: Extract<ActivityDetailBlock, { kind:
   const { visibleRows, onScroll } = useProgressiveRows(props.block.rows);
   return (
     <div
-      className={cn(
-        "tool-diff",
-        props.block.hashLine && "tool-diff--hashline",
-        props.block.mode === "edit" && "tool-diff--edit",
-      )}
+      className={cn("tool-diff", props.block.hashLine && "tool-diff--hashline")}
       role="region"
       aria-label={props.block.mode === "edit" ? "Edit input" : "Unified diff"}
       data-rendered-rows={visibleRows.length}
@@ -331,7 +321,7 @@ function CodeBlock(props: {
   return (
     <div className={cn("tool-code", props.softWrap && "tool-command-single-line")}>
       {props.title ? <div className="tool-code-title">{props.title}</div> : null}
-      <div className="markdown-renderer markdown-v2-output prose markdown tool-source">
+      <div className="markdown-renderer markdown-v2-output prose tool-source">
         <div className={cn("docs-code-block markdown-code-block", `language-${languageClass}`)}>
           <div className="docs-code-block__body">
             <pre className="shiki">
@@ -376,7 +366,7 @@ function DetailBlock(props: {
   switch (props.block.kind) {
     case "status":
       return (
-        <div className="tool-result-status">
+        <div>
           <strong>{props.block.label}</strong>
           <span>{props.block.status}</span>
           {props.block.description ? <span>{props.block.description}</span> : null}
@@ -511,8 +501,8 @@ function OutputSection(props: {
           }}
           onKeyDown={(event) => event.stopPropagation()}
         >
-          <CopyIcon className="icon copy-icon size-3.5" aria-hidden />
-          <span className="copy-status">{isCopied ? "Copied" : "Copy"}</span>
+          <CopyIcon className="icon size-3.5" aria-hidden />
+          <span>{isCopied ? "Copied" : "Copy"}</span>
         </button>
       </div>
       <div id={bodyId} className={cn("cell-body", !expanded && "hidden")}>
@@ -555,7 +545,7 @@ function InputSection(props: {
   if (description === undefined && contentBlocks.length === 0 && argumentBlocks.length === 0)
     return null;
   return (
-    <section className="tool-pane-section tool-io-input">
+    <section className="tool-pane-section">
       <div className="tool-call-content">
         {description ? <div className="tool-intent">{description}</div> : null}
         {contentBlocks.map((block, index) => (

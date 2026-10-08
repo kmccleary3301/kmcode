@@ -155,12 +155,16 @@ previewed call that never executes is marked failed when the turn ends.
 OMP sessions subscribe to child-agent events (`set_subagent_subscription`). Subagent items carry
 the child's session file and, while running, a `liveContent` preview of its latest reasoning,
 answer, or tool output, capped at the newest 8,192 UTF-16 units with `truncated` set. Completed
-children drop the preview. The server reads child transcripts through the subagent item, never a
-client-supplied path.
+children drop the preview. `orchestration.getSubagentTranscript` reads a child transcript through
+its subagent item (by turn item id or subagent id), never a client-supplied path. Pages advance by
+byte cursor to the last complete JSONL line within 512 KiB, growing the window for one oversized
+record; a partial trailing line waits for the next page, and a cursor past the end restarts with
+`reset`. Entry text is capped at 8,192 characters.
 
-Web and mobile share a grapheme-aware reveal controller (`@t3tools/client-runtime/streaming-reveal`)
-paced at 30 Hz. Completion, identity changes, and reduced motion snap to the authoritative text;
-without `Intl.Segmenter` the controller snaps rather than splitting graphemes.
+Web and mobile share a reveal controller (`@t3tools/client-runtime/streaming-reveal`) paced at
+30 Hz. Completion, identity changes, and reduced motion snap to the authoritative text. Hermes has
+no `Intl.Segmenter`, so both use the same approximate grapheme clustering: marks, variation
+selectors, skin-tone modifiers, ZWJ sequences, flag pairs, and CRLF stay whole.
 
 ## Provider updates run only through the owning installer
 

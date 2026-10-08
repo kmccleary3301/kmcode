@@ -1404,78 +1404,80 @@ export const MessagesTimeline = memo(function MessagesTimeline({
   return (
     <TimelineRowCtx value={sharedState}>
       <TimelineRowActivityCtx value={activityState}>
-        <TooltipScrollDismissArea
-          ref={setTimelineViewportElement}
-          className="km-transcript relative h-full min-h-0"
-          data-t3-surface="timeline"
-          data-assistant-citation-viewport="true"
-        >
-          {onCiteAssistantText && citationThreadRef ? (
-            <AssistantSelectionToolbar
-              viewport={timelineViewportElement}
-              threadRef={citationThreadRef}
-              onCite={onCiteAssistantText}
+        <div className="km-transcript relative h-full min-h-0">
+          <TooltipScrollDismissArea
+            ref={setTimelineViewportElement}
+            className="relative h-full min-h-0"
+            data-t3-surface="timeline"
+            data-assistant-citation-viewport="true"
+          >
+            {onCiteAssistantText && citationThreadRef ? (
+              <AssistantSelectionToolbar
+                viewport={timelineViewportElement}
+                threadRef={citationThreadRef}
+                onCite={onCiteAssistantText}
+              />
+            ) : null}
+            <LegendList<MessagesTimelineRow>
+              ref={setTimelineList}
+              data={rows}
+              extraData={`${listIdentityKey}:${rows.length}`}
+              keyExtractor={keyExtractor}
+              getItemType={getItemType}
+              renderItem={renderItem}
+              estimatedItemSize={90}
+              initialScrollAtEnd={citationRequest === null && rememberedPosition?.atEnd !== false}
+              // Legend needs a data refresh to mount new pins without a scroll event.
+              dataVersion={readyCitationRequest?.key ?? listIdentityKey}
+              {...(alwaysRender ? { alwaysRender } : {})}
+              onLoad={onCitationListLoad}
+              {...(anchoredEndSpace ? { anchoredEndSpace } : {})}
+              contentInsetEndAdjustment={anchoredEndSpace ? contentInsetEndAdjustment : 0}
+              maintainScrollAtEnd={
+                citationPositioning ||
+                (restoringThreadPosition && rememberedPosition?.atEnd === false) ||
+                anchoredEndSpace ||
+                !liveFollowEnabled ||
+                fullscreenAppRowId !== null ||
+                disclosureToggleSettling
+                  ? false
+                  : isWorking && !prefersReducedMotion && settlingListIdentity === null
+                    ? TIMELINE_MAINTAIN_SCROLL_AT_END_SMOOTH
+                    : TIMELINE_MAINTAIN_SCROLL_AT_END
+              }
+              maintainVisibleContentPosition={
+                citationPositioning ||
+                (restoringThreadPosition && rememberedPosition?.atEnd === false)
+                  ? false
+                  : maintainVisibleContentPosition
+              }
+              maintainScrollAtEndThreshold={1}
+              onScroll={handleScroll}
+              onItemSizeChanged={reportContentOverflow}
+              className={cn(
+                "messages-timeline-scroll scrollbar-gutter-both h-full min-h-0 overflow-x-hidden overscroll-y-contain [overflow-anchor:none]",
+                topFadeEnabled && "topbar-scroll-fade",
+              )}
+              ListHeaderComponent={listHeader}
+              ListFooterComponent={timelineListFooter}
             />
-          ) : null}
-          <LegendList<MessagesTimelineRow>
-            ref={setTimelineList}
-            data={rows}
-            extraData={`${listIdentityKey}:${rows.length}`}
-            keyExtractor={keyExtractor}
-            getItemType={getItemType}
-            renderItem={renderItem}
-            estimatedItemSize={90}
-            initialScrollAtEnd={citationRequest === null && rememberedPosition?.atEnd !== false}
-            // Legend needs a data refresh to mount new pins without a scroll event.
-            dataVersion={readyCitationRequest?.key ?? listIdentityKey}
-            {...(alwaysRender ? { alwaysRender } : {})}
-            onLoad={onCitationListLoad}
-            {...(anchoredEndSpace ? { anchoredEndSpace } : {})}
-            contentInsetEndAdjustment={anchoredEndSpace ? contentInsetEndAdjustment : 0}
-            maintainScrollAtEnd={
-              citationPositioning ||
-              (restoringThreadPosition && rememberedPosition?.atEnd === false) ||
-              anchoredEndSpace ||
-              !liveFollowEnabled ||
-              fullscreenAppRowId !== null ||
-              disclosureToggleSettling
-                ? false
-                : isWorking && !prefersReducedMotion && settlingListIdentity === null
-                  ? TIMELINE_MAINTAIN_SCROLL_AT_END_SMOOTH
-                  : TIMELINE_MAINTAIN_SCROLL_AT_END
-            }
-            maintainVisibleContentPosition={
-              citationPositioning ||
-              (restoringThreadPosition && rememberedPosition?.atEnd === false)
-                ? false
-                : maintainVisibleContentPosition
-            }
-            maintainScrollAtEndThreshold={1}
-            onScroll={handleScroll}
-            onItemSizeChanged={reportContentOverflow}
-            className={cn(
-              "messages-timeline-scroll scrollbar-gutter-both h-full min-h-0 overflow-x-hidden overscroll-y-contain [overflow-anchor:none]",
-              topFadeEnabled && "topbar-scroll-fade",
-            )}
-            ListHeaderComponent={listHeader}
-            ListFooterComponent={timelineListFooter}
-          />
-          <TimelineMinimap
-            items={minimapItems}
-            hasPersistentGutter={minimapHasPersistentGutter}
-            hitStripWidth={minimapHitStripWidth}
-            currentIndex={minimapCurrentIndex}
-            stripMap={minimapStripMap}
-            onSelect={(item) => {
-              onManualNavigation();
-              void listRef.current?.scrollToIndex({
-                index: item.rowIndex,
-                animated: true,
-                viewOffset: 24,
-              });
-            }}
-          />
-        </TooltipScrollDismissArea>
+            <TimelineMinimap
+              items={minimapItems}
+              hasPersistentGutter={minimapHasPersistentGutter}
+              hitStripWidth={minimapHitStripWidth}
+              currentIndex={minimapCurrentIndex}
+              stripMap={minimapStripMap}
+              onSelect={(item) => {
+                onManualNavigation();
+                void listRef.current?.scrollToIndex({
+                  index: item.rowIndex,
+                  animated: true,
+                  viewOffset: 24,
+                });
+              }}
+            />
+          </TooltipScrollDismissArea>
+        </div>
       </TimelineRowActivityCtx>
     </TimelineRowCtx>
   );
@@ -1850,13 +1852,6 @@ const TimelineRowContent = memo(function TimelineRowContent({ row }: { row: Time
     <div
       className={cn(
         "km-transcript-row",
-        row.kind === "message" && row.message.role === "user" && "km-transcript-user",
-        row.kind === "message" && row.message.role === "assistant" && "km-transcript-assistant",
-        row.kind === "message" &&
-          (row.message.role as string) === "reasoning" &&
-          "km-transcript-thinking",
-        row.kind === "turn-fold" && "km-transcript-turn-fold",
-        row.kind === "proposed-plan" && "km-transcript-plan",
         // Commentary (non-terminal assistant) rows carry no metadata row, so
         // they sit closer to the work that follows them.
         isWorkLogRow || isSubagentGroup
@@ -2629,7 +2624,7 @@ function ReasoningTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "mess
         <span>
           Thinking · {lineCount} {lineCount === 1 ? "line" : "lines"}
         </span>
-        <time className="trace-meta-time" dateTime={row.message.createdAt}>
+        <time dateTime={row.message.createdAt}>
           {formatDayAwareTimestamp(row.message.createdAt, ctx.timestampFormat)}
         </time>
       </button>
@@ -5365,7 +5360,7 @@ function TimelineToolWorkEntryCard(props: {
           ? "circle-alert"
           : workEntryIconName(workEntry)
       }
-      className="icon size-4 shrink-0 stroke-[1.8]"
+      className="icon size-4 shrink-0"
       muted
     />
   );

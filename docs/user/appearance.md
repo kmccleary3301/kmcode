@@ -104,9 +104,21 @@ Open **Settings → Appearance** to choose the system, light, or dark appearance
 
 The package list shows its source, version, app/platform compatibility, active variant, asset count, and latest diagnostics. Imported packages remain disabled until explicitly activated. Re-importing the same package reloads its files without changing its enabled state.
 
+On web and desktop, the theme library also includes community themes adapted from open-source editor themes: Ayu Light, Ayu Dark, Ayu Mirage, Tokyo Night, Catppuccin Mocha, One Dark Pro, Dracula Official, Nord, Rosé Pine, Rosé Pine Moon, Gruvbox Material Dark, and SynthWave '84, plus the original Monoline Void and Neon Tokyo Cyber. Their sources and licenses are listed in `assets/themes-buffet/ATTRIBUTIONS.md`.
+
+Themes without their own syntax colors highlight code with a bundled light or dark palette; themes with custom token colors keep them.
+
 ### Fonts
 
-A package can set interface, composer, code, terminal, markdown, label, and heading typography. Explicit client font preferences take precedence over package defaults. T3 reports each failed family/style/weight descriptor separately and falls back through the declared family list. Use **Retry failed fonts** after correcting an installed or package font.
+The default Typography settings show three font families:
+
+- **Interface font** controls app navigation, settings, buttons, and other UI text.
+- **Text font** controls assistant replies and other rendered Markdown, including headings. Unset, it follows the interface font. Inline and fenced code keep the monospace font.
+- **Monospace font** controls code blocks, inline code, diffs, file previews, and terminal output. Advanced settings can override the prompt composer and terminal separately.
+
+KM Code bundles Inter on web and desktop and uses it as the default interface and Markdown font.
+
+A package can set interface, composer, code, terminal, markdown, label, and heading typography. Explicit client font preferences take precedence over package defaults; clearing a family restores the package's choice. KM Code reports each failed family/style/weight descriptor separately and falls back through the declared family list. Use **Retry failed fonts** after correcting an installed or package font.
 
 Web and desktop packages may contain declared WOFF2 assets. Mobile uses installed or bundled font families and does not load package WOFF2 files.
 

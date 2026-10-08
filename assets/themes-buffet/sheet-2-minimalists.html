@@ -1,0 +1,1236 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <title>KM Code &mdash; Sheet 2 &mdash; Modern Minimalists & Nord</title>
+    <style>
+      * {
+        box-sizing: border-box;
+        margin: 0;
+        padding: 0;
+      }
+      html,
+      body {
+        width: 800px;
+        height: 800px;
+        background: #07070a;
+        color: #f1f5f9;
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+        padding: 14px 16px;
+        overflow: hidden;
+      }
+      header {
+        border-bottom: 1px solid #1e293b;
+        padding-bottom: 8px;
+        margin-bottom: 12px;
+        display: flex;
+        justify-content: space-between;
+        align-items: flex-end;
+      }
+      .badge {
+        display: inline-block;
+        background: linear-gradient(135deg, #00d2ff, #ff00b4);
+        color: #fff;
+        font-size: 9px;
+        font-weight: 750;
+        text-transform: uppercase;
+        letter-spacing: 0.08em;
+        padding: 2px 7px;
+        border-radius: 999px;
+        margin-bottom: 4px;
+      }
+      h1 {
+        font-size: 16px;
+        font-weight: 750;
+        letter-spacing: -0.01em;
+      }
+      p.subtitle {
+        font-size: 10px;
+        color: #94a3b8;
+        margin-top: 2px;
+      }
+      .page-index {
+        font-size: 10px;
+        color: #64748b;
+        font-weight: 600;
+        text-transform: uppercase;
+      }
+
+      .grid-2x2 {
+        display: grid;
+        grid-template-columns: 374px 374px;
+        grid-template-rows: 350px 350px;
+        gap: 12px;
+      }
+
+      .sheet-cell {
+        background: #0f1016;
+        border: 1px solid #1f2230;
+        border-radius: 9px;
+        padding: 8px 10px;
+        display: flex;
+        flex-direction: column;
+        gap: 6px;
+        box-shadow: 0 8px 20px -6px rgba(0, 0, 0, 0.6);
+        min-height: 0;
+      }
+      .cell-top {
+        display: flex;
+        justify-content: space-between;
+        align-items: baseline;
+        padding: 0 2px;
+      }
+      .cell-title {
+        font-size: 12px;
+        font-weight: 700;
+        color: #f8fafc;
+      }
+      .cell-meta {
+        font-size: 9px;
+        color: #64748b;
+        font-family: ui-monospace, monospace;
+      }
+      .cell-window-wrap {
+        flex: 1;
+        min-height: 0;
+        display: flex;
+      }
+
+      /* Window Shell */
+      .window-shell {
+        flex: 1;
+        border-radius: 7px;
+        overflow: hidden;
+        display: flex;
+        flex-direction: column;
+        box-shadow: 0 4px 14px rgba(0, 0, 0, 0.4);
+        font-size: 9.5px;
+      }
+      .win-titlebar {
+        height: 22px;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        padding: 0 8px;
+        font-size: 8.5px;
+        user-select: none;
+      }
+      .traffic-lights {
+        display: flex;
+        gap: 4px;
+      }
+      .tl {
+        width: 6px;
+        height: 6px;
+        border-radius: 50%;
+        display: inline-block;
+      }
+      .tl.red {
+        background: #ff5f56;
+      }
+      .tl.yellow {
+        background: #ffbd2e;
+      }
+      .tl.green {
+        background: #27c93f;
+      }
+      .win-title {
+        font-weight: 500;
+        font-size: 8.5px;
+      }
+      .win-badge {
+        font-size: 7.5px;
+        font-weight: 750;
+        padding: 1px 4px;
+        border-radius: 3px;
+      }
+
+      .win-body {
+        display: flex;
+        flex: 1;
+        min-height: 0;
+      }
+      .app-sidebar {
+        width: 96px;
+        flex-shrink: 0;
+        padding: 6px 4px;
+        display: flex;
+        flex-direction: column;
+        justify-content: space-between;
+      }
+      .sb-header {
+        font-size: 8px;
+        font-weight: 800;
+        letter-spacing: 0.05em;
+        padding: 0 3px 4px 3px;
+      }
+      .sb-item {
+        display: flex;
+        align-items: center;
+        gap: 4px;
+        padding: 3px 4px;
+        border-radius: 4px;
+        margin-bottom: 1px;
+        font-size: 8.5px;
+        font-weight: 500;
+      }
+      .sb-indicator {
+        width: 4px;
+        height: 4px;
+        border-radius: 50%;
+        flex-shrink: 0;
+      }
+      .sb-label {
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      .sb-footer {
+        padding-top: 4px;
+        font-size: 8px;
+      }
+      .agent-status {
+        display: flex;
+        align-items: center;
+        gap: 4px;
+      }
+      .status-dot {
+        width: 5px;
+        height: 5px;
+        border-radius: 50%;
+      }
+
+      .app-main {
+        flex: 1;
+        display: flex;
+        flex-direction: column;
+        min-width: 0;
+      }
+      .app-toolbar {
+        height: 22px;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        padding: 0 8px;
+        font-size: 8.5px;
+      }
+      .tb-left {
+        display: flex;
+        align-items: center;
+        gap: 4px;
+      }
+      .tb-pill {
+        padding: 0 4px;
+        border-radius: 2px;
+        font-size: 8px;
+      }
+      .tb-btn {
+        padding: 1px 4px;
+        border-radius: 3px;
+        font-size: 8px;
+        font-weight: 500;
+      }
+
+      .chat-timeline {
+        flex: 1;
+        padding: 8px;
+        overflow-y: hidden;
+        display: flex;
+        flex-direction: column;
+        gap: 6px;
+      }
+      .chat-row.user {
+        display: flex;
+        justify-content: flex-end;
+      }
+      .user-bubble {
+        max-width: 88%;
+        padding: 4px 7px;
+        border-radius: 8px 8px 1px 8px;
+        font-size: 8.5px;
+        line-height: 1.3;
+      }
+      .chat-row.assistant {
+        display: flex;
+        gap: 5px;
+        align-items: flex-start;
+      }
+      .agent-avatar {
+        width: 15px;
+        height: 15px;
+        border-radius: 3px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        font-weight: 800;
+        font-size: 7.5px;
+        flex-shrink: 0;
+      }
+      .assistant-content {
+        flex: 1;
+        min-width: 0;
+      }
+      .assistant-lead {
+        font-size: 8.5px;
+        line-height: 1.3;
+        margin-bottom: 4px;
+      }
+
+      .chat-markdown-codeblock {
+        border-radius: 5px;
+        overflow: hidden;
+        font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+        font-size: 8px;
+      }
+      .chat-markdown-codeblock-header {
+        padding: 2px 6px;
+        display: flex;
+        justify-content: space-between;
+        font-size: 7.5px;
+        font-weight: 600;
+        letter-spacing: 0.04em;
+      }
+      .chat-markdown-codeblock pre {
+        padding: 4px 6px;
+        line-height: 1.35;
+        overflow-x: hidden;
+      }
+
+      .composer-container {
+        padding: 4px 8px 8px 8px;
+      }
+      .composer-body {
+        border-radius: 7px;
+        padding: 4px 6px;
+        display: flex;
+        flex-direction: column;
+        gap: 4px;
+      }
+      .composer-input-row {
+        font-size: 8px;
+      }
+      .composer-footer {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+      }
+      .cf-pill {
+        padding: 0 4px;
+        border-radius: 2px;
+        font-size: 7.5px;
+      }
+      .send-button {
+        width: 16px;
+        height: 16px;
+        border-radius: 50%;
+        border: none;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        font-size: 9px;
+        font-weight: bold;
+      }
+
+      /* STRICTLY SCOPED INJECTED SNIPPETS RULES (ONLY AFFECTS .snippets-active) */
+      .snippets-active[data-t3-app] [data-t3-surface="composer-body"],
+      .snippets-active[data-t3-app] [data-chat-composer-surface="true"] {
+        box-shadow:
+          0 12px 36px -10px rgb(0 0 0 / 55%),
+          0 0 0 1px color-mix(in srgb, var(--ring) 20%, transparent),
+          0 0 24px -4px color-mix(in srgb, var(--ring) 14%, transparent) !important;
+        transition: box-shadow 240ms cubic-bezier(0.16, 1, 0.3, 1) !important;
+      }
+      .snippets-active[data-t3-app]
+        [data-t3-surface="composer"]:focus-within
+        [data-t3-surface="composer-body"],
+      .snippets-active[data-t3-app]
+        [data-t3-surface="composer"]:focus-within
+        [data-chat-composer-surface="true"] {
+        box-shadow:
+          0 16px 44px -8px rgb(0 0 0 / 65%),
+          0 0 0 1.5px color-mix(in srgb, var(--ring) 55%, white 15%),
+          0 0 32px -2px color-mix(in srgb, var(--ring) 28%, transparent) !important;
+      }
+      .snippets-active[data-t3-app] [data-t3-surface="sidebar"] [data-active="true"],
+      .snippets-active[data-t3-app] [data-app-sidebar] [data-active="true"] {
+        border-radius: 8px !important;
+        box-shadow:
+          inset 0 1px 0 0 rgb(255 255 255 / 10%),
+          0 1px 3px 0 rgb(0 0 0 / 30%) !important;
+        transition: all 150ms cubic-bezier(0.16, 1, 0.3, 1) !important;
+      }
+      .snippets-active[data-t3-app] [role="dialog"],
+      .snippets-active[data-t3-app] [data-t3-surface="command-palette"],
+      .snippets-active[data-t3-app] [role="menu"] {
+        border-radius: 12px !important;
+        box-shadow:
+          0 24px 64px -16px rgb(0 0 0 / 75%),
+          0 0 0 1px color-mix(in srgb, var(--contrast-border) 80%, transparent),
+          inset 0 1px 0 0 rgb(255 255 255 / 10%) !important;
+      }
+      .snippets-active[data-t3-app] [data-t3-surface="code-block"],
+      .snippets-active .chat-markdown .chat-markdown-codeblock {
+        border-radius: 9px !important;
+        border: 1px solid color-mix(in srgb, var(--contrast-border) 70%, transparent) !important;
+        box-shadow: 0 4px 16px -4px rgb(0 0 0 / 30%) !important;
+        overflow: hidden !important;
+      }
+      .snippets-active .chat-markdown .chat-markdown-codeblock-header {
+        border-bottom: 1px solid color-mix(in srgb, var(--contrast-border) 50%, transparent) !important;
+        font-family: var(--font-mono) !important;
+        font-size: 0.72rem !important;
+        letter-spacing: 0.05em !important;
+        text-transform: uppercase !important;
+        padding: 0.35rem 0.75rem !important;
+      }
+      .snippets-active .chat-markdown :not(pre) > code {
+        font-family: var(--font-mono) !important;
+        font-size: 0.84em !important;
+        font-weight: 450 !important;
+        padding: 0.15rem 0.4rem !important;
+        border-radius: 5px !important;
+        border: 1px solid color-mix(in srgb, var(--contrast-border) 60%, transparent) !important;
+        background: color-mix(in srgb, var(--muted) 70%, transparent) !important;
+        letter-spacing: -0.01em !important;
+      }
+      .snippets-active .chat-markdown blockquote {
+        border-left: 3px solid var(--primary) !important;
+        background: color-mix(in srgb, var(--primary) 4%, transparent) !important;
+        border-radius: 0 8px 8px 0 !important;
+        padding: 0.6rem 1rem !important;
+        margin: 0.75rem 0 !important;
+        font-style: normal !important;
+      }
+      .snippets-active[data-t3-app] [data-t3-surface="composer"] [data-t3-part="send-button"],
+      .snippets-active[data-t3-app]
+        [data-chat-composer-surface="true"]
+        [data-t3-part="send-button"] {
+        background-image: linear-gradient(135deg, #00d2ff 0%, #3264ff 50%, #ff00b4 100%) !important;
+        color: #ffffff !important;
+        border: none !important;
+        font-weight: 550 !important;
+        box-shadow: 0 2px 14px -2px rgb(0 210 255 / 45%) !important;
+        transition: all 180ms ease !important;
+      }
+      .snippets-active[data-t3-app] [data-t3-surface="composer"] [data-t3-part="send-button"]:hover,
+      .snippets-active[data-t3-app]
+        [data-chat-composer-surface="true"]
+        [data-t3-part="send-button"]:hover {
+        filter: brightness(1.12) !important;
+        box-shadow:
+          0 4px 20px -1px rgb(255 0 180 / 50%),
+          0 0 14px rgb(0 210 255 / 35%) !important;
+        transform: translateY(-0.5px) !important;
+      }
+      .snippets-active ::-webkit-scrollbar {
+        width: 5px !important;
+        height: 5px !important;
+      }
+      .snippets-active ::-webkit-scrollbar-track {
+        background: transparent !important;
+      }
+      .snippets-active ::-webkit-scrollbar-thumb {
+        background: color-mix(in srgb, var(--contrast-border) 60%, transparent) !important;
+        border-radius: 999px !important;
+        transition: background 150ms ease !important;
+      }
+      .snippets-active ::-webkit-scrollbar-thumb:hover {
+        background: color-mix(in srgb, var(--ring) 75%, white 25%) !important;
+        box-shadow: 0 0 8px color-mix(in srgb, var(--ring) 50%, transparent) !important;
+      }
+      .snippets-active[data-t3-app] [data-t3-surface="sidebar"] nav {
+        gap: 2px !important;
+      }
+      .snippets-active[data-t3-app] [data-t3-surface="sidebar"] button {
+        min-height: 28px !important;
+        font-size: 0.8125rem !important;
+      }
+      .snippets-active[data-t3-app] [data-t3-surface="title-area"] {
+        border-bottom: 1px solid color-mix(in srgb, var(--contrast-border) 40%, transparent) !important;
+      }
+    </style>
+  </head>
+  <body>
+    <header>
+      <div>
+        <span class="badge">Minimalists</span>
+        <h1>Sheet 2 &mdash; Modern Minimalists & Nord</h1>
+        <p class="subtitle">
+          Complete mini-app render &mdash; all 4 cards 100% visible with verified semantic
+          foregrounds.
+        </p>
+      </div>
+      <div class="page-index">KM Code</div>
+    </header>
+
+    <div class="grid-2x2">
+      <div class="sheet-cell">
+        <div class="cell-top">
+          <div class="cell-title">Ayu Mirage</div>
+          <div class="cell-meta"><code>ayu-mirage</code> &bull; dark</div>
+        </div>
+        <div class="cell-window-wrap">
+          <div
+            class="window-shell"
+            data-t3-app
+            data-theme-id="ayu-mirage"
+            style="
+              --background: #242936;
+              --foreground: #cccac2;
+              --primary: #ffcc66;
+              --ring: #ffcc66;
+              --contrast-border: #171b24;
+              --muted: #282e3b;
+              --app-theme-canvas: #242936;
+              --app-theme-sidebar: #1f2430;
+              --app-theme-text: #cccac2;
+              --app-theme-text-muted: #9699a1;
+              --app-theme-accent: #ffcc66;
+              --app-theme-border: #171b24;
+              background: #242936;
+              border: 1px solid #171b24;
+              color: #cccac2;
+            "
+          >
+            <!-- Window Titlebar -->
+            <div
+              class="win-titlebar"
+              style="background: #242936; border-bottom: 1px solid #171b24"
+              data-t3-surface="title-area"
+            >
+              <div class="traffic-lights">
+                <span class="tl red"></span>
+                <span class="tl yellow"></span>
+                <span class="tl green"></span>
+              </div>
+              <div class="win-title" style="color: #9699a1">KM Code &mdash; Ayu Mirage</div>
+              <div
+                class="win-badge"
+                style="background: color-mix(in srgb, #ffcc66 20%, transparent); color: #ffcc66"
+              >
+                Text: 8.9:1 &bull; Action: 14.1:1
+              </div>
+            </div>
+
+            <div class="win-body">
+              <!-- App Sidebar -->
+              <aside
+                class="app-sidebar"
+                data-app-sidebar
+                data-t3-surface="sidebar"
+                style="background: #1f2430; border-right: 1px solid #171b24"
+              >
+                <div class="sb-header" style="color: #9699a1">CHATS</div>
+                <nav>
+                  <div
+                    class="sb-item active"
+                    data-active="true"
+                    style="background: color-mix(in srgb, #ffcc66 16%, transparent); color: #cccac2"
+                  >
+                    <span class="sb-indicator" style="background: #ffcc66"></span>
+                    <span class="sb-label">Feature / Rpc</span>
+                  </div>
+                  <div class="sb-item" style="color: #9699a1">
+                    <span class="sb-indicator muted" style="background: #171b24"></span>
+                    <span class="sb-label">Release Canary</span>
+                  </div>
+                  <div class="sb-item" style="color: #9699a1">
+                    <span class="sb-indicator muted" style="background: #171b24"></span>
+                    <span class="sb-label">Pi Checkpoint</span>
+                  </div>
+                </nav>
+                <div class="sb-footer" style="border-top: 1px solid #171b24; color: #9699a1">
+                  <div class="agent-status">
+                    <span class="status-dot" style="background: #22c55e"></span>
+                    <span>Pi Ready</span>
+                  </div>
+                </div>
+              </aside>
+
+              <!-- App Main Content Area -->
+              <main class="app-main" style="background: #242936">
+                <!-- Top Toolbar -->
+                <header
+                  class="app-toolbar"
+                  data-t3-surface="toolbar"
+                  style="background: #242936; border-bottom: 1px solid #171b24; color: #cccac2"
+                >
+                  <div class="tb-left">
+                    <span class="tb-pill" style="border: 1px solid #171b24; color: #9699a1"
+                      >main</span
+                    >
+                    <span class="tb-sep" style="color: #171b24">/</span>
+                    <span class="tb-title" style="font-weight: 600">src/modes/</span>
+                  </div>
+                  <div class="tb-right">
+                    <span
+                      class="tb-btn"
+                      style="background: #282e3b; border: 1px solid #171b24; color: #cccac2"
+                      >Sonnet 3.5</span
+                    >
+                  </div>
+                </header>
+
+                <!-- Chat Timeline -->
+                <div class="chat-timeline" data-t3-surface="timeline">
+                  <!-- User Prompt -->
+                  <div class="chat-row user">
+                    <div
+                      class="user-bubble"
+                      style="
+                        background: color-mix(in srgb, #ffcc66 12%, #282e3b);
+                        border: 1px solid color-mix(in srgb, #ffcc66 30%, #171b24);
+                        color: #cccac2;
+                      "
+                    >
+                      Verify the strict JSONL byte decoder.
+                    </div>
+                  </div>
+
+                  <!-- Assistant Response -->
+                  <div class="chat-row assistant">
+                    <div class="agent-avatar" style="background: #ffcc66; color: #000000">Pi</div>
+                    <div class="assistant-content">
+                      <div class="assistant-lead" style="color: #cccac2">
+                        Supervisor active. Streaming chunk decoded:
+                      </div>
+
+                      <!-- Full Codeblock with syntax mock -->
+                      <div class="chat-markdown">
+                        <div
+                          class="chat-markdown-codeblock"
+                          data-t3-surface="code-block"
+                          style="background: #282e3b; border: 1px solid #171b24"
+                        >
+                          <div
+                            class="chat-markdown-codeblock-header"
+                            style="border-bottom: 1px solid #171b24; color: #9699a1"
+                          >
+                            <span>TYPESCRIPT &bull; decoder.ts</span>
+                            <span style="opacity: 0.8">Copy</span>
+                          </div>
+                          <pre
+                            style="color: #cccac2"
+                          ><code><span style="color: #ffcc66;">export</span> <span style="color: #ffcc66;">class</span> ByteDecoder {
+  <span style="color: #ffcc66;">readonly</span> frame = <span style="color: #ffcc66;">new</span> Uint8Array(MAX);
+}</code></pre>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+
+                <!-- Composer -->
+                <div class="composer-container" data-t3-surface="composer">
+                  <div
+                    class="composer-body"
+                    data-t3-surface="composer-body"
+                    data-chat-composer-surface="true"
+                    style="background: #282e3b; border: 1px solid #171b24"
+                  >
+                    <div class="composer-input-row" style="color: #9699a1">
+                      Ask Pi or OMP to generate patches...
+                    </div>
+                    <div class="composer-footer" data-t3-surface="toolbar">
+                      <div class="cf-left">
+                        <span class="cf-pill" style="border: 1px solid #171b24; color: #9699a1"
+                          >12k tokens</span
+                        >
+                      </div>
+                      <div class="cf-right">
+                        <button
+                          class="send-button"
+                          type="submit"
+                          data-t3-part="send-button"
+                          style="background: #ffcc66; color: #000000"
+                        >
+                          &#8593;
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </main>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="sheet-cell">
+        <div class="cell-top">
+          <div class="cell-title">Ayu Dark</div>
+          <div class="cell-meta"><code>ayu-dark</code> &bull; dark</div>
+        </div>
+        <div class="cell-window-wrap">
+          <div
+            class="window-shell"
+            data-t3-app
+            data-theme-id="ayu-dark"
+            style="
+              --background: #10141c;
+              --foreground: #bfbdb6;
+              --primary: #e6b450;
+              --ring: #e6b450;
+              --contrast-border: #1b1f29;
+              --muted: #141821;
+              --app-theme-canvas: #10141c;
+              --app-theme-sidebar: #0d1017;
+              --app-theme-text: #bfbdb6;
+              --app-theme-text-muted: #858688;
+              --app-theme-accent: #e6b450;
+              --app-theme-border: #1b1f29;
+              background: #10141c;
+              border: 1px solid #1b1f29;
+              color: #bfbdb6;
+            "
+          >
+            <!-- Window Titlebar -->
+            <div
+              class="win-titlebar"
+              style="background: #10141c; border-bottom: 1px solid #1b1f29"
+              data-t3-surface="title-area"
+            >
+              <div class="traffic-lights">
+                <span class="tl red"></span>
+                <span class="tl yellow"></span>
+                <span class="tl green"></span>
+              </div>
+              <div class="win-title" style="color: #858688">KM Code &mdash; Ayu Dark</div>
+              <div
+                class="win-badge"
+                style="background: color-mix(in srgb, #e6b450 20%, transparent); color: #e6b450"
+              >
+                Text: 9.8:1 &bull; Action: 11.0:1
+              </div>
+            </div>
+
+            <div class="win-body">
+              <!-- App Sidebar -->
+              <aside
+                class="app-sidebar"
+                data-app-sidebar
+                data-t3-surface="sidebar"
+                style="background: #0d1017; border-right: 1px solid #1b1f29"
+              >
+                <div class="sb-header" style="color: #858688">CHATS</div>
+                <nav>
+                  <div
+                    class="sb-item active"
+                    data-active="true"
+                    style="background: color-mix(in srgb, #e6b450 16%, transparent); color: #bfbdb6"
+                  >
+                    <span class="sb-indicator" style="background: #e6b450"></span>
+                    <span class="sb-label">Feature / Rpc</span>
+                  </div>
+                  <div class="sb-item" style="color: #858688">
+                    <span class="sb-indicator muted" style="background: #1b1f29"></span>
+                    <span class="sb-label">Release Canary</span>
+                  </div>
+                  <div class="sb-item" style="color: #858688">
+                    <span class="sb-indicator muted" style="background: #1b1f29"></span>
+                    <span class="sb-label">Pi Checkpoint</span>
+                  </div>
+                </nav>
+                <div class="sb-footer" style="border-top: 1px solid #1b1f29; color: #858688">
+                  <div class="agent-status">
+                    <span class="status-dot" style="background: #22c55e"></span>
+                    <span>Pi Ready</span>
+                  </div>
+                </div>
+              </aside>
+
+              <!-- App Main Content Area -->
+              <main class="app-main" style="background: #10141c">
+                <!-- Top Toolbar -->
+                <header
+                  class="app-toolbar"
+                  data-t3-surface="toolbar"
+                  style="background: #10141c; border-bottom: 1px solid #1b1f29; color: #bfbdb6"
+                >
+                  <div class="tb-left">
+                    <span class="tb-pill" style="border: 1px solid #1b1f29; color: #858688"
+                      >main</span
+                    >
+                    <span class="tb-sep" style="color: #1b1f29">/</span>
+                    <span class="tb-title" style="font-weight: 600">src/modes/</span>
+                  </div>
+                  <div class="tb-right">
+                    <span
+                      class="tb-btn"
+                      style="background: #141821; border: 1px solid #1b1f29; color: #bfbdb6"
+                      >Sonnet 3.5</span
+                    >
+                  </div>
+                </header>
+
+                <!-- Chat Timeline -->
+                <div class="chat-timeline" data-t3-surface="timeline">
+                  <!-- User Prompt -->
+                  <div class="chat-row user">
+                    <div
+                      class="user-bubble"
+                      style="
+                        background: color-mix(in srgb, #e6b450 12%, #141821);
+                        border: 1px solid color-mix(in srgb, #e6b450 30%, #1b1f29);
+                        color: #bfbdb6;
+                      "
+                    >
+                      Verify the strict JSONL byte decoder.
+                    </div>
+                  </div>
+
+                  <!-- Assistant Response -->
+                  <div class="chat-row assistant">
+                    <div class="agent-avatar" style="background: #e6b450; color: #000000">Pi</div>
+                    <div class="assistant-content">
+                      <div class="assistant-lead" style="color: #bfbdb6">
+                        Supervisor active. Streaming chunk decoded:
+                      </div>
+
+                      <!-- Full Codeblock with syntax mock -->
+                      <div class="chat-markdown">
+                        <div
+                          class="chat-markdown-codeblock"
+                          data-t3-surface="code-block"
+                          style="background: #141821; border: 1px solid #1b1f29"
+                        >
+                          <div
+                            class="chat-markdown-codeblock-header"
+                            style="border-bottom: 1px solid #1b1f29; color: #858688"
+                          >
+                            <span>TYPESCRIPT &bull; decoder.ts</span>
+                            <span style="opacity: 0.8">Copy</span>
+                          </div>
+                          <pre
+                            style="color: #bfbdb6"
+                          ><code><span style="color: #e6b450;">export</span> <span style="color: #e6b450;">class</span> ByteDecoder {
+  <span style="color: #e6b450;">readonly</span> frame = <span style="color: #e6b450;">new</span> Uint8Array(MAX);
+}</code></pre>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+
+                <!-- Composer -->
+                <div class="composer-container" data-t3-surface="composer">
+                  <div
+                    class="composer-body"
+                    data-t3-surface="composer-body"
+                    data-chat-composer-surface="true"
+                    style="background: #141821; border: 1px solid #1b1f29"
+                  >
+                    <div class="composer-input-row" style="color: #858688">
+                      Ask Pi or OMP to generate patches...
+                    </div>
+                    <div class="composer-footer" data-t3-surface="toolbar">
+                      <div class="cf-left">
+                        <span class="cf-pill" style="border: 1px solid #1b1f29; color: #858688"
+                          >12k tokens</span
+                        >
+                      </div>
+                      <div class="cf-right">
+                        <button
+                          class="send-button"
+                          type="submit"
+                          data-t3-part="send-button"
+                          style="background: #e6b450; color: #000000"
+                        >
+                          &#8593;
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </main>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="sheet-cell">
+        <div class="cell-top">
+          <div class="cell-title">Ayu Light</div>
+          <div class="cell-meta"><code>ayu-light</code> &bull; light</div>
+        </div>
+        <div class="cell-window-wrap">
+          <div
+            class="window-shell"
+            data-t3-app
+            data-theme-id="ayu-light"
+            style="
+              --background: #fcfcfc;
+              --foreground: #5c6166;
+              --primary: #924e00;
+              --ring: #924e00;
+              --contrast-border: #eaedef;
+              --muted: #fafafa;
+              --app-theme-canvas: #fcfcfc;
+              --app-theme-sidebar: #f8f9fa;
+              --app-theme-text: #5c6166;
+              --app-theme-text-muted: #73726f;
+              --app-theme-accent: #924e00;
+              --app-theme-border: #eaedef;
+              background: #fcfcfc;
+              border: 1px solid #eaedef;
+              color: #5c6166;
+            "
+          >
+            <!-- Window Titlebar -->
+            <div
+              class="win-titlebar"
+              style="background: #fcfcfc; border-bottom: 1px solid #eaedef"
+              data-t3-surface="title-area"
+            >
+              <div class="traffic-lights">
+                <span class="tl red"></span>
+                <span class="tl yellow"></span>
+                <span class="tl green"></span>
+              </div>
+              <div class="win-title" style="color: #73726f">KM Code &mdash; Ayu Light</div>
+              <div
+                class="win-badge"
+                style="background: color-mix(in srgb, #924e00 20%, transparent); color: #924e00"
+              >
+                Text: 6.1:1 &bull; Action: 6.2:1
+              </div>
+            </div>
+
+            <div class="win-body">
+              <!-- App Sidebar -->
+              <aside
+                class="app-sidebar"
+                data-app-sidebar
+                data-t3-surface="sidebar"
+                style="background: #f8f9fa; border-right: 1px solid #eaedef"
+              >
+                <div class="sb-header" style="color: #73726f">CHATS</div>
+                <nav>
+                  <div
+                    class="sb-item active"
+                    data-active="true"
+                    style="background: color-mix(in srgb, #924e00 16%, transparent); color: #5c6166"
+                  >
+                    <span class="sb-indicator" style="background: #924e00"></span>
+                    <span class="sb-label">Feature / Rpc</span>
+                  </div>
+                  <div class="sb-item" style="color: #73726f">
+                    <span class="sb-indicator muted" style="background: #eaedef"></span>
+                    <span class="sb-label">Release Canary</span>
+                  </div>
+                  <div class="sb-item" style="color: #73726f">
+                    <span class="sb-indicator muted" style="background: #eaedef"></span>
+                    <span class="sb-label">Pi Checkpoint</span>
+                  </div>
+                </nav>
+                <div class="sb-footer" style="border-top: 1px solid #eaedef; color: #73726f">
+                  <div class="agent-status">
+                    <span class="status-dot" style="background: #22c55e"></span>
+                    <span>Pi Ready</span>
+                  </div>
+                </div>
+              </aside>
+
+              <!-- App Main Content Area -->
+              <main class="app-main" style="background: #fcfcfc">
+                <!-- Top Toolbar -->
+                <header
+                  class="app-toolbar"
+                  data-t3-surface="toolbar"
+                  style="background: #fcfcfc; border-bottom: 1px solid #eaedef; color: #5c6166"
+                >
+                  <div class="tb-left">
+                    <span class="tb-pill" style="border: 1px solid #eaedef; color: #73726f"
+                      >main</span
+                    >
+                    <span class="tb-sep" style="color: #eaedef">/</span>
+                    <span class="tb-title" style="font-weight: 600">src/modes/</span>
+                  </div>
+                  <div class="tb-right">
+                    <span
+                      class="tb-btn"
+                      style="background: #fafafa; border: 1px solid #eaedef; color: #5c6166"
+                      >Sonnet 3.5</span
+                    >
+                  </div>
+                </header>
+
+                <!-- Chat Timeline -->
+                <div class="chat-timeline" data-t3-surface="timeline">
+                  <!-- User Prompt -->
+                  <div class="chat-row user">
+                    <div
+                      class="user-bubble"
+                      style="
+                        background: color-mix(in srgb, #924e00 12%, #fafafa);
+                        border: 1px solid color-mix(in srgb, #924e00 30%, #eaedef);
+                        color: #5c6166;
+                      "
+                    >
+                      Verify the strict JSONL byte decoder.
+                    </div>
+                  </div>
+
+                  <!-- Assistant Response -->
+                  <div class="chat-row assistant">
+                    <div class="agent-avatar" style="background: #924e00; color: #fcfcfc">Pi</div>
+                    <div class="assistant-content">
+                      <div class="assistant-lead" style="color: #5c6166">
+                        Supervisor active. Streaming chunk decoded:
+                      </div>
+
+                      <!-- Full Codeblock with syntax mock -->
+                      <div class="chat-markdown">
+                        <div
+                          class="chat-markdown-codeblock"
+                          data-t3-surface="code-block"
+                          style="background: #fafafa; border: 1px solid #eaedef"
+                        >
+                          <div
+                            class="chat-markdown-codeblock-header"
+                            style="border-bottom: 1px solid #eaedef; color: #73726f"
+                          >
+                            <span>TYPESCRIPT &bull; decoder.ts</span>
+                            <span style="opacity: 0.8">Copy</span>
+                          </div>
+                          <pre
+                            style="color: #5c6166"
+                          ><code><span style="color: #924e00;">export</span> <span style="color: #924e00;">class</span> ByteDecoder {
+  <span style="color: #924e00;">readonly</span> frame = <span style="color: #924e00;">new</span> Uint8Array(MAX);
+}</code></pre>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+
+                <!-- Composer -->
+                <div class="composer-container" data-t3-surface="composer">
+                  <div
+                    class="composer-body"
+                    data-t3-surface="composer-body"
+                    data-chat-composer-surface="true"
+                    style="background: #fafafa; border: 1px solid #eaedef"
+                  >
+                    <div class="composer-input-row" style="color: #73726f">
+                      Ask Pi or OMP to generate patches...
+                    </div>
+                    <div class="composer-footer" data-t3-surface="toolbar">
+                      <div class="cf-left">
+                        <span class="cf-pill" style="border: 1px solid #eaedef; color: #73726f"
+                          >12k tokens</span
+                        >
+                      </div>
+                      <div class="cf-right">
+                        <button
+                          class="send-button"
+                          type="submit"
+                          data-t3-part="send-button"
+                          style="background: #924e00; color: #fcfcfc"
+                        >
+                          &#8593;
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </main>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="sheet-cell">
+        <div class="cell-top">
+          <div class="cell-title">Nord (Arctic)</div>
+          <div class="cell-meta"><code>nord</code> &bull; dark</div>
+        </div>
+        <div class="cell-window-wrap">
+          <div
+            class="window-shell"
+            data-t3-app
+            data-theme-id="nord"
+            style="
+              --background: #2e3440;
+              --foreground: #d8dee9;
+              --primary: #88c0d0;
+              --ring: #88c0d0;
+              --contrast-border: #3b4252;
+              --muted: #2e3440;
+              --app-theme-canvas: #2e3440;
+              --app-theme-sidebar: #2e3440;
+              --app-theme-text: #d8dee9;
+              --app-theme-text-muted: #c7cdd8;
+              --app-theme-accent: #88c0d0;
+              --app-theme-border: #3b4252;
+              background: #2e3440;
+              border: 1px solid #3b4252;
+              color: #d8dee9;
+            "
+          >
+            <!-- Window Titlebar -->
+            <div
+              class="win-titlebar"
+              style="background: #2e3440; border-bottom: 1px solid #3b4252"
+              data-t3-surface="title-area"
+            >
+              <div class="traffic-lights">
+                <span class="tl red"></span>
+                <span class="tl yellow"></span>
+                <span class="tl green"></span>
+              </div>
+              <div class="win-title" style="color: #c7cdd8">KM Code &mdash; Nord (Arctic)</div>
+              <div
+                class="win-badge"
+                style="background: color-mix(in srgb, #88c0d0 20%, transparent); color: #88c0d0"
+              >
+                Text: 9.2:1 &bull; Action: 6.2:1
+              </div>
+            </div>
+
+            <div class="win-body">
+              <!-- App Sidebar -->
+              <aside
+                class="app-sidebar"
+                data-app-sidebar
+                data-t3-surface="sidebar"
+                style="background: #2e3440; border-right: 1px solid #3b4252"
+              >
+                <div class="sb-header" style="color: #c7cdd8">CHATS</div>
+                <nav>
+                  <div
+                    class="sb-item active"
+                    data-active="true"
+                    style="background: color-mix(in srgb, #88c0d0 16%, transparent); color: #d8dee9"
+                  >
+                    <span class="sb-indicator" style="background: #88c0d0"></span>
+                    <span class="sb-label">Feature / Rpc</span>
+                  </div>
+                  <div class="sb-item" style="color: #c7cdd8">
+                    <span class="sb-indicator muted" style="background: #3b4252"></span>
+                    <span class="sb-label">Release Canary</span>
+                  </div>
+                  <div class="sb-item" style="color: #c7cdd8">
+                    <span class="sb-indicator muted" style="background: #3b4252"></span>
+                    <span class="sb-label">Pi Checkpoint</span>
+                  </div>
+                </nav>
+                <div class="sb-footer" style="border-top: 1px solid #3b4252; color: #c7cdd8">
+                  <div class="agent-status">
+                    <span class="status-dot" style="background: #22c55e"></span>
+                    <span>Pi Ready</span>
+                  </div>
+                </div>
+              </aside>
+
+              <!-- App Main Content Area -->
+              <main class="app-main" style="background: #2e3440">
+                <!-- Top Toolbar -->
+                <header
+                  class="app-toolbar"
+                  data-t3-surface="toolbar"
+                  style="background: #2e3440; border-bottom: 1px solid #3b4252; color: #d8dee9"
+                >
+                  <div class="tb-left">
+                    <span class="tb-pill" style="border: 1px solid #3b4252; color: #c7cdd8"
+                      >main</span
+                    >
+                    <span class="tb-sep" style="color: #3b4252">/</span>
+                    <span class="tb-title" style="font-weight: 600">src/modes/</span>
+                  </div>
+                  <div class="tb-right">
+                    <span
+                      class="tb-btn"
+                      style="background: #2e3440; border: 1px solid #3b4252; color: #d8dee9"
+                      >Sonnet 3.5</span
+                    >
+                  </div>
+                </header>
+
+                <!-- Chat Timeline -->
+                <div class="chat-timeline" data-t3-surface="timeline">
+                  <!-- User Prompt -->
+                  <div class="chat-row user">
+                    <div
+                      class="user-bubble"
+                      style="
+                        background: color-mix(in srgb, #88c0d0 12%, #2e3440);
+                        border: 1px solid color-mix(in srgb, #88c0d0 30%, #3b4252);
+                        color: #d8dee9;
+                      "
+                    >
+                      Verify the strict JSONL byte decoder.
+                    </div>
+                  </div>
+
+                  <!-- Assistant Response -->
+                  <div class="chat-row assistant">
+                    <div class="agent-avatar" style="background: #88c0d0; color: #030d11">Pi</div>
+                    <div class="assistant-content">
+                      <div class="assistant-lead" style="color: #d8dee9">
+                        Supervisor active. Streaming chunk decoded:
+                      </div>
+
+                      <!-- Full Codeblock with syntax mock -->
+                      <div class="chat-markdown">
+                        <div
+                          class="chat-markdown-codeblock"
+                          data-t3-surface="code-block"
+                          style="background: #2e3440; border: 1px solid #3b4252"
+                        >
+                          <div
+                            class="chat-markdown-codeblock-header"
+                            style="border-bottom: 1px solid #3b4252; color: #c7cdd8"
+                          >
+                            <span>TYPESCRIPT &bull; decoder.ts</span>
+                            <span style="opacity: 0.8">Copy</span>
+                          </div>
+                          <pre
+                            style="color: #d8dee9"
+                          ><code><span style="color: #88c0d0;">export</span> <span style="color: #88c0d0;">class</span> ByteDecoder {
+  <span style="color: #88c0d0;">readonly</span> frame = <span style="color: #88c0d0;">new</span> Uint8Array(MAX);
+}</code></pre>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+
+                <!-- Composer -->
+                <div class="composer-container" data-t3-surface="composer">
+                  <div
+                    class="composer-body"
+                    data-t3-surface="composer-body"
+                    data-chat-composer-surface="true"
+                    style="background: #2e3440; border: 1px solid #3b4252"
+                  >
+                    <div class="composer-input-row" style="color: #c7cdd8">
+                      Ask Pi or OMP to generate patches...
+                    </div>
+                    <div class="composer-footer" data-t3-surface="toolbar">
+                      <div class="cf-left">
+                        <span class="cf-pill" style="border: 1px solid #3b4252; color: #c7cdd8"
+                          >12k tokens</span
+                        >
+                      </div>
+                      <div class="cf-right">
+                        <button
+                          class="send-button"
+                          type="submit"
+                          data-t3-part="send-button"
+                          style="background: #88c0d0; color: #2e3440"
+                        >
+                          &#8593;
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </main>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </body>
+</html>

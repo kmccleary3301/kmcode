@@ -40,6 +40,24 @@ export const BUILT_IN_THEME_IDS = [
   "iris",
 ] as const;
 
+/** Community workbench themes bundled with web and desktop (see `themeCatalog.ts`). */
+export const WORKBENCH_THEME_IDS = [
+  "ayu-light",
+  "ayu-dark",
+  "ayu-mirage",
+  "tokyo-night",
+  "catppuccin-mocha",
+  "one-dark-pro",
+  "dracula-official",
+  "nord",
+  "ros-pine",
+  "ros-pine-moon",
+  "gruvbox-material-dark",
+  "synthwave-84",
+  "monoline-void",
+  "neon-tokyo-cyber",
+] as const;
+
 /** The mobile app's fresh-install KM Code palette. */
 export const MOBILE_DEFAULT_THEME_ID = "km-code";
 
@@ -64,6 +82,7 @@ export const RESERVED_THEME_IDS: ReadonlySet<string> = new Set([
   "light",
   "dark",
   ...BUILT_IN_THEME_IDS,
+  ...WORKBENCH_THEME_IDS,
   "t3-chat-dark",
   "t3-grove",
   "t3-ocean",

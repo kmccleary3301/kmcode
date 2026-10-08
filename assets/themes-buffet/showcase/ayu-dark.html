@@ -1,0 +1,344 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="UTF-8" />
+    <title>Ayu Dark</title>
+    <style>
+      * {
+        box-sizing: border-box;
+        margin: 0;
+        padding: 0;
+      }
+      html,
+      body {
+        width: 800px;
+        height: 600px;
+        margin: 0;
+        padding: 0;
+        background: #10141c;
+        overflow: hidden;
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      }
+      .window-shell {
+        width: 800px;
+        height: 600px;
+        display: flex;
+        flex-direction: column;
+        font-size: 13px;
+        background: #10141c;
+        color: #bfbdb6;
+      }
+      .win-titlebar {
+        height: 36px;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        padding: 0 14px;
+        font-size: 12px;
+        background: #10141c;
+        border-bottom: 1px solid #1b1f29;
+      }
+      .traffic-lights {
+        display: flex;
+        gap: 6px;
+      }
+      .tl {
+        width: 10px;
+        height: 10px;
+        border-radius: 50%;
+      }
+      .tl.red {
+        background: #ff5f56;
+      }
+      .tl.yellow {
+        background: #ffbd2e;
+      }
+      .tl.green {
+        background: #27c93f;
+      }
+      .win-title {
+        font-weight: 500;
+        color: #858688;
+      }
+      .win-badge {
+        font-size: 10px;
+        font-weight: bold;
+        padding: 2px 8px;
+        border-radius: 4px;
+        background: color-mix(in srgb, #e6b450 20%, transparent);
+        color: #e6b450;
+      }
+      .win-body {
+        display: flex;
+        flex: 1;
+        min-height: 0;
+      }
+      .app-sidebar {
+        width: 160px;
+        padding: 12px 8px;
+        display: flex;
+        flex-direction: column;
+        justify-content: space-between;
+        background: #0d1017;
+        border-right: 1px solid #1b1f29;
+      }
+      .sb-header {
+        font-size: 10px;
+        font-weight: 800;
+        padding: 0 6px 8px 6px;
+        color: #858688;
+      }
+      .sb-item {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        padding: 6px 8px;
+        border-radius: 6px;
+        margin-bottom: 2px;
+        font-size: 11.5px;
+      }
+      .sb-item.active {
+        background: color-mix(in srgb, #e6b450 16%, transparent);
+        color: #bfbdb6;
+      }
+      .sb-indicator {
+        width: 6px;
+        height: 6px;
+        border-radius: 50%;
+        background: #e6b450;
+      }
+      .sb-footer {
+        padding-top: 8px;
+        font-size: 10px;
+        border-top: 1px solid #1b1f29;
+        color: #858688;
+      }
+      .agent-status {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+      }
+      .status-dot {
+        width: 6px;
+        height: 6px;
+        border-radius: 50%;
+        background: #22c55e;
+      }
+      .app-main {
+        flex: 1;
+        display: flex;
+        flex-direction: column;
+        min-width: 0;
+        background: #10141c;
+      }
+      .app-toolbar {
+        height: 36px;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        padding: 0 14px;
+        font-size: 12px;
+        background: #10141c;
+        border-bottom: 1px solid #1b1f29;
+      }
+      .tb-left {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+      }
+      .tb-pill {
+        padding: 2px 6px;
+        border-radius: 4px;
+        font-size: 10.5px;
+        border: 1px solid #1b1f29;
+        color: #858688;
+      }
+      .tb-btn {
+        padding: 2px 8px;
+        border-radius: 4px;
+        font-size: 11px;
+        background: #141821;
+        border: 1px solid #1b1f29;
+        color: #bfbdb6;
+      }
+      .chat-timeline {
+        flex: 1;
+        padding: 14px;
+        display: flex;
+        flex-direction: column;
+        gap: 10px;
+        overflow: hidden;
+      }
+      .chat-row.user {
+        display: flex;
+        justify-content: flex-end;
+      }
+      .user-bubble {
+        max-width: 80%;
+        padding: 8px 12px;
+        border-radius: 12px 12px 2px 12px;
+        font-size: 12px;
+        background: color-mix(in srgb, #e6b450 12%, #141821);
+        border: 1px solid color-mix(in srgb, #e6b450 30%, #1b1f29);
+        color: #bfbdb6;
+      }
+      .chat-row.assistant {
+        display: flex;
+        gap: 8px;
+        align-items: flex-start;
+      }
+      .agent-avatar {
+        width: 24px;
+        height: 24px;
+        border-radius: 6px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        font-weight: bold;
+        font-size: 11px;
+        background: #e6b450;
+        color: #000000;
+      }
+      .assistant-lead {
+        font-size: 12px;
+        margin-bottom: 6px;
+        color: #bfbdb6;
+      }
+      .chat-markdown-codeblock {
+        border-radius: 8px;
+        overflow: hidden;
+        font-family: monospace;
+        font-size: 11px;
+        border: 1px solid #1b1f29;
+        background: #141821;
+      }
+      .chat-markdown-codeblock-header {
+        padding: 4px 10px;
+        display: flex;
+        justify-content: space-between;
+        font-size: 10px;
+        border-bottom: 1px solid #1b1f29;
+        color: #858688;
+      }
+      .chat-markdown-codeblock pre {
+        padding: 8px 10px;
+        line-height: 1.4;
+        color: #bfbdb6;
+      }
+      .composer-container {
+        padding: 8px 14px 14px 14px;
+      }
+      .composer-body {
+        border-radius: 10px;
+        padding: 8px 12px;
+        display: flex;
+        flex-direction: column;
+        gap: 6px;
+        border: 1px solid #1b1f29;
+        background: #141821;
+      }
+      .composer-input-row {
+        font-size: 11.5px;
+        color: #858688;
+      }
+      .composer-footer {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+      }
+      .cf-pill {
+        padding: 2px 6px;
+        border-radius: 4px;
+        font-size: 10px;
+        border: 1px solid #1b1f29;
+        color: #858688;
+      }
+      .send-button {
+        width: 26px;
+        height: 26px;
+        border-radius: 50%;
+        border: none;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        font-size: 13px;
+        font-weight: bold;
+        background: #e6b450;
+        color: #000000;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="window-shell">
+      <div class="win-titlebar">
+        <div class="traffic-lights">
+          <span class="tl red"></span>
+          <span class="tl yellow"></span>
+          <span class="tl green"></span>
+        </div>
+        <div class="win-title">KM Code &mdash; Ayu Dark</div>
+        <div class="win-badge">Text: 9.8:1 &bull; Action: 11.0:1</div>
+      </div>
+      <div class="win-body">
+        <aside class="app-sidebar">
+          <div class="sb-header">CHATS</div>
+          <nav>
+            <div class="sb-item active">
+              <span class="sb-indicator"></span>
+              <span>Feature / Rpc</span>
+            </div>
+            <div class="sb-item">
+              <span class="sb-indicator" style="background: #1b1f29"></span>
+              <span>Release Canary</span>
+            </div>
+          </nav>
+          <div class="sb-footer">
+            <div class="agent-status">
+              <span class="status-dot"></span>
+              <span>Pi Ready</span>
+            </div>
+          </div>
+        </aside>
+        <main class="app-main">
+          <header class="app-toolbar">
+            <div class="tb-left">
+              <span class="tb-pill">main</span>
+              <span>/</span>
+              <span>src/modes/</span>
+            </div>
+            <div class="tb-right">
+              <span class="tb-btn">Sonnet 3.5</span>
+            </div>
+          </header>
+          <div class="chat-timeline">
+            <div class="chat-row user">
+              <div class="user-bubble">Verify the strict JSONL byte decoder.</div>
+            </div>
+            <div class="chat-row assistant">
+              <div class="agent-avatar">Pi</div>
+              <div class="assistant-content">
+                <div class="assistant-lead">Supervisor active. Streaming chunk decoded:</div>
+                <div class="chat-markdown-codeblock">
+                  <div class="chat-markdown-codeblock-header">
+                    <span>TYPESCRIPT &bull; decoder.ts</span>
+                    <span>Copy</span>
+                  </div>
+                  <pre><code>export class ByteDecoder { readonly frame = new Uint8Array(MAX); }</code></pre>
+                </div>
+              </div>
+            </div>
+          </div>
+          <div class="composer-container">
+            <div class="composer-body">
+              <div class="composer-input-row">Ask Pi or OMP to generate patches...</div>
+              <div class="composer-footer">
+                <div class="cf-pill">12k tokens</div>
+                <button class="send-button">&#8593;</button>
+              </div>
+            </div>
+          </div>
+        </main>
+      </div>
+    </div>
+  </body>
+</html>

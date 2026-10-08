@@ -9,6 +9,7 @@ import { ArrowUpRightIcon, EllipsisIcon, LoaderCircleIcon, XIcon } from "lucide-
 import { Button } from "../ui/button";
 import { Menu, MenuItem, MenuPopup, MenuSeparator, MenuTrigger } from "../ui/menu";
 import { Select, SelectItem, SelectPopup, SelectTrigger, SelectValue } from "../ui/select";
+import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 import { getDisplayModelName } from "./providerIconUtils";
 import { OMP_ROLE_META, ompRoleLabel, thinkingLevelsForModel } from "./ompModelRoles";
 
@@ -41,42 +42,65 @@ function RoleRow(props: {
   ]
     .filter(Boolean)
     .join(" · ");
+  const roleName = (
+    <div className="w-24 min-w-0 shrink-0">
+      <div className="truncate text-xs font-medium leading-tight">{label}</div>
+      <div className="truncate font-mono text-3xs leading-tight text-muted-foreground">
+        {meta ? binding.role : "custom"}
+      </div>
+    </div>
+  );
+  const modelButton = (
+    <button
+      type="button"
+      onClick={props.onChangeModel}
+      className="flex min-w-0 flex-1 cursor-pointer flex-col items-start rounded-sm text-left outline-none focus-visible:ring-1 focus-visible:ring-ring"
+      aria-label={`Change model for ${label}`}
+    >
+      {modelLabel ? (
+        <>
+          <span className="w-full truncate text-xs leading-tight">{modelLabel}</span>
+          <span className="w-full truncate text-2xs leading-tight text-muted-foreground">
+            {detail}
+          </span>
+        </>
+      ) : (
+        <span className="text-xs leading-tight text-muted-foreground">
+          {meta?.fallback ? `Uses ${ompRoleLabel(meta.fallback)}` : "Not set"}
+        </span>
+      )}
+    </button>
+  );
 
   return (
     <div
-      className="group/role flex min-h-11 items-center gap-3 rounded-md px-2 py-1.5 hover:bg-accent"
+      className="flex min-h-11 items-center gap-3 rounded-md px-2 py-1.5 hover:bg-accent"
       data-model-role={binding.role}
       // Returning from the rebind list remounts the panel at the top; keep the
       // role being written in view.
       ref={props.busy ? (element) => element?.scrollIntoView({ block: "nearest" }) : undefined}
     >
-      <div className="w-24 min-w-0 shrink-0" title={meta?.description}>
-        <div className="truncate text-xs font-medium leading-tight">{label}</div>
-        <div className="truncate font-mono text-3xs leading-tight text-muted-foreground">
-          {meta ? binding.role : "custom"}
-        </div>
-      </div>
+      {meta ? (
+        <Tooltip>
+          <TooltipTrigger render={roleName} />
+          <TooltipPopup side="top" align="start">
+            {meta.description}
+          </TooltipPopup>
+        </Tooltip>
+      ) : (
+        roleName
+      )}
 
-      <button
-        type="button"
-        onClick={props.onChangeModel}
-        className="flex min-w-0 flex-1 cursor-pointer flex-col items-start rounded-sm text-left outline-none focus-visible:ring-1 focus-visible:ring-ring"
-        aria-label={`Change model for ${label}`}
-        title={binding.selector ?? undefined}
-      >
-        {modelLabel ? (
-          <>
-            <span className="w-full truncate text-xs leading-tight">{modelLabel}</span>
-            <span className="w-full truncate text-2xs leading-tight text-muted-foreground">
-              {detail}
-            </span>
-          </>
-        ) : (
-          <span className="text-xs leading-tight text-muted-foreground">
-            {meta?.fallback ? `Uses ${ompRoleLabel(meta.fallback)}` : "Not set"}
-          </span>
-        )}
-      </button>
+      {binding.selector ? (
+        <Tooltip>
+          <TooltipTrigger render={modelButton} />
+          <TooltipPopup side="top" align="start">
+            <span className="font-mono">{binding.selector}</span>
+          </TooltipPopup>
+        </Tooltip>
+      ) : (
+        modelButton
+      )}
 
       {binding.model ? (
         <Select
@@ -91,7 +115,7 @@ function RoleRow(props: {
           <SelectTrigger
             size="xs"
             variant="ghost"
-            className="w-auto min-w-0 shrink-0 capitalize"
+            className="w-auto min-w-0 shrink-0"
             aria-label={`Thinking level for ${label}`}
           >
             <SelectValue>
@@ -101,7 +125,7 @@ function RoleRow(props: {
           <SelectPopup align="end" alignItemWithTrigger={false}>
             <SelectItem value={MODEL_DEFAULT_THINKING}>Model default</SelectItem>
             {thinkingLevelsForModel(props.model).map((level) => (
-              <SelectItem key={level} value={level} className="capitalize">
+              <SelectItem key={level} value={level}>
                 {level}
               </SelectItem>
             ))}
@@ -116,12 +140,7 @@ function RoleRow(props: {
           <Menu>
             <MenuTrigger
               render={
-                <Button
-                  size="icon-xs"
-                  variant="ghost-muted"
-                  className="opacity-0 group-hover/role:opacity-100 focus-visible:opacity-100 data-popup-open:opacity-100"
-                  aria-label={`${label} actions`}
-                />
+                <Button size="icon-xs" variant="ghost-muted" aria-label={`${label} actions`} />
               }
             >
               <EllipsisIcon className="size-3.5" />
@@ -197,12 +216,16 @@ export const ModelPickerRolesPanel = memo(function ModelPickerRolesPanel(props: 
     <div className="flex min-h-0 flex-1 flex-col" data-model-picker-roles="true">
       <div className="flex items-baseline justify-between gap-3 px-3 pt-2.5 pb-1.5">
         <div className="text-xs font-medium">{props.harnessName} roles</div>
-        <div
-          className="min-w-0 truncate text-2xs text-muted-foreground"
-          title={props.roles.configPath}
-        >
-          {abbreviateHome(props.roles.configPath)} · new sessions
-        </div>
+        <Tooltip>
+          <TooltipTrigger
+            render={<div className="min-w-0 truncate text-2xs text-muted-foreground" />}
+          >
+            {abbreviateHome(props.roles.configPath)} · new sessions
+          </TooltipTrigger>
+          <TooltipPopup side="top" align="end">
+            <span className="font-mono">{props.roles.configPath}</span>
+          </TooltipPopup>
+        </Tooltip>
       </div>
       {props.error ? (
         <div className="mx-3 mb-1 rounded-md bg-destructive/8 px-2 py-1.5 text-xs text-destructive-foreground">

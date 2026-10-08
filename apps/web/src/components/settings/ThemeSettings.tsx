@@ -1,4 +1,4 @@
-import { BUILT_IN_THEMES } from "@t3tools/shared/themePalettes";
+import { APP_THEME_CATALOG } from "@t3tools/shared/themeCatalog";
 import {
   CheckIcon,
   CopyIcon,
@@ -781,7 +781,7 @@ export function ThemeLibrary({
             theme={standardTheme}
           />
         ))}
-        {BUILT_IN_THEMES.map((maintainerTheme) => {
+        {APP_THEME_CATALOG.map((maintainerTheme) => {
           const card = getThemeCardDefinition(maintainerTheme);
           return (
             <ThemeLibraryCard

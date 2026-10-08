@@ -249,6 +249,12 @@ export const SETTINGS_SEARCH_ITEMS = [
     searchTerms: ["typography family size system sans"],
   },
   {
+    id: "text-font",
+    title: "Text font",
+    to: "/settings/appearance",
+    searchTerms: ["typography family markdown messages replies requests thinking"],
+  },
+  {
     id: "prompt-font",
     title: "Prompt font",
     to: "/settings/appearance",

@@ -574,7 +574,7 @@ export const DEFAULT_APPEARANCE_TYPOGRAPHY: AppearanceTypography = {
     variableAxes: {},
   },
   markdown: {
-    families: ["system-ui"],
+    families: ["Inter"],
     sizePx: 16,
     weight: 400,
     lineHeight: 1.6,

@@ -1,0 +1,29 @@
+{
+  "schema": "t3.appearance/snippets/v1",
+  "snippets": [
+    {
+      "id": "ambient-specular-glow",
+      "enabled": true,
+      "advanced": false,
+      "css": "/* KM Code Pro — Ambient Specular Glow & Glass Depth */\n[data-t3-app] [data-t3-surface=\"composer-body\"],\n[data-t3-app] [data-chat-composer-surface=\"true\"] {\n  box-shadow:\n    0 12px 36px -10px rgb(0 0 0 / 55%),\n    0 0 0 1px color-mix(in srgb, var(--ring) 20%, transparent),\n    0 0 24px -4px color-mix(in srgb, var(--ring) 14%, transparent) !important;\n  transition: box-shadow 240ms cubic-bezier(0.16, 1, 0.3, 1) !important;\n}\n\n[data-t3-app] [data-t3-surface=\"composer\"]:focus-within [data-t3-surface=\"composer-body\"],\n[data-t3-app] [data-t3-surface=\"composer\"]:focus-within [data-chat-composer-surface=\"true\"] {\n  box-shadow:\n    0 16px 44px -8px rgb(0 0 0 / 65%),\n    0 0 0 1.5px color-mix(in srgb, var(--ring) 55%, white 15%),\n    0 0 32px -2px color-mix(in srgb, var(--ring) 28%, transparent) !important;\n}\n\n[data-t3-app] [data-t3-surface=\"sidebar\"] [data-active=\"true\"],\n[data-t3-app] [data-app-sidebar] [data-active=\"true\"] {\n  border-radius: 8px !important;\n  box-shadow:\n    inset 0 1px 0 0 rgb(255 255 255 / 10%),\n    0 1px 3px 0 rgb(0 0 0 / 30%) !important;\n  transition: all 150ms cubic-bezier(0.16, 1, 0.3, 1) !important;\n}\n\n[data-t3-app] [role=\"dialog\"],\n[data-t3-app] [data-t3-surface=\"command-palette\"],\n[data-t3-app] [role=\"menu\"] {\n  border-radius: 12px !important;\n  box-shadow:\n    0 24px 64px -16px rgb(0 0 0 / 75%),\n    0 0 0 1px color-mix(in srgb, var(--contrast-border) 80%, transparent),\n    inset 0 1px 0 0 rgb(255 255 255 / 10%) !important;\n}"
+    },
+    {
+      "id": "editorial-monoline-code",
+      "enabled": true,
+      "advanced": false,
+      "css": "/* KM Code Pro — Editorial Monoline Code & Markdown */\n[data-t3-app] [data-t3-surface=\"code-block\"],\n.chat-markdown .chat-markdown-codeblock {\n  border-radius: 9px !important;\n  border: 1px solid color-mix(in srgb, var(--contrast-border) 70%, transparent) !important;\n  box-shadow: 0 4px 16px -4px rgb(0 0 0 / 30%) !important;\n  overflow: hidden !important;\n}\n\n.chat-markdown .chat-markdown-codeblock-header {\n  border-bottom: 1px solid color-mix(in srgb, var(--contrast-border) 50%, transparent) !important;\n  font-family: var(--font-mono) !important;\n  font-size: 0.72rem !important;\n  letter-spacing: 0.05em !important;\n  text-transform: uppercase !important;\n  padding: 0.35rem 0.75rem !important;\n}\n\n.chat-markdown :not(pre) > code {\n  font-family: var(--font-mono) !important;\n  font-size: 0.84em !important;\n  font-weight: 450 !important;\n  padding: 0.15rem 0.4rem !important;\n  border-radius: 5px !important;\n  border: 1px solid color-mix(in srgb, var(--contrast-border) 60%, transparent) !important;\n  background: color-mix(in srgb, var(--muted) 70%, transparent) !important;\n  letter-spacing: -0.01em !important;\n}\n\n.chat-markdown blockquote {\n  border-left: 3px solid var(--primary) !important;\n  background: color-mix(in srgb, var(--primary) 4%, transparent) !important;\n  border-radius: 0 8px 8px 0 !important;\n  padding: 0.6rem 1rem !important;\n  margin: 0.75rem 0 !important;\n  font-style: normal !important;\n}"
+    },
+    {
+      "id": "cyber-neon-pulses",
+      "enabled": true,
+      "advanced": false,
+      "css": "/* KM Code Pro — Cyber Neon Send Button & Stealth Scrollbars */\n[data-t3-app] [data-t3-surface=\"composer\"] [data-t3-part=\"send-button\"],\n[data-t3-app] [data-chat-composer-surface=\"true\"] [data-t3-part=\"send-button\"] {\n  background-image: linear-gradient(135deg, #00d2ff 0%, #3264ff 50%, #ff00b4 100%) !important;\n  color: #ffffff !important;\n  border: none !important;\n  font-weight: 550 !important;\n  box-shadow: 0 2px 14px -2px rgb(0 210 255 / 45%) !important;\n  transition: all 180ms ease !important;\n}\n\n[data-t3-app] [data-t3-surface=\"composer\"] [data-t3-part=\"send-button\"]:hover,\n[data-t3-app] [data-chat-composer-surface=\"true\"] [data-t3-part=\"send-button\"]:hover {\n  filter: brightness(1.12) !important;\n  box-shadow:\n    0 4px 20px -1px rgb(255 0 180 / 50%),\n    0 0 14px rgb(0 210 255 / 35%) !important;\n  transform: translateY(-0.5px) !important;\n}\n\n::-webkit-scrollbar {\n  width: 5px !important;\n  height: 5px !important;\n}\n\n::-webkit-scrollbar-track {\n  background: transparent !important;\n}\n\n::-webkit-scrollbar-thumb {\n  background: color-mix(in srgb, var(--contrast-border) 60%, transparent) !important;\n  border-radius: 999px !important;\n  transition: background 150ms ease !important;\n}\n\n::-webkit-scrollbar-thumb:hover {\n  background: color-mix(in srgb, var(--ring) 75%, white 25%) !important;\n  box-shadow: 0 0 8px color-mix(in srgb, var(--ring) 50%, transparent) !important;\n}"
+    },
+    {
+      "id": "compact-zen-chrome",
+      "enabled": true,
+      "advanced": false,
+      "css": "/* KM Code Pro — Compact Zen Chrome & Clean Borders */\n[data-t3-app] [data-t3-surface=\"sidebar\"] nav {\n  gap: 2px !important;\n}\n\n[data-t3-app] [data-t3-surface=\"sidebar\"] button {\n  min-height: 28px !important;\n  font-size: 0.8125rem !important;\n}\n\n[data-t3-app] [data-t3-surface=\"title-area\"] {\n  border-bottom: 1px solid color-mix(in srgb, var(--contrast-border) 40%, transparent) !important;\n}"
+    }
+  ]
+}

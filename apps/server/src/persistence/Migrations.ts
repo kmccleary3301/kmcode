@@ -11,6 +11,8 @@
 import * as Migrator from "effect/unstable/sql/Migrator";
 import * as Effect from "effect/Effect";
 
+import { reconcileForkMigrationLedger, runForkMigrations } from "./ForkMigrations.ts";
+
 // Import all migrations statically
 import Migration0001 from "./Migrations/001_OrchestrationEvents.ts";
 import Migration0002 from "./Migrations/002_OrchestrationCommandReceipts.ts";
@@ -66,8 +68,6 @@ import Migration0051 from "./Migrations/051_ProjectionThreadMessageContext.ts";
 import Migration0052 from "./Migrations/052_ProjectionThreadTitleState.ts";
 import Migration0053 from "./Migrations/053_PullRequestFilesViewed.ts";
 import Migration0054 from "./Migrations/054_ProjectionThreadsAutoSettleDisabledAt.ts";
-import Migration0055 from "./Migrations/055_ProjectionTurnNativeCheckpoint.ts";
-import Migration0056 from "./Migrations/056_ReplayForkSkippedUpstreamMigrations.ts";
 
 /**
  * Migration loader with all migrations defined inline.
@@ -134,8 +134,6 @@ const migrationEntries = [
   [52, "ProjectionThreadTitleState", Migration0052],
   [53, "PullRequestFilesViewed", Migration0053],
   [54, "ProjectionThreadsAutoSettleDisabledAt", Migration0054],
-  [55, "ProjectionTurnNativeCheckpoint", Migration0055],
-  [56, "ReplayForkSkippedUpstreamMigrations", Migration0056],
 ] as const;
 
 export const migrationManifest = migrationEntries.map(([id, name]) => [id, name] as const);
@@ -164,16 +162,25 @@ export interface RunMigrationsOptions {
  *
  * Creates the migrations tracking table (effect_sql_migrations) if it doesn't exist,
  * then runs any migrations with ID greater than the latest recorded migration.
+ * KM Code first removes records older fork builds left at upstream ids, and
+ * runs its own schema changes from a separate ledger after a full run.
  *
- * Returns array of [id, name] tuples for migrations that were run.
+ * Returns array of [id, name] tuples for upstream migrations that were run.
  *
  * @returns Effect containing array of executed migrations
  */
 export const runMigrations = Effect.fn("runMigrations")(function* ({
   toMigrationInclusive,
 }: RunMigrationsOptions = {}) {
-  const executedMigrations = yield* run({ loader: makeMigrationLoader(toMigrationInclusive) });
-  const migrations = executedMigrations.map(([id, name]) => `${id}_${name}`);
+  const executedMigrations = [
+    ...(yield* reconcileForkMigrationLedger(migrationManifest)),
+    ...(yield* run({ loader: makeMigrationLoader(toMigrationInclusive) })),
+  ];
+  const forkMigrations = toMigrationInclusive === undefined ? yield* runForkMigrations() : [];
+  const migrations = [
+    ...executedMigrations.map(([id, name]) => `${id}_${name}`),
+    ...forkMigrations.map((name) => `kmcode_${name}`),
+  ];
   yield* migrations.length === 0
     ? Effect.logDebug("Database schema is current")
     : Effect.log("Migrations ran successfully").pipe(Effect.annotateLogs({ migrations }));

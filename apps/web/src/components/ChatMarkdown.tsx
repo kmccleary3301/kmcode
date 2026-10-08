@@ -83,9 +83,13 @@ import ReactMarkdown from "react-markdown";
 import { toHtml } from "hast-util-to-html";
 import { createIncrementalMarkdownPlugin } from "../markdown-incremental";
 import { defaultUrlTransform } from "react-markdown";
+import rehypeKatex from "rehype-katex";
 import rehypeRaw from "rehype-raw";
 import rehypeSanitize, { defaultSchema } from "rehype-sanitize";
 import remarkBreaks from "remark-breaks";
+import remarkMath from "remark-math";
+import "katex/dist/katex.min.css";
+import { remarkSvgGraphics } from "../markdown-graphics";
 import { parseAssistantCitationHref } from "@t3tools/shared/assistantCitations";
 import { parseComposerContextHref } from "@t3tools/shared/composerContextReferences";
 import { parseThreadLinkHref, THREAD_LINK_PROTOCOL } from "@t3tools/shared/threadLinks";
@@ -146,6 +150,7 @@ import { createIncrementalHighlightedDocument } from "../lib/incrementalHighligh
 import { HighlightedCodeLines } from "./chat/HighlightedCodeLines";
 import { RenderErrorBoundary } from "./RenderErrorBoundary";
 import { MermaidDiagram } from "./chat/MermaidDiagram";
+import { SvgGraphic } from "./chat/SvgGraphic";
 import { useTheme } from "../hooks/useTheme";
 import { getClientSettings, useClientSettings } from "../hooks/useSettings";
 import {
@@ -551,8 +556,13 @@ const CHAT_MARKDOWN_SANITIZE_SCHEMA = {
   },
 } satisfies Parameters<typeof rehypeSanitize>[0];
 
+// Single-dollar inline math would swallow `$skill` chips and amounts like `$20k`,
+// so inline math uses `$$...$$`; `$$` fences on their own lines are display math.
+const CHAT_MARKDOWN_MATH = [remarkMath, { singleDollarTextMath: false }] as const;
+
 const CHAT_MARKDOWN_REMARK_PLUGINS = [
   remarkGfm,
+  CHAT_MARKDOWN_MATH,
   remarkKeepWindowsPathDestinations,
   remarkGithubAlerts,
   remarkNormalizeListItemIndentation,
@@ -563,6 +573,7 @@ const CHAT_MARKDOWN_REMARK_PLUGINS = [
 
 const CHAT_MARKDOWN_REMARK_PLUGINS_WITH_BREAKS = [
   remarkGfm,
+  CHAT_MARKDOWN_MATH,
   remarkKeepWindowsPathDestinations,
   remarkGithubAlerts,
   remarkNormalizeListItemIndentation,
@@ -572,12 +583,24 @@ const CHAT_MARKDOWN_REMARK_PLUGINS_WITH_BREAKS = [
   remarkNormalizeLinksAndTagInlineCode,
 ] satisfies NonNullable<ReactMarkdownOptions["remarkPlugins"]>;
 
+// KaTeX runs after sanitizing, so its MathML survives; `trust: false` keeps
+// TeX commands such as \href from producing links.
+const CHAT_MARKDOWN_KATEX = [
+  rehypeKatex,
+  { trust: false, strict: "error", throwOnError: false },
+] as const;
+
 const CHAT_MARKDOWN_REHYPE_PLUGINS = [
   rehypePreserveBareAnchorPlaceholders,
   rehypeRaw,
   rehypePreserveImageSourceMeta,
   [rehypeSanitize, CHAT_MARKDOWN_SANITIZE_SCHEMA],
+  CHAT_MARKDOWN_KATEX,
 ] satisfies NonNullable<ReactMarkdownOptions["rehypePlugins"]>;
+
+const CHAT_MARKDOWN_LITERAL_REHYPE_PLUGINS = [CHAT_MARKDOWN_KATEX] satisfies NonNullable<
+  ReactMarkdownOptions["rehypePlugins"]
+>;
 
 /** GitHub's own five alert kinds, in its colors: the glyph names the urgency, the title says it. */
 const GITHUB_ALERT_PRESENTATIONS: Record<
@@ -1258,10 +1281,11 @@ function MarkdownCodeBlock({
 }
 
 /**
- * Mermaid fences render as a diagram once the response settles; streaming and
- * the code toggle keep the highlighted source.
+ * Mermaid and SVG fences render as a graphic once the response settles;
+ * streaming and the code toggle keep the highlighted source.
  */
-function MarkdownMermaidCodeBlock({
+function MarkdownGraphicCodeBlock({
+  kind,
   code,
   fenceTitle,
   theme,
@@ -1269,6 +1293,7 @@ function MarkdownMermaidCodeBlock({
   onExpand,
   children,
 }: {
+  kind: "mermaid" | "svg";
   code: string;
   fenceTitle: string | null;
   theme: "light" | "dark";
@@ -1278,11 +1303,11 @@ function MarkdownMermaidCodeBlock({
 }) {
   const [showCode, setShowCode] = useState(false);
   const showDiagram = !showCode && !isStreaming && code.trim().length > 0;
-  const toggleLabel = showCode ? "Show diagram" : "Show code";
+  const toggleLabel = showCode ? `Show ${kind === "mermaid" ? "diagram" : "graphic"}` : "Show code";
   return (
     <MarkdownCodeBlock
       code={code}
-      language="mermaid"
+      language={kind}
       fenceTitle={fenceTitle}
       theme={theme}
       isStreaming={isStreaming}
@@ -1318,7 +1343,11 @@ function MarkdownMermaidCodeBlock({
               </div>
             }
           >
-            <MermaidDiagram source={code} theme={theme} onExpand={onExpand} />
+            {kind === "mermaid" ? (
+              <MermaidDiagram source={code} theme={theme} onExpand={onExpand} />
+            ) : (
+              <SvgGraphic source={code} onExpand={onExpand} />
+            )}
           </Suspense>
         </RenderErrorBoundary>
       ) : (
@@ -3607,17 +3636,19 @@ const CHAT_MARKDOWN_COMPONENTS = {
         </Suspense>
       </RenderErrorBoundary>
     );
-    if (language === "mermaid") {
+    if (language === "mermaid" || language === "svg") {
+      const name = language === "mermaid" ? "Mermaid diagram" : "SVG graphic";
       return (
-        <MarkdownMermaidCodeBlock
+        <MarkdownGraphicCodeBlock
+          kind={language}
           code={codeBlock.code}
           fenceTitle={fenceTitle}
           theme={resolvedTheme}
           isStreaming={isStreaming}
-          onExpand={(src) => expandMedia({ images: [{ src, name: "Mermaid diagram" }], index: 0 })}
+          onExpand={(src) => expandMedia({ images: [{ src, name }], index: 0 })}
         >
           {highlightedCode}
-        </MarkdownMermaidCodeBlock>
+        </MarkdownGraphicCodeBlock>
       );
     }
     return (
@@ -3662,10 +3693,12 @@ function ChatMarkdown({
   const remarkPlugins = useMemo(
     () => [
       ...(lineBreaks ? CHAT_MARKDOWN_REMARK_PLUGINS_WITH_BREAKS : CHAT_MARKDOWN_REMARK_PLUGINS),
+      // Standalone raw <svg> documents become svg fences for the isolated renderer.
+      ...(parseRawHtml ? [remarkSvgGraphics] : []),
       ...extraRemarkPlugins,
       ...(incrementalParsing ? [createIncrementalMarkdownPlugin()] : []),
     ],
-    [extraRemarkPlugins, incrementalParsing, lineBreaks],
+    [extraRemarkPlugins, incrementalParsing, lineBreaks, parseRawHtml],
   );
 
   // react-markdown converts unparsed HTML nodes to text when skipHtml is false.
@@ -3686,7 +3719,9 @@ function ChatMarkdown({
       <ChatMarkdownRendererContext value={componentState}>
         <ReactMarkdown
           remarkPlugins={remarkPlugins}
-          rehypePlugins={parseRawHtml ? CHAT_MARKDOWN_REHYPE_PLUGINS : undefined}
+          rehypePlugins={
+            parseRawHtml ? CHAT_MARKDOWN_REHYPE_PLUGINS : CHAT_MARKDOWN_LITERAL_REHYPE_PLUGINS
+          }
           skipHtml={false}
           components={CHAT_MARKDOWN_COMPONENTS}
           urlTransform={markdownUrlTransform}

@@ -1331,6 +1331,23 @@ const OrchestrationV2TurnItemBaseFields = {
   updatedAt: Schema.DateTimeUtc,
 } as const;
 
+export const ORCHESTRATION_V2_SUBAGENT_LIVE_CONTENT_MAX_LENGTH = 8_192;
+
+/** Latest bounded child-agent output, shown while a native subagent runs. */
+export const OrchestrationV2SubagentLiveContent = Schema.Struct({
+  kind: Schema.Literals(["assistant", "reasoning", "tool"]),
+  /** The newest UTF-16 units; older text is dropped and `truncated` set. */
+  text: Schema.String.check(Schema.isMaxLength(ORCHESTRATION_V2_SUBAGENT_LIVE_CONTENT_MAX_LENGTH)),
+  truncated: Schema.optional(Schema.Boolean),
+});
+export type OrchestrationV2SubagentLiveContent = typeof OrchestrationV2SubagentLiveContent.Type;
+
+const OrchestrationV2SubagentNativeFields = {
+  liveContent: Schema.optional(OrchestrationV2SubagentLiveContent),
+  /** Native child session transcript. The server reads it; clients only test presence. */
+  transcriptFile: Schema.optional(TrimmedNonEmptyString),
+} as const;
+
 export const OrchestrationV2FileSearchResult = Schema.Struct({
   fileName: TrimmedNonEmptyString,
   line: Schema.optional(PositiveInt),
@@ -1560,6 +1577,7 @@ export const OrchestrationV2TurnItem = Schema.Union([
     prompt: Schema.String,
     progress: Schema.optional(Schema.String),
     result: Schema.NullOr(Schema.String),
+    ...OrchestrationV2SubagentNativeFields,
   }),
   Schema.Struct({
     ...OrchestrationV2TurnItemBaseFields,
@@ -2335,6 +2353,7 @@ export const OrchestrationV2TurnItemJson = Schema.Union([
     prompt: Schema.String,
     progress: Schema.optional(Schema.String),
     result: Schema.NullOr(Schema.String),
+    ...OrchestrationV2SubagentNativeFields,
   }),
   Schema.Struct({
     ...OrchestrationV2TurnItemJsonBaseFields,

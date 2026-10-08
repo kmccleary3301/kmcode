@@ -1034,3 +1034,36 @@ describe("ChatMarkdown Windows file links", () => {
     expect(html).not.toContain("chat-markdown-file-link");
   });
 });
+
+describe("ChatMarkdown math and graphics safety", () => {
+  it("typesets accessible inline and display math without trusting TeX links", () => {
+    const html = renderToStaticMarkup(
+      <ChatMarkdown
+        cwd="/tmp/project"
+        text={
+          "Inline $$x^2$$ costs $20 and $30.\n\n$$\n\\frac{1}{2}\n$$\n\n$$\\href{javascript:alert(1)}{unsafe}$$"
+        }
+      />,
+    );
+    expect(html).toContain("<msup><mi>x</mi><mn>2</mn></msup>");
+    expect(html).toContain("costs $20 and $30.");
+    expect(html).toContain("<mfrac><mn>1</mn><mn>2</mn></mfrac>");
+    expect(html).toMatch(/<math\b[^>]*display="block"/);
+    expect(html).not.toMatch(/<a\b[^>]*href=["']javascript:/i);
+  });
+
+  it("keeps authored SVG as escaped source while the response streams", () => {
+    const html = renderToStaticMarkup(
+      <ChatMarkdown
+        cwd="/tmp/project"
+        isStreaming
+        text={
+          '<svg id="hostile-model-svg" xmlns="http://www.w3.org/2000/svg" onload="alert(1)"><script>alert(2)</script><text>Label</text></svg>'
+        }
+      />,
+    );
+    expect(html).toContain("&lt;svg");
+    expect(html).not.toMatch(/<svg\b[^>]*id="hostile-model-svg"/);
+    expect(html).not.toMatch(/<script(?:\s|>)/i);
+  });
+});

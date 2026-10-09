@@ -366,17 +366,6 @@ describe("ssh tunnel scripts", () => {
       script.indexOf('"$T3_STAGING/t3" --version'),
       script.indexOf('> "$T3_STAGING/.install-complete"'),
     );
-    // Node discovery is defined for the dev path but only ever invoked inside
-    // the node-script branch, which the archive path skips entirely.
-    assert.equal(script.split("ensure_remote_node_path || true").length - 1, 1);
-    assert.isBelow(
-      script.indexOf("ensure_remote_node_path || true"),
-      script.indexOf('exec node "$T3_NODE_SCRIPT_PATH" "$@"'),
-    );
-    assert.isBelow(
-      script.indexOf('exec node "$T3_NODE_SCRIPT_PATH" "$@"'),
-      script.indexOf("T3_ARCHIVE_VERSION="),
-    );
 
     const launch = SshTunnel.buildRemoteLaunchScript({
       ...ARCHIVE,
@@ -1079,12 +1068,12 @@ describe("archive runner script", () => {
   const windowsHost = hostPlatform === "win32";
   const archiveVersion = "1.2.3-preview.20260911.4";
 
-  const runRunner = (home: string, runner: string) =>
+  const runRunner = (home: string, runner: string, path = process.env.PATH ?? "") =>
     Effect.gen(function* () {
       const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
       const child = yield* spawner.spawn(
         ChildProcess.make("sh", [runner, "--version"], {
-          env: { PATH: process.env.PATH ?? "", HOME: home },
+          env: { PATH: path, HOME: home },
           extendEnv: false,
         }),
       );
@@ -1180,5 +1169,32 @@ describe("archive runner script", () => {
         assert.isFalse(yield* fs.exists(lock));
       }).pipe(Effect.provide(NodeServices.layer)),
     60_000,
+  );
+
+  // Installers put fork CLIs (Node scripts) in ~/.local/bin, which Ubuntu's
+  // non-interactive ssh shell does not have on PATH.
+  it.effect.skipIf(windowsHost)(
+    "finds an installed CLI in ~/.local/bin from a bare non-interactive PATH",
+    () =>
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const root = yield* fs.makeTempDirectoryScoped({ prefix: "t3-installed-runner-" });
+        const home = `${root}/home`;
+        const cli = `${home}/.local/bin/t3-pi-omp`;
+        yield* fs.makeDirectory(`${home}/.local/bin`, { recursive: true });
+        yield* fs.writeFileString(cli, "#!/bin/sh\necho t3-pi-omp 9.9.9\n");
+        yield* fs.chmod(cli, 0o755);
+        const runner = `${root}/run-t3.sh`;
+        yield* fs.writeFileString(
+          runner,
+          SshTunnel.buildRemoteT3RunnerScript({
+            installedCli: true,
+            installedCliCommand: "t3-pi-omp",
+          }),
+        );
+        const result = yield* runRunner(home, runner, "/usr/bin:/bin");
+        assert.equal(result.exitCode, 0, result.stderr);
+        assert.include(result.stdout, "t3-pi-omp 9.9.9");
+      }).pipe(Effect.provide(NodeServices.layer)),
   );
 });

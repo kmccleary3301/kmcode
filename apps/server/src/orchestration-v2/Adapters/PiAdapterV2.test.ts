@@ -873,6 +873,50 @@ describe("PiAdapterV2", () => {
     }).pipe(Effect.scoped, Effect.provide(layerTest)),
   );
 
+  it.effect("follows OMP's save redirect when another process holds the session file", () =>
+    Effect.gen(function* () {
+      const fake = yield* makeFakePi;
+      const { runtime, takeEvent } = yield* openRuntime(fake);
+      const providerThread = yield* runtime.ensureThread({
+        threadId: THREAD_ID,
+        modelSelection: modelSelection("default"),
+        runtimePolicy,
+      });
+      yield* startTurn(runtime, providerThread, "default");
+      yield* fake.takeRequest("prompt");
+      yield* fake.emit({ type: "agent_start" });
+      // An unrelated notice must not move the binding.
+      yield* fake.emit({ type: "notice", level: "warning", message: "x", source: "other" });
+      fake.queueState({ sessionFile: "/fake/redirected.jsonl" });
+      yield* fake.emit({
+        type: "notice",
+        level: "warning",
+        message: "Session is open for writing in another omp process",
+        source: "session-persistence",
+      });
+      const moved = yield* takeEvent(
+        (event) =>
+          event.type === "provider_thread.updated" &&
+          event.providerThread.nativeThreadRef?.nativeId !== FAKE_SESSION_FILE,
+      );
+      assert.isTrue(
+        moved.type === "provider_thread.updated" &&
+          moved.providerThread.id === providerThread.id &&
+          moved.providerThread.nativeThreadRef?.nativeId === "/fake/redirected.jsonl",
+      );
+      yield* fake.emit({ type: "agent_end", messages: [], willRetry: false });
+      yield* fake.emit({ type: "agent_settled" });
+      const idle = yield* takeEvent(
+        (event) =>
+          event.type === "provider_thread.updated" && event.providerThread.status === "idle",
+      );
+      assert.isTrue(
+        idle.type === "provider_thread.updated" &&
+          idle.providerThread.nativeThreadRef?.nativeId === "/fake/redirected.jsonl",
+      );
+    }).pipe(Effect.scoped, Effect.provide(layerTest)),
+  );
+
   it.effect("resets applied thinking when returning to Pi default", () =>
     Effect.gen(function* () {
       const fake = yield* makeFakePi;

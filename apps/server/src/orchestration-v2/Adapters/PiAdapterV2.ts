@@ -2176,6 +2176,35 @@ export function makePiAdapterV2(
             }
             return;
           }
+          case "notice": {
+            // OMP allows one writer per session file. If another omp process
+            // (a TUI, `omp -r`) already holds it, OMP saves this session to a
+            // fresh file instead and says so here. Follow the move, or the
+            // next resume reopens the old file and silently drops every turn
+            // written since.
+            if (state === null || recordString(event, "source") !== "session-persistence") return;
+            const data = yield* request({ type: "get_state" }, 10_000).pipe(
+              Effect.orElseSucceed(() => undefined),
+            );
+            const sessionFile = recordString(data, "sessionFile");
+            if (
+              threadState !== state ||
+              sessionFile === undefined ||
+              sessionFile === state.providerThread.nativeThreadRef?.nativeId
+            ) {
+              return;
+            }
+            yield* Effect.logWarning(
+              "Pi session file is held by another process; following the redirect.",
+              {
+                from: state.providerThread.nativeThreadRef?.nativeId,
+                to: sessionFile,
+              },
+            );
+            lastNativeThreadId = sessionFile;
+            yield* updateProviderThread(state, { nativeThreadRef: providerRef(sessionFile) });
+            return;
+          }
           default:
             return;
         }

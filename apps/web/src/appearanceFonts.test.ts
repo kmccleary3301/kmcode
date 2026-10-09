@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vite-plus/test";
+import { afterEach, describe, expect, it, vi } from "vite-plus/test";
 
 import {
   areFontAdvancesMonospace,
@@ -59,9 +59,25 @@ describe("cssFontFamilies", () => {
 });
 
 describe("resolveDefaultFamilyLabel", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
   it("skips generic keywords and returns null for a stack of only generics", () => {
     expect(resolveDefaultFamilyLabel("system-ui, sans-serif")).toBeNull();
     expect(resolveDefaultFamilyLabel("ui-monospace, monospace")).toBeNull();
+  });
+
+  it("names a bundled @font-face family before it has finished loading", () => {
+    // Canvas metrics cannot see a face that is still loading, so the settings
+    // page opened at startup labeled the Inter default as the system font.
+    vi.stubGlobal("document", { fonts: [{ family: '"Inter"', status: "unloaded" }] });
+    expect(resolveDefaultFamilyLabel(DEFAULT_SANS_FONT_STACK)).toBe("Inter");
+  });
+
+  it("does not name a bundled face that failed to load", () => {
+    vi.stubGlobal("document", { fonts: [{ family: "Inter", status: "error" }] });
+    expect(resolveDefaultFamilyLabel('"Inter", sans-serif')).toBeNull();
   });
 });
 

@@ -251,6 +251,22 @@
       }
     },
     {
+      "name": "remark-math",
+      "sourceUrl": "https://github.com/remarkjs/remark-math",
+      "generatedNotice": {
+        "licenseId": "MIT",
+        "copyrights": ["Copyright (c) 2017 Junyoung Choi <fluke8259@gmail.com>"]
+      }
+    },
+    {
+      "name": "rehype-katex",
+      "sourceUrl": "https://github.com/remarkjs/remark-math",
+      "generatedNotice": {
+        "licenseId": "MIT",
+        "copyrights": ["Copyright (c) 2017 Junyoung Choi <fluke8259@gmail.com>"]
+      }
+    },
+    {
       "name": "@pierre/theming",
       "generatedNotice": {
         "licenseId": "Apache-2.0",

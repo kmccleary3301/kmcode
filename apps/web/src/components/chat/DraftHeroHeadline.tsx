@@ -360,7 +360,9 @@ export function DraftHeroHeadline({
   return (
     <div className="mx-auto flex w-full max-w-5xl flex-col items-center select-none">
       <Tooltip>
-        <TooltipTrigger render={<div className="mb-4 relative group cursor-pointer" />}>
+        <TooltipTrigger
+          render={<div data-draft-hero-mascot className="mb-4 relative group cursor-pointer" />}
+        >
           {/* oxlint-disable-next-line shadcn/no-raw-colors -- KM Code brand mark keeps its exact neon halo across themes. */}
           <div className="absolute -inset-1.5 rounded-full bg-gradient-to-r from-cyan-500 via-purple-500 to-pink-500 opacity-60 blur-xs transition duration-500 group-hover:opacity-100 group-hover:blur-sm" />
           <img

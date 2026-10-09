@@ -1,3 +1,4 @@
+@import "./transcript.css";
 @import "tailwindcss";
 
 @custom-variant dark (&:is(.dark, .dark *));
@@ -2186,6 +2187,31 @@ form[data-t3-surface="composer"] {
 
 [data-t3-part="timeline-message"] {
   padding-inline: var(--t3-content-gutter, 24px);
+}
+
+/* The hero overlay is the actual available chat height. Container queries
+   therefore follow Android's resizes-content keyboard behavior without
+   coupling this presentation detail to focus state or a global observer. */
+@container (max-width: 639px) and (max-height: 540px) {
+  [data-chat-draft-hero="true"] [data-draft-hero-mascot] {
+    display: none;
+  }
+}
+
+@container (max-width: 639px) {
+  [data-chat-draft-hero="true"] [data-draft-hero-layout] {
+    max-height: 100%;
+    overflow: auto;
+    padding-block: 0.5rem;
+  }
+
+  [data-chat-draft-hero="true"] [data-draft-hero-headline] {
+    position: static;
+  }
+
+  [data-chat-draft-hero="true"] [data-draft-hero-headline] > div {
+    padding-bottom: 1rem;
+  }
 }
 
 [data-t3-part="send-button"],

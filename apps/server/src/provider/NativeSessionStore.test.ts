@@ -214,7 +214,7 @@ describe("listNativeSessionFiles", () => {
 });
 
 describe("readNativeHistory", () => {
-  it("follows the active branch and keeps only user and assistant text", async () => {
+  it("follows the active branch in content order and attaches tool results to their calls", async () => {
     const agentDir = await agentDirectory();
     const filePath = await writeSession(
       agentDir,
@@ -244,9 +244,12 @@ describe("readNativeHistory", () => {
           message: {
             role: "assistant",
             content: [
-              { type: "thinking", thinking: "private" },
+              { type: "thinking", thinking: "plan" },
+              { type: "thinking", thinking: "more plan" },
               { type: "text", text: "active answer" },
-              { type: "toolCall", id: "c", name: "read", arguments: {} },
+              { type: "toolCall", id: "c", name: "bash", arguments: { command: "false" } },
+              { type: "text", text: "after the call" },
+              { type: "toolCall", id: "unanswered", name: "read", arguments: { path: "a" } },
             ],
           },
         },
@@ -255,14 +258,43 @@ describe("readNativeHistory", () => {
           id: "tool",
           parentId: "assistant",
           timestamp: "2026-08-01T12:00:04.000Z",
-          message: { role: "toolResult", toolCallId: "c", content: [{ type: "text", text: "x" }] },
+          message: {
+            role: "toolResult",
+            toolCallId: "c",
+            content: [{ type: "text", text: "x" }],
+            details: { exitCode: 1 },
+            isError: true,
+          },
         },
       ]),
     );
 
     expect(await readNativeHistory(filePath)).toEqual([
       { role: "user", text: "active prompt", createdAt: "2026-08-01T12:00:02.000Z" },
+      { role: "reasoning", text: "plan\n\nmore plan", createdAt: "2026-08-01T12:00:03.000Z" },
       { role: "assistant", text: "active answer", createdAt: "2026-08-01T12:00:03.000Z" },
+      {
+        role: "tool",
+        toolCallId: "c",
+        toolName: "bash",
+        args: { command: "false" },
+        result: {
+          outputText: "x",
+          details: { exitCode: 1 },
+          isError: true,
+          completedAt: "2026-08-01T12:00:04.000Z",
+        },
+        createdAt: "2026-08-01T12:00:03.000Z",
+      },
+      { role: "assistant", text: "after the call", createdAt: "2026-08-01T12:00:03.000Z" },
+      {
+        role: "tool",
+        toolCallId: "unanswered",
+        toolName: "read",
+        args: { path: "a" },
+        result: undefined,
+        createdAt: "2026-08-01T12:00:03.000Z",
+      },
     ]);
   });
 });

@@ -1,7 +1,8 @@
 /**
  * Pi and OMP native sessions as KM Code threads. Opening a session imports its
- * active-branch text history once and binds the thread to the session file;
- * the Pi adapter then resumes that file on the thread's first turn.
+ * active-branch history (prompts, answers, thinking, and tool calls) once and
+ * binds the thread to the session file; the Pi adapter then resumes that file
+ * on the thread's first turn.
  */
 import {
   CommandId,
@@ -13,6 +14,8 @@ import {
   ProjectId,
   type AbsolutePath,
   type OrchestrationV2AppThread,
+  type OrchestrationV2DomainEvent,
+  type OrchestrationV2TurnItem,
   type OrchestrationV2ProviderThread,
   type OrchestrationV2ServerCommand,
   ProviderModelRoleError,
@@ -34,6 +37,7 @@ import {
   type ProviderNativeSessionStopInput,
   type ProviderNativeSessionStopResult,
   ThreadId,
+  TurnItemId,
 } from "@t3tools/contracts";
 import { normalizeProjectPathForComparison } from "@t3tools/shared/path";
 import * as Context from "effect/Context";
@@ -52,6 +56,7 @@ import * as ServerConfig from "../config.ts";
 import * as EventSink from "../orchestration-v2/EventSink.ts";
 import * as IdAllocator from "../orchestration-v2/IdAllocator.ts";
 import { makePiRpcConnection } from "../orchestration-v2/Adapters/PiRpc.ts";
+import { piToolTurnItemFields } from "../orchestration-v2/Adapters/PiToolTurnItem.ts";
 import {
   buildPiRpcLaunch,
   resolvePiLaunchArgs,
@@ -375,7 +380,67 @@ const make = Effect.gen(function* () {
             occurredAt: createdAt,
             payload: appThread,
           },
-          ...history.flatMap((message, index) => messageEvents({ threadId, index, message })),
+          ...history.flatMap((message, index): ReadonlyArray<OrchestrationV2DomainEvent> => {
+            if (message.role === "user" || message.role === "assistant") {
+              return messageEvents({ threadId, index, message });
+            }
+            const suffix = String(index).padStart(6, "0");
+            const id = `${IMPORT_EVENT_PREFIX}:turn-item:${threadId}:${suffix}`;
+            const startedAt = DateTime.makeUnsafe(message.createdAt);
+            const result = message.role === "tool" ? message.result : undefined;
+            const completedAt =
+              result === undefined ? startedAt : DateTime.makeUnsafe(result.completedAt);
+            const common = {
+              id: TurnItemId.make(id),
+              threadId,
+              runId: null,
+              nodeId: null,
+              providerThreadId: null,
+              providerTurnId: null,
+              nativeItemRef: null,
+              parentItemId: null,
+              ordinal: index + 1,
+              startedAt,
+              completedAt,
+              updatedAt: completedAt,
+            };
+            const turnItem: OrchestrationV2TurnItem =
+              message.role === "tool"
+                ? {
+                    ...common,
+                    // A call without a recorded result never finished.
+                    status:
+                      result === undefined
+                        ? "interrupted"
+                        : result.isError
+                          ? "failed"
+                          : "completed",
+                    ...piToolTurnItemFields({
+                      toolName: message.toolName,
+                      args: message.args,
+                      outputText: result?.outputText ?? "",
+                      details: result?.details,
+                      isError: result?.isError ?? false,
+                    }),
+                  }
+                : {
+                    ...common,
+                    status: "completed",
+                    title: null,
+                    type: "reasoning",
+                    text: message.text,
+                    streaming: false,
+                  };
+            return [
+              {
+                id: EventId.make(id),
+                type: "turn-item.updated",
+                threadId,
+                occurredAt: completedAt,
+                payload: turnItem,
+              },
+            ];
+          }),
           {
             id: EventId.make(`${IMPORT_EVENT_PREFIX}:provider-thread:${providerThreadId}`),
             type: "provider-thread.updated",

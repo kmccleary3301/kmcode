@@ -142,7 +142,7 @@ let expandedImageUrl: string | null = null;
  * save and copy actions fetch through. Only one diagram is expanded at a time, so
  * the previous URL is released.
  */
-function mermaidImageUrl(svg: string): string {
+export function standaloneSvgImageUrl(svg: string): string {
   const svgDocument = new DOMParser().parseFromString(svg, "image/svg+xml");
   const element = svgDocument.documentElement;
   const viewBox = element.getAttribute("viewBox")?.trim().split(/\s+/).map(Number);
@@ -205,7 +205,7 @@ export function MermaidDiagram({
         type="button"
         aria-label="Expand diagram"
         className="flex w-full cursor-zoom-in justify-center rounded-md focus-visible:outline-2 focus-visible:outline-ring [&_svg]:h-auto [&_svg]:max-w-full"
-        onClick={() => onExpand(mermaidImageUrl(result.svg))}
+        onClick={() => onExpand(standaloneSvgImageUrl(result.svg))}
         dangerouslySetInnerHTML={{ __html: result.svg }}
       />
     </div>

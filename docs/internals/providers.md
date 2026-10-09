@@ -98,11 +98,14 @@ a profile and `~/.omp/agent/sessions` otherwise.
 [`NativeSessionCoordinator`][native-coordinator] opens a session as a KM Code thread. A thread whose
 provider thread is already bound to the session file (one KM Code started, or an earlier import) is
 reused and unarchived; otherwise the coordinator registers the project for the session's working
-directory, creates a thread bound to the file, and imports the active branch's user and assistant
-messages. The next turn resumes the runtime on that file, so native history and KM Code stay one
-conversation. Rename writes the title the way each runtime does (OMP rewrites its fixed-width title
-slot in place; Pi appends a `session_info` entry) and renames the thread; fork, stop, and archive
-act on the bound thread. Mutations are serialized and wait for server startup.
+directory, creates a thread bound to the file, and imports the active branch: prompts, then each
+assistant message's thinking, answer text, and tool calls in content order. Tool results attach to
+their call and map to the same command, file-change, and tool items a live turn emits; a call with
+no recorded result imports as interrupted. The next turn resumes the runtime on that file, so native
+history and KM Code stay one conversation. Rename writes the title the way each runtime does (OMP
+rewrites its fixed-width title slot in place; Pi appends a `session_info` entry) and renames the
+thread; fork, stop, and archive act on the bound thread. Mutations are serialized and wait for
+server startup.
 
 Tool previews are bounded, but expanded details load the native arguments and results from durable
 activity data, including text, structured content, and supported images. OMP image blob references
@@ -141,6 +144,27 @@ All six RPCs—list, open, rename, fork, stop, and archive—live in the shared 
 attached, a native session is an ordinary canonical thread: mobile can send turns, interrupt work,
 answer approvals and user-input requests, change supported runtime/model settings, and receive the
 existing thread push notifications without a provider-specific notification path.
+
+## Native streaming transcripts
+
+Reasoning streams into its own turn items and never becomes answer text. An OMP `toolcall_start`
+finishes the preceding answer segment and opens a running tool item whose arguments update as
+they stream (throttled to the 50 ms flush); `toolcall_end` only marks the arguments complete. A
+previewed call that never executes is marked failed when the turn ends.
+
+OMP sessions subscribe to child-agent events (`set_subagent_subscription`). Subagent items carry
+the child's session file and, while running, a `liveContent` preview of its latest reasoning,
+answer, or tool output, capped at the newest 8,192 UTF-16 units with `truncated` set. Completed
+children drop the preview. `orchestration.getSubagentTranscript` reads a child transcript through
+its subagent item (by turn item id or subagent id), never a client-supplied path. Pages advance by
+byte cursor to the last complete JSONL line within 512 KiB, growing the window for one oversized
+record; a partial trailing line waits for the next page, and a cursor past the end restarts with
+`reset`. Entry text is capped at 8,192 characters.
+
+Web and mobile share a reveal controller (`@t3tools/client-runtime/streaming-reveal`) paced at
+30 Hz. Completion, identity changes, and reduced motion snap to the authoritative text. Hermes has
+no `Intl.Segmenter`, so both use the same approximate grapheme clustering: marks, variation
+selectors, skin-tone modifiers, ZWJ sequences, flag pairs, and CRLF stay whole.
 
 ## Provider updates run only through the owning installer
 

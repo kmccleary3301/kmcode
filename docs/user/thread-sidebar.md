@@ -215,7 +215,11 @@ snooze limit stops by default. Providers without a reset time offer manual
 retry and the normal snooze choices.
 
 On web and desktop, use **Agents** to follow work delegated to subagents.
-Stop on a thread also stops the subagents it delegated to.
+Stop on a thread also stops the subagents it delegated to. Each running
+provider agent shows a live preview of its latest reasoning, answer, or tool
+output; select it to read its full transcript, with tool calls shown as cards.
+On mobile, the Agents sheet opens the same transcript. Agents with their own
+thread open that thread instead.
 
 Subagent threads started by the agent can't take messages; message the parent
 thread instead. When such a subagent needs an approval or an answer, the parent

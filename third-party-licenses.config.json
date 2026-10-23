@@ -251,6 +251,13 @@
       }
     },
     {
+      "repositoryUrl": "https://github.com/kmccleary3301/stream-mdx",
+      "generatedNotice": {
+        "licenseId": "MIT",
+        "copyrights": ["Copyright (c) 2025 Kyle McCleary"]
+      }
+    },
+    {
       "name": "remark-math",
       "sourceUrl": "https://github.com/remarkjs/remark-math",
       "generatedNotice": {

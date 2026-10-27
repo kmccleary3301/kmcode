@@ -30,7 +30,7 @@ import * as McpInvocationContext from "../../McpInvocationContext.ts";
 
 const ThreadOrganizeTool = Tool.make("t3_thread_organize", {
   description:
-    "Pin, snooze, settle, archive, or mark a thread unread. Omit threadId for this thread. snooze requires snoozedUntil. Existing thread lifecycle rules apply; this does not schedule a future action.",
+    "Pin, snooze, settle, archive, or mark a thread unread. Omit threadId for this thread. snooze requires snoozedUntil. Settling this thread from its own active turn is deferred until that turn ends and returns settlesWhenTurnEnds. Existing thread lifecycle rules apply; this does not schedule a future action.",
   parameters: Schema.Struct({
     threadId: Schema.optional(ThreadId),
     action: Schema.Literals([
@@ -46,7 +46,10 @@ const ThreadOrganizeTool = Tool.make("t3_thread_organize", {
     ]),
     snoozedUntil: Schema.optional(IsoDateTime),
   }),
-  success: OrchestrationV2DispatchCommandResult,
+  success: Schema.Union([
+    OrchestrationV2DispatchCommandResult,
+    Schema.Struct({ settlesWhenTurnEnds: Schema.Literal(true) }),
+  ]),
   failure: OrchestratorMcpFailure,
   failureMode: "return" as const,
   dependencies: [
@@ -138,7 +141,7 @@ const question = Schema.Struct({
   ),
   multiSelect: Schema.optional(Schema.Boolean),
   allowCustomAnswer: Schema.optional(Schema.Boolean),
-  required: Schema.optional(Schema.Boolean),
+  initialAnswer: Schema.optional(Schema.String),
 });
 const pendingRequest = Schema.Struct({
   requestId: RuntimeRequestId,
@@ -154,11 +157,16 @@ const PendingRequestListTool = Tool.make("t3_pending_request_list", {
   .annotate(Tool.Readonly, true)
   .annotate(Tool.Destructive, false);
 const PendingRequestReadTool = Tool.make("t3_pending_request_read", {
-  ...commandTool,
   description:
-    "Read a pending user question. Answer with t3_pending_request_respond; existing live or message response handling is used.",
+    "Read a pending user question, including any suggested initialAnswer from the provider. Answer with t3_pending_request_respond; an initialAnswer is a suggestion, not a submitted response.",
   parameters: Schema.Struct(requestTarget),
   success: pendingRequest,
+  failure: OrchestratorMcpFailure,
+  failureMode: "return" as const,
+  dependencies: [
+    McpInvocationContext.McpInvocationContext,
+    ThreadManagementService.ThreadManagementService,
+  ],
 })
   .annotate(Tool.Readonly, true)
   .annotate(Tool.Destructive, false);

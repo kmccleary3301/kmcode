@@ -1,0 +1,258 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>KM Code · OMP replay</title>
+  <style>
+    :root { color-scheme: dark; font-family: Inter, ui-sans-serif, system-ui, sans-serif; font-size: 13px; background: #101114; color: #e9eaed; }
+    * { box-sizing: border-box; }
+    body { margin: 0; height: 100dvh; display: flex; flex-direction: column; overflow: hidden; }
+    header { flex: none; border-bottom: 1px solid #303239; padding: 10px 16px 8px; background: #18191e; }
+    .heading, .controls, .status { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+    .heading { justify-content: space-between; margin-bottom: 9px; }
+    h1 { margin: 0; font-size: 14px; font-weight: 600; letter-spacing: -.02em; }
+    .badge { display: inline-block; padding: 2px 7px; border: 1px solid #635b83; border-radius: 5px; font-size: 11px; color: #cfb9ff; margin-right: 6px; }
+    .isolation { color: #a9abb5; font-size: 11px; }
+    button, select, .file-button { min-height: 34px; border: 1px solid #42444e; border-radius: 6px; background: #25262d; color: inherit; padding: 5px 11px; font: inherit; cursor: pointer; }
+    button:active, .file-button:active { background: #3b3d48; }
+    button:disabled, select:disabled { opacity: .45; cursor: default; }
+    button:focus-visible, select:focus-visible, .file-button:focus-within { outline: 2px solid #b8a0f1; outline-offset: 2px; }
+    #play { background: #c4aff6; color: #191424; border-color: transparent; min-width: 74px; font-weight: 600; }
+    label { display: inline-flex; gap: 6px; align-items: center; }
+    .file-button { position: relative; overflow: hidden; }
+    .file-button input { position: absolute; inset: 0; opacity: 0; width: 100%; cursor: pointer; }
+    .spacer { flex: 1; }
+    .status { margin-top: 8px; font-size: 11px; color: #a9abb5; gap: 10px; font-variant-numeric: tabular-nums; }
+    #status { color: #d8d0ef; }
+    progress { appearance: none; width: 150px; height: 3px; border: 0; border-radius: 2px; overflow: hidden; background: #383943; }
+    progress::-webkit-progress-bar { background: #383943; }
+    progress::-webkit-progress-value { background: #b8a0f1; }
+    progress::-moz-progress-bar { background: #b8a0f1; }
+    #scenario { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 360px; }
+    #error { color: #ffb3b3; margin: 8px 0 0; overflow-wrap: anywhere; }
+    #warnings { margin: 8px 0 0; font-size: 12px; color: #dcc69b; }
+    #warnings ul { margin: 5px 0 0; padding-left: 20px; max-height: 100px; overflow: auto; }
+    iframe { display: block; flex: 1; width: 100%; min-height: 0; border: 0; background: #101114; }
+    #inspector { flex: none; margin: 0; max-height: 30dvh; overflow: auto; background: #16171b; border-bottom: 1px solid #303239; padding: 10px 16px; font: 11px/1.5 ui-monospace, monospace; white-space: pre-wrap; overflow-wrap: anywhere; }
+    [hidden] { display: none !important; }
+    @media (max-width: 600px) {
+      header { padding: 8px 10px; }
+      .heading { margin-bottom: 7px; gap: 4px; }
+      .isolation { width: 100%; }
+      button, select, .file-button { min-height: 44px; }
+      .controls { gap: 6px; }
+      .spacer { display: none; }
+      #inspect { margin-left: auto; }
+      .status { gap: 7px; }
+      progress { width: 70px; }
+      #scenario { max-width: 180px; }
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <div class="heading">
+      <h1><span class="badge">REPLAY</span>Provider session preview</h1>
+      <span class="isolation">Scratch profile · Offline mock OMP and Codex · Desktop app untouched</span>
+    </div>
+    <div class="controls" aria-label="Replay controls">
+      <button id="tour-session" disabled>OMP tour</button>
+      <button id="goal-session" disabled>Goal session</button>
+      <button id="play" disabled>Play</button>
+      <button id="step" disabled title="Emit the next native event">Step</button>
+      <button id="reset" disabled title="Start a fresh isolated replay thread">Reset</button>
+      <label>Speed <select id="speed" aria-label="Playback speed" disabled>
+        <option value="0.5">0.5×</option><option value="1" selected>1×</option><option value="2">2×</option><option value="4">4×</option>
+      </select></label>
+      <label>Transcript <select id="transcript-style" aria-label="Transcript style">
+        <option value="minimal">Minimal</option><option value="km">KM</option><option value="terminal">Terminal</option>
+      </select></label>
+      <button id="appearance" aria-pressed="false" title="Show the transcript style preview and loader gallery in Settings → Appearance">Styles &amp; loaders</button>
+      <span class="spacer"></span>
+      <label class="file-button">Open export<input id="archive" type="file" accept=".jsonl,.json,application/json" aria-label="Open an exported OMP or ATIF transcript"></label>
+      <button id="inspect" aria-expanded="false" aria-controls="inspector">Events</button>
+    </div>
+    <div class="status">
+      <span id="status">Connecting to isolated replay…</span>
+      <progress id="progress" value="0" max="1" aria-label="Native event playback progress"></progress>
+      <span id="count">0 events</span>
+      <span id="scenario">Built-in synthetic session</span>
+    </div>
+    <p id="error" role="alert" hidden></p>
+    <details id="warnings" hidden><summary>Import notes</summary><ul></ul></details>
+  </header>
+  <pre id="inspector" hidden aria-label="Replay event state"></pre>
+  <iframe id="session" title="Isolated KM Code session using the production transcript" allow="clipboard-read; clipboard-write" src="/"></iframe>
+  <script type="module">
+    const play = document.querySelector('#play');
+    const step = document.querySelector('#step');
+    const reset = document.querySelector('#reset');
+    const speed = document.querySelector('#speed');
+    const archive = document.querySelector('#archive');
+    const inspect = document.querySelector('#inspect');
+    const inspector = document.querySelector('#inspector');
+    const error = document.querySelector('#error');
+    const frame = document.querySelector('#session');
+    const transcriptStyle = document.querySelector('#transcript-style');
+    const appearance = document.querySelector('#appearance');
+    const tourSession = document.querySelector('#tour-session');
+    const goalSession = document.querySelector('#goal-session');
+    // The app keeps client settings in this same-origin key and reads them on load.
+    const CLIENT_SETTINGS_KEY = 't3code:client-settings:v1';
+    function readClientSettings() {
+      try {
+        const value = JSON.parse(localStorage.getItem(CLIENT_SETTINGS_KEY) ?? '{}');
+        return value && typeof value === 'object' ? value : {};
+      } catch { return {}; }
+    }
+    transcriptStyle.value = readClientSettings().transcriptStyle ?? 'minimal';
+    let state = null;
+    let busy = false;
+    let threadUrl = null;
+    let polling = false;
+
+    function showError(message) {
+      error.textContent = message;
+      error.hidden = !message;
+    }
+    function parseState(value) {
+      if (!value || typeof value !== 'object' ||
+          !['omp', 'goal'].includes(value.mode) ||
+          !['idle', 'playing', 'paused', 'completed'].includes(value.status) ||
+          !Number.isFinite(value.cursor) || !Number.isFinite(value.total) ||
+          !Number.isFinite(value.speed) || typeof value.scenario !== 'string') {
+        throw new Error('The replay runtime returned an invalid playback state.');
+      }
+      return value;
+    }
+    function render() {
+      const ready = state !== null && !busy;
+      const goalMode = state?.mode === 'goal';
+      tourSession.disabled = !ready || !goalMode;
+      // Clicking it again starts a fresh goal thread (e.g. after Clear).
+      goalSession.disabled = !ready;
+      play.disabled = !ready || goalMode;
+      step.disabled = !ready || goalMode || state?.status === 'playing' || state?.status === 'completed';
+      reset.disabled = !ready || goalMode;
+      speed.disabled = !ready;
+      archive.disabled = busy;
+      if (!state) return;
+      play.textContent = state.status === 'playing' ? 'Pause' : state.status === 'completed' ? 'Replay' : 'Play';
+      speed.value = String(state.speed);
+      document.querySelector('#status').textContent = goalMode
+        ? 'Native Codex goal session · use the goal card controls in the composer'
+        : {
+          idle: 'Ready', playing: 'Playing native events', paused: 'Event feed paused', completed: 'Replay feed finished'
+        }[state.status];
+      const progress = document.querySelector('#progress');
+      progress.hidden = goalMode;
+      progress.max = Math.max(1, state.total);
+      progress.value = state.cursor;
+      document.querySelector('#count').textContent = goalMode
+        ? 'Goal turns run autonomously'
+        : `${state.cursor} / ${state.total} events`;
+      document.querySelector('#scenario').textContent = state.scenario;
+      inspector.textContent = JSON.stringify(state, null, 2);
+      const warnings = Array.isArray(state.warnings) ? state.warnings.filter(item => typeof item === 'string') : [];
+      const notes = document.querySelector('#warnings');
+      const list = notes.querySelector('ul');
+      if (list.textContent !== warnings.join('')) {
+        list.replaceChildren(...warnings.map(note => {
+          const item = document.createElement('li');
+          item.textContent = note;
+          return item;
+        }));
+      }
+      notes.hidden = warnings.length === 0;
+      if (typeof state.threadUrl === 'string' && state.threadUrl !== threadUrl) {
+        const target = new URL(state.threadUrl, location.origin);
+        if (target.origin !== location.origin) throw new Error('Replay navigation must stay on this isolated origin.');
+        threadUrl = state.threadUrl;
+        frame.src = target.href;
+      }
+      if (typeof state.error === 'string' && state.error) showError(state.error);
+    }
+    async function request(path, body) {
+      const response = await fetch(`/__omp-replay/${path}`, {
+        ...(body === undefined ? {} : {
+          method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body)
+        }),
+        signal: AbortSignal.timeout(30_000), cache: 'no-store'
+      });
+      const value = await response.json();
+      if (!response.ok) throw new Error(typeof value.error === 'string' ? value.error : `Replay request failed (${response.status}).`);
+      return value;
+    }
+    async function refresh() {
+      if (polling || busy) return;
+      polling = true;
+      try {
+        state = parseState(await request('state'));
+        render();
+      } catch (cause) {
+        showError(cause instanceof Error ? cause.message : String(cause));
+      } finally { polling = false; }
+    }
+    async function command(actions) {
+      if (busy) return;
+      busy = true;
+      showError('');
+      render();
+      try {
+        for (const action of actions) await request('control', action);
+        state = parseState(await request('state'));
+      } catch (cause) {
+        showError(cause instanceof Error ? cause.message : String(cause));
+      } finally { busy = false; render(); }
+    }
+    tourSession.addEventListener('click', () => void command([{ action: 'tour-session' }]));
+    goalSession.addEventListener('click', () => void command([{ action: 'goal-session' }]));
+    play.addEventListener('click', () => {
+      if (!state) return;
+      void command(state.status === 'completed'
+        ? [{ action: 'reset' }, { action: 'play' }]
+        : [{ action: state.status === 'playing' ? 'pause' : 'play' }]);
+    });
+    step.addEventListener('click', () => void command([{ action: 'step' }]));
+    reset.addEventListener('click', () => void command([{ action: 'reset' }]));
+    speed.addEventListener('change', () => void command([{ action: 'speed', speed: Number(speed.value) }]));
+    inspect.addEventListener('click', () => {
+      inspector.hidden = !inspector.hidden;
+      inspect.setAttribute('aria-expanded', String(!inspector.hidden));
+    });
+    transcriptStyle.addEventListener('change', () => {
+      localStorage.setItem(CLIENT_SETTINGS_KEY, JSON.stringify({ ...readClientSettings(), transcriptStyle: transcriptStyle.value }));
+      frame.contentWindow?.location.reload();
+    });
+    appearance.addEventListener('click', () => {
+      const showing = appearance.getAttribute('aria-pressed') === 'true';
+      appearance.setAttribute('aria-pressed', String(!showing));
+      appearance.textContent = showing ? 'Styles & loaders' : 'Back to session';
+      frame.src = new URL(showing ? (threadUrl ?? '/') : '/settings/appearance', location.origin).href;
+    });
+    archive.addEventListener('change', async () => {
+      const file = archive.files?.[0];
+      if (!file || busy) return;
+      if (file.size > 32 * 1024 * 1024) {
+        showError('Choose an exported transcript smaller than 32 MiB.');
+        archive.value = '';
+        return;
+      }
+      busy = true;
+      showError('');
+      render();
+      try {
+        await request('import', { fileName: file.name, text: await file.text() });
+        state = parseState(await request('state'));
+      } catch (cause) {
+        showError(cause instanceof Error ? cause.message : String(cause));
+      } finally { busy = false; archive.value = ''; render(); }
+    });
+    await refresh();
+    const interval = setInterval(() => { if (!document.hidden) void refresh(); }, 400);
+    document.addEventListener('visibilitychange', () => { if (!document.hidden) void refresh(); });
+    window.addEventListener('pagehide', () => clearInterval(interval), { once: true });
+  </script>
+</body>
+</html>

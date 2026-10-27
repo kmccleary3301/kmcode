@@ -196,7 +196,15 @@ export const make = Effect.gen(function* () {
                 },
                 { type: "separator" as const },
               ]),
-          { role: environment.platform === "darwin" ? "close" : "quit" },
+          ...(environment.platform === "darwin"
+            ? [
+                {
+                  label: "Close Window",
+                  click: (_item: Electron.MenuItem, window: Electron.BaseWindow | undefined) =>
+                    window?.close(),
+                },
+              ]
+            : [{ role: "quit" as const }]),
         ],
       },
       {
@@ -253,7 +261,16 @@ export const make = Effect.gen(function* () {
           { role: "togglefullscreen" },
         ],
       },
-      { role: "windowMenu" },
+      {
+        role: "windowMenu",
+        submenu: [
+          { role: "minimize" },
+          { role: "zoom" },
+          ...(environment.platform === "darwin"
+            ? [{ type: "separator" as const }, { role: "front" as const }]
+            : []),
+        ],
+      },
       {
         role: "help",
         submenu: [

@@ -232,7 +232,14 @@ it.layer(NodeServices.layer)("AnalyticsService test", (it) => {
     }),
   );
 
-  it.effect("does not send batch requests when telemetry is disabled", () =>
+  it.effect.each([
+    {
+      label: "telemetry is disabled",
+      env: { T3CODE_TELEMETRY_ENABLED: false, T3CODE_POSTHOG_KEY: "phc_test_key" },
+    },
+    // No built-in key: KM Code never reports into upstream's PostHog project.
+    { label: "no PostHog key is configured", env: { T3CODE_TELEMETRY_ENABLED: true } },
+  ])("does not send batch requests when $label", ({ env }) =>
     Effect.gen(function* () {
       const capturedPaths: Array<string> = [];
       const layerServerConfig = ServerConfig.ServerConfig.layerTest(process.cwd(), {
@@ -240,11 +247,7 @@ it.layer(NodeServices.layer)("AnalyticsService test", (it) => {
       });
       const layerTelemetry = AnalyticsService.layer.pipe(Layer.provideMerge(layerServerConfig));
       const layerConfig = ConfigProvider.layer(
-        ConfigProvider.fromUnknown({
-          T3CODE_TELEMETRY_ENABLED: false,
-          T3CODE_POSTHOG_KEY: "phc_test_key",
-          T3CODE_POSTHOG_HOST: "http://localhost",
-        }),
+        ConfigProvider.fromUnknown({ ...env, T3CODE_POSTHOG_HOST: "http://localhost" }),
       );
       const layerBatchServer = HttpServer.serve(
         Effect.gen(function* () {

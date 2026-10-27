@@ -27,6 +27,8 @@ describe("T3 orchestration provider instructions", () => {
       "Every new delegate review or re-check is a new `delegate_task`",
     );
     assert.include(T3_CODE_ORCHESTRATION_INSTRUCTIONS, "never `t3_thread_send`");
+    assert.include(T3_CODE_ORCHESTRATION_INSTRUCTIONS, "`t3_thread_broadcast` for several");
+    assert.include(T3_CODE_ORCHESTRATION_INSTRUCTIONS, "`queue` waits for the entire current run");
   });
 
   it("documents schedule-only requests without executing their prompts", () => {

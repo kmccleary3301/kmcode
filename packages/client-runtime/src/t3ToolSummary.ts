@@ -94,7 +94,7 @@ export function summarizeT3ToolCalls(
     };
   });
   const completed = results.filter((call) => call.outcome === "completed");
-  const failedCount = results.filter((call) => call.outcome === "failed").length;
+  let failedCount = results.filter((call) => call.outcome === "failed").length;
   const selected = completed.length > 0 ? completed : results;
   const times = quantity(selected.length, "time");
   const phrase = (past: string, infinitive: string, object: string) =>
@@ -122,6 +122,58 @@ export function summarizeT3ToolCalls(
           : `${quantity(messages, "message")} to ${quantity(threads, "thread")}`
         : quantity(messages, "message");
       label = phrase("Sent", "send", object);
+      break;
+    }
+    case "thread-broadcast": {
+      const requestedTargets = new Set<string>();
+      const deliveredTargets = new Set<string>();
+      const successfulBroadcasts = new Set<string>();
+      let failedTargets = 0;
+      for (const [callIndex, call] of selected.entries()) {
+        const inputTargets = Array.isArray(call.input?.threadIds)
+          ? call.input.threadIds.map(id)
+          : [];
+        const outputResults = Array.isArray(call.output?.results) ? call.output.results : [];
+        let hasSuccessfulTarget = false;
+        if (outputResults.length > 0) {
+          outputResults.forEach((result, index) => {
+            const targetResult = asRecord(result);
+            const targetId = id(targetResult?.threadId) ?? inputTargets[index];
+            const targetKey = targetId ?? `call-${callIndex}-target-${index}`;
+            requestedTargets.add(targetKey);
+            if (targetResult?.error != null) {
+              failedTargets += 1;
+            } else {
+              deliveredTargets.add(targetKey);
+              hasSuccessfulTarget = true;
+            }
+          });
+        } else {
+          inputTargets.forEach((targetId, index) => {
+            const targetKey = targetId ?? `call-${callIndex}-target-${index}`;
+            requestedTargets.add(targetKey);
+            if (call.outcome === "completed") {
+              deliveredTargets.add(targetKey);
+              hasSuccessfulTarget = true;
+            }
+          });
+        }
+        if (hasSuccessfulTarget) {
+          successfulBroadcasts.add(id(call.input?.clientRequestId) ?? `call-${callIndex}`);
+        }
+      }
+      failedCount += failedTargets;
+      const message =
+        successfulBroadcasts.size > 1
+          ? quantity(successfulBroadcasts.size, "message")
+          : "a message";
+      const deliveredCount = completed.length === 0 ? requestedTargets.size : deliveredTargets.size;
+      const targets = `${deliveredTargets.size} of ${quantity(requestedTargets.size, "thread")}`;
+      const targetSummary =
+        failedTargets > 0
+          ? `${message} to ${targets}`
+          : `${message} to ${quantity(deliveredCount, "thread")}`;
+      label = phrase("Sent", "send", targetSummary);
       break;
     }
     case "thread-create": {

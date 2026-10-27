@@ -443,13 +443,51 @@ export const OrchestratorMcpThreadReadResult = Schema.Struct({
 });
 export type OrchestratorMcpThreadReadResult = typeof OrchestratorMcpThreadReadResult.Type;
 
+const ORCHESTRATOR_MCP_THREAD_BROADCAST_MAX_THREADS = 32;
+const OrchestratorMcpThreadSendMode = Schema.Literals(["auto", "queue", "steer", "restart"]);
+
+export const OrchestratorMcpFailureCode = Schema.Literals([
+  "capability_denied",
+  "parent_not_active",
+  "provider_unavailable",
+  "model_unavailable",
+  "runtime_mode_escalation_denied",
+  "interaction_mode_escalation_denied",
+  "task_not_found",
+  "task_not_cancellable",
+  "thread_not_found",
+  "run_not_found",
+  "thread_not_sendable",
+  "thread_not_interruptible",
+  "invalid_request",
+  "orchestration_error",
+  "thread_credential_required",
+  "target_required",
+]);
+
 export const OrchestratorMcpThreadSendInput = Schema.Struct({
   threadId: ThreadId,
   message: OrchestratorMcpPrompt,
-  mode: Schema.optional(Schema.Literals(["auto", "queue", "steer", "restart"])),
+  mode: Schema.optional(OrchestratorMcpThreadSendMode),
   clientRequestId: Schema.optional(OrchestratorMcpClientRequestId),
 });
 export type OrchestratorMcpThreadSendInput = typeof OrchestratorMcpThreadSendInput.Type;
+
+export const OrchestratorMcpThreadBroadcastInput = Schema.Struct({
+  threadIds: Schema.Array(ThreadId)
+    .check(
+      Schema.isMinLength(1),
+      Schema.isMaxLength(ORCHESTRATOR_MCP_THREAD_BROADCAST_MAX_THREADS),
+      Schema.makeFilter(
+        (threadIds) => new Set(threadIds).size === threadIds.length || "Thread IDs must be unique.",
+      ),
+    )
+    .annotate({ description: "1–32 unique target thread IDs." }),
+  message: OrchestratorMcpPrompt,
+  mode: Schema.optional(OrchestratorMcpThreadSendMode),
+  clientRequestId: Schema.optional(OrchestratorMcpClientRequestId),
+});
+export type OrchestratorMcpThreadBroadcastInput = typeof OrchestratorMcpThreadBroadcastInput.Type;
 
 export const OrchestratorMcpThreadSendResult = Schema.Struct({
   threadId: ThreadId,
@@ -460,6 +498,23 @@ export const OrchestratorMcpThreadSendResult = Schema.Struct({
   delivery: Schema.Literals(["started", "queued", "steered", "restarted"]),
 });
 export type OrchestratorMcpThreadSendResult = typeof OrchestratorMcpThreadSendResult.Type;
+export const OrchestratorMcpThreadBroadcastTargetResult = Schema.Union([
+  OrchestratorMcpThreadSendResult,
+  Schema.Struct({
+    threadId: ThreadId,
+    error: Schema.Struct({
+      code: OrchestratorMcpFailureCode,
+      message: Schema.String,
+    }),
+  }),
+]);
+export type OrchestratorMcpThreadBroadcastTargetResult =
+  typeof OrchestratorMcpThreadBroadcastTargetResult.Type;
+
+export const OrchestratorMcpThreadBroadcastResult = Schema.Struct({
+  results: Schema.Array(OrchestratorMcpThreadBroadcastTargetResult),
+});
+export type OrchestratorMcpThreadBroadcastResult = typeof OrchestratorMcpThreadBroadcastResult.Type;
 
 export const OrchestratorMcpThreadWaitInput = Schema.Struct({
   threadId: ThreadId,
@@ -655,24 +710,7 @@ export type OrchestratorMcpDeleteScheduledTaskResult =
 export class OrchestratorMcpFailure extends Schema.TaggedError<OrchestratorMcpFailure>()(
   "OrchestratorMcpFailure",
   {
-    code: Schema.Literals([
-      "capability_denied",
-      "parent_not_active",
-      "provider_unavailable",
-      "model_unavailable",
-      "runtime_mode_escalation_denied",
-      "interaction_mode_escalation_denied",
-      "task_not_found",
-      "task_not_cancellable",
-      "thread_not_found",
-      "run_not_found",
-      "thread_not_sendable",
-      "thread_not_interruptible",
-      "invalid_request",
-      "orchestration_error",
-      "thread_credential_required",
-      "target_required",
-    ]),
+    code: OrchestratorMcpFailureCode,
     message: Schema.String,
   },
 ) {}

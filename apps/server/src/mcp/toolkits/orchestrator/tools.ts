@@ -25,6 +25,8 @@ import {
   OrchestratorMcpThreadListResult,
   OrchestratorMcpThreadReadInput,
   OrchestratorMcpThreadReadResult,
+  OrchestratorMcpThreadBroadcastInput,
+  OrchestratorMcpThreadBroadcastResult,
   OrchestratorMcpThreadSendInput,
   OrchestratorMcpThreadSendResult,
   OrchestratorMcpThreadWaitInput,
@@ -221,7 +223,7 @@ export const ThreadUpdateTool = Tool.make("t3_thread_update", {
 
 const ThreadSendTool = Tool.make("t3_thread_send", {
   description:
-    "Send a message to any thread. The target cannot run with broader modes than yours. `mode:'auto'` starts an idle thread, steers a running turn, or queues. `queue`: new turn. `steer`: mid-turn update. `restart`: interrupt and restart. A send to a finished child thread starts a fresh task and returns its `taskId`. In your reply, name it as its `link` verbatim.",
+    "Send within your mode limits. `auto` (default) starts an idle thread or delivers at the target's next tool boundary; it queues only if the provider cannot inject mid-turn. `queue` waits for the target's entire current run to finish (possibly hours); use it only to start a separate task afterwards. `steer` updates a running turn; `restart` interrupts it. A send to a finished child thread starts a fresh task and returns its `taskId`. In your reply, name it as its `link` verbatim.",
   parameters: OrchestratorMcpThreadSendInput,
   success: OrchestratorMcpThreadSendResult,
   failure: OrchestratorMcpFailure,
@@ -229,6 +231,19 @@ const ThreadSendTool = Tool.make("t3_thread_send", {
   dependencies,
 })
   .annotate(Tool.Title, "Send to a T3 thread")
+  .annotate(Tool.Destructive, true)
+  .annotate(Tool.OpenWorld, true);
+
+const ThreadBroadcastTool = Tool.make("t3_thread_broadcast", {
+  description:
+    "Send one message to 1–32 unique threads. Per-target failures are returned alongside successful message IDs. Uses the same modes and caller limits as `t3_thread_send`; retry with the same `clientRequestId`.",
+  parameters: OrchestratorMcpThreadBroadcastInput,
+  success: OrchestratorMcpThreadBroadcastResult,
+  failure: OrchestratorMcpFailure,
+  failureMode: "return",
+  dependencies,
+})
+  .annotate(Tool.Title, "Broadcast to T3 threads")
   .annotate(Tool.Destructive, true)
   .annotate(Tool.OpenWorld, true);
 
@@ -284,6 +299,7 @@ export const OrchestratorToolkit = Toolkit.make(
   ThreadReadTool,
   ThreadUpdateTool,
   ThreadSendTool,
+  ThreadBroadcastTool,
   ThreadWaitTool,
   ThreadInterruptTool,
   WorkflowStopTool,

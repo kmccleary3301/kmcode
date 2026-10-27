@@ -116,6 +116,16 @@ const handlers = {
         return yield* service.sendToThread(scope, input);
       }),
   ),
+  // Let the service check targets independently so one failure stays per-target.
+  t3_thread_broadcast: McpToolAccess.writesThreads(
+    () => [],
+    (input) =>
+      Effect.gen(function* () {
+        const scope = yield* McpInvocationContext.McpInvocationContext;
+        const service = yield* OrchestratorMcpService.OrchestratorMcpService;
+        return yield* service.broadcastToThreads(scope, input);
+      }),
+  ),
   t3_thread_wait: McpToolAccess.reads((input) =>
     Effect.gen(function* () {
       const scope = yield* McpInvocationContext.McpInvocationContext;

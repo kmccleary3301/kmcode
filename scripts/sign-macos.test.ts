@@ -24,3 +24,21 @@ it("batches codesign calls without changing existing signing options", async () 
     batchCodesignCalls: true,
   });
 });
+
+it("signs ad hoc builds with the local identity, never over a release identity", async () => {
+  vi.stubEnv("T3CODE_DESKTOP_MAC_LOCAL_SIGN_IDENTITY", "Apple Development: KM (TEAM123456)");
+  try {
+    await sign({ app: "/tmp/KM Code.app", identity: "-" });
+    expect(signApplication).toHaveBeenLastCalledWith({
+      app: "/tmp/KM Code.app",
+      identity: "Apple Development: KM (TEAM123456)",
+      batchCodesignCalls: true,
+    });
+
+    const release = { app: "/tmp/KM Code.app", identity: "Developer ID Application: KM" };
+    await sign(release);
+    expect(signApplication).toHaveBeenLastCalledWith({ ...release, batchCodesignCalls: true });
+  } finally {
+    vi.unstubAllEnvs();
+  }
+});

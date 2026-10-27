@@ -4,6 +4,7 @@ import {
   type DesktopDiscoveredSshHost,
   type DesktopSshEnvironmentBootstrap,
   type DesktopSshEnvironmentTarget,
+  type DesktopSshTunnelStatus,
 } from "@t3tools/contracts";
 import * as NetService from "@t3tools/shared/Net";
 import * as SshAuth from "@t3tools/ssh/auth";
@@ -67,6 +68,9 @@ export class DesktopSshEnvironment extends Context.Service<
       target: DesktopSshEnvironmentTarget,
       options?: { readonly issuePairingToken?: boolean },
     ) => Effect.Effect<DesktopSshEnvironmentBootstrap, DesktopSshEnvironmentOperationError>;
+    readonly getTunnelStatus: (
+      target: DesktopSshEnvironmentTarget,
+    ) => Effect.Effect<DesktopSshTunnelStatus, SshCommandError | SshInvalidTargetError>;
     readonly disconnectEnvironment: (
       target: DesktopSshEnvironmentTarget,
     ) => Effect.Effect<void, DesktopSshEnvironmentOperationError>;
@@ -157,6 +161,14 @@ export const make = Effect.gen(function* () {
           Effect.provideService(SshAuth.SshPasswordPrompt, passwordPrompt),
           Effect.provide(runtimeContext),
           Effect.withSpan("desktop.ssh.ensureEnvironment"),
+        ),
+    getTunnelStatus: (target) =>
+      manager
+        .getTunnelStatus(target)
+        .pipe(
+          Effect.provideService(SshAuth.SshPasswordPrompt, passwordPrompt),
+          Effect.provide(runtimeContext),
+          Effect.withSpan("desktop.ssh.getTunnelStatus"),
         ),
     disconnectEnvironment: (target) =>
       manager

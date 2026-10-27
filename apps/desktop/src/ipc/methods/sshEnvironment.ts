@@ -17,6 +17,7 @@ import {
   DesktopSshHttpBaseUrlInputSchema,
   DesktopSshPasswordPromptCancelledType,
   DesktopSshPasswordPromptResolutionInputSchema,
+  DesktopSshTunnelStatusSchema,
   ExecutionEnvironmentDescriptor,
   EnvironmentInternalError,
   EnvironmentOperationForbiddenError,
@@ -144,6 +145,16 @@ export const ensureSshEnvironment = DesktopIpc.makeIpcMethod({
         }),
       ),
     );
+  }),
+});
+
+export const getSshTunnelStatus = DesktopIpc.makeIpcMethod({
+  channel: IpcChannels.GET_SSH_TUNNEL_STATUS_CHANNEL,
+  payload: DesktopSshEnvironmentTargetSchema,
+  result: DesktopSshTunnelStatusSchema,
+  handler: Effect.fn("desktop.ipc.sshEnvironment.getTunnelStatus")(function* (target) {
+    const sshEnvironment = yield* DesktopSshEnvironment.DesktopSshEnvironment;
+    return yield* sshEnvironment.getTunnelStatus(target);
   }),
 });
 

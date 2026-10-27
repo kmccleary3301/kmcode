@@ -8,6 +8,7 @@ import {
   type ThreadId,
 } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
+import * as DateTime from "effect/DateTime";
 import type { ProjectionRuntimeRecoveryState } from "./ProjectionStore.ts";
 
 import * as ServerSettings from "../serverSettings.ts";
@@ -20,6 +21,8 @@ import {
 } from "./RestartBackgroundNote.ts";
 
 const CONTINUE_PROMPT = "Continue where you left off.";
+const MAX_CONTINUATION_CHAIN = 3;
+const CONTINUATION_LOOP_WINDOW_MS = 5 * 60 * 1_000;
 
 /**
  * Resume only an unfinished root turn. Leftover background work is cleaned up
@@ -125,6 +128,20 @@ export const continueRestartedRun = Effect.fn("RestartContinuation.continueResta
     )
       return;
     if (projection.thread.providerInstanceId !== source.providerInstanceId) return;
+    // A turn that keeps crashing the server would otherwise restart it forever.
+    let chainLength = 0;
+    const loopWindowStart =
+      DateTime.toEpochMillis(source.completedAt ?? source.requestedAt) -
+      CONTINUATION_LOOP_WINDOW_MS;
+    for (
+      let run: OrchestrationV2Run | undefined = source;
+      run?.restartContinuationOfRunId !== undefined && chainLength < MAX_CONTINUATION_CHAIN;
+      run = projection.runs.find((candidate) => candidate.id === run?.restartContinuationOfRunId)
+    ) {
+      if (DateTime.toEpochMillis(run.requestedAt) < loopWindowStart) break;
+      chainLength += 1;
+    }
+    if (chainLength >= MAX_CONTINUATION_CHAIN) return;
     const sourceRecords = yield* threads.getThreadRecords(
       input.threadId,
       ["messages", "turnItems"],

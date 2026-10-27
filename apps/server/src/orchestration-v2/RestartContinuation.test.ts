@@ -33,6 +33,7 @@ const providerThreadId = ProviderThreadId.make("provider-thread:restart");
 const sessionId = ProviderSessionId.make("session:restart");
 const attemptId = RunAttemptId.make("attempt:restart");
 // "No project" threads belong to the environment's Scratch project.
+const now = DateTime.makeUnsafe("2026-10-03T10:05:00.000Z");
 const scratchProjectId = ProjectId.make("project:scratch");
 
 function makeProjection() {
@@ -52,6 +53,8 @@ function makeProjection() {
         modelSelection: { instanceId, model: "gpt-6" },
         providerThreadId,
         activeAttemptId: attemptId,
+        requestedAt: now,
+        completedAt: null,
         status: "running",
       },
     ],
@@ -635,6 +638,7 @@ const cutMidTurn = (extra: Record<string, unknown> = {}) => {
       {
         ...base.runs[0]!,
         status: "cancelled",
+        completedAt: now,
         userMessageId: MessageId.make("message:user"),
         ...extra,
       },
@@ -642,6 +646,61 @@ const cutMidTurn = (extra: Record<string, unknown> = {}) => {
     providerTurns: [{ ...base.providerTurns[0]!, status: "cancelled" }],
   } as unknown as OrchestrationV2ThreadProjection;
 };
+
+it.effect("stops rapid restart loops but allows repeated restarts after normal work", () =>
+  Effect.gen(function* () {
+    const first = RunId.make("run:first-continuation");
+    const second = RunId.make("run:second-continuation");
+    const third = RunId.make("run:third-continuation");
+    const cut = cutMidTurn();
+    const withThreeLinks = {
+      ...cut,
+      runs: [
+        {
+          ...cut.runs[0]!,
+          requestedAt: DateTime.subtract(now, { minutes: 1 }),
+          completedAt: null,
+          restartContinuationOfRunId: first,
+        },
+        {
+          ...cut.runs[0]!,
+          id: first,
+          requestedAt: DateTime.subtract(now, { minutes: 6 }),
+          restartContinuationOfRunId: second,
+        },
+        {
+          ...cut.runs[0]!,
+          id: second,
+          requestedAt: DateTime.subtract(now, { minutes: 2 }),
+          restartContinuationOfRunId: third,
+        },
+        {
+          ...cut.runs[0]!,
+          id: third,
+          requestedAt: DateTime.subtract(now, { minutes: 3 }),
+        },
+      ],
+    } as unknown as OrchestrationV2ThreadProjection;
+    for (const { completedAt, oldestRequestAge, expected } of [
+      { completedAt: null, oldestRequestAge: { minutes: 6 }, expected: 0 },
+      { completedAt: null, oldestRequestAge: { minutes: 6, milliseconds: 1 }, expected: 1 },
+      { completedAt: now, oldestRequestAge: { minutes: 6 }, expected: 1 },
+    ]) {
+      const projection = {
+        ...withThreeLinks,
+        runs: withThreeLinks.runs.map((run, index) => ({
+          ...run,
+          completedAt,
+          requestedAt: DateTime.subtract(
+            now,
+            run.id === first ? oldestRequestAge : { minutes: index + 1 },
+          ),
+        })),
+      };
+      assert.lengthOf(yield* continuationTexts(projection), expected);
+    }
+  }),
+);
 
 const queuedFollowUp = {
   id: RunId.make("run:queued"),

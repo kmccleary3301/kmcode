@@ -66,6 +66,7 @@ import * as PortScanner from "./preview/PortScanner.ts";
 import * as ServerBrowser from "./preview/ServerBrowser.ts";
 import * as DesktopBrowserChannel from "./preview/DesktopBrowserChannel.ts";
 import * as ServerBrowserStream from "./preview/ServerBrowserStream.ts";
+import * as PortRoutes from "./ports/PortRoutes.ts";
 import * as PreviewBrowser from "./preview/PreviewBrowser.ts";
 import * as ProcessRunner from "./processRunner.ts";
 import * as GitManager from "./git/GitManager.ts";
@@ -195,7 +196,7 @@ const layerPtyAdapter = NodePtyAdapter.layer;
 
 const layerServerSettings = ServerSettings.layer.pipe(
   Layer.provide(ServerSecretStore.layer),
-  Layer.provideMerge(SqlitePersistence.layerConfig),
+  Layer.provideMerge(SqlitePersistence.layerConfigExclusive),
 );
 
 const layerNativeTelemetry = NativeTelemetryClient.layer.pipe(
@@ -261,7 +262,7 @@ const layerHttpServer = Layer.unwrap(
 
 const layerPlatformServices = NodeServices.layer;
 
-const layerPersistence = Layer.empty.pipe(Layer.provideMerge(SqlitePersistence.layerConfig));
+const layerPersistence = Layer.empty.pipe(Layer.provideMerge(SqlitePersistence.layerConfigExclusive));
 
 const layerVcsDriverRegistry = VcsDriverRegistry.layer.pipe(Layer.provide(VcsProjectConfig.layer));
 
@@ -663,6 +664,7 @@ const layerMakeRoutes = Layer.mergeAll(
       Layer.provide(ProjectHttp.layer),
       Layer.provide(ServerHttp.layerServerEnvironmentHttpApi),
       Layer.provide(WebhookRoute.layer.pipe(Layer.provide(RelayDeliveryProof.layer))),
+      Layer.provide(PortRoutes.layerPortsHttpApi.pipe(Layer.provide(ProcessRunner.layer))),
       Layer.provide(AuthHttp.layerAuthenticatedAuth),
     ),
     ServerHttp.layerOtlpTracesProxyRoute,
@@ -670,6 +672,7 @@ const layerMakeRoutes = Layer.mergeAll(
     ServerHttp.layerAttachmentUploadRoute,
     DeviceHubProxy.layer,
     ServerBrowserStream.routeLayer,
+    PortRoutes.routeLayer,
     ServerHttp.layerStaticAndDevRoute,
     Ws.layer,
   ),

@@ -26,6 +26,7 @@ import {
   makeTraceSink,
   type EffectTraceRecord,
   type TraceRecord,
+  type TraceSink,
   type TraceSinkFlushStats,
   OtlpHeadersFromString,
   truncateTraceAttributes,
@@ -102,7 +103,7 @@ const readTraceRecords = Effect.fn("readTraceRecords")(function* (tracePath: str
     .map((line) => decodeTraceRecordLine(line));
 });
 
-const layerTest = (tracePath: string) =>
+const layerTest = (tracePath: string, sink: TraceSink) =>
   Layer.mergeAll(
     Layer.effect(
       Tracer.Tracer,
@@ -111,6 +112,7 @@ const layerTest = (tracePath: string) =>
         maxBytes: 1024 * 1024,
         maxFiles: 2,
         batchWindowMs: 10_000,
+        sink,
       }),
     ),
     Logger.layer([Logger.tracerLogger], { mergeWithExisting: false }),
@@ -331,7 +333,7 @@ describe("observability", () => {
   });
 
   nodeServicesIt("node services", (it) => {
-    it.effect("flushes buffered trace records on close", () =>
+    it.effect("flushes buffered trace records on scope close", () =>
       Effect.scoped(
         Effect.gen(function* () {
           const fileSystem = yield* FileSystem.FileSystem;
@@ -339,16 +341,19 @@ describe("observability", () => {
           const tempDir = yield* fileSystem.makeTempDirectoryScoped({ prefix: "t3-trace-sink-" });
           const tracePath = path.join(tempDir, "shared.trace.ndjson");
 
-          const sink = yield* makeTraceSink({
-            filePath: tracePath,
-            maxBytes: 1024,
-            maxFiles: 2,
-            batchWindowMs: 10_000,
-          });
+          yield* Effect.scoped(
+            Effect.gen(function* () {
+              const sink = yield* makeTraceSink({
+                filePath: tracePath,
+                maxBytes: 1024,
+                maxFiles: 2,
+                batchWindowMs: 10_000,
+              });
 
-          sink.push(makeRecord("alpha"));
-          sink.push(makeRecord("beta"));
-          yield* sink.close();
+              sink.push(makeRecord("alpha"));
+              sink.push(makeRecord("beta"));
+            }),
+          );
 
           const lines = yield* readTraceRecords(tracePath);
 
@@ -568,6 +573,7 @@ describe("observability", () => {
         for (let index = 0; index < 5; index += 1) {
           sink.push(makeRecord("lost"));
           yield* TestClock.adjust("1 second");
+          yield* sink.flush;
         }
 
         // One write per batch, never a growing backlog.
@@ -583,6 +589,7 @@ describe("observability", () => {
         yield* fileSystem.remove(tracePath, { recursive: true });
         sink.push(makeRecord("recovered"));
         yield* TestClock.adjust("1 second");
+        yield* sink.flush;
 
         const records = yield* readTraceRecords(tracePath);
         assert.deepStrictEqual(
@@ -597,6 +604,7 @@ describe("observability", () => {
         // Healthy flushes after the recovery log nothing.
         sink.push(makeRecord("healthy"));
         yield* TestClock.adjust("1 second");
+        yield* sink.flush;
         expect(logs).toHaveLength(2);
 
         // A new failure episode warns again.
@@ -604,6 +612,7 @@ describe("observability", () => {
         yield* fileSystem.makeDirectory(tracePath);
         sink.push(makeRecord("lost-again"));
         yield* TestClock.adjust("1 second");
+        yield* sink.flush;
         assert.deepStrictEqual(
           logs.map((log) => log.logLevel),
           ["Warn", "Info", "Warn"],
@@ -629,6 +638,12 @@ describe("observability", () => {
           const path = yield* Path.Path;
           const tempDir = yield* fileSystem.makeTempDirectoryScoped({ prefix: "t3-local-tracer-" });
           const tracePath = path.join(tempDir, "shared.trace.ndjson");
+          const sink = yield* makeTraceSink({
+            filePath: tracePath,
+            maxBytes: 1024 * 1024,
+            maxFiles: 2,
+            batchWindowMs: 10_000,
+          });
 
           yield* Effect.scoped(
             Effect.gen(function* () {
@@ -645,9 +660,10 @@ describe("observability", () => {
                 }).pipe(Effect.withSpan("child-span"));
               }).pipe(Effect.withSpan("parent-span"));
 
-              yield* program.pipe(Effect.provide(layerTest(tracePath)));
+              yield* program.pipe(Effect.provide(layerTest(tracePath, sink)));
             }),
           );
+          yield* sink.flush;
 
           const records = yield* readTraceRecords(tracePath);
           assert.equal(records.length, 2);
@@ -687,15 +703,22 @@ describe("observability", () => {
           const path = yield* Path.Path;
           const tempDir = yield* fileSystem.makeTempDirectoryScoped({ prefix: "t3-local-tracer-" });
           const tracePath = path.join(tempDir, "shared.trace.ndjson");
+          const sink = yield* makeTraceSink({
+            filePath: tracePath,
+            maxBytes: 1024 * 1024,
+            maxFiles: 2,
+            batchWindowMs: 10_000,
+          });
 
           yield* Effect.scoped(
             Effect.exit(
               Effect.interrupt.pipe(
                 Effect.withSpan("interrupt-span"),
-                Effect.provide(layerTest(tracePath)),
+                Effect.provide(layerTest(tracePath, sink)),
               ),
             ),
           );
+          yield* sink.flush;
 
           const records = yield* readTraceRecords(tracePath);
           assert.equal(records.length, 1);

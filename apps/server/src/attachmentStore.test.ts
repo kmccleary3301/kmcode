@@ -98,7 +98,7 @@ describe("attachmentStore", () => {
     expect(createAttachmentId("x".repeat(80), ".abcdefghij")?.length).toBeLessThanOrEqual(128);
   });
 
-  it("resolves attachment path by id using the extension that exists on disk", () => {
+  it("resolves attachment path by id using the extension that exists on disk", async () => {
     const attachmentsDir = NodeFS.mkdtempSync(
       NodePath.join(NodeOS.tmpdir(), "t3code-attachment-store-"),
     );
@@ -107,7 +107,7 @@ describe("attachmentStore", () => {
       const pngPath = NodePath.join(attachmentsDir, `${attachmentId}.png`);
       NodeFS.writeFileSync(pngPath, Buffer.from("hello"));
 
-      const resolved = resolveAttachmentPathById({
+      const resolved = await resolveAttachmentPathById({
         attachmentsDir,
         attachmentId,
       });
@@ -117,12 +117,12 @@ describe("attachmentStore", () => {
     }
   });
 
-  it("returns null when no attachment file exists for the id", () => {
+  it("returns null when no attachment file exists for the id", async () => {
     const attachmentsDir = NodeFS.mkdtempSync(
       NodePath.join(NodeOS.tmpdir(), "t3code-attachment-store-"),
     );
     try {
-      const resolved = resolveAttachmentPathById({
+      const resolved = await resolveAttachmentPathById({
         attachmentsDir,
         attachmentId: "thread-1-missing",
       });
@@ -132,7 +132,7 @@ describe("attachmentStore", () => {
     }
   });
 
-  it("resolves generic attachments without scanning the attachment directory", () => {
+  it("resolves generic attachments without scanning the attachment directory", async () => {
     const attachmentsDir = NodeFS.mkdtempSync(
       NodePath.join(NodeOS.tmpdir(), "t3code-file-attachment-"),
     );
@@ -141,13 +141,13 @@ describe("attachmentStore", () => {
       const archivePath = NodePath.join(attachmentsDir, `${attachmentId}.zip`);
       NodeFS.writeFileSync(archivePath, Buffer.from("archive"));
 
-      expect(resolveAttachmentPathById({ attachmentsDir, attachmentId })).toBe(archivePath);
+      expect(await resolveAttachmentPathById({ attachmentsDir, attachmentId })).toBe(archivePath);
     } finally {
       NodeFS.rmSync(attachmentsDir, { recursive: true, force: true });
     }
   });
 
-  it("plans pending attachment claims with direct filename lookups", () => {
+  it("plans pending attachment claims with direct filename lookups", async () => {
     const attachmentsDir = NodeFS.mkdtempSync(
       NodePath.join(NodeOS.tmpdir(), "t3code-attachment-claim-"),
     );
@@ -156,7 +156,7 @@ describe("attachmentStore", () => {
       const pendingPath = NodePath.join(attachmentsDir, `pending-${uuid}.png`);
       NodeFS.writeFileSync(pendingPath, Buffer.from("pixels"));
 
-      const claim = planAttachmentClaim({
+      const claim = await planAttachmentClaim({
         attachmentsDir,
         threadId: "thread-1",
         attachmentId: `pending-${uuid}`,
@@ -176,7 +176,7 @@ describe("attachmentStore", () => {
     }
   });
 
-  it("rejects thread-owned attachments even when thread segments collide", () => {
+  it("rejects thread-owned attachments even when thread segments collide", async () => {
     const attachmentsDir = NodeFS.mkdtempSync(
       NodePath.join(NodeOS.tmpdir(), "t3code-attachment-ownership-"),
     );
@@ -184,7 +184,7 @@ describe("attachmentStore", () => {
       const attachmentId = "a-b-00000000-0000-4000-8000-000000000003";
       NodeFS.writeFileSync(NodePath.join(attachmentsDir, `${attachmentId}.png`), "pixels");
 
-      expect(planAttachmentClaim({ attachmentsDir, threadId: "a b", attachmentId })).toEqual({
+      expect(await planAttachmentClaim({ attachmentsDir, threadId: "a b", attachmentId })).toEqual({
         ok: false,
         reason: "attachment must be a pending upload",
       });
@@ -193,7 +193,7 @@ describe("attachmentStore", () => {
     }
   });
 
-  it("removes expired pending and partial files without touching thread attachments", () => {
+  it("removes expired pending and partial files without touching thread attachments", async () => {
     const attachmentsDir = NodeFS.mkdtempSync(
       NodePath.join(NodeOS.tmpdir(), "t3code-attachment-sweep-"),
     );
@@ -210,7 +210,9 @@ describe("attachmentStore", () => {
         NodeFS.utimesSync(filePath, oldTimeSeconds, oldTimeSeconds);
       }
 
-      expect(sweepStalePendingAttachments({ attachmentsDir, nowMs: now })).toEqual({ deleted: 3 });
+      expect(await sweepStalePendingAttachments({ attachmentsDir, nowMs: now })).toEqual({
+        deleted: 3,
+      });
       expect(NodeFS.existsSync(pendingPath)).toBe(false);
       expect(NodeFS.existsSync(pendingFilePath)).toBe(false);
       expect(NodeFS.existsSync(partialPath)).toBe(false);

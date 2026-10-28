@@ -558,10 +558,13 @@ export const issueAssetUrl = Effect.fn("AssetAccess.issueAssetUrl")(function* (i
     }
     case "attachment": {
       const config = yield* ServerConfig.ServerConfig;
-      const attachmentPath = resolveAttachmentPathById({
-        attachmentsDir: config.attachmentsDir,
-        attachmentId: input.resource.attachmentId,
-      });
+      const attachmentId = input.resource.attachmentId;
+      const attachmentPath = yield* Effect.promise(() =>
+        resolveAttachmentPathById({
+          attachmentsDir: config.attachmentsDir,
+          attachmentId,
+        }),
+      );
       if (!attachmentPath) {
         return yield* new AssetAttachmentNotFoundError({
           resource: input.resource,
@@ -803,10 +806,12 @@ export const resolveAsset = Effect.fn("AssetAccess.resolveAsset")(function* (
 
   if (claims.kind === "attachment") {
     const config = yield* ServerConfig.ServerConfig;
-    const attachmentPath = resolveAttachmentPathById({
-      attachmentsDir: config.attachmentsDir,
-      attachmentId: claims.attachmentId,
-    });
+    const attachmentPath = yield* Effect.promise(() =>
+      resolveAttachmentPathById({
+        attachmentsDir: config.attachmentsDir,
+        attachmentId: claims.attachmentId,
+      }),
+    );
     if (!attachmentPath) return null;
     const fileSystem = yield* FileSystem.FileSystem;
     const info = yield* optionOnNotFound(fileSystem.stat(attachmentPath)).pipe(

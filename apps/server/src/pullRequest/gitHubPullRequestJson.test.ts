@@ -433,6 +433,9 @@ describe("pull request detail decoding", () => {
       ["Prepare PR size config", "pending"],
     ]);
     expect(detail.checksState).toBe("pending");
+    // The run in progress keeps when it started; GitHub's placeholder completion is no time at all.
+    expect(detail.checks[0]).toMatchObject({ startedAt: "2026-08-11T17:01:04Z" });
+    expect(detail.checks[0]).not.toHaveProperty("completedAt");
   });
 
   it("merges reviews with comments in time order and keeps a bodyless approval", () => {

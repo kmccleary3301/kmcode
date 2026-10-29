@@ -154,6 +154,9 @@ export const PullRequestCheck = Schema.Struct({
   url: Schema.NullOr(Schema.String),
   /** The base branch requires this check to merge. Absent where the host does not say. */
   required: Schema.optional(Schema.Boolean),
+  /** When the check started and finished. Absent while queued or running, or where the host does not say. */
+  startedAt: Schema.optional(IsoDateTime),
+  completedAt: Schema.optional(IsoDateTime),
 });
 export type PullRequestCheck = typeof PullRequestCheck.Type;
 

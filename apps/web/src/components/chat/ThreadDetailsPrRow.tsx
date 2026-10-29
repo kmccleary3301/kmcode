@@ -17,8 +17,7 @@ import { PullRequestGlyph } from "../pullRequest/pullRequestIcons";
  * from the linked snapshot or branch summary, or just the link when status is unavailable.
  */
 import type { EnvironmentProject } from "@t3tools/client-runtime/state/shell";
-import type { EnvironmentId, ProjectId, PullRequestRef } from "@t3tools/contracts";
-import { sourceControlRepositorySelector } from "@t3tools/shared/sourceControl";
+import type { EnvironmentId, PullRequestRef } from "@t3tools/contracts";
 import {
   ArrowUpRightIcon,
   EyeIcon,
@@ -29,12 +28,7 @@ import {
 } from "lucide-react";
 import { useState, type MouseEvent as ReactMouseEvent } from "react";
 
-import { useLiveRefresh } from "~/hooks/useLiveRefresh";
-import { usePullRequestChecksRefresh } from "~/hooks/usePullRequestChecksRefresh";
 import { cn } from "~/lib/utils";
-import { useServerConfigs } from "~/state/entities";
-import { pullRequestEnvironment } from "~/state/pullRequests";
-import { useEnvironmentQuery } from "~/state/query";
 
 import {
   buildFixFindingsHandoff,
@@ -53,25 +47,17 @@ import {
   PullRequestDiffStat,
   resolvePullRequestState,
 } from "../pullRequest/pullRequestPresentation";
+import { PullRequestMergeConfirmDialog } from "../pullRequest/PullRequestMergeConfirmDialog";
 import {
   usePullRequestActionRunner,
   usePullRequestHandoffs,
 } from "../pullRequest/usePullRequestActions";
+import { useThreadPullRequestDetail } from "../pullRequest/useThreadPullRequestDetail";
 import {
   ChangeRequestStatusIcon,
   type PrStatusIndicator,
   type ThreadPr,
 } from "../ThreadStatusIndicators";
-import {
-  AlertDialog,
-  AlertDialogClose,
-  AlertDialogDescription,
-  AlertDialogFooter,
-  AlertDialogHeader,
-  AlertDialogPopup,
-  AlertDialogTitle,
-} from "../ui/alert-dialog";
-import { Button } from "../ui/button";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 import {
   THREAD_DETAILS_PANEL_ICON_CLASS,
@@ -107,59 +93,19 @@ export function ThreadDetailsPrRow({
   /** Set while the server watches this pull request for the thread; stops the watch. */
   onStopWatching?: (() => void) | undefined;
 }) {
-  const serverConfigs = useServerConfigs();
-  const supportsPullRequests =
-    serverConfigs.get(environmentId)?.environment.capabilities.pullRequests === true;
-  const repository = sourceControlRepositorySelector(project?.repositoryIdentity);
-  const reference: PullRequestRef | null =
-    supportsPullRequests && project !== null
-      ? linkedReference
-        ? { ...linkedReference, projectId: project.id as ProjectId }
-        : repository !== null
-          ? { projectId: project.id as ProjectId, repository, number }
-          : null
-      : null;
-  const detailQuery = useEnvironmentQuery(
-    reference === null
-      ? null
-      : pullRequestEnvironment.detail({
-          environmentId,
-          input: { ...reference, allowStale: false },
-        }),
-  );
-  const supportsChecks =
-    serverConfigs.get(environmentId)?.environment.capabilities.pullRequestChecks === true;
-  const checksQuery = useEnvironmentQuery(
-    supportsChecks && reference !== null && detailQuery.data !== null
-      ? pullRequestEnvironment.checks({ environmentId, input: reference })
-      : null,
-  );
-  const detail =
-    detailQuery.data === null
-      ? null
-      : checksQuery.data !== null && checksQuery.dataUpdatedAt >= detailQuery.dataUpdatedAt
-        ? { ...detailQuery.data, ...checksQuery.data }
-        : detailQuery.data;
-  const open = reference !== null && (detail?.state ?? pr?.state) === "open";
-  const refreshKey = `${environmentId}:${project?.id}:${reference?.host}:${reference?.repository}:${number}`;
-  useLiveRefresh(detailQuery.isPending ? null : detailQuery.refresh, {
-    enabled: open,
-    key: `workspace-pr:${refreshKey}`,
-    intervalMs: 10 * 60_000,
-  });
-  usePullRequestChecksRefresh({
-    refresh: checksQuery.isPending || detailQuery.isPending ? null : checksQuery.refresh,
-    enabled: open && supportsChecks && !(checksQuery.isSuccess && checksQuery.data === null),
-    key: `workspace-pr-checks:${refreshKey}`,
-    checks: detail?.checks ?? [],
+  const { reference, detail, refresh } = useThreadPullRequestDetail({
+    environmentId,
+    project,
+    reference: linkedReference,
+    number,
+    fallbackState: pr?.state,
   });
 
   const { actionPending, perform } = usePullRequestActionRunner({
     environmentId,
     reference,
     onSuccess: () => {
-      detailQuery.refresh();
-      checksQuery.refresh();
+      refresh();
       onActed?.();
     },
   });
@@ -459,31 +405,14 @@ export function ThreadDetailsPrRow({
         openRow(label, "row")
       )}
       {rowAction === "merge" ? (
-        <AlertDialog open={confirmingMerge} onOpenChange={(open) => setConfirmingMerge(open)}>
-          <AlertDialogPopup>
-            <AlertDialogHeader>
-              <AlertDialogTitle>Merge pull request?</AlertDialogTitle>
-              <AlertDialogDescription>
-                This merges #{number} using {selectedMergeMethod}.
-              </AlertDialogDescription>
-            </AlertDialogHeader>
-            <AlertDialogFooter>
-              <AlertDialogClose render={<Button variant="outline" size="sm" />}>
-                Cancel
-              </AlertDialogClose>
-              <Button
-                size="sm"
-                disabled={actionPending}
-                onClick={() => {
-                  setConfirmingMerge(false);
-                  void perform("merge", selectedMergeMethod);
-                }}
-              >
-                Merge
-              </Button>
-            </AlertDialogFooter>
-          </AlertDialogPopup>
-        </AlertDialog>
+        <PullRequestMergeConfirmDialog
+          open={confirmingMerge}
+          onOpenChange={setConfirmingMerge}
+          number={number}
+          method={selectedMergeMethod}
+          pending={actionPending}
+          onConfirm={() => void perform("merge", selectedMergeMethod)}
+        />
       ) : null}
     </>
   );

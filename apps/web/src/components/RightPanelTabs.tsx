@@ -24,6 +24,7 @@ import {
   Files,
   Globe2,
   Plus,
+  Radio,
   TerminalSquare,
 } from "lucide-react";
 import { Volume2, VolumeOff } from "lucide";
@@ -124,6 +125,8 @@ interface RightPanelTabsProps {
    */
   onAddBrowserInProfile: (profileId: string) => void;
   onAddTerminal: () => void;
+  onAddPorts?: (() => void) | undefined;
+  portsAvailable?: boolean | undefined;
   onAddDiff: () => void;
   onAddFiles: () => void;
   onAddPullRequest: () => void;
@@ -167,6 +170,7 @@ const SURFACE_DISABLED_REASONS = {
   pullRequest: "This thread's branch has no pull request yet.",
   pullRequests: "No linked pull requests are available for this thread.",
   device: "Devices are only available from a thread.",
+  ports: "Ports are only available from a thread.",
 } as const;
 
 /** Overlays that must win over the launcher's letter shortcuts. */
@@ -190,6 +194,7 @@ const SURFACE_UNAVAILABLE_HINTS = {
   pullRequest: "No pull request on this branch yet.",
   pullRequests: "No linked pull requests available.",
   device: "Available from a thread.",
+  ports: "Available from a thread.",
 } as const;
 
 type TabContextMenuAction =
@@ -324,6 +329,8 @@ function RightPanelEmptyState(props: {
   onAddBrowserInProfile: (profileId: string) => void;
   browserProfiles: ReadonlyArray<{ readonly id: string; readonly name: string }>;
   onAddTerminal: () => void;
+  onAddPorts?: (() => void) | undefined;
+  portsAvailable?: boolean | undefined;
   onAddDiff: () => void;
   onAddFiles: () => void;
   onAddPullRequest: () => void;
@@ -359,6 +366,14 @@ function RightPanelEmptyState(props: {
       available: props.terminalAvailable,
       disabledReason: SURFACE_UNAVAILABLE_HINTS.terminal,
       onClick: props.onAddTerminal,
+    },
+    {
+      label: "Ports",
+      icon: Radio,
+      shortcut: "O",
+      available: props.portsAvailable ?? false,
+      disabledReason: SURFACE_UNAVAILABLE_HINTS.ports,
+      onClick: props.onAddPorts ?? (() => {}),
     },
     {
       label: "Files",
@@ -619,6 +634,8 @@ function surfaceTitle(
       return surface.title ?? surface.target?.name ?? "Device";
     case "agents":
       return "Agents";
+    case "ports":
+      return "Ports";
     case "preview": {
       const snapshot = surface.resourceId ? sessions[surface.resourceId] : null;
       if (!snapshot || snapshot.navStatus._tag === "Idle") return "Browser";
@@ -710,6 +727,8 @@ function SurfaceIcon({
       );
     case "agents":
       return <Bot className="size-3 shrink-0" />;
+    case "ports":
+      return <Radio className="size-3 shrink-0" />;
   }
 }
 
@@ -896,6 +915,14 @@ export function RightPanelTabs(props: RightPanelTabsProps) {
       available: props.terminalAvailable,
       disabledReason: SURFACE_DISABLED_REASONS.terminal,
       onClick: props.onAddTerminal,
+    },
+    {
+      label: "Ports",
+      icon: Radio,
+      shortcut: "O",
+      available: props.portsAvailable ?? false,
+      disabledReason: SURFACE_DISABLED_REASONS.ports,
+      onClick: props.onAddPorts ?? (() => {}),
     },
     {
       label: "Files",
@@ -1430,6 +1457,8 @@ export function RightPanelTabs(props: RightPanelTabsProps) {
             onAddBrowserInProfile={props.onAddBrowserInProfile}
             browserProfiles={browserProfiles}
             onAddTerminal={props.onAddTerminal}
+            onAddPorts={props.onAddPorts}
+            portsAvailable={props.portsAvailable}
             onAddDiff={props.onAddDiff}
             onAddFiles={props.onAddFiles}
             onAddPullRequest={props.onAddPullRequest}

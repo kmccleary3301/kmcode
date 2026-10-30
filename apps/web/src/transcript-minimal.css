@@ -444,6 +444,25 @@
   }
 }
 
+/* Minimal and Minimal+ set a step's intent against the line's right edge, so a
+ * turn's steps read as two columns: what ran on the left, why on the right. The
+ * column replaces the dot; ellipsizing stays as above. A work-log line runs to
+ * the row's edge while a step card's stops before its disclosure chevron (the
+ * card's 0.85rem gap plus the 0.75rem chevron), so work-log tags hold back the
+ * same and every tag ends on one edge. */
+.km-transcript:is([data-transcript-style="minimal"], [data-transcript-style="minimal-plus"]) {
+  .tool-intent-tag {
+    margin-inline-start: auto;
+    padding-inline-start: 0.625rem;
+  }
+  .tool-intent-tag::before {
+    content: none;
+  }
+  .group\/timeline-row .tool-intent-tag {
+    margin-inline-end: 1.6rem;
+  }
+}
+
 .km-transcript:is(
     [data-transcript-style="minimal"],
     [data-transcript-style="minimal-plus"],

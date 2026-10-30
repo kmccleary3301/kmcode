@@ -1,7 +1,5 @@
+import { createMarkdownSnapshotCompiler } from "@stream-mdx/worker/direct";
 import { describe, expect, it } from "vite-plus/test";
-import { createElement } from "react";
-import { renderToStaticMarkup } from "react-dom/server";
-import ReactMarkdown from "react-markdown";
 
 import {
   extractMarkdownLinkHrefs,
@@ -24,23 +22,12 @@ describe("isWindowsDrivePathHref", () => {
   });
 });
 
-function renderMarkdownLinkHref(markdown: string): string | undefined {
-  let renderedHref: string | undefined;
-  renderToStaticMarkup(
-    createElement(
-      ReactMarkdown,
-      {
-        components: {
-          a({ href }) {
-            renderedHref = href;
-            return createElement("a", { href });
-          },
-        },
-      },
-      markdown,
-    ),
-  );
-  return renderedHref;
+const linkHrefCompiler = createMarkdownSnapshotCompiler({ extensionId: "markdown-links-test" });
+
+async function renderMarkdownLinkHref(markdown: string): Promise<string | undefined> {
+  const { blocks } = await linkHrefCompiler.compile({ text: markdown });
+  const link = blocks[0]?.payload.inline?.find((node) => node.kind === "link");
+  return link?.kind === "link" ? link.href : undefined;
 }
 
 describe("extractMarkdownLinkHrefs", () => {
@@ -209,8 +196,8 @@ describe("resolveMarkdownFileLinkTarget", () => {
     });
   });
 
-  it("resolves relative spaced folders from the markdown renderer", () => {
-    const href = renderMarkdownLinkHref("[folder](<docs/My Folder>)");
+  it("resolves relative spaced folders from the markdown renderer", async () => {
+    const href = await renderMarkdownLinkHref("[folder](<docs/My Folder>)");
 
     expect(href).toBe("docs/My%20Folder");
     expect(resolveMarkdownFileLinkMeta(href, "/repo/project")).toMatchObject({
@@ -222,8 +209,8 @@ describe("resolveMarkdownFileLinkTarget", () => {
 
   it.each(["md", "html", "xml"])(
     "resolves a bare spaced .%s filename from the markdown renderer",
-    (extension) => {
-      const href = renderMarkdownLinkHref(`[checklist](<Updated cutover checklist.${extension}>)`);
+    async (extension) => {
+      const href = await renderMarkdownLinkHref(`[checklist](<Updated cutover checklist.${extension}>)`);
 
       expect(href).toBe(`Updated%20cutover%20checklist.${extension}`);
       expect(resolveMarkdownFileLinkMeta(href, "/repo/project")).toMatchObject({

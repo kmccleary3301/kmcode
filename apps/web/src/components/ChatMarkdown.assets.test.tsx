@@ -58,6 +58,13 @@ vi.mock("~/lib/openPullRequestLink", () => ({
 }));
 
 import ChatMarkdown from "./ChatMarkdown";
+async function waitForMarkdownSnapshot(renderer: ReactTestRenderer) {
+  await vi.waitFor(() => {
+    expect(renderer.root.findAllByProps({ "data-markdown-pending": "" })).toHaveLength(0);
+    expect(renderer.root.findAllByProps({ "data-markdown-error": "" })).toHaveLength(0);
+  });
+}
+
 
 it("opens host media through server authorization before the client grant loads", async () => {
   vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
@@ -81,6 +88,7 @@ it("opens host media through server authorization before the client grant loads"
         />,
       );
     });
+    await waitForMarkdownSnapshot(renderer!);
     await act(async () => {
       const link = renderer!.root
         .findAllByType("a")

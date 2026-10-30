@@ -87,6 +87,7 @@ import {
   detectComposerTrigger,
   expandCollapsedComposerCursor,
   formatAssistantCitationForComposer,
+  parseComposerGoalCommand,
   replaceTextRange,
 } from "../../composer-logic";
 import { DISCONNECTED_COMPOSER_PLACEHOLDER } from "../../composerPlaceholder";
@@ -137,13 +138,9 @@ import { useComposerMenuState } from "./useComposerMenuState";
 import { useComposerTriggerState } from "./useComposerTriggerState";
 import { useComposerFocusState } from "./useComposerFocusState";
 import { useComposerMultilinePrompt } from "./useComposerMultilinePrompt";
-import {
-  ComposerTasksBadge,
-  ComposerTasksContent,
-  ComposerTasksDrawer,
-  type ComposerTaskStep,
-  type ComposerTasksProgress,
-} from "./ComposerTasksBadge";
+import { ComposerStatusBumps } from "./ComposerStatusBumps";
+import type { ComposerBackgroundWorkStatus, ComposerGoalStatus } from "./ComposerStatusBumps";
+import type { NativeTodoPlan } from "./todoPlan";
 import { ComposerActivityRow } from "./ComposerActivityStatus";
 import {
   reconcileAttachmentContextReferences,
@@ -1093,6 +1090,7 @@ import {
   PencilRulerIcon,
   PlayIcon,
   ShieldIcon,
+  TargetIcon,
   XIcon,
 } from "lucide-react";
 import { proposedPlanTitle } from "../../proposedPlan";
@@ -1398,8 +1396,10 @@ const ComposerFooterPrimaryActions = memo(function ComposerFooterPrimaryActions(
   onCompactContext?: (() => void) | undefined;
   compactDisabled: boolean;
   compactDisabledReason: string | null;
+  goalCommandLabel: string | null;
   compactBeforeSendTokens: number | null;
-  onSendWithFullHistory: () => void;
+  keepFullHistory: boolean;
+  onToggleKeepFullHistory: () => void;
 }) {
   return (
     <>
@@ -1439,7 +1439,9 @@ const ComposerFooterPrimaryActions = memo(function ComposerFooterPrimaryActions(
         onInterrupt={props.onInterrupt}
         onImplementPlanInNewThread={props.onImplementPlanInNewThread}
         compactBeforeSendTokens={props.compactBeforeSendTokens}
-        onSendWithFullHistory={props.onSendWithFullHistory}
+        goalCommandLabel={props.goalCommandLabel}
+        keepFullHistory={props.keepFullHistory}
+        onToggleKeepFullHistory={props.onToggleKeepFullHistory}
       />
     </>
   );
@@ -1508,6 +1510,7 @@ export interface ChatComposerHandle {
     selectedProviderModels: ReadonlyArray<ServerProvider["models"][number]>;
     interactionMode: ProviderInteractionMode;
     interactionModeEnabled: boolean;
+    shownPendingApprovalIds: ReadonlyArray<RuntimeRequestId>;
   };
   /** Validate the fully composed text immediately before a provider turn starts. */
   validateProviderInput: (providerInput: string) => boolean;
@@ -1559,10 +1562,12 @@ export interface ChatComposerProps {
   sendDisabledReason: string | null;
   isPreparingWorktree: boolean;
   bannerItems: readonly ComposerBannerStackItem[];
-  /** Tokens Enter compacts before sending; null when the next send keeps full history. */
+  /** Tokens a stale session would re-read; null when the thread is not offered compaction. */
   resumeCompactionTokens: number | null;
-  /** Runs `send` as a one-off send that keeps full history instead of compacting first. */
-  onSendWithFullHistory: (send: () => void) => void;
+  /** The Compact chip is off, so the next send keeps full history. */
+  keepFullHistory: boolean;
+  /** Flips the Compact chip for the active thread. */
+  onToggleKeepFullHistory: () => void;
   /** Picking /usage-limits from the menu is the action itself; the draft keeps nothing of it. */
   onUsageLimitsCommand?: (() => void) | undefined;
   environmentUnavailable: {
@@ -1594,8 +1599,9 @@ export interface ChatComposerProps {
   // Plan
   showPlanFollowUpPrompt: boolean;
   activeProposedPlan: LatestProposedPlanState | null;
-  activeTasksProgress: ComposerTasksProgress | null;
-  activeTaskSteps: readonly ComposerTaskStep[] | null;
+  activeTodoPlan: NativeTodoPlan | null;
+  goalBump: ComposerGoalStatus | null;
+  backgroundWorkBump: ComposerBackgroundWorkStatus | null;
   threadSyncPhase: ThreadSyncPhase | null;
 
   // Mode
@@ -1813,12 +1819,9 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
   } = props;
   const primaryEnvironmentId = usePrimaryEnvironmentId();
   const composerDraftTargetKey = composerTargetKey(composerDraftTarget);
-  // Opening a running thread resyncs for a few frames. Show the sync row, and
-  // hide the tasks row for it, only when the sync lasts. Logic that depends on
-  // the real phase keeps reading `props.threadSyncPhase`.
+  // Opening a running thread resyncs for a few frames. Show the sync row only
+  // when the sync lasts; logic that depends on phase reads the real value.
   const shownSyncPhase = useDelayedStatus(composerDraftTargetKey, props.threadSyncPhase);
-  const activeTasksProgress = shownSyncPhase === null ? props.activeTasksProgress : null;
-  const activeTaskSteps = shownSyncPhase === null ? props.activeTaskSteps : null;
   const isEditingQueuedMessage = editingQueuedAttachments !== null;
   // ------------------------------------------------------------------
   // Store subscriptions (prompt / images / terminal contexts)
@@ -2437,7 +2440,6 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
   const hasWrappedPrompt = useComposerMultilinePrompt(composerMenuAnchor);
   const hasMultilinePrompt = prompt.includes("\n") || hasWrappedPrompt;
   const [isStashMenuOpen, setIsStashMenuOpen] = useState(false);
-  const [isTasksDrawerOpen, setIsTasksDrawerOpen] = useState(false);
   const [stashPulse, setStashPulse] = useState<{ key: number; active: boolean }>({
     key: 0,
     active: false,
@@ -2868,7 +2870,9 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
   );
 
   const isComposerApprovalState = activePendingApproval !== null;
-  const composerSuggestionsVisible = composerMenuOpen && !isComposerApprovalState;
+  const followUpBehavior =
+    pendingApprovals.length > 0 ? "steer" : settings.followUpBehavior;
+  const composerSuggestionsVisible = composerMenuOpen;
   const composerSuggestionListVisible = composerSuggestionsVisible && composerMenuItems.length > 0;
   const activePendingUserInput = pendingUserInputs[0] ?? null;
   const isChoiceOnlyPendingQuestion =
@@ -2878,7 +2882,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     pendingUserInputs.length > 0 ||
     (!isComposerCollapsedMobile && showPlanFollowUpPrompt && activeProposedPlan !== null);
   const showCollapsedMobilePromptRow =
-    isComposerCollapsedMobile && !isComposerApprovalState && pendingUserInputs.length === 0;
+    isComposerCollapsedMobile;
   const showComposerAttachAction =
     fileStagingLimit !== null &&
     (!activePendingProgress ||
@@ -3034,6 +3038,24 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
       attachmentTargetKey,
     ],
   );
+  // A `/goal` draft is a command to the provider, not a message, so the
+  // composer names what sending it does.
+  const goalCommand = activePendingProgress ? null : parseComposerGoalCommand(prompt);
+  const replacesGoal = props.goalBump !== null && props.goalBump.status !== "complete";
+  const goalCommandLabel =
+    goalCommand === null
+      ? null
+      : goalCommand.kind === "set"
+        ? replacesGoal
+          ? "Replace goal"
+          : "Set goal"
+        : {
+            show: "Show goal",
+            pause: "Pause goal",
+            resume: "Resume goal",
+            clear: "Clear goal",
+            budget: "Set goal budget",
+          }[goalCommand.kind];
   const showResumeAction =
     canResume && !composerDraftHasUserContent(composerDraft) && !isEditingQueuedMessage;
   const collapsedComposerPrimaryActionDisabled =
@@ -3047,7 +3069,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     (!composerSendState.hasSendableContent && !showResumeAction);
   const collapsedComposerPrimaryActionLabel = showResumeAction
     ? "Resume thread"
-    : props.resumeCompactionTokens !== null
+    : props.resumeCompactionTokens !== null && !props.keepFullHistory
       ? "Open composer to compact and send"
       : "Send message";
   const showMobilePendingAnswerActions =
@@ -4327,7 +4349,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
               resolveComposerDispatchMode({
                 running: phase === "running",
                 alternateModifier: false,
-                activeTurnDefault: settings.followUpBehavior,
+                activeTurnDefault: followUpBehavior,
               }),
             submissionIntent,
           );
@@ -4349,7 +4371,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
       isSendDisabled,
       noProviderAvailable,
       onSend,
-      settings.followUpBehavior,
+      followUpBehavior,
       phase,
       promptRef,
       shouldBlurMobileComposerOnSubmit,
@@ -4363,16 +4385,11 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
         resolveComposerDispatchMode({
           running: phase === "running",
           alternateModifier: event.metaKey || event.ctrlKey,
-          activeTurnDefault: settings.followUpBehavior,
+          activeTurnDefault: followUpBehavior,
         }),
       );
     },
-    [phase, settings.followUpBehavior, submitComposer],
-  );
-  const { onSendWithFullHistory } = props;
-  const sendWithFullHistory = useCallback(
-    () => onSendWithFullHistory(() => submitComposer()),
-    [onSendWithFullHistory, submitComposer],
+    [phase, followUpBehavior, submitComposer],
   );
   const submitCitationAndSend = useCallback(() => {
     submitComposer(
@@ -4380,10 +4397,10 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
       resolveComposerDispatchMode({
         running: phase === "running",
         alternateModifier: false,
-        activeTurnDefault: settings.followUpBehavior,
+        activeTurnDefault: followUpBehavior,
       }),
     );
-  }, [phase, settings.followUpBehavior, submitComposer]);
+  }, [phase, followUpBehavior, submitComposer]);
   const compactThreadContext = useCallback(() => {
     if (
       !readEnvironmentScope(environmentId, AuthOrchestrationOperateScope) ||
@@ -4467,7 +4484,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
       if (event.shiftKey || event.altKey || event.metaKey || event.ctrlKey || event.isComposing) {
         return false;
       }
-      if (isComposerApprovalState || pendingUserInputs.length > 0) return false;
+      if (pendingUserInputs.length > 0) return false;
       // A composer holding an image, file, picked element, preview
       // annotation, or review comment is not empty. Recalling text into it
       // would send the old prompt with the new context, which is never what
@@ -4507,7 +4524,6 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
       composerImagesRef,
       composerPreviewAnnotations.length,
       composerReviewComments.length,
-      isComposerApprovalState,
       pendingUserInputs.length,
       promptRef,
       replacePromptFromHistory,
@@ -4565,7 +4581,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
         resolveComposerDispatchMode({
           running: phase === "running",
           alternateModifier: submissionIntent === "alternate",
-          activeTurnDefault: settings.followUpBehavior,
+          activeTurnDefault: followUpBehavior,
         }),
         submissionIntent,
       );
@@ -5214,27 +5230,9 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     }
     setIsStashMenuOpen((open) => !open);
   }, [expandMobileComposer, isComposerCollapsedMobile]);
-  const toggleTasksDrawer = useCallback(() => {
-    setIsTasksDrawerOpen((open) => !open);
-  }, []);
   const hasBannerItems = props.bannerItems.length > 0;
   const hasBlockingComposerTopDrawer =
     activePendingApproval !== null || pendingUserInputs.length > 0;
-  const showInlineTasksBadge =
-    activeTasksProgress !== null &&
-    activeTaskSteps !== null &&
-    !isTasksDrawerOpen &&
-    !hasBlockingComposerTopDrawer &&
-    (hasBannerItems || showComposerTopDrawer || isComposerCollapsedMobile);
-  const inlineTasksBadge = showInlineTasksBadge ? (
-    <ComposerTasksBadge
-      expanded={false}
-      onToggle={toggleTasksDrawer}
-      placement="inline"
-      progress={activeTasksProgress}
-      steps={activeTaskSteps}
-    />
-  ) : null;
   const hasImageAttachmentAttention = standaloneComposerImages.some((image) => {
     const upload = uploadsByImageId[image.id];
     const failedInCurrentEnvironment =
@@ -5245,12 +5243,10 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     // its collapsed thumbnail is enough to signal that the draft has images.
     return nonPersistedComposerImageIdSet.has(image.id) && !failedInCurrentEnvironment;
   });
-  // Banners and the tasks badge dock above the surface rather than inside
-  // it, so they do not hold the composer open; only surface-internal chrome
-  // does.
+  // Banners and status bumps dock above the surface, so they do not hold the
+  // composer open; only surface-internal chrome does.
   const composerHasExpandedChrome =
     showComposerTopDrawer ||
-    isTasksDrawerOpen ||
     composerMenuOpen ||
     isStashMenuOpen ||
     isDragOverComposer ||
@@ -5373,8 +5369,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     canTrackComposerScrollGesture &&
     settings.composerCollapseOnScroll &&
     !hasMultilinePrompt &&
-    !composerHasExpandedChrome &&
-    !showInlineTasksBadge;
+    !composerHasExpandedChrome;
   // Scrolling only has something to collapse while the composer is expanded,
   // focused or not, so the wheel handler keys off the resting state rather
   // than editor focus.
@@ -5689,26 +5684,8 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
       </>
     </>
   );
-  const showTasksTab =
-    !hasBannerItems &&
-    !showComposerTopDrawer &&
-    !isTasksDrawerOpen &&
-    !isComposerCollapsedMobile &&
-    activeTasksProgress !== null &&
-    activeTaskSteps !== null &&
-    activeTasksProgress.totalSteps > 0;
-  const activityStackContent = hasBannerItems ? (
-    shownSyncPhase ? (
-      <ComposerActivityRow phase={shownSyncPhase} />
-    ) : !hasBlockingComposerTopDrawer && activeTasksProgress && activeTaskSteps ? (
-      <ComposerTasksContent
-        expanded={isTasksDrawerOpen}
-        onToggle={toggleTasksDrawer}
-        progress={activeTasksProgress}
-        steps={activeTaskSteps}
-      />
-    ) : null
-  ) : null;
+  const activityStackContent =
+    hasBannerItems && shownSyncPhase ? <ComposerActivityRow phase={shownSyncPhase} /> : null;
   const activityStackItem: ComposerBannerStackContent | null = activityStackContent
     ? {
         id: "composer-activity",
@@ -5720,21 +5697,6 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
   const bannerStackItems = activityStackItem
     ? [activityStackItem, ...props.bannerItems]
     : props.bannerItems;
-  useEffect(() => {
-    if (activeTasksProgress === null || activeTaskSteps === null) {
-      setIsTasksDrawerOpen(false);
-    }
-  }, [activeTaskSteps, activeTasksProgress]);
-
-  useEffect(() => {
-    if (hasBlockingComposerTopDrawer) {
-      setIsTasksDrawerOpen(false);
-    }
-  }, [hasBlockingComposerTopDrawer]);
-
-  useEffect(() => {
-    setIsTasksDrawerOpen(false);
-  }, [activeThreadId]);
 
   // Close the stash menu whenever the trigger-driven command menu opens so
   // the two popovers never stack in the same layer, and when the user
@@ -5765,11 +5727,11 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
       if (isCommandPaletteOpen() || isRevertingCheckpoint) {
         return;
       }
-      if (pendingUserInputs.length > 0 && !isComposerApprovalState) {
+      if (pendingUserInputs.length > 0) {
         setIsStashMenuOpen((open) => !open);
         return;
       }
-      if (isComposerApprovalState || projectSelectionRequired || activePendingProgress !== null) {
+      if (projectSelectionRequired || activePendingProgress !== null) {
         return;
       }
       void stashCurrentPrompt();
@@ -5778,7 +5740,6 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     return () => window.removeEventListener("keydown", handler, true);
   }, [
     activePendingProgress,
-    isComposerApprovalState,
     isComposerModelPickerOpen,
     keybindings,
     pendingUserInputs.length,
@@ -5841,15 +5802,13 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     const threadId = activeThreadId;
     // Images landing with no prose live on the shelf with no chip. Read before
     // the awaits below: compression is async and the prompt may change while it
-    // runs. An explicit selection replace and states where the editor refuses
-    // input (connecting, approval, pending questions, project selection) still
-    // get chips so the image is never invisible, unless paste-as-text explicitly
-    // requests no inline image chip.
+    // runs. Explicit selection replaces and states where the editor refuses input
+    // (connecting, pending questions, project selection) still get chips so images
+    // stay visible, unless paste-as-text explicitly requests no inline image chip.
     const imageAttachmentsGetChips =
       !options?.skipImageInlineChip &&
       (options?.selection !== undefined ||
         isConnecting ||
-        isComposerApprovalState ||
         pendingUserInputs.length > 0 ||
         projectSelectionRequired ||
         stripInlineContextReferences(promptRef.current).trim().length > 0);
@@ -6204,7 +6163,6 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
       if (
         text.length === 0 ||
         isConnecting ||
-        isComposerApprovalState ||
         pendingUserInputs.length > 0 ||
         projectSelectionRequired ||
         (options?.citationCommentAnchor && !composerEditorRef.current)
@@ -6240,7 +6198,6 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     },
     [
       applyPromptReplacement,
-      isComposerApprovalState,
       isConnecting,
       pendingUserInputs.length,
       projectSelectionRequired,
@@ -6365,6 +6322,13 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
       if (isInsideRestingComposerControlScope(activeElement)) {
         return;
       }
+      if (
+        activeElement instanceof Element &&
+        activeElement.closest("[data-composer-status-popup]")
+      ) {
+        return;
+      }
+
       if (
         activeElement instanceof Node &&
         ((composerSurface && composerSurface.contains(activeElement)) ||
@@ -6581,6 +6545,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
         });
       },
       getSendContext: () => ({
+        shownPendingApprovalIds: pendingApprovals.map((approval) => approval.requestId),
         prompt: promptRef.current,
         images: composerImagesRef.current,
         files: composerFilesRef.current,
@@ -6641,8 +6606,8 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
       environmentId,
       primaryEnvironmentId,
       isConnecting,
-      isComposerApprovalState,
       isChoiceOnlyPendingQuestion,
+      pendingApprovals,
       pendingUserInputs.length,
       projectSelectionRequired,
       applyPromptReplacement,
@@ -6701,6 +6666,12 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
       }}
       onFocusCapture={(event) => {
         const activeElement = event.target;
+        if (
+          activeElement instanceof Element &&
+          activeElement.closest("[data-composer-status-bumps]")
+        ) {
+          return;
+        }
         if (composerControlsCollapsed && isInsideRestingComposerControlScope(activeElement)) {
           return;
         }
@@ -6759,22 +6730,31 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
             restingControlsHost,
           )
         : null}
+      {/* To-do, working, background, and goal status bumps stay above the composer; popovers portal without reflowing it. */}
+      <ComposerStatusBumps
+        environmentId={props.activeThreadEnvironmentId}
+        threadId={props.activeThreadId}
+        todoPlan={props.activeTodoPlan}
+        backgroundWork={props.backgroundWorkBump}
+        goal={props.goalBump}
+      />
       <ComposerBanner.Dock>
         <ComposerBanner.Column>
+          {/* Keyed per thread to reset its state on thread switches. */}
           <ComposerBannerStack
-            key={activeThreadId}
+            key={`banner-stack:${activeThreadId ?? ""}`}
             className="relative z-0"
             items={bannerStackItems}
             attachedAbove={props.queuedRunsControl}
           />
-          {!activityStackItem && (shownSyncPhase || inlineTasksBadge) ? (
+          {!activityStackItem && shownSyncPhase ? (
             <ComposerBanner.Attachment>
               <ComposerBanner.Root data-chat-composer-activity-strip="true">
-                {shownSyncPhase ? <ComposerActivityRow phase={shownSyncPhase} /> : inlineTasksBadge}
+                <ComposerActivityRow phase={shownSyncPhase} />
               </ComposerBanner.Root>
             </ComposerBanner.Attachment>
           ) : null}
-          {showComposerTopDrawer && (!isTasksDrawerOpen || hasBlockingComposerTopDrawer) ? (
+          {showComposerTopDrawer ? (
             <ComposerBanner.Attachment>
               <ComposerBanner.Root
                 data-chat-composer-top-drawer="true"
@@ -6906,37 +6886,14 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
               </ComposerBanner.Root>
             </ComposerBanner.Attachment>
           ) : null}
-          {!activityStackItem &&
-          isTasksDrawerOpen &&
-          !hasBlockingComposerTopDrawer &&
-          activeTasksProgress &&
-          activeTaskSteps ? (
-            <ComposerTasksDrawer
-              onCollapse={toggleTasksDrawer}
-              progress={activeTasksProgress}
-              steps={activeTaskSteps}
-            />
-          ) : null}
-          {showTasksTab ? (
-            <ComposerBanner.Attachment>
-              <ComposerTasksBadge
-                expanded={false}
-                onToggle={toggleTasksDrawer}
-                progress={activeTasksProgress}
-                steps={activeTaskSteps}
-              />
-            </ComposerBanner.Attachment>
-          ) : null}
         </ComposerBanner.Column>
-        {!isComposerApprovalState ? (
-          <ComposerStashBadge
-            count={stashQueue.length}
-            menuOpen={isStashMenuOpen}
-            pulseKey={stashPulse.key}
-            pulsing={stashPulse.active}
-            onToggleMenu={toggleStashMenu}
-          />
-        ) : null}
+        <ComposerStashBadge
+          count={stashQueue.length}
+          menuOpen={isStashMenuOpen}
+          pulseKey={stashPulse.key}
+          pulsing={stashPulse.active}
+          onToggleMenu={toggleStashMenu}
+        />
       </ComposerBanner.Dock>
       <div className="relative">
         <ComposerSurface.Main
@@ -6997,8 +6954,12 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                   onClick={(event) => {
                     event.stopPropagation();
                     if (showResumeAction) onResume();
-                    // Compacting first is only sent from the labeled button, so expand to show it.
-                    else if (props.resumeCompactionTokens !== null) expandMobileComposer();
+                    // Compacting first only sends from the expanded composer, where the chip shows it.
+                    else if (
+                      props.resumeCompactionTokens !== null &&
+                      !props.keepFullHistory
+                    )
+                      expandMobileComposer();
                     else submitComposer();
                   }}
                 >
@@ -7025,12 +6986,11 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
               className={cn(
                 "relative px-3 pb-2 sm:px-4",
                 "pt-3.5 sm:pt-4",
-                isComposerApprovalState && "pb-3 sm:pb-4",
                 isComposerCollapsedMobile && "hidden",
                 isComposerResting && "py-2 sm:py-2",
               )}
             >
-              {isStashMenuOpen && !composerMenuOpen && !isComposerApprovalState && (
+              {isStashMenuOpen && !composerMenuOpen && (
                 <ComposerCommandMenuLayer anchor={composerMenuAnchor}>
                   <ComposerStashMenu
                     entries={stashQueue}
@@ -7074,7 +7034,6 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
               )}
 
               {!isComposerCollapsedMobile &&
-                !isComposerApprovalState &&
                 pendingUserInputs.length === 0 &&
                 editingQueuedAttachments !== null &&
                 editingQueuedAttachments.length > 0 && (
@@ -7110,7 +7069,6 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                 )}
 
               {!isComposerCollapsedMobile &&
-                !isComposerApprovalState &&
                 pendingUserInputs.length === 0 &&
                 (uncommittedSnapShotIds.length > 0 ||
                   composerVideos.length > 0 ||
@@ -7361,7 +7319,6 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                 )}
 
               {!isComposerCollapsedMobile &&
-                !isComposerApprovalState &&
                 composerOtherFiles.length > 0 && (
                   <div className="mb-3 flex flex-col gap-1">
                     {composerOtherFiles.map((file) => {
@@ -7437,6 +7394,23 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                     })}
                   </div>
                 )}
+              {goalCommand?.kind === "set" && !isComposerResting ? (
+                // Sending this starts autonomous work, so the composer says so before it goes.
+                <div
+                  className="mb-1.5 flex min-w-0 items-center gap-1.5 text-xs text-muted-foreground"
+                  data-composer-goal-draft
+                >
+                  <TargetIcon aria-hidden className="size-3.5 shrink-0 text-foreground" />
+                  <span className="shrink-0 font-medium text-foreground">
+                    {replacesGoal ? "Replaces the current goal" : "New goal"}
+                  </span>
+                  <span className="min-w-0 truncate">
+                    {replacesGoal && props.goalBump !== null
+                      ? props.goalBump.objective
+                      : "The agent keeps working until it judges the objective met"}
+                  </span>
+                </div>
+              ) : null}
               <div
                 data-t3-part="prompt-editor"
                 className={cn(
@@ -7502,13 +7476,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                     }
                     editorRef={composerEditorRef}
                     richTextEnabled={settings.composerRichTextEnabled}
-                    value={
-                      isComposerApprovalState
-                        ? ""
-                        : activePendingProgress
-                          ? activePendingProgress.customAnswer
-                          : prompt
-                    }
+                    value={activePendingProgress ? activePendingProgress.customAnswer : prompt}
                     cursor={composerCursor}
                     contextRecords={composerContextRecords}
                     buildContextClipboardFragment={buildContextClipboardFragment}
@@ -7519,7 +7487,6 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                       showMobilePendingAnswerActions && "max-sm:pb-12",
                       isComposerResting &&
                         "my-0 max-h-8 min-h-8 overflow-hidden py-0 whitespace-pre! leading-8",
-                      isComposerApprovalState && "min-h-10",
                     )}
                     placeholderClassName={cn(
                       isComposerResting &&
@@ -7537,7 +7504,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                       props.threadSyncPhase !== null
                         ? threadSyncLabel(props.threadSyncPhase)
                         : isComposerApprovalState
-                          ? "Resolve this approval request to continue"
+                          ? "Send a message to decline and redirect the agent"
                           : activePendingProgress
                             ? isChoiceOnlyPendingQuestion
                               ? "Choose an option above"
@@ -7554,7 +7521,6 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                     }
                     disabled={
                       isConnecting ||
-                      isComposerApprovalState ||
                       projectSelectionRequired ||
                       Boolean(props.threadSyncPhase) ||
                       isChoiceOnlyPendingQuestion ||
@@ -7601,7 +7567,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
             />
 
             {/* Bottom toolbar */}
-            {isComposerCollapsedMobile || isComposerApprovalState ? null : (
+            {isComposerCollapsedMobile ? null : (
               <div
                 data-chat-composer-footer="true"
                 data-t3-surface="toolbar"
@@ -7686,7 +7652,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                     pendingAction={pendingPrimaryAction}
                     isRunning={phase === "running"}
                     canInterrupt={canInterrupt}
-                    followUpBehavior={settings.followUpBehavior}
+                    followUpBehavior={followUpBehavior}
                     alternateShortcutLabel={shortcutLabelForCommand(
                       keybindings,
                       "composer.sendAlternate",
@@ -7721,7 +7687,9 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                     onInterrupt={handleInterruptPrimaryAction}
                     onImplementPlanInNewThread={handleImplementPlanInNewThreadPrimaryAction}
                     compactBeforeSendTokens={props.resumeCompactionTokens}
-                    onSendWithFullHistory={sendWithFullHistory}
+                    goalCommandLabel={goalCommandLabel}
+                    keepFullHistory={props.keepFullHistory}
+                    onToggleKeepFullHistory={props.onToggleKeepFullHistory}
                     compactDisabled={
                       compactDisabled || noProviderAvailable || isSendBusy || isConnecting
                     }

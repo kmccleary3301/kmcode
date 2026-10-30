@@ -2,11 +2,33 @@ import type {
   OrchestrationV2ThreadProjection,
   OrchestrationV2RuntimeRequest,
   OrchestrationV2UserInputQuestion,
+  ProviderApprovalDecision,
   ProviderApprovalOption,
   ProviderRequestKind,
   RuntimeRequestId,
 } from "@t3tools/contracts";
 import * as DateTime from "effect/DateTime";
+import type { AtomCommandResult } from "./runtime.ts";
+
+export type ApprovalResponse = AtomCommandResult<unknown, unknown> | undefined;
+
+export type ApprovalResponder = (
+  requestId: RuntimeRequestId,
+  decision: ProviderApprovalDecision,
+) => Promise<ApprovalResponse>;
+
+/** Declines every approval a redirect replaces; any one still pending would block the agent. */
+export async function declinePendingApprovals(
+  approvals: ReadonlyArray<ThreadPendingApproval>,
+  respond: ApprovalResponder,
+): Promise<boolean> {
+  for (const approval of approvals) {
+    // A request the provider can no longer answer has nothing to decline.
+    if (approval.responseCapability !== "live") continue;
+    if ((await respond(approval.requestId, "decline"))?._tag !== "Success") return false;
+  }
+  return true;
+}
 
 export interface ThreadPendingApproval {
   readonly requestId: RuntimeRequestId;

@@ -10,6 +10,7 @@ import monolineVoidThemeFile from "../../../assets/themes-buffet/monoline-void.t
 import neonTokyoCyberThemeFile from "../../../assets/themes-buffet/neon-tokyo-cyber.theme.json" with { type: "json" };
 import nordThemeFile from "../../../assets/themes-buffet/nord.theme.json" with { type: "json" };
 import oneDarkProThemeFile from "../../../assets/themes-buffet/one-dark-pro.theme.json" with { type: "json" };
+import parchmentThemeFile from "../../../assets/themes-buffet/parchment.theme.json" with { type: "json" };
 import rosPineMoonThemeFile from "../../../assets/themes-buffet/ros-pine-moon.theme.json" with { type: "json" };
 import rosPineThemeFile from "../../../assets/themes-buffet/ros-pine.theme.json" with { type: "json" };
 import synthwave84ThemeFile from "../../../assets/themes-buffet/synthwave-84.theme.json" with { type: "json" };
@@ -23,6 +24,13 @@ const WorkbenchThemeFileSchema = Schema.Struct({
   name: Schema.String,
   appearance: Schema.Literals(["light", "dark"]),
   colors: AppearanceColorsSchema,
+  /** The other appearance, for a theme that ships both as one card. */
+  variants: Schema.optionalKey(
+    Schema.Struct({
+      light: Schema.optionalKey(AppearanceColorsSchema),
+      dark: Schema.optionalKey(AppearanceColorsSchema),
+    }),
+  ),
 });
 
 const decodeWorkbenchThemeFile = Schema.decodeUnknownSync(WorkbenchThemeFileSchema);
@@ -42,6 +50,7 @@ const WORKBENCH_THEME_FILES: ReadonlyArray<unknown> = [
   synthwave84ThemeFile,
   monolineVoidThemeFile,
   neonTokyoCyberThemeFile,
+  parchmentThemeFile,
 ];
 
 function toThemeDefinition(input: unknown): ThemeDefinition {
@@ -51,6 +60,7 @@ function toThemeDefinition(input: unknown): ThemeDefinition {
     label: file.name,
     appearance: file.appearance,
     colors: file.colors,
+    ...(file.variants === undefined ? {} : { variants: file.variants }),
   };
 }
 

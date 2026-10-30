@@ -56,6 +56,7 @@ export const WORKBENCH_THEME_IDS = [
   "synthwave-84",
   "monoline-void",
   "neon-tokyo-cyber",
+  "parchment",
 ] as const;
 
 /** The mobile app's fresh-install KM Code palette. */

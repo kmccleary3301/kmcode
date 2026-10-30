@@ -1433,9 +1433,10 @@ html[data-mobile-composer-route-transition="true"]::view-transition-old(t3-mobil
    compatibility overrides so both navigation implementations receive the
    same palette. Success, info, provider, and channel identity colors remain
    independent; error, warning, and update roles are themeable below. */
-/* The active marker adds enough specificity to outrank the generated root
-   dark variant without reintroducing raw `.dark` selectors. */
-html[data-t3-appearance-active="true"] {
+/* The root dark variant compiles to `:root:is(.dark, .dark *)` (0,2,0), so the
+   active marker pairs with the theme id the runtime always sets alongside it
+   to reach (0,2,1) and win in both appearances without raw `.dark` selectors. */
+html[data-t3-appearance-active="true"][data-theme-id] {
   --background: var(--app-theme-canvas);
   --app-chrome-background: var(--app-theme-chrome);
   --toolbar-background: var(--app-theme-toolbar);

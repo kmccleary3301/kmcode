@@ -1,0 +1,242 @@
+/* OMP tool panes (components/chat/omp-pane): a port of OMP's TUI box. One
+ * bordered pane per opened step: the call's input on top, an `Output` rule,
+ * then the output. Code is mono; labels are sans. Tokens come from
+ * transcript.css (.km-transcript). */
+.km-transcript {
+  .omp-pane {
+    min-width: 0;
+    max-width: 100%;
+    margin-top: 0.35rem;
+    overflow: hidden;
+    border: 1px solid var(--line);
+    border-radius: 6px;
+    background: var(--code-bg);
+    font-family: var(--font-mono);
+    font-size: 12px;
+    line-height: 1.6;
+  }
+
+  .omp-pane-input,
+  .omp-pane-output {
+    position: relative;
+    min-width: 0;
+  }
+
+  /* Each section is a live region: it glides taller up to this cap, then
+     follows its tail while it streams. */
+  .omp-pane [data-bottom-stick-viewport] {
+    max-height: min(22rem, 50dvh);
+  }
+
+  .omp-pane-input > [data-bottom-stick-viewport],
+  .omp-pane-input > * > [data-bottom-stick-viewport] {
+    padding: 0.5rem 0.75rem;
+  }
+
+  .omp-pane-actions {
+    position: absolute;
+    top: 0.25rem;
+    right: 0.25rem;
+    z-index: 1;
+    display: flex;
+    align-items: center;
+    gap: 0.35rem;
+    opacity: 0;
+    transition: opacity 150ms ease-out;
+  }
+  .omp-pane-input:hover > .omp-pane-actions,
+  .omp-pane-output:hover > .omp-pane-actions,
+  .omp-pane-actions:focus-within,
+  .omp-pane-actions:has([role="alert"]) {
+    opacity: 1;
+  }
+  @media (pointer: coarse) {
+    .omp-pane-actions {
+      opacity: 1;
+    }
+  }
+  .omp-pane-actions .copy-button {
+    min-height: 1.4rem;
+    border-radius: 4px;
+    background: var(--code-bg);
+  }
+
+  /* `├─── Output ───┤`: a hairline that meets both pane edges. */
+  .omp-pane-divider {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    color: var(--foreground-faint);
+    font-family: var(--font-interface, var(--font-sans));
+    font-size: 11px;
+    line-height: 1.4;
+  }
+  .omp-pane-divider::before,
+  .omp-pane-divider::after {
+    content: "";
+    border-top: 1px solid var(--line);
+  }
+  .omp-pane-divider::before {
+    width: 0.75rem;
+  }
+  .omp-pane-divider::after {
+    flex: 1;
+  }
+
+  .omp-pane-output-text,
+  .omp-pane-note {
+    margin: 0;
+    padding: 0.5rem 0.75rem;
+    color: var(--foreground-soft);
+    font: inherit;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+    tab-size: 4;
+  }
+
+  /* Code rows (OmpPaneCode): line numbers in their own column, code wrapping
+   * inside its column the way an editor soft-wraps, so continuation lines
+   * never slide under the numbers. Diff rows follow Cursor: the number, a
+   * left stripe and the row tint carry the change; no +/− prefixes. */
+  .omp-pane-input .omp-code-host {
+    margin: -0.5rem -0.75rem;
+  }
+  .omp-code-host {
+    padding-block: 0.3rem;
+  }
+  .omp-code {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+    color: var(--kmt-foreground);
+    line-height: 1.55;
+    tab-size: 4;
+  }
+  .omp-code[data-gutters="1"] {
+    grid-template-columns: max-content minmax(0, 1fr);
+  }
+  .omp-code + .omp-code {
+    margin-top: 0.3rem;
+    padding-top: 0.3rem;
+    border-top: 1px dashed var(--line);
+  }
+  .omp-code-title {
+    grid-column: 1 / -1;
+    padding: 0 0.75rem 0.15rem;
+    color: var(--foreground-faint);
+    font-family: var(--font-interface, var(--font-sans));
+    font-size: 11px;
+  }
+  .omp-code-row {
+    display: grid;
+    grid-column: 1 / -1;
+    grid-template-columns: subgrid;
+    min-height: 1.55em;
+    border-left: 2px solid transparent;
+  }
+  .omp-code-gutter {
+    min-width: 2ch;
+    padding: 0 0.25rem 0 0.75rem;
+    color: var(--foreground-faint);
+    font-variant-numeric: tabular-nums;
+    text-align: right;
+    user-select: none;
+  }
+  .omp-code-text {
+    display: block;
+    min-width: 0;
+    padding: 0 0.75rem;
+    font: inherit;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+  }
+  .omp-code-text span {
+    color: var(--shiki-light, inherit);
+  }
+
+  .omp-code-row[data-kind="add"] {
+    border-left-color: var(--kmt-success);
+    background: color-mix(in srgb, var(--kmt-success) 12%, transparent);
+  }
+  .omp-code-row[data-kind="add"] .omp-code-gutter {
+    color: var(--kmt-success);
+  }
+  .omp-code-row[data-kind="remove"] {
+    border-left-color: var(--danger);
+    background: color-mix(in srgb, var(--danger) 12%, transparent);
+  }
+  .omp-code-row[data-kind="remove"] .omp-code-gutter {
+    color: var(--danger);
+  }
+  .omp-code-row[data-kind="hunk"] {
+    color: var(--foreground-faint);
+    background: var(--surface-subtle);
+  }
+  .omp-code-row[data-kind="hunk"] .omp-code-text span {
+    color: inherit;
+  }
+
+  /* Listings: search hits get a neutral grey stripe, not a diff colour. */
+  .omp-code-row[data-kind="match"] {
+    border-left-color: color-mix(in srgb, var(--kmt-accent) 58%, transparent);
+    background: color-mix(in srgb, var(--kmt-accent) 8%, transparent);
+  }
+  .omp-code-row[data-kind="range"] .omp-code-gutter {
+    opacity: 0.68;
+  }
+  .omp-code-row[data-kind="gap"] .omp-code-text::before {
+    content: "···";
+    color: var(--foreground-faint);
+  }
+
+  .omp-pane-streaming {
+    margin: 0.2rem 0 0;
+    color: var(--foreground-faint);
+    font-family: var(--font-interface, var(--font-sans));
+    font-size: 11px;
+  }
+
+  .omp-pane-prose {
+    margin: 0;
+    color: var(--foreground-soft);
+    font-family: var(--font-interface, var(--font-sans));
+    font-size: 13px;
+    line-height: 1.55;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+  }
+  /* Agent-written markdown (task prompts, shared context): the prose voice,
+     laid out by stream-mdx rather than by preserved whitespace. */
+  .chat-markdown.omp-pane-markdown {
+    color: var(--foreground-soft);
+    font-family: var(--font-interface, var(--font-sans));
+    font-size: 13px;
+    line-height: 1.55;
+    overflow-wrap: anywhere;
+  }
+
+  .omp-pane-fields {
+    display: grid;
+    grid-template-columns: max-content minmax(0, 1fr);
+    gap: 0.1rem 1rem;
+    margin: 0;
+  }
+  .omp-pane-field {
+    display: contents;
+  }
+  .omp-pane-field dt {
+    color: var(--foreground-faint);
+  }
+  .omp-pane-field dd {
+    margin: 0;
+    color: var(--kmt-foreground);
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+  }
+}
+
+.dark .km-transcript .omp-code-text span {
+  color: var(--shiki-dark, inherit);
+}
+.dark .km-transcript .omp-code-row[data-kind="hunk"] .omp-code-text span {
+  color: inherit;
+}

@@ -1567,7 +1567,11 @@ export const layer = Layer.effect(
               return { _tag: "expired" as const };
             }
 
-            const rendered = renderWebhookPrompt(task.prompt, request);
+            const frameId = yield* crypto.randomBytes(6).pipe(
+              Effect.map((bytes) => Buffer.from(bytes).toString("hex")),
+              Effect.mapError((cause) => taskError("Could not generate frame id.", { cause })),
+            );
+            const rendered = renderWebhookPrompt(task.prompt, request, frameId);
             // A provider refuses a turn this long, so it is not started. The
             // delivery is not retryable, so the claim is kept. Providers trim
             // the prompt before checking, so whitespace around it is free.

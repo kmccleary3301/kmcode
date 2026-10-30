@@ -19,6 +19,13 @@ import type {
   DesktopAppActivationRequest,
   DesktopAppActivationResponse,
 } from "./desktopAppActivation.ts";
+import type {
+  ForwardedPort,
+  PortForwardConnectionRequest,
+  PortForwardConnectionResolution,
+  PortForwardKey,
+  PortForwardStart,
+} from "./ports.ts";
 
 export interface ContextMenuItem<T extends string = string> {
   id: T;
@@ -1348,10 +1355,23 @@ export interface DesktopBridge {
    * Electron desktop build; web builds have `preview === undefined`.
    */
   preview?: DesktopPreviewBridge;
+  /** Local port forwarding manager. Present iff hosted by the Electron desktop build. */
+  portForwarding?: DesktopPortForwardingBridge;
 }
 
 /** Renderer callback invoked by Electron with a fresh user gesture before display-media capture. */
 export const DESKTOP_PREVIEW_RECORDING_CAPTURE_TRIGGER = "__t3DesktopPreviewRecordingCapture";
+
+export interface DesktopPortForwardingBridge {
+  list: () => Promise<readonly ForwardedPort[]>;
+  start: (input: PortForwardStart) => Promise<ForwardedPort>;
+  stop: (input: PortForwardKey) => Promise<void>;
+  /** Closes every forward in every environment in one pass; resolves to how many closed. */
+  stopAll: () => Promise<number>;
+  onChanged: (listener: (ports: readonly ForwardedPort[]) => void) => () => void;
+  onConnectionRequest: (listener: (request: PortForwardConnectionRequest) => void) => () => void;
+  resolveConnection: (input: PortForwardConnectionResolution) => Promise<void>;
+}
 
 export interface DesktopPreviewBridge {
   setForwardedShortcuts?: (shortcuts: ReadonlyArray<PreviewForwardedShortcut>) => Promise<void>;

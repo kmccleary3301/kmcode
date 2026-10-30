@@ -1,6 +1,7 @@
 import * as NodeEvents from "node:events";
 
 import * as NodeServices from "@effect/platform-node/NodeServices";
+import { HostProcessPlatform } from "@t3tools/shared/hostProcess";
 import { it } from "@effect/vitest";
 import {
   EnvironmentId,
@@ -16,6 +17,7 @@ import * as Fiber from "effect/Fiber";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
+import * as Path from "effect/Path";
 import * as Queue from "effect/Queue";
 import * as Stream from "effect/Stream";
 import type { BrowserContext, Page } from "playwright-core";
@@ -61,10 +63,19 @@ function makeSession() {
   return {
     on: vi.fn(),
     detach: vi.fn(async () => {}),
-    send: vi.fn(async (method: string, _input?: unknown): Promise<Record<string, unknown>> => {
+    send: vi.fn(async (method: string, input?: unknown): Promise<Record<string, unknown>> => {
       if (method === "Page.getNavigationHistory") return { currentIndex: 0, entries: [{}] };
       if (method === "Page.getLayoutMetrics") return { cssVisualViewport: { pageX: 0, pageY: 0 } };
       if (method === "Page.captureScreenshot") return { data: "ZnJhbWU=" };
+      if (method === "Page.getFrameTree") return { frameTree: { frame: { id: "test-frame" } } };
+      if (method === "Page.createIsolatedWorld") return { executionContextId: 919_191 };
+      if (method === "Runtime.evaluate") {
+        const contextId =
+          input !== null && typeof input === "object" && "contextId" in input
+            ? input.contextId
+            : undefined;
+        return { result: { value: contextId === 919_191 ? [] : "evaluated" } };
+      }
       return { result: { value: "evaluated" } };
     }),
   };
@@ -490,6 +501,39 @@ it.live("applies any client's viewport, appearance, and zoom to a headless tab",
   ).pipe(Effect.provide(layer)),
 );
 
+
+it.live("preview diagnostics redact data URL payloads in network and console entries", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const { broker, tabId } = yield* ready;
+      const page = contexts[0]!.page;
+      page.emit("response", {
+        url: () => "data:text/plain,PAYLOAD",
+        request: () => ({ method: () => "GET" }),
+        status: () => 200,
+      });
+      page.emit("console", {
+        type: () => "error",
+        args: () => [],
+        text: () => "Blocked data:text/plain,PAYLOAD",
+      });
+
+      const snapshot = yield* broker.invoke<PreviewAutomationSnapshot>({
+        scope,
+        tabId,
+        operation: "snapshot",
+        input: {},
+      });
+      expect(snapshot.networkEntries).toContainEqual(
+        expect.objectContaining({ url: "data:text/plain,…" }),
+      );
+      expect(snapshot.consoleEntries).toContainEqual(
+        expect.objectContaining({ text: "Blocked data:text/plain,…" }),
+      );
+    }),
+  ).pipe(Effect.provide(layer)),
+);
+
 it.live(
   "takeover waits for the running agent and revokes snapshot refs before returning control",
   () =>
@@ -798,7 +842,7 @@ it.live("a page download is saved, offered to the controller, and listed for the
           return written.promise;
         },
         suggestedFilename: () => "report.csv",
-        url: () => "blob:http://localhost:5173/1",
+        url: () => 'data:text/csv;charset="a,b",a b\'c',
       });
       const fs = yield* FileSystem.FileSystem;
       const path = yield* Queue.take(saved);
@@ -812,7 +856,11 @@ it.live("a page download is saved, offered to the controller, and listed for the
         tabId,
         downloadId: offered.id,
       });
-      expect(Option.isSome(file) && file.value.fileName).toBe("report.csv");
+      const downloadedFile = Option.getOrThrow(file);
+      expect(downloadedFile.fileName).toBe("report.csv");
+      if ((yield* HostProcessPlatform) !== "win32") {
+        expect((yield* fs.stat(downloadedFile.path)).mode & 0o777).toBe(0o600);
+      }
       const status = yield* broker.invoke<PreviewAutomationStatus>({
         scope,
         tabId,
@@ -820,7 +868,11 @@ it.live("a page download is saved, offered to the controller, and listed for the
         input: {},
       });
       expect(status.downloads).toEqual([
-        expect.objectContaining({ fileName: "report.csv", sizeBytes: 3 }),
+        expect.objectContaining({
+          fileName: "report.csv",
+          sizeBytes: 3,
+          url: "data:text/csv,…",
+        }),
       ]);
       expect(
         Option.isNone(
@@ -831,6 +883,28 @@ it.live("a page download is saved, offered to the controller, and listed for the
           }),
         ),
       ).toBe(true);
+      if ((yield* HostProcessPlatform) !== "win32") {
+        const folder = (yield* Path.Path).dirname(downloadedFile.path);
+        yield* fs.chmod(folder, 0o755);
+        const savedAgain = yield* Queue.unbounded<string>();
+        const writtenAgain = Promise.withResolvers<void>();
+        page.emit("download", {
+          failure: async () => null,
+          delete: async () => {},
+          saveAs: (path: string) => {
+            Queue.offerUnsafe(savedAgain, path);
+            return writtenAgain.promise;
+          },
+          suggestedFilename: () => "again.csv",
+          url: () => "https://example.test/again.csv",
+        });
+        const againPath = yield* Queue.take(savedAgain);
+        yield* fs.writeFileString(againPath, "c");
+        writtenAgain.resolve();
+        let again = yield* Queue.take(viewer.output);
+        while (again._tag !== "download") again = yield* Queue.take(viewer.output);
+        expect((yield* fs.stat(folder)).mode & 0o777).toBe(0o700);
+      }
     }),
   ).pipe(Effect.provide(layer)),
 );
@@ -871,6 +945,48 @@ it.live("a page's file picker goes to the controller and takes its uploaded file
   ).pipe(Effect.provide(layer)),
 );
 
+it.live("reissues a file picker to a new controller and rejects the old chooser id", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const { browser, tabId } = yield* ready;
+      const page = contexts[0]!.page;
+      const first = yield* browser.attachViewer(viewerInput(tabId, true));
+      yield* first.input({ type: "takeControl" });
+      const setFiles = vi.fn(async (_files: unknown) => {});
+      page.emit("filechooser", {
+        isMultiple: () => false,
+        element: () => ({ getAttribute: async () => ".csv" }),
+        setFiles,
+      });
+      let firstOffer = yield* Queue.take(first.output);
+      while (firstOffer._tag !== "fileChooser") firstOffer = yield* Queue.take(first.output);
+
+      const second = yield* browser.attachViewer(viewerInput(tabId, true));
+      yield* first.input({ type: "releaseControl" });
+      yield* second.input({ type: "takeControl" });
+      let secondOffer = yield* Queue.take(second.output);
+      while (secondOffer._tag !== "fileChooser") secondOffer = yield* Queue.take(second.output);
+      expect(secondOffer.id).not.toBe(firstOffer.id);
+
+      let closed = yield* Queue.take(first.output);
+      while (closed._tag !== "fileChooserClosed") closed = yield* Queue.take(first.output);
+      expect(closed.id).toBe(firstOffer.id);
+      const files = [
+        { name: "answer.csv", mimeType: "text/csv", buffer: Buffer.from("answer") },
+      ];
+      const answer = (chooserId: string) =>
+        browser.answerFileChooser({
+          threadId: scope.thread.threadId,
+          tabId,
+          chooserId,
+          files,
+        });
+      expect(yield* answer(firstOffer.id)).toBe(false);
+      expect(yield* answer(secondOffer.id)).toBe(true);
+      expect(setFiles).toHaveBeenCalledExactlyOnceWith(files);
+    }),
+  ).pipe(Effect.provide(layer)),
+);
 it.live("a file picker replaces a stalled viewer backlog instead of being dropped", () =>
   Effect.scoped(
     Effect.gen(function* () {

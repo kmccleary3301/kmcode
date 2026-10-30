@@ -1438,6 +1438,55 @@ it.effect("keeps ingesting owned child events after the root turn terminalizes",
   }),
 );
 
+it.effect("persists root work completion before checkpoint finalization", () =>
+  Effect.gen(function* () {
+    const workCompletedAt = yield* DateTime.now;
+    const updates = yield* Ref.make<
+      ReadonlyArray<{
+        readonly phase: "guarded" | "terminal";
+        readonly run: OrchestrationV2Run;
+        readonly effects: ReadonlyArray<PendingOrchestrationEffectV2>;
+      }>
+    >([]);
+
+    yield* runBackgroundItemScenario(
+      "work-completion-before-checkpoint",
+      (ids) => [
+        {
+          type: "run.execution-ended",
+          driver,
+          threadId: ids.threadId,
+          runId: ids.runId,
+          attemptId: ids.attemptId,
+          providerThreadId: ids.providerThreadId,
+          providerTurnId: ids.rootProviderTurnId,
+          runOrdinal: 1,
+          workCompletedAt,
+        } as unknown as ProviderAdapterV2Event,
+        rootTerminalEvent(ids, "completed"),
+      ],
+      { onRunUpdate: (update) => Ref.update(updates, (current) => [...current, update]) },
+    );
+
+    const persisted = yield* Ref.get(updates);
+    const executionEnded = persisted.find((update) => update.phase === "guarded");
+    if (executionEnded === undefined) throw new Error("root work-completion update was not persisted");
+    assert.equal(executionEnded.run.status, "running");
+    assert.isNull(executionEnded.run.completedAt);
+    assert.deepEqual(executionEnded.run.workCompletedAt, workCompletedAt);
+    assert.isEmpty(executionEnded.effects);
+
+    const checkpointPending = persisted.find((update) => update.phase === "terminal");
+    if (checkpointPending === undefined) throw new Error("terminal checkpoint update was not persisted");
+    assert.equal(checkpointPending.run.status, "waiting");
+    assert.isNull(checkpointPending.run.completedAt);
+    assert.deepEqual(checkpointPending.run.workCompletedAt, workCompletedAt);
+    assert.isTrue(
+      checkpointPending.effects.some((effect) => effect.request.type === "checkpoint.capture"),
+    );
+  }),
+);
+
 it.effect("keeps ingesting a late background command item completion after root terminal", () =>
   Effect.gen(function* () {
     const observed = yield* runBackgroundItemScenario("bg-command", (ids) => [
@@ -4010,10 +4059,32 @@ function runBackgroundItemScenario(
       ReadonlyArray<{ readonly id: TurnItemId; readonly runId: RunId }>
     >;
     readonly onSubscribe?: Effect.Effect<void>;
+    readonly onRunUpdate?: (input: {
+      readonly phase: "guarded" | "terminal";
+      readonly run: OrchestrationV2Run;
+      readonly effects: ReadonlyArray<PendingOrchestrationEffectV2>;
+    }) => Effect.Effect<void>;
+    readonly onFinalized?: (
+      events: ReadonlyArray<OrchestrationV2DomainEvent>,
+    ) => Effect.Effect<void>;
   },
 ) {
   return Effect.gen(function* () {
     const ids = backgroundScenarioIds(key);
+    const now = yield* DateTime.now;
+  const observeRunUpdates = (
+    phase: "guarded" | "terminal",
+    events: ReadonlyArray<OrchestrationV2DomainEvent>,
+    effects: ReadonlyArray<PendingOrchestrationEffectV2>,
+  ) =>
+    Effect.gen(function* () {
+      if (options?.onRunUpdate === undefined) return;
+      for (const event of events) {
+        if (event.type === "run.updated" && event.runId === ids.runId) {
+          yield* options.onRunUpdate({ phase, run: event.payload, effects });
+        }
+      }
+    });
     const providerInstanceId = ProviderInstanceId.make("codex");
     const observed = yield* Ref.make<ReadonlyArray<string>>([]);
     const ingestionDone = yield* Deferred.make<void>();
@@ -4032,10 +4103,18 @@ function runBackgroundItemScenario(
                   )
                 ) {
                   yield* Ref.update(observed, (current) => [...current, "root-finalized"]);
+                  if (options?.onFinalized !== undefined) {
+                    yield* options.onFinalized(input.events);
+                  }
                 }
+                yield* observeRunUpdates("terminal", input.events, input.effects);
                 return [];
               }),
-            writeIfRunCurrent: () => Effect.succeed({ committed: true, storedEvents: [] }),
+            writeIfRunCurrent: (input) =>
+              Effect.gen(function* () {
+                yield* observeRunUpdates("guarded", input.events, input.effects ?? []);
+                return { committed: true, storedEvents: [] };
+              }),
           }),
           IdAllocator.layer,
           Layer.mock(ProviderEventIngestor.ProviderEventIngestorV2)({
@@ -4088,6 +4167,17 @@ function runBackgroundItemScenario(
           threadId: ids.threadId,
           ordinal: 1,
           providerInstanceId,
+          modelSelection: { instanceId: providerInstanceId, model: "gpt-5.4" },
+          providerThreadId: ids.providerThreadId,
+          userMessageId: MessageId.make(`message:${key}:user`),
+          rootNodeId: ids.rootNodeId,
+          activeAttemptId: ids.attemptId,
+          status: "running",
+          requestedAt: now,
+          startedAt: now,
+          completedAt: null,
+          checkpointId: null,
+          contextHandoffId: null,
         } as OrchestrationV2Run,
         rootNode: { id: ids.rootNodeId } as OrchestrationV2ExecutionNode,
         checkpointScope: {
@@ -4135,6 +4225,55 @@ function runBackgroundItemScenario(
     return yield* Ref.get(observed);
   });
 }
+
+it.effect("keeps a failed root's still-running native children live while the run settles", () =>
+  Effect.gen(function* () {
+    const finalized = yield* Ref.make<ReadonlyArray<OrchestrationV2DomainEvent>>([]);
+    const childTurn = (
+      ids: BackgroundScenarioIds,
+      status: "running" | "completed",
+    ): ProviderAdapterV2Event =>
+      ({
+        type: "provider_turn.updated",
+        driver,
+        threadId: ids.childThreadId,
+        providerTurn: {
+          id: ProviderTurnId.make(`${ids.rootProviderTurnId}:child`),
+          providerThreadId: ProviderThreadId.make(`${ids.providerThreadId}:child`),
+          nodeId: NodeId.make(`${ids.subagentNodeId}:child-root`),
+          runAttemptId: null,
+          status,
+        },
+      }) as ProviderAdapterV2Event;
+    const observed = yield* runBackgroundItemScenario(
+      "failed-root-live-child",
+      (ids) => [
+        childThreadCreatedEvent(ids),
+        subagentEvent(ids, "running"),
+        childTurn(ids, "running"),
+        { ...rootTerminalEvent(ids, "failed"), childTurnsContinue: true },
+        subagentEvent(ids, "completed"),
+        childTurn(ids, "completed"),
+      ],
+      {
+        keepEventStreamOpen: true,
+        onFinalized: (events) => Ref.set(finalized, events),
+      },
+    );
+
+    assert.deepEqual(observed, ["subagent:running", "root-finalized", "subagent:completed"]);
+    const written = yield* Ref.get(finalized);
+    assert.deepEqual(
+      written.flatMap((event) => (event.type === "run.updated" ? [event.payload.status] : [])),
+      ["failed"],
+    );
+    assert.isFalse(
+      written.some((event) => event.type === "subagent.updated"),
+      "a child that outlives the failed root must not be settled with it",
+    );
+  }),
+);
+
 
 it.effect("releases ingestion after idle subagent rows and items settle", () =>
   Effect.gen(function* () {

@@ -18,6 +18,7 @@ import {
   initializeAppearanceStartup,
   revealAppearanceStartup,
 } from "./appearanceRuntime";
+import { reconcileStoredTheme } from "./hooks/useTheme";
 import { clearChunkReloadGuard, reloadOnceForChunkLoadError } from "./lib/chunkReloadGuard";
 
 prepareProviderAuthDelivery();
@@ -68,7 +69,8 @@ export const startup = Promise.all([
   managedAuthShellModule?.then((module) => module.default) ?? null,
   router.load(),
   initializeAppearanceStartup()
-    .then(() => {
+    .then((startupMode) => {
+      if (startupMode === "profile") reconcileStoredTheme();
       if (isElectron) window.postMessage("t3code:appearance-startup-ready", "*");
     })
     .catch((error: unknown) => {

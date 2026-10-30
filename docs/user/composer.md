@@ -235,14 +235,21 @@ provider supports it. Web and desktop also offer compaction from the context met
 
 With Codex and Claude, send `/goal` followed by what "done" means, for example
 `/goal all tests in packages/api pass`. The agent keeps working across turns
-until it judges the goal met. The thread shows **Goal** while it works, and a
-row above the composer shows the goal and its progress.
+until it judges the goal met. A status bump above the composer shows its state and
+progress; hover or open it to review the objective and available controls. **New
+goal** inserts `/goal ` into the draft to edit before sending.
 
 - `/goal` alone shows the current goal. `/goal clear` removes it.
 - Codex also supports `/goal pause` and `/goal resume`. Stopping a Codex goal
   pauses it.
 - Stopping Claude ends the current turn, but the goal stays set. Claude checks it
   again at the end of your next message.
+
+While subagents run, one quiet line above the composer says who the thread is waiting on (or how
+many agents are working), with elapsed time and **Stop**. Open it to see each agent on its own line,
+with its current step, elapsed time, and a stop control; **Stop all** ends every agent. A native
+to-do plan shows as a compact status bump; open it to inspect the current list without resizing
+the composer.
 
 ## Context in your message
 

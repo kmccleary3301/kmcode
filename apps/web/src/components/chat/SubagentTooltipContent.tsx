@@ -7,6 +7,8 @@ import type {
   ProviderInstanceId,
   OrchestrationV2Subagent,
   OrchestrationV2SubagentLiveContent,
+  ScopedThreadRef,
+  TurnItemId,
 } from "@t3tools/contracts";
 import {
   resolveSubagentMetadata,
@@ -29,6 +31,11 @@ import { MiddleTruncate } from "../ui/middle-truncate";
 import { ProviderInstanceIcon } from "./ProviderInstanceIcon";
 import { cn } from "~/lib/utils";
 import { deriveProviderInstanceEntries, shouldShowInstanceBadge } from "../../providerInstances";
+import { isOrchestrationV2WorkActive } from "@t3tools/contracts";
+import {
+  LiveViewPausedNote,
+  useSubagentLiveContent,
+} from "../../hooks/useSubagentLiveContent";
 
 /** Geometry and preview limits stay identical in lineage and timeline tooltips. */
 export function SubagentTooltipContent(props: {
@@ -51,7 +58,17 @@ export function SubagentTooltipContent(props: {
   result?: string | null | undefined;
   progress?: string | null | undefined;
   liveContent?: OrchestrationV2SubagentLiveContent | null | undefined;
+  readonly threadRef?: ScopedThreadRef | null | undefined;
+  readonly subagentId?: string | null | undefined;
+  readonly turnItemId?: TurnItemId | null | undefined;
+  overlayActive: boolean;
 }) {
+  const { liveContent, rateLimited } = useSubagentLiveContent(props.threadRef ?? null, {
+    subagentId: props.subagentId,
+    active: props.overlayActive,
+    turnItemId: props.turnItemId,
+    persisted: props.liveContent,
+  });
   const { modelLabel, workspace: metadata } = resolveSubagentMetadata(props);
   const preview = subagentDetailPreview(props);
   const model = props.model?.trim();
@@ -181,19 +198,24 @@ export function SubagentTooltipContent(props: {
           </div>
         );
       })}
-      {props.liveContent ? (
+      {liveContent ? (
         <div className="flex min-w-0 items-start gap-2 text-xs text-muted-foreground">
           <TerminalIcon aria-hidden className="mt-0.5 size-3 shrink-0" />
           <div className="min-w-0">
             <span className="font-mono text-3xs uppercase text-muted-foreground/80">
-              {props.liveContent.kind}:{" "}
+              {liveContent.kind}:{" "}
             </span>
             <span className="break-words">
-              {props.liveContent.text.length > 120
-                ? `${props.liveContent.text.slice(0, 117)}…`
-                : props.liveContent.text}
+              {liveContent.text.length > 120
+                ? `${liveContent.text.slice(0, 117)}…`
+                : liveContent.text}
             </span>
           </div>
+        </div>
+      ) : rateLimited && isOrchestrationV2WorkActive(props.status) ? (
+        <div className="flex min-w-0 items-start gap-2 text-xs text-muted-foreground">
+          <TerminalIcon aria-hidden className="mt-0.5 size-3 shrink-0" />
+          <LiveViewPausedNote />
         </div>
       ) : preview ? (
         <div className="flex min-w-0 items-center gap-2">

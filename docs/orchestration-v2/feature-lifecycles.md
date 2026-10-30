@@ -45,16 +45,22 @@ provider turn accepted/started
   -> run status=running
 ```
 
-When the root provider turn completes:
+When native root execution ends (not when a provider cycle or child completes):
 
 ```text
-root provider turn/completed
-  -> finalize assistant streams
-  -> finalize plans/todos/questions
-  -> root node terminal
+authoritative root-attempt settlement
+  -> persist Run.workCompletedAt under current-attempt guards
+  -> finalize streams and optional/slow history and usage metadata
+  -> preserve the native cursor snapshot
   -> capture checkpoint if applicable
-  -> run terminal
+  -> terminalize the run and set completedAt
 ```
+
+`workCompletedAt` stops the native execution clock without claiming that checkpoint-backed finalization is complete. Until cursor capture and checkpoint handling finish, the run continues to block admission: new input queues instead of steering a closed native runtime. Only the selected root attempt can publish the milestone; child/provider-cycle terminal events cannot.
+
+The shell carries `activityRunWorkCompletedAt` for the run that owns the visible activity. A newer queued run must not restart that run's clock. While finalization is pending, the UI shows a finishing state with the frozen work duration; it does not report metadata or checkpoint time as native work. Historical turns use their own run's native end, even after another run becomes latest.
+
+Chat, sidebar, and related-child controls distinguish active native work from the run's finalization status. A raw shell work-end marker remains authoritative when the activity summary is absent or still says running: it clears Thinking and Stop without rewriting the canonical run status. Phase derivation also receives the latest run, so a queued successor stays connecting and a genuinely active successor retains its own interruptible run ID.
 
 Only the root node can complete the run.
 
@@ -372,11 +378,13 @@ before root execution starts
 Post-root-run checkpoint:
 
 ```text
-root node terminal
-  -> drain/finalize streams
+native root execution settles
+  -> persist workCompletedAt for the selected attempt
+  -> preserve/capture the native cursor before admitting another prompt
+  -> drain/finalize streams and optional metadata
   -> capture root checkpoint for app run ordinal
   -> compute diff from prior root checkpoint
-  -> mark run terminal with checkpoint
+  -> mark run terminal with completedAt and checkpoint
 ```
 
 Child/subagent checkpoint:
@@ -511,6 +519,8 @@ Rules:
 
 Activities are a projection of execution graph events.
 
+For Pi and OMP, streamed tool arguments may appear before native execution. Keep that item pending with no `startedAt` until `tool_execution_start`; the start transition reuses the same native item identity and ordinal.
+
 Examples:
 
 ```text
@@ -525,6 +535,22 @@ runtime.warning
 ```
 
 Activities should keep `nodeId` and `runId` so the UI can group them correctly.
+
+Transcript presentation follows the ordered messages and activities, including new input accepted as a steer. The live status belongs after the latest input in the current run, not above an earlier assistant response. A queued input promoted into the active run becomes that run's live-status boundary; a queued successor for another run does not. Reasoning and tool execution are displayed only when reported; an empty assistant stream is not evidence of thinking.
+
+Tool cards keep Run and Result independently expandable and copyable. The panes are side by side when space permits and stacked on narrow screens. Collapsed previews stay bounded; full argument and result parsing is deferred until expansion. Input-only parsed metadata is not a result: opening Result retains the pending state until output arrives.
+
+Delegated-task rows resolve native identity before display names. Live status, current tool, reported model, progress, retry, and results share that identity across the row, group, and details. Pending tasks have no execution clock. A reported running state remains running when its start time is unknown. Completed tasks use their terminal interval; missing native timing remains unknown rather than continuing to tick. Child details retain the reader's disclosure state when a virtualized row remounts.
+
+Runless provider-native roots determine activity from their root status, independently of a nullable start time. A running root with no start remains active without an invented duration; a terminal root stops the live indicator. Related child shells cannot revive a completed activation or erase its result and frozen interval merely because workflow status still says running. A genuinely newer active child run is handled separately.
+
+Native OMP Task rosters use the child's reported parent tool identity, not adjacent rows or matching labels. Shared Task context, including Goal and Contract Markdown, is shown once above that parent's children. Long context renders a bounded preview; full Markdown mounts only on explicit expansion. That choice persists per parent Task and thread through virtualized remounts. Current tool intent and retry remain visible while child details are collapsed. Separately reported Task calls in the same run keep separate rosters. A matching live lifecycle determines the default roster visibility; until it arrives, the native snapshot remains usable. Explicit reader choices override those defaults.
+
+Task metrics use native reports only: tool and request counts, cumulative tokens, current context tokens and model context window, and billed USD cost. Current context is not the cumulative token total. Reported zero values remain visible; missing values remain absent. Partial reports merge within an activation, terminal results retain previously reported counters, and a new activation clears old metrics.
+
+OMP async-result jobs produce separate completion notices with exact job IDs, native timestamps, reported status, and fixed reported duration. Message lifecycle replay is deduplicated per job; identical labels do not merge distinct jobs. A late completion from an earlier run does not acquire a newer active run or revive root work. Secondary metadata is reader-controlled and full metadata remains copyable.
+
+Native OMP IRC messages are chronological notices with their reported sender, recipient, and timestamp. Their body is plain text, not executable markup or a tool result. Long notices have a bounded preview, an independent disclosure, and full-body copy including sender and recipient. Background child updates and notices may arrive after root work ends without reviving its working indicator; required foreground children retain their own waiting state.
 
 ## Completion Barriers
 

@@ -35,6 +35,7 @@ import {
 } from "@t3tools/contracts";
 import * as Context from "effect/Context";
 import * as Schema from "effect/Schema";
+import type * as DateTime from "effect/DateTime";
 import type * as Effect from "effect/Effect";
 import type * as Scope from "effect/Scope";
 import type * as Stream from "effect/Stream";
@@ -129,6 +130,18 @@ export const ProviderAdapterV2Event = Schema.Union([
     plan: OrchestrationV2PlanArtifact,
   }),
   Schema.Struct({
+    type: Schema.Literal("run.execution-ended"),
+    driver: ProviderDriverKind,
+    threadId: ThreadId,
+    runId: RunId,
+    attemptId: RunAttemptId,
+    providerThreadId: ProviderThreadId,
+    providerTurnId: ProviderTurnId,
+    runOrdinal: PositiveInt,
+    workCompletedAt: Schema.DateTimeUtc,
+  }),
+
+  Schema.Struct({
     type: Schema.Literal("turn.terminal"),
     driver: ProviderDriverKind,
     providerThreadId: ProviderThreadId,
@@ -150,6 +163,11 @@ export const ProviderAdapterV2Event = Schema.Union([
     retry: Schema.optional(OrchestrationV2ProviderRetry),
     retryStartedAt: Schema.optional(Schema.DateTimeUtc),
     threadDisposition: Schema.Literals(["reusable", "broken"]),
+    /**
+     * Child turns the failed root started outlive its failure and report their
+     * own terminals.
+     */
+    childTurnsContinue: Schema.optional(Schema.Literal(true)),
   }),
 ]);
 export type ProviderAdapterV2Event = typeof ProviderAdapterV2Event.Type;
@@ -408,6 +426,11 @@ export interface ProviderAdapterV2TurnInput {
   readonly message: ProviderAdapterV2TurnMessage;
   readonly modelSelection: ModelSelection;
   readonly runtimePolicy: ProviderAdapterV2RuntimePolicy;
+  /** Whether a native turn's original orchestration attempt is still active. */
+  readonly isRunAttemptActive?: (
+    runId: RunId,
+    attemptId: RunAttemptId,
+  ) => Effect.Effect<boolean>;
   /**
    * What the thread's MCP Apps want the agent to know (`ui/update-model-context`),
    * latest per app, keyed stably per app. Adapters that host apps deliver it as
@@ -448,6 +471,18 @@ export interface ProviderAdapterV2ThreadSnapshot {
 
 export interface ProviderAdapterV2ReadThreadSnapshotInput {
   readonly providerThread: OrchestrationV2ProviderThread;
+}
+
+export interface ProviderAdapterV2InspectSettlementInput {
+  readonly providerThread: OrchestrationV2ProviderThread;
+  readonly runId: RunId;
+}
+
+export interface ProviderAdapterV2SettlementResult {
+  readonly settledAt: DateTime.Utc;
+  readonly providerTurnId: ProviderTurnId;
+  readonly nativeTurnRef: OrchestrationV2ProviderTurn["nativeTurnRef"];
+  readonly nativeConversationHeadRef: OrchestrationV2ProviderThread["nativeConversationHeadRef"];
 }
 
 export type ProviderAdapterV2RollbackTarget =
@@ -558,6 +593,11 @@ export interface ProviderAdapterV2SessionRuntime {
     modelSelection: ModelSelection,
     cwd?: string | null,
   ) => number | undefined;
+  /**
+   * Current occupancy of the loaded native thread, asked only when no turn has
+   * reported usage for it (every turn was cut off before it settled).
+   */
+  readonly measureNativeContextTokens?: () => Effect.Effect<number | undefined>;
   /** Whether an option-only change preserves measured native usage and capacity.
    * Compaction thresholds are still discarded. Unknown transitions invalidate usage.
    */
@@ -586,6 +626,14 @@ export interface ProviderAdapterV2SessionRuntime {
   readonly steerTurn: (
     input: ProviderAdapterV2SteerInput,
   ) => Effect.Effect<void, ProviderAdapterV2Error>;
+  /**
+   * Stop one native workflow coordinator task without stopping its owning turn or thread.
+   * Only drivers with task-scoped native cancellation provide this operation.
+   */
+  readonly stopTask?: (input: {
+    readonly providerThread: OrchestrationV2ProviderThread;
+    readonly taskId: string;
+  }) => Effect.Effect<void, ProviderAdapterV2Error>;
   readonly interruptTurn: (
     input: ProviderAdapterV2InterruptInput,
   ) => Effect.Effect<void, ProviderAdapterV2Error>;
@@ -617,6 +665,17 @@ export interface ProviderAdapterV2SessionRuntime {
    * provider are not interactive and their tool calls stay plain tool rows.
    */
   readonly mcpApps?: ProviderAdapterV2McpApps;
+  /**
+   * Safe native settlement inspection while the original runtime and active turn
+   * are still bound to the same canonical run.
+   *
+   * Available ONLY if the original runtime's active turn bounds this runId
+   * in the original native busy context. Returns null if unsupported, active,
+   * compacting, streaming, or missing original binding.
+   */
+  readonly inspectSettlement?: (
+    input: ProviderAdapterV2InspectSettlementInput,
+  ) => Effect.Effect<ProviderAdapterV2SettlementResult | null, ProviderAdapterV2Error>;
   readonly rollbackThread: (
     input: ProviderAdapterV2RollbackThreadInput,
   ) => Effect.Effect<ProviderAdapterV2ThreadSnapshot, ProviderAdapterV2Error>;

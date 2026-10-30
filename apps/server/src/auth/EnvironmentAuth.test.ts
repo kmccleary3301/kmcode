@@ -2,6 +2,10 @@ import * as NodeServices from "@effect/platform-node/NodeServices";
 import {
   authScopeResponse,
   AuthAdministrativeScopes,
+  AuthOrchestrationReadScope,
+  AuthOrchestrationOperateScope,
+  AuthSettingsWriteScope,
+  AuthSourceControlWriteScope,
   AuthStandardClientScopes,
 } from "@t3tools/contracts";
 import { expect, it } from "@effect/vitest";
@@ -346,6 +350,38 @@ it.layer(NodeServices.layer)("EnvironmentAuth.layer", (it) => {
       expect(verified.scopes).toEqual(AuthStandardClientScopes);
       expect(verified.subject).toBe("one-time-token");
     }).pipe(Effect.provide(layerEnvironmentAuth())),
+  );
+
+  it.effect("adds settings and source-control writes only to full-access MCP grants", () =>
+    Effect.sync(() => {
+      const readOnlyScopes = [AuthOrchestrationReadScope];
+      const operatingScopes = [AuthOrchestrationReadScope, AuthOrchestrationOperateScope];
+
+      expect(EnvironmentAuth.mcpClientScopes("read-only")).toEqual(readOnlyScopes);
+      for (const access of ["approval-required", "auto-accept-edits", "auto"] as const) {
+        expect(EnvironmentAuth.mcpClientScopes(access)).toEqual(operatingScopes);
+      }
+      expect(EnvironmentAuth.mcpClientScopes("full-access")).toEqual([
+        ...operatingScopes,
+        AuthSettingsWriteScope,
+        AuthSourceControlWriteScope,
+      ]);
+      expect(AuthStandardClientScopes).toEqual([
+        "orchestration:read",
+        "orchestration:operate",
+        "settings:write",
+        "providers:manage",
+        "environment:maintain",
+        "preview:operate",
+        "diagnostics:read",
+        "terminal:read",
+        "terminal:operate",
+        "source-control:write",
+        "filesystem:read",
+        "filesystem:write",
+        "relay:read",
+      ]);
+    }),
   );
 
   it.effect("prefers a bearer token over a stale legacy cookie", () =>

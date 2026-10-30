@@ -1,7 +1,11 @@
 import { EnvironmentId, ProviderInstanceId, RunId, ThreadId } from "@t3tools/contracts";
 import { describe, expect, it } from "vite-plus/test";
 
-import { createInboxReturnTracker, sortWorkingThreadsBySend } from "./threadInbox.ts";
+import {
+  createInboxReturnTracker,
+  isThreadWorking,
+  sortWorkingThreadsBySend,
+} from "./threadInbox.ts";
 
 const environmentId = EnvironmentId.make("environment-1");
 
@@ -28,6 +32,45 @@ function thread(id: string, working: boolean) {
       : null,
   };
 }
+
+describe("isThreadWorking", () => {
+  it("uses native end while preserving pending and interruptible successors", () => {
+    const base = thread("native-ended", true);
+    const ended = {
+      ...base,
+      latestRun: {
+        runId: RunId.make("run-native-ended"),
+        status: "running" as const,
+        requestedAt: null,
+        startedAt: null,
+        completedAt: null,
+        assistantMessageId: null,
+      },
+      runtime: {
+        ...base.runtime!,
+        activityRunWorkCompletedAt: "2026-06-01T00:05:00.000Z",
+      },
+    };
+
+    expect(isThreadWorking(ended)).toBe(false);
+    expect(
+      isThreadWorking({
+        ...ended,
+        latestRun: {
+          ...ended.latestRun,
+          runId: RunId.make("run-queued-successor"),
+          status: "queued",
+        },
+      }),
+    ).toBe(true);
+    expect(
+      isThreadWorking({
+        ...ended,
+        runtime: { ...ended.runtime, activeRunId: RunId.make("run-newer-active") },
+      }),
+    ).toBe(true);
+  });
+});
 
 describe("createInboxReturnTracker", () => {
   it("stamps a thread when it stops working, but never on the first observation", () => {

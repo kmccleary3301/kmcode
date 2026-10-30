@@ -280,8 +280,11 @@ it("pins one Chrome for Testing build per host", () => {
     undefined,
   ]);
   expect(PreviewBrowser.previewBrowserRelease("linux", "x64")).toMatchObject({
-    url: "https://storage.googleapis.com/chrome-for-testing-public/154.0.8037.92/linux64/chrome-headless-shell-linux64.zip",
-    bytes: 120_477_194,
+    version: "156.0.8078.70",
+    platform: "linux64",
+    url: "https://storage.googleapis.com/chrome-for-testing-public/156.0.8078.70/linux64/chrome-headless-shell-linux64.zip",
+    bytes: 126_646_931,
+    sha256: "a313da592261ff1e342c1e507d315f25b1809006c0508f77ce86151d464d4ccb",
   });
 });
 
@@ -289,8 +292,8 @@ it("tells the agent how far the install has come", () => {
   expect(
     new PreviewBrowser.PreviewBrowserInstallingError({
       downloadedBytes: 37_200_000,
-      totalBytes: 120_477_194,
+      totalBytes: 126_646_931,
       unpacking: false,
     }).message,
-  ).toBe("T3 is installing its headless browser (37 of 120 MB downloaded). Try again in a minute.");
+  ).toBe("T3 is installing its headless browser (37 of 127 MB downloaded). Try again in a minute.");
 });

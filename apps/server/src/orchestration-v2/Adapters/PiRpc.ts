@@ -299,6 +299,7 @@ export const makePiRpcConnection = (
     const exitDeferred = yield* Deferred.make<number, PiRpcError>();
     let nextRequestId = 0;
     const isOmp = options.dialect.binary === "omp";
+    const readyDeferred = isOmp ? yield* Deferred.make<PiRpcRecord, PiRpcError>() : undefined;
     const chunkAssembler = isOmp ? new OmpChunkAssembler() : undefined;
     let lastAvailableCommands: PiRpcRecord | undefined = undefined;
 
@@ -306,6 +307,9 @@ export const makePiRpcConnection = (
       Effect.gen(function* () {
         const claimed = yield* Deferred.fail(transportDown, error);
         if (!claimed) return;
+        if (readyDeferred !== undefined) {
+          yield* Deferred.fail(readyDeferred, error);
+        }
         for (const [key, pending] of pendingRequests) {
           pendingRequests.delete(key);
           yield* Deferred.fail(pending.deferred, error);
@@ -319,12 +323,8 @@ export const makePiRpcConnection = (
     const routeRecord = (record: PiRpcRecord) =>
       Effect.gen(function* () {
         if (record["type"] === "ready") {
-          if (
-            isOmp &&
-            Array.isArray(record["supportedProtocolVersions"]) &&
-            record["supportedProtocolVersions"].includes(2)
-          ) {
-            yield* send({ type: "negotiate_protocol", protocolVersion: 2 });
+          if (readyDeferred !== undefined) {
+            yield* Deferred.succeed(readyDeferred, record);
           }
         }
         if (record["type"] === "available_commands_update") {
@@ -536,6 +536,45 @@ export const makePiRpcConnection = (
         new PiRpcError({ operation: "terminate", detail: "pi process was stopped" }),
       ).pipe(Effect.andThen(terminateProcess), Effect.ignore, Effect.uninterruptible),
     );
+
+    if (isOmp && readyDeferred !== undefined) {
+      const readyRecord = yield* Effect.raceFirst(
+        Deferred.await(readyDeferred),
+        Deferred.await(transportDown),
+      ).pipe(
+        Effect.timeoutOrElse({
+          duration: Duration.millis(DEFAULT_REQUEST_TIMEOUT_MS),
+          orElse: () =>
+            Effect.fail(
+              new PiRpcError({
+                operation: "ready",
+                detail: `timed out after ${DEFAULT_REQUEST_TIMEOUT_MS}ms`,
+              }),
+            ),
+        }),
+      );
+
+      const supported = readyRecord["supportedProtocolVersions"];
+      if (Array.isArray(supported) && supported.includes(2)) {
+        yield* request({ type: "negotiate_protocol", protocolVersion: 2 }).pipe(
+          Effect.mapError((err) =>
+            err._tag === "PiRpcError"
+              ? err
+              : new PiRpcError({
+                  operation: "negotiate_protocol",
+                  detail: `timed out after ${err.timeoutMs}ms`,
+                }),
+          ),
+        );
+      } else {
+        const error = new PiRpcError({
+          operation: "negotiate_protocol",
+          detail: "OMP did not advertise protocol version 2",
+        });
+        yield* failTransport(error);
+        return yield* Effect.fail(error);
+      }
+    }
     return {
       send,
       request,

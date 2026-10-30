@@ -1,6 +1,8 @@
 import { ProjectReadFileError } from "@t3tools/contracts";
 import * as Schema from "effect/Schema";
 import { describe, expect, it } from "vite-plus/test";
+import { findThreadFilePathCandidates } from "./threadFilePathResolver";
+
 
 import {
   formatFileCommentRange,
@@ -56,6 +58,89 @@ describe("file preview read errors", () => {
       message: "Legacy file read failure.",
     });
     expect(filePreviewReadErrorMessage(error)).toBe("Legacy file read failure.");
+  });
+});
+
+describe("findThreadFilePathCandidates", () => {
+  const turnItem = (position: number, item: unknown) => ({ position, item });
+
+  it("matches a normalized path suffix on segment boundaries", () => {
+    const candidates = findThreadFilePathCandidates(
+      [
+        turnItem(0, {
+          type: "assistant_message",
+          text: "Not /x/mytools/mutate.py; use /x/./tools/mutate.py.",
+        }),
+      ],
+      "./tools/mutate.py",
+    );
+
+    expect(candidates.mentionedPaths).toEqual(["/x/tools/mutate.py"]);
+  });
+
+  it("orders mentioned paths by recency and deduplicates them", () => {
+    const candidates = findThreadFilePathCandidates(
+      [
+        turnItem(0, { type: "assistant_message", text: "Old: /old/tools/mutate.py" }),
+        turnItem(1, { type: "command_execution", input: "run", output: "/middle/tools/mutate.py" }),
+        turnItem(2, {
+          type: "subagent",
+          prompt: "Read /latest/tools/mutate.py",
+          result: "Found /latest/tools/mutate.py.",
+        }),
+      ],
+      "tools/mutate.py",
+    );
+
+    expect(candidates.mentionedPaths).toEqual([
+      "/latest/tools/mutate.py",
+      "/middle/tools/mutate.py",
+      "/old/tools/mutate.py",
+    ]);
+  });
+
+  it("extracts explicit cwd fields, cd targets, and absolute variable assignments", () => {
+    const candidates = findThreadFilePathCandidates(
+      [
+        turnItem(0, { type: "dynamic_tool", input: { cwd: "/explicit" } }),
+        turnItem(1, { type: "command_execution", input: "cd /via-cd && run" }),
+        turnItem(2, { type: "command_execution", input: "S=/via-variable ./run" }),
+        turnItem(3, { type: "dynamic_tool", input: { arguments: { cwd: "/nested" } } }),
+      ],
+      "./tools/mutate.py",
+    );
+
+    expect(candidates.workingDirectoryPaths).toEqual([
+      "/nested/tools/mutate.py",
+      "/via-variable/tools/mutate.py",
+      "/via-cd/tools/mutate.py",
+      "/explicit/tools/mutate.py",
+    ]);
+  });
+
+  it("caps mentioned-path candidates at three and working-directory reads at four", () => {
+    const candidates = findThreadFilePathCandidates(
+      Array.from({ length: 6 }, (_, position) =>
+        turnItem(position, {
+          type: "command_execution",
+          input: `cd /working-${position}`,
+          output: `/mentioned-${position}/tools/mutate.py`,
+        }),
+      ),
+      "tools/mutate.py",
+    );
+
+    expect(candidates.mentionedPaths).toEqual([
+      "/mentioned-5/tools/mutate.py",
+      "/mentioned-4/tools/mutate.py",
+      "/mentioned-3/tools/mutate.py",
+    ]);
+    expect(candidates.workingDirectoryPaths).toEqual([
+      "/working-5/tools/mutate.py",
+      "/working-4/tools/mutate.py",
+      "/working-3/tools/mutate.py",
+      "/working-2/tools/mutate.py",
+    ]);
   });
 });
 

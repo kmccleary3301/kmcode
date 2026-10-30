@@ -91,6 +91,55 @@ export function isActiveSubagentStatus(status: RuntimeSubagentStatus): boolean {
   return isOrchestrationV2WorkActive(status);
 }
 
+export interface SubagentLifecycle {
+  readonly status: RuntimeSubagentStatus;
+  readonly startedAt: string | DateTime.Utc | null | undefined;
+  readonly completedAt: string | DateTime.Utc | null | undefined;
+}
+
+export interface ResolvedSubagentLifecycle {
+  readonly status: RuntimeSubagentStatus;
+  readonly startedAt: string | null;
+  readonly completedAt: string | null;
+}
+
+function lifecycleTimestamp(value: string | DateTime.Utc | null | undefined): string | null {
+  if (value == null) return null;
+  return typeof value === "string" ? value : DateTime.formatIso(value);
+}
+
+/**
+ * Combines an item's captured lifecycle with the current child projection.
+ * Callers match children by stable ID before supplying `live`; titles are not
+ * identities. A changed known start is a new activation. An unknown live start
+ * only reuses a still-active snapshot; a missing end for the same activation
+ * keeps its known end.
+ */
+export function resolveSubagentLifecycle(
+  snapshot: SubagentLifecycle,
+  live?: SubagentLifecycle | null,
+): ResolvedSubagentLifecycle {
+  const snapshotStart = lifecycleTimestamp(snapshot.startedAt);
+  const liveStart = lifecycleTimestamp(live?.startedAt);
+  const status = live?.status ?? snapshot.status;
+  const liveEnd = lifecycleTimestamp(live?.completedAt);
+  const snapshotEnd = lifecycleTimestamp(snapshot.completedAt);
+  const sameAttempt =
+    live == null ||
+    (snapshotStart !== null && liveStart === snapshotStart) ||
+    (liveStart === null &&
+      isActiveSubagentStatus(snapshot.status) &&
+      isActiveSubagentStatus(status));
+
+  return {
+    status,
+    startedAt: liveStart ?? (sameAttempt ? snapshotStart : null),
+    completedAt: isActiveSubagentStatus(status)
+      ? null
+      : (liveEnd ?? (sameAttempt ? snapshotEnd : null)),
+  };
+}
+
 /**
  * A subagent card whose child is still working. The card outlives its
  * launching turn: once that turn settles, the waiting footer counts the child,

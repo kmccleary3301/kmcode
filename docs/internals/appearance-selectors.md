@@ -37,6 +37,8 @@ Stable values are static and nonsecret. A hook may identify a route or state cla
 
 `settings`, `settings-nav`, `settings-panel`, `command-palette`, `menu`, `popover`, `dialog`, `tooltip`, `toast`, `switch`, `field`, `slider`.
 
+`data-t3-surface="toast"` identifies the stationary stacking viewport. Its animated notification cards expose `data-t3-part="toast"`. Apply border, radius, and shadow to `[data-t3-surface="toast"] [data-t3-part="toast"]`, not the viewport: viewport decorations stay in place during a card's exit animation. Anchored toast cards expose the same part hook without the stacking surface.
+
 ### Auth, recovery, terminal, files, and review
 
 `auth`, `pairing`, `profile`, `update`, `offline`, `reconnect`, `fatal-error`, `recovery`, `terminal`, `terminal-tabs`, `terminal-resize`, `terminal-status`, `terminal-context`, `files`, `file-tree`, `file-preview`, `code-block`, `review`, `diff`, `diff-header`, `diff-gutter`, `diff-hunk`, `diff-comment`, `source-control`.

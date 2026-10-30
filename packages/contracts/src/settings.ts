@@ -2,6 +2,7 @@ import { SshDeviceHostConfigs } from "./device.ts";
 import {
   AuthSettingsWriteScope,
   AuthProvidersManageScope,
+  AuthOrchestrationOperateScope,
   type AuthEnvironmentScope,
 } from "./auth.ts";
 import * as Effect from "effect/Effect";
@@ -9,9 +10,11 @@ import * as Duration from "effect/Duration";
 import * as Schema from "effect/Schema";
 import * as SchemaTransformation from "effect/SchemaTransformation";
 import {
+  EnvironmentId,
   ForwardCompatibleNullable,
   ForwardCompatibleOptional,
   OmittedWhenNull,
+  PortSchema,
   ProjectId,
   TrimmedNonEmptyString,
   TrimmedString,
@@ -26,7 +29,7 @@ import {
   ProviderOptionSelections,
 } from "./model.ts";
 import { ModelSelection } from "./modelSelection.ts";
-import { ProjectScript } from "./project.ts";
+import { ProjectScript, type ProjectMutation } from "./project.ts";
 import { DEFAULT_RUNTIME_MODE, RuntimeMode } from "./providerPolicy.ts";
 import { BrowserProfile, BrowserProfileId, DEFAULT_BROWSER_PROFILE_ID } from "./browserProfile.ts";
 import {
@@ -40,7 +43,7 @@ import {
 import {
   ProviderInstanceConfig,
   ProviderInstanceId,
-  type ProviderDriverKind,
+  ProviderDriverKind,
 } from "./providerInstance.ts";
 import { PullRequestMergeMethod } from "./pullRequest.ts";
 
@@ -49,6 +52,9 @@ import { PullRequestMergeMethod } from "./pullRequest.ts";
 export const TimestampFormat = Schema.Literals(["locale", "12-hour", "24-hour"]);
 export type TimestampFormat = typeof TimestampFormat.Type;
 const DEFAULT_TIMESTAMP_FORMAT: TimestampFormat = "locale";
+export const ToolDetail = Schema.Literals(["compact", "rich", "minimal"]);
+export type ToolDetail = typeof ToolDetail.Type;
+const DEFAULT_TOOL_DETAIL: ToolDetail = "compact";
 
 export const DiffLayout = Schema.Literals(["stacked", "split"]);
 export type DiffLayout = typeof DiffLayout.Type;
@@ -119,6 +125,29 @@ export const PanelAnimationDurationMs = Schema.Int.check(
 );
 export type PanelAnimationDurationMs = typeof PanelAnimationDurationMs.Type;
 const DEFAULT_PANEL_ANIMATION_DURATION_MS: PanelAnimationDurationMs = 0;
+/** How many of a running turn's latest edits, commands and subagents Minimal+ keeps open. */
+export const MIN_LIVE_STEPS_KEPT_OPEN = 0;
+export const MAX_LIVE_STEPS_KEPT_OPEN = 8;
+export const LiveStepsKeptOpen = Schema.Int.check(
+  Schema.isBetween({ minimum: MIN_LIVE_STEPS_KEPT_OPEN, maximum: MAX_LIVE_STEPS_KEPT_OPEN }),
+);
+export type LiveStepsKeptOpen = typeof LiveStepsKeptOpen.Type;
+const DEFAULT_LIVE_STEPS_KEPT_OPEN: LiveStepsKeptOpen = 2;
+/**
+ * Ceiling on ports auto-forwarded per environment. Auto-forwards close when
+ * their remote listener exits, so this only binds when that many listeners
+ * are alive at once; it guards against runaway forwarding, not normal use.
+ */
+export const MIN_PORT_AUTO_FORWARD_LIMIT = 1;
+export const MAX_PORT_AUTO_FORWARD_LIMIT = 1000;
+export const PortAutoForwardLimit = Schema.Int.check(
+  Schema.isBetween({
+    minimum: MIN_PORT_AUTO_FORWARD_LIMIT,
+    maximum: MAX_PORT_AUTO_FORWARD_LIMIT,
+  }),
+);
+export type PortAutoForwardLimit = typeof PortAutoForwardLimit.Type;
+export const DEFAULT_PORT_AUTO_FORWARD_LIMIT: PortAutoForwardLimit = 100;
 /**
  * Font size preferences, in CSS pixels. The ranges are deliberately narrow:
  * the interface size scales every rem-based dimension in the app, so the
@@ -131,6 +160,14 @@ export const InterfaceFontSize = Schema.Int.check(
 );
 export type InterfaceFontSize = typeof InterfaceFontSize.Type;
 export const DEFAULT_INTERFACE_FONT_SIZE: InterfaceFontSize = 16;
+
+export const MIN_TEXT_FONT_SIZE = 12;
+export const MAX_TEXT_FONT_SIZE = 24;
+export const TextFontSize = Schema.Int.check(
+  Schema.isBetween({ minimum: MIN_TEXT_FONT_SIZE, maximum: MAX_TEXT_FONT_SIZE }),
+);
+export type TextFontSize = typeof TextFontSize.Type;
+export const DEFAULT_TEXT_FONT_SIZE: TextFontSize = 14;
 
 export const MIN_PROMPT_FONT_SIZE = 12;
 export const MAX_PROMPT_FONT_SIZE = 20;
@@ -297,6 +334,25 @@ export const DiffColorScheme = Schema.Literals(["red-green", "blue-orange"]);
 export const ChatWidth = Schema.Literals(["comfortable", "wide", "full"]);
 export type ChatWidth = typeof ChatWidth.Type;
 
+/**
+ * How the transcript presents the same rows: a minimal desktop-agent look
+ * (the default), Minimal+ (that look, plus edits, commands and subagents open
+ * while they run and the latest few stay open), KM (the minimal look with
+ * stacked intents, plus running steps open), or Oh My Pi's terminal look.
+ * Presentation only; content, controls, and grouping detail (`toolDetail`)
+ * are the same in every style.
+ */
+export const TranscriptStyle = Schema.Literals(["km", "terminal", "minimal", "minimal-plus"]);
+export type TranscriptStyle = typeof TranscriptStyle.Type;
+
+/** A loopback target+port the client must not auto-forward until explicitly forwarded. */
+export const ClientPortForwardExclusion = Schema.Struct({
+  environmentId: EnvironmentId,
+  remotePort: PortSchema,
+  hidden: Schema.Boolean,
+});
+export type ClientPortForwardExclusion = typeof ClientPortForwardExclusion.Type;
+
 export const ClientSettingsSchema = Schema.Struct({
   notificationMode: NotificationMode.pipe(
     Schema.withDecodingDefault(Effect.succeed("off" as const)),
@@ -306,6 +362,12 @@ export const ClientSettingsSchema = Schema.Struct({
     Schema.withDecodingDefault(Effect.succeed("red-green" as const)),
   ),
   chatWidth: ChatWidth.pipe(Schema.withDecodingDefault(Effect.succeed("comfortable" as const))),
+  transcriptStyle: TranscriptStyle.pipe(
+    Schema.withDecodingDefault(Effect.succeed("minimal" as const)),
+  ),
+  liveStepsKeptOpen: LiveStepsKeptOpen.pipe(
+    Schema.withDecodingDefault(Effect.succeed(DEFAULT_LIVE_STEPS_KEPT_OPEN)),
+  ),
   loadBalancingEnabled: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
   loadBalancingWeights: LoadBalancingWeights.pipe(Schema.withDecodingDefault(Effect.succeed({}))),
   appearanceContrast: AppearanceContrast.pipe(
@@ -384,6 +446,9 @@ export const ClientSettingsSchema = Schema.Struct({
   ),
   fontSizeInterface: InterfaceFontSize.pipe(
     Schema.withDecodingDefault(Effect.succeed(DEFAULT_INTERFACE_FONT_SIZE)),
+  ),
+  fontSizeText: TextFontSize.pipe(
+    Schema.withDecodingDefault(Effect.succeed(DEFAULT_TEXT_FONT_SIZE)),
   ),
   fontSizePrompt: PromptFontSize.pipe(
     Schema.withDecodingDefault(Effect.succeed(DEFAULT_PROMPT_FONT_SIZE)),
@@ -501,6 +566,7 @@ export const ClientSettingsSchema = Schema.Struct({
   timestampFormat: TimestampFormat.pipe(
     Schema.withDecodingDefault(Effect.succeed(DEFAULT_TIMESTAMP_FORMAT)),
   ),
+  toolDetail: ToolDetail.pipe(Schema.withDecodingDefault(Effect.succeed(DEFAULT_TOOL_DETAIL))),
   snapShotEnabled: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
   snapShotIncludeAccessibility: Schema.Boolean.pipe(
     Schema.withDecodingDefault(Effect.succeed(true)),
@@ -515,6 +581,13 @@ export const ClientSettingsSchema = Schema.Struct({
   snapShotFlash: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(true))),
   snapShotAnimations: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(true))),
   wordWrap: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(true))),
+  // Loopback host spellings are intentionally normalized to a port per environment.
+  portForwardExclusions: Schema.Array(ClientPortForwardExclusion).pipe(
+    Schema.withDecodingDefault(Effect.succeed([])),
+  ),
+  portAutoForwardLimit: PortAutoForwardLimit.pipe(
+    Schema.withDecodingDefault(Effect.succeed(DEFAULT_PORT_AUTO_FORWARD_LIMIT)),
+  ),
 });
 export type ClientSettings = typeof ClientSettingsSchema.Type;
 
@@ -562,6 +635,13 @@ export interface ProviderSettingsFormAnnotation {
   readonly clearWhenEmpty?: "omit" | "persist" | undefined;
   /** Choices for a `select` control. The first entry is the default. */
   readonly options?: ReadonlyArray<ProviderSettingsFormOption> | undefined;
+}
+
+export function isSecretSetting(schema: Schema.Constraint): boolean {
+  return (
+    Schema.resolveAnnotationsKey(schema)?.providerSettingsForm?.control === "password" ||
+    Schema.resolveAnnotations(schema)?.providerSettingsForm?.control === "password"
+  );
 }
 
 export interface ProviderSettingsFormSchemaAnnotation {
@@ -1230,6 +1310,14 @@ export const PROJECT_SCOPED_SERVER_SETTING_KEYS = [
 export type ProjectScopedServerSettingKey = (typeof PROJECT_SCOPED_SERVER_SETTING_KEYS)[number];
 
 /**
+ * One project's provider-instance overrides only the fields users choose;
+ * absent fields inherit the configured or default instance state.
+ */
+export const ProjectProviderInstanceOverride = Schema.Struct({
+  enabled: Schema.optionalKey(Schema.Boolean),
+});
+export type ProjectProviderInstanceOverride = typeof ProjectProviderInstanceOverride.Type;
+/**
  * One project's overrides. An absent key inherits the environment value;
  * `null` is a real value where the environment type is nullable (no default
  * model, no dedicated writer model, never auto-settle).
@@ -1257,7 +1345,10 @@ export const ProjectSettingsOverrides = Schema.Struct({
   sidebarAutoSettleAfterDays: Schema.optionalKey(Schema.NullOr(SidebarAutoSettleAfterDays)),
   continueThreadsAfterServerUpdate: Schema.optionalKey(Schema.Boolean),
   responseStreamingMode: Schema.optionalKey(ResponseStreamingMode),
-} satisfies Record<ProjectScopedServerSettingKey, unknown>);
+  providerInstances: Schema.optionalKey(
+    Schema.Record(ProviderInstanceId, ProjectProviderInstanceOverride),
+  ),
+} satisfies Record<ProjectScopedServerSettingKey | "providerInstances", unknown>);
 export type ProjectSettingsOverrides = typeof ProjectSettingsOverrides.Type;
 
 /**
@@ -1574,6 +1665,25 @@ export const resolveProviderInstanceEnabled = (
   return instance.enabled ?? configEnabled ?? defaultEnabledForDriver(instance.driver);
 };
 
+export const resolveProjectProviderInstanceEnabled = (
+  settings: Pick<ServerSettings, "providerInstances" | "projectSettingsOverrides">,
+  projectId: ProjectId | null,
+  instanceId: ProviderInstanceId,
+): boolean => {
+  const override =
+    projectId === null
+      ? undefined
+      : settings.projectSettingsOverrides[projectId]?.providerInstances?.[instanceId]?.enabled;
+  if (override !== undefined) return override;
+  const instance = Object.hasOwn(settings.providerInstances, instanceId)
+    ? settings.providerInstances[instanceId]
+    : undefined;
+  if (instance !== undefined) return resolveProviderInstanceEnabled(instance);
+  return Object.hasOwn(DEFAULT_SERVER_SETTINGS.providers, instanceId)
+    ? defaultEnabledForDriver(ProviderDriverKind.make(instanceId))
+    : false;
+};
+
 export const ServerSettingsOperation = Schema.Literals([
   "normalize",
   "check-exists",
@@ -1860,11 +1970,26 @@ export function requiredScopesForServerSettingsPatch(
   ];
 }
 
+/** Project script mutations are settings changes in addition to project operations. */
+export function requiredScopesForProjectMutation(
+  mutation: ProjectMutation,
+): ReadonlyArray<AuthEnvironmentScope> {
+  if (mutation.type === "project.delete" || mutation.scripts === undefined) {
+    return [AuthOrchestrationOperateScope];
+  }
+  return [
+    AuthOrchestrationOperateScope,
+    ...requiredScopesForServerSettingsPatch({ defaultProjectScripts: mutation.scripts }),
+  ];
+}
+
 export const ClientSettingsPatch = Schema.Struct({
   notificationMode: Schema.optionalKey(NotificationMode),
   inAppNotificationsEnabled: Schema.optionalKey(Schema.Boolean),
   diffColorScheme: Schema.optionalKey(DiffColorScheme),
   chatWidth: Schema.optionalKey(ChatWidth),
+  transcriptStyle: Schema.optionalKey(TranscriptStyle),
+  liveStepsKeptOpen: Schema.optionalKey(LiveStepsKeptOpen),
   loadBalancingEnabled: Schema.optionalKey(Schema.Boolean),
   loadBalancingWeights: Schema.optionalKey(LoadBalancingWeights),
   appearanceContrast: Schema.optionalKey(AppearanceContrast),
@@ -1890,6 +2015,7 @@ export const ClientSettingsPatch = Schema.Struct({
   glassOpacity: Schema.optionalKey(GlassOpacity),
   onboardingCompletedAt: Schema.optionalKey(Schema.NullOr(Schema.String)),
   fontSizeInterface: Schema.optionalKey(InterfaceFontSize),
+  fontSizeText: Schema.optionalKey(TextFontSize),
   fontSizePrompt: Schema.optionalKey(PromptFontSize),
   fontSizeCode: Schema.optionalKey(CodeFontSize),
   fontSizeTerminal: Schema.optionalKey(TerminalFontSize),
@@ -1951,6 +2077,7 @@ export const ClientSettingsPatch = Schema.Struct({
   sidebarThreadSortOrder: Schema.optionalKey(SidebarThreadSortOrder),
   sidebarThreadPreviewCount: Schema.optionalKey(SidebarThreadPreviewCount),
   timestampFormat: Schema.optionalKey(TimestampFormat),
+  toolDetail: Schema.optionalKey(ToolDetail),
   snapShotEnabled: Schema.optionalKey(Schema.Boolean),
   snapShotIncludeAccessibility: Schema.optionalKey(Schema.Boolean),
   snapShotShortcut: Schema.optionalKey(SnapShotShortcut),
@@ -1959,5 +2086,7 @@ export const ClientSettingsPatch = Schema.Struct({
   snapShotFlash: Schema.optionalKey(Schema.Boolean),
   snapShotAnimations: Schema.optionalKey(Schema.Boolean),
   wordWrap: Schema.optionalKey(Schema.Boolean),
+  portForwardExclusions: Schema.optionalKey(Schema.Array(ClientPortForwardExclusion)),
+  portAutoForwardLimit: Schema.optionalKey(PortAutoForwardLimit),
 });
 export type ClientSettingsPatch = typeof ClientSettingsPatch.Type;

@@ -94,6 +94,13 @@ import {
   installCliCommand,
   uninstallCliCommand,
 } from "./methods/cliCommand.ts";
+import {
+  portForwardList,
+  portForwardResolveConnection,
+  portForwardStart,
+  portForwardStop,
+  portForwardStopAll,
+} from "./methods/portForward.ts";
 
 export const installDesktopIpcHandlers = Effect.fn("desktop.ipc.installHandlers")(function* () {
   const ipc = yield* DesktopIpc.DesktopIpc;
@@ -188,4 +195,9 @@ export const installDesktopIpcHandlers = Effect.fn("desktop.ipc.installHandlers"
   }
   yield* ipc.handle(PreviewIpc.listBrowserImportSources);
   yield* ipc.handle(PreviewIpc.importBrowserCookies);
+  yield* ipc.handle(portForwardList);
+  yield* ipc.handle(portForwardStart);
+  yield* ipc.handle(portForwardStop);
+  yield* ipc.handle(portForwardStopAll);
+  yield* ipc.handle(portForwardResolveConnection);
 });

@@ -1,5 +1,9 @@
+// @vitest-environment jsdom
+
+import { act, createRef } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
-import { describe, expect, it, vi } from "vite-plus/test";
+import { create, type ReactTestRenderer } from "react-test-renderer";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 
 const state = vi.hoisted(() => ({
   projection: null as unknown,
@@ -35,7 +39,15 @@ vi.mock("../../assets/assetUrls", () => ({
     resources.map((resource) => `https://assets.test/${resource.attachmentId}`),
 }));
 
-import { QueuedRunsControl } from "./QueuedRunsControl";
+import { QueuedRunsControl, type QueuedRunsControlHandle } from "./QueuedRunsControl";
+beforeEach(() => {
+  vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+});
+
+afterEach(() => {
+  vi.unstubAllGlobals();
+});
+
 
 describe("QueuedRunsControl automatic completion delivery", () => {
   it("does not render a queue control when only hidden delivery remains", () => {
@@ -66,6 +78,7 @@ describe("QueuedRunsControl automatic completion delivery", () => {
         optimisticMessages={[]}
         threadId={"thread:test" as never}
         editingRunId={null}
+        editBlockedReason={null}
         onEditQueuedRun={() => undefined}
         onCancelEdit={() => undefined}
       />,
@@ -97,6 +110,39 @@ describe("QueuedRunsControl attachments and edit mode", () => {
     ],
   });
 
+  it("blocks queued edits while a user-input question is pending", () => {
+    state.projection = { projection: { messages: [] } };
+    state.workflow = workflowWithAttachment();
+    const onEditQueuedRun = vi.fn();
+    const controlRef = createRef<QueuedRunsControlHandle>();
+    let renderer!: ReactTestRenderer;
+
+    act(() => {
+      renderer = create(
+        <QueuedRunsControl
+          ref={controlRef}
+          environmentId={"environment:test" as never}
+          optimisticMessages={[]}
+          threadId={"thread:test" as never}
+          editingRunId={null}
+          editBlockedReason="Answer the question to edit queued messages"
+          onEditQueuedRun={onEditQueuedRun}
+          onCancelEdit={() => undefined}
+        />,
+      );
+    });
+
+    try {
+      expect(controlRef.current?.editLatest(false)).toBe(false);
+      expect(onEditQueuedRun).not.toHaveBeenCalled();
+      expect(
+        renderer.root.findByProps({ "aria-label": "Edit queued message" }).props.disabled,
+      ).toBe(true);
+    } finally {
+      act(() => renderer.unmount());
+    }
+  });
+
   it("renders an attachment thumbnail on the queued row", () => {
     state.projection = { projection: { messages: [] } };
     state.workflow = workflowWithAttachment();
@@ -107,6 +153,7 @@ describe("QueuedRunsControl attachments and edit mode", () => {
         optimisticMessages={[]}
         threadId={"thread:test" as never}
         editingRunId={null}
+        editBlockedReason={null}
         onEditQueuedRun={() => undefined}
         onCancelEdit={() => undefined}
       />,
@@ -143,6 +190,7 @@ describe("QueuedRunsControl attachments and edit mode", () => {
         ]}
         threadId={"thread:test" as never}
         editingRunId={null}
+        editBlockedReason={null}
         onEditQueuedRun={() => undefined}
         onCancelEdit={() => undefined}
       />,
@@ -161,6 +209,7 @@ describe("QueuedRunsControl attachments and edit mode", () => {
         optimisticMessages={[]}
         threadId={"thread:test" as never}
         editingRunId={"run:queued" as never}
+        editBlockedReason={null}
         onEditQueuedRun={() => undefined}
         onCancelEdit={() => undefined}
       />,

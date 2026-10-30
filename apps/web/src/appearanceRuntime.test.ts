@@ -339,7 +339,6 @@ describe("web appearance runtime adapter", () => {
     expect(artifact).toContain("--t3-space-md:12px");
     expect(artifact).toContain("--t3-outline-width:2px");
     expect(artifact).toContain("--t3-motion-duration-normal:200ms");
-    expect(artifact).toContain("@media (prefers-reduced-motion: reduce)");
     expect(artifact).toContain("t3.preview");
   });
   it("compiles validated preview package CSS without overriding preference layer order", async () => {

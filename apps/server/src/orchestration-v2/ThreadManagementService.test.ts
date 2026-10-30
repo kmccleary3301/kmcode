@@ -6,11 +6,16 @@ import {
   type OrchestrationV2Command,
   type OrchestrationV2Run,
   type OrchestrationV2StoredEvent,
+  type OrchestrationV2ServerCommand,
   type OrchestrationV2ThreadProjection,
   ProjectId,
+  ProviderDriverKind,
   ProviderInstanceId,
+  ProviderSessionId,
+  ProviderThreadId,
   RunId,
   ThreadId,
+  type OrchestrationV2ProviderThread,
 } from "@t3tools/contracts";
 import * as Deferred from "effect/Deferred";
 import * as Duration from "effect/Duration";
@@ -19,11 +24,33 @@ import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
 import * as Queue from "effect/Queue";
 import * as Stream from "effect/Stream";
+import * as Option from "effect/Option";
 import * as TestClock from "effect/testing/TestClock";
 
 import * as LegacyV1ThreadImporter from "./legacy/LegacyV1ThreadImporter.ts";
 import * as Orchestrator from "./Orchestrator.ts";
 import * as ThreadManagementService from "./ThreadManagementService.ts";
+import * as CommandReceiptStore from "./CommandReceiptStore.ts";
+import * as ProviderSessionManager from "./ProviderSessionManager.ts";
+import * as ServerSettings from "../serverSettings.ts";
+import * as ThreadCommandExecutor from "./ThreadCommandExecutor.ts";
+
+const layerManagementDependencies = (options: {
+  readonly serverSettings?: Parameters<typeof ServerSettings.layerTest>[0];
+  readonly getSession?: ProviderSessionManager.ProviderSessionManagerV2["Service"]["get"];
+  readonly hasReceipt?: boolean;
+} = {}) =>
+  Layer.mergeAll(
+    ThreadCommandExecutor.layer,
+    Layer.mock(ProviderSessionManager.ProviderSessionManagerV2)({
+      get: options.getSession ?? (() => Effect.succeed(Option.none())),
+    }),
+    ServerSettings.layerTest(options.serverSettings).pipe(Layer.orDie),
+    Layer.mock(CommandReceiptStore.CommandReceiptStoreV2)({
+      getByCommandId: () =>
+        Effect.succeed(options.hasReceipt ? Option.some({} as never) : Option.none()),
+    }),
+  );
 
 it("stamps authoritative provenance on commands that create threads or messages", () => {
   const command: OrchestrationV2Command = {
@@ -270,9 +297,12 @@ it.effect("classifies projection infrastructure failures separately from a missi
   });
   const layerTest = ThreadManagementService.layer.pipe(
     Layer.provide(
-      Layer.mock(Orchestrator.OrchestratorV2)({
-        getThreadProjection: () => Effect.fail(projectionError),
-      }),
+      Layer.mergeAll(
+        Layer.mock(Orchestrator.OrchestratorV2)({
+          getThreadProjection: () => Effect.fail(projectionError),
+        }),
+        layerManagementDependencies(),
+      ),
     ),
   );
 
@@ -303,9 +333,12 @@ it.effect("uses thread-not-found only after a projection loads outside the proje
   } as OrchestrationV2ThreadProjection;
   const layerTest = ThreadManagementService.layer.pipe(
     Layer.provide(
-      Layer.mock(Orchestrator.OrchestratorV2)({
-        getThreadProjection: () => Effect.succeed(projection),
-      }),
+      Layer.mergeAll(
+        Layer.mock(Orchestrator.OrchestratorV2)({
+          getThreadProjection: () => Effect.succeed(projection),
+        }),
+        layerManagementDependencies(),
+      ),
     ),
   );
 
@@ -336,6 +369,7 @@ it.effect("preserves failed legacy materialization when reading checkpoint conte
         Layer.mock(LegacyV1ThreadImporter.LegacyV1ThreadImporter)({
           ensureTranscript: () => Effect.fail(importError),
         }),
+        layerManagementDependencies(),
       ),
     ),
   );
@@ -369,21 +403,24 @@ it.effect.each([
       }) as unknown as OrchestrationV2ThreadProjection;
     const layerTest = ThreadManagementService.layer.pipe(
       Layer.provide(
-        Layer.mock(Orchestrator.OrchestratorV2)({
-          getThreadEventSequence: () => Effect.succeed(0),
-          // No run update arrives, so the timeout path runs while a final
-          // projection read can still observe a terminal run.
-          streamStoredEventsFrom: () =>
-            Stream.fromEffect(Deferred.succeed(subscribed, undefined)).pipe(
-              Stream.drain,
-              Stream.concat(Stream.never),
-            ),
-          getThreadRecords: () =>
-            Effect.sync(() => {
-              reads += 1;
-              return projection(reads === 1 ? "running" : scenario.finalStatus);
-            }),
-        }),
+        Layer.mergeAll(
+          Layer.mock(Orchestrator.OrchestratorV2)({
+            getThreadEventSequence: () => Effect.succeed(0),
+            // No run update arrives, so the timeout path runs while a final
+            // projection read can still observe a terminal run.
+            streamStoredEventsFrom: () =>
+              Stream.fromEffect(Deferred.succeed(subscribed, undefined)).pipe(
+                Stream.drain,
+                Stream.concat(Stream.never),
+              ),
+            getThreadRecords: () =>
+              Effect.sync(() => {
+                reads += 1;
+                return projection(reads === 1 ? "running" : scenario.finalStatus);
+              }),
+          }),
+          layerManagementDependencies(),
+        ),
       ),
     );
     const service = yield* ThreadManagementService.ThreadManagementService.pipe(
@@ -435,25 +472,28 @@ it.effect("waitForThread reads the run again only when the run updates", () =>
       ({ sequence, event: { threadId, ...event } }) as unknown as OrchestrationV2StoredEvent;
     const layerTest = ThreadManagementService.layer.pipe(
       Layer.provide(
-        Layer.mock(Orchestrator.OrchestratorV2)({
-          getThreadEventSequence: () => Effect.succeed(0),
-          // Only the run.updated stream carries events in this test.
-          streamStoredEventsFrom: (input) =>
-            input?.eventType === "run.updated"
-              ? Stream.fromEffect(Deferred.succeed(subscribed, undefined)).pipe(
-                  Stream.drain,
-                  Stream.concat(Stream.fromQueue(events)),
-                )
-              : Stream.never,
-          getThreadRecords: () =>
-            Effect.sync(() => {
-              reads += 1;
-              return {
-                thread: { id: threadId, projectId, deletedAt: null },
-                runs: [{ id: runId, status }],
-              } as unknown as OrchestrationV2ThreadProjection;
-            }),
-        }),
+        Layer.mergeAll(
+          Layer.mock(Orchestrator.OrchestratorV2)({
+            getThreadEventSequence: () => Effect.succeed(0),
+            // Only the run.updated stream carries events in this test.
+            streamStoredEventsFrom: (input) =>
+              input?.eventType === "run.updated"
+                ? Stream.fromEffect(Deferred.succeed(subscribed, undefined)).pipe(
+                    Stream.drain,
+                    Stream.concat(Stream.fromQueue(events)),
+                  )
+                : Stream.never,
+            getThreadRecords: () =>
+              Effect.sync(() => {
+                reads += 1;
+                return {
+                  thread: { id: threadId, projectId, deletedAt: null },
+                  runs: [{ id: runId, status }],
+                } as unknown as OrchestrationV2ThreadProjection;
+              }),
+          }),
+          layerManagementDependencies(),
+        ),
       ),
     );
     const service = yield* ThreadManagementService.ThreadManagementService.pipe(
@@ -471,5 +511,429 @@ it.effect("waitForThread reads the run again only when the run updates", () =>
     expect(result).toMatchObject({ timedOut: false, run: { id: runId, status: "completed" } });
     // The first read plus one for this run's update. The other run caused none.
     expect(reads).toBe(2);
+  }),
+);
+
+it.effect("defers settlement from its own active turn and settles only after completion", () =>
+  Effect.gen(function* () {
+    const projectId = ProjectId.make("project:thread-management:self-settle");
+    const threadId = ThreadId.make("thread:thread-management:self-settle");
+    const runId = RunId.make("run:thread-management:self-settle");
+    const commandId = CommandId.make("command:thread-management:self-settle");
+    const subscribed = yield* Deferred.make<void>();
+    const settlementCommand = yield* Deferred.make<CommandId>();
+    const events = yield* Queue.unbounded<OrchestrationV2StoredEvent>();
+    let status: OrchestrationV2Run["status"] = "running";
+    const stored = (sequence: number, event: object) =>
+      ({ sequence, event: { threadId, ...event } }) as unknown as OrchestrationV2StoredEvent;
+    const shell = {
+      id: threadId,
+      projectId,
+      activeRunId: runId,
+    };
+    const projection = () =>
+      ({
+        thread: { id: threadId, projectId, deletedAt: null },
+        runs: [{ id: runId, status }],
+      }) as unknown as OrchestrationV2ThreadProjection;
+    const layerTest = ThreadManagementService.layer.pipe(
+      Layer.provide(
+        Layer.mergeAll(
+          Layer.mock(Orchestrator.OrchestratorV2)({
+            getThreadShell: () => Effect.succeed(shell as never),
+            getThreadEventSequence: () => Effect.succeed(0),
+            streamStoredEventsFrom: (input) =>
+              input?.eventType === "run.updated"
+                ? Stream.fromEffect(Deferred.succeed(subscribed, undefined)).pipe(
+                    Stream.drain,
+                    Stream.concat(Stream.fromQueue(events)),
+                  )
+                : Stream.never,
+            getThreadRecords: () => Effect.sync(projection),
+            dispatch: (command) =>
+              Effect.succeed(command).pipe(
+                Effect.tap((value) => Deferred.succeed(settlementCommand, value.commandId)),
+                Effect.as({ sequence: 17 } as never),
+              ),
+          }),
+          layerManagementDependencies(),
+        ),
+      ),
+    );
+    yield* Effect.gen(function* () {
+      const service = yield* ThreadManagementService.ThreadManagementService;
+      const result = yield* service.settleThread({ threadId, commandId, byOwnAgent: true });
+      expect(result).toEqual({ settlesWhenTurnEnds: true });
+      yield* Deferred.await(subscribed);
+      status = "completed";
+      yield* Queue.offer(events, stored(1, { type: "run.updated", payload: { id: runId, status } }));
+      expect(yield* Deferred.await(settlementCommand)).toBe(
+        CommandId.make(`server:settle-after-run:${runId}`),
+      );
+    }).pipe(Effect.provide(layerTest));
+  }),
+);
+
+it.effect("stops only a running Claude workflow coordinator through its live native runtime", () =>
+  Effect.gen(function* () {
+    const projectId = ProjectId.make("project:thread-management:workflow-stop");
+    const threadId = ThreadId.make("thread:thread-management:workflow-stop");
+    const subagentId = NodeId.make("node:thread-management:workflow-stop");
+    const providerThreadId = ProviderThreadId.make("provider-thread:workflow-stop");
+    const providerSessionId = ProviderSessionId.make("provider-session:workflow-stop");
+    const providerInstanceId = ProviderInstanceId.make("claudeAgent");
+    const driver = ProviderDriverKind.make("claudeAgent");
+    const providerThread = {
+      id: providerThreadId,
+      appThreadId: threadId,
+      providerSessionId,
+      providerInstanceId,
+      driver,
+    } as unknown as OrchestrationV2ProviderThread;
+    const projection = {
+      thread: {
+        id: threadId,
+        projectId,
+        deletedAt: null,
+        runtimeMode: "auto",
+        interactionMode: "default",
+      },
+      subagents: [
+        {
+          id: subagentId,
+          threadId,
+          runId: null,
+          origin: "provider_native",
+          driver,
+          providerInstanceId,
+          providerThreadId,
+          nativeTaskRef: { driver, nativeId: "native-task-1", strength: "strong" },
+          status: "running",
+          workflow: { phases: [], agents: [] },
+        },
+      ],
+      runs: [],
+      providerThreads: [providerThread],
+    } as unknown as OrchestrationV2ThreadProjection;
+    const stopped: Array<string> = [];
+    const runtime = {
+      stopTask: ({ taskId }: { readonly taskId: string }) =>
+        Effect.sync(() => stopped.push(taskId)),
+    } as never;
+    const layerTest = ThreadManagementService.layer.pipe(
+      Layer.provide(
+        Layer.mergeAll(
+          Layer.mock(Orchestrator.OrchestratorV2)({
+            getThreadRecords: () => Effect.succeed(projection),
+          }),
+          layerManagementDependencies({
+            getSession: () => Effect.succeed(Option.some(runtime)),
+          }),
+        ),
+      ),
+    );
+    const service = yield* ThreadManagementService.ThreadManagementService.pipe(
+      Effect.provide(layerTest),
+    );
+
+    yield* service.stopWorkflow({ threadId, subagentId });
+    expect(stopped).toEqual(["native-task-1"]);
+  }),
+);
+
+it.effect("reports unsupported workflow-stop targets without opening or stopping another provider", () =>
+  Effect.gen(function* () {
+    const projectId = ProjectId.make("project:thread-management:unsupported-workflow");
+    const threadId = ThreadId.make("thread:thread-management:unsupported-workflow");
+    const subagentId = NodeId.make("node:thread-management:unsupported-workflow");
+    const providerInstanceId = ProviderInstanceId.make("codex");
+    const driver = ProviderDriverKind.make("codex");
+    const projection = {
+      thread: { id: threadId, projectId, deletedAt: null, runtimeMode: "auto", interactionMode: "default" },
+      subagents: [
+        {
+          id: subagentId,
+          threadId,
+          origin: "provider_native",
+          driver,
+          providerInstanceId,
+          status: "running",
+          workflow: { phases: [], agents: [] },
+        },
+      ],
+      runs: [],
+      providerThreads: [],
+    } as unknown as OrchestrationV2ThreadProjection;
+    const layerTest = ThreadManagementService.layer.pipe(
+      Layer.provide(
+        Layer.mergeAll(
+          Layer.mock(Orchestrator.OrchestratorV2)({
+            getThreadRecords: () => Effect.succeed(projection),
+          }),
+          layerManagementDependencies(),
+        ),
+      ),
+    );
+    const service = yield* ThreadManagementService.ThreadManagementService.pipe(
+      Effect.provide(layerTest),
+    );
+    const error = yield* Effect.flip(service.stopWorkflow({ threadId, subagentId }));
+    expect(error.reason).toBe("unsupported");
+  }),
+);
+
+it.effect("blocks provider dispatch when the project override disables its instance", () =>
+  Effect.gen(function* () {
+    const projectId = ProjectId.make("project:thread-management:provider-disabled");
+    const threadId = ThreadId.make("thread:thread-management:provider-disabled");
+    const commandId = CommandId.make("command:thread-management:provider-disabled");
+    const instanceId = ProviderInstanceId.make("codex");
+    let dispatched = false;
+    const projection = {
+      thread: {
+        id: threadId,
+        projectId,
+        deletedAt: null,
+        modelSelection: { instanceId, model: "gpt-5.1-codex" },
+      },
+    } as unknown as OrchestrationV2ThreadProjection;
+    const layerTest = ThreadManagementService.layer.pipe(
+      Layer.provide(
+        Layer.mergeAll(
+          Layer.mock(Orchestrator.OrchestratorV2)({
+            getThreadRecords: () => Effect.succeed(projection),
+            dispatch: () => Effect.sync(() => {
+              dispatched = true;
+              return { sequence: 1 } as never;
+            }),
+          }),
+          layerManagementDependencies({
+            serverSettings: {
+              projectSettingsOverrides: {
+                [projectId]: { providerInstances: { [instanceId]: { enabled: false } } },
+              },
+            },
+          }),
+        ),
+      ),
+    );
+    const service = yield* ThreadManagementService.ThreadManagementService.pipe(
+      Effect.provide(layerTest),
+    );
+    const error = yield* Effect.flip(
+      service.dispatch({
+        type: "message.dispatch",
+        commandId,
+        threadId,
+        messageId: MessageId.make("message:thread-management:provider-disabled"),
+        text: "must not dispatch",
+        attachments: [],
+        dispatchMode: { type: "start_immediately" },
+        modelSelection: { instanceId, model: "gpt-5.1-codex" },
+        createdBy: "user",
+        creationSource: "web",
+      }),
+    );
+
+    expect(error).toBeInstanceOf(
+      ThreadManagementService.ThreadManagementProviderInstanceDisabledError,
+    );
+    expect(dispatched).toBe(false);
+  }),
+);
+
+it.effect("replays an accepted delegated command after its provider is disabled", () =>
+  Effect.gen(function* () {
+    const projectId = ProjectId.make("project:thread-management:receipt-replay");
+    const threadId = ThreadId.make("thread:thread-management:receipt-replay");
+    const commandId = CommandId.make("command:thread-management:receipt-replay");
+    const freshCommandId = CommandId.make("command:thread-management:receipt-replay-fresh");
+    const instanceId = ProviderInstanceId.make("codex");
+    const receipts = new Map<CommandId, unknown>();
+    const dispatches: Array<CommandId> = [];
+    const newWork: Array<CommandId> = [];
+    const projection = {
+      thread: { id: threadId, projectId, deletedAt: null },
+    } as unknown as OrchestrationV2ThreadProjection;
+    const command: OrchestrationV2ServerCommand = {
+      type: "delegated_task.request",
+      createdBy: "agent",
+      creationSource: "mcp",
+      commandId,
+      parentThreadId: threadId,
+      parentRunId: RunId.make("run:thread-management:receipt-replay"),
+      parentNodeId: NodeId.make("node:thread-management:receipt-replay"),
+      task: "Review the changes.",
+      modelSelection: { instanceId, model: "gpt-5.1-codex" },
+      runtimeMode: "full-access",
+      interactionMode: "default",
+    };
+    const settingsLayer = ServerSettings.layerTest({
+      projectSettingsOverrides: {
+        [projectId]: { providerInstances: { [instanceId]: { enabled: true } } },
+      },
+    }).pipe(Layer.orDie);
+    const receiptLayer = Layer.mock(CommandReceiptStore.CommandReceiptStoreV2)({
+      getByCommandId: (lookupId) =>
+        Effect.sync(() => {
+          const receipt = receipts.get(lookupId);
+          return receipt === undefined ? Option.none() : Option.some(receipt as never);
+        }),
+    });
+    const layerTest = ThreadManagementService.layer.pipe(
+      Layer.provideMerge(
+        Layer.mergeAll(
+          Layer.mock(Orchestrator.OrchestratorV2)({
+            getThreadRecords: () => Effect.succeed(projection),
+            dispatch: (received) =>
+              Effect.sync(() => {
+                dispatches.push(received.commandId);
+                if (!receipts.has(received.commandId)) {
+                  newWork.push(received.commandId);
+                  receipts.set(received.commandId, { sequence: 42 });
+                }
+                return { sequence: 42 } as never;
+              }),
+          }),
+          ThreadCommandExecutor.layer,
+          Layer.mock(ProviderSessionManager.ProviderSessionManagerV2)({
+            get: () => Effect.succeed(Option.none()),
+          }),
+          settingsLayer,
+          receiptLayer,
+        ),
+      ),
+    );
+    yield* Effect.gen(function* () {
+      const service = yield* ThreadManagementService.ThreadManagementService;
+      const settings = yield* ServerSettings.ServerSettingsService;
+
+      const accepted = yield* service.dispatch(command);
+      yield* settings.updateSettings({
+        projectSettingsOverrides: {
+          [projectId]: { providerInstances: { [instanceId]: { enabled: false } } },
+        },
+      });
+      const replayed = yield* service.dispatch(command);
+      const freshError = yield* Effect.flip(
+        service.dispatch({ ...command, commandId: freshCommandId }),
+      );
+
+      expect(accepted).toMatchObject({ sequence: 42 });
+      expect(replayed).toMatchObject({ sequence: 42 });
+      expect(freshError).toBeInstanceOf(
+        ThreadManagementService.ThreadManagementProviderInstanceDisabledError,
+      );
+      expect(dispatches).toEqual([commandId, commandId]);
+      expect(newWork).toEqual([commandId]);
+    }).pipe(Effect.provide(layerTest));
+  }),
+);
+
+it.effect("stops a reused delegated child and cancels only its queued follow-up", () =>
+  Effect.gen(function* () {
+    const rootThreadId = ThreadId.make("thread:thread-management:dedup-root");
+    const childThreadId = ThreadId.make("thread:thread-management:dedup-child");
+    const grandchildThreadId = ThreadId.make("thread:thread-management:dedup-grandchild");
+    const originalTaskId = NodeId.make("node:thread-management:dedup-original");
+    const followupTaskId = NodeId.make("node:thread-management:dedup-followup");
+    const originalRunId = RunId.make("run:thread-management:dedup-original");
+    const followupRunId = RunId.make("run:thread-management:dedup-followup");
+    const unrelatedRunId = RunId.make("run:thread-management:dedup-unrelated");
+    const rootTasks = [
+      {
+        id: originalTaskId,
+        threadId: rootThreadId,
+        runId: originalRunId,
+        origin: "app_owned",
+        childThreadId,
+        status: "completed",
+      },
+      {
+        id: followupTaskId,
+        threadId: rootThreadId,
+        runId: followupRunId,
+        origin: "app_owned",
+        childThreadId,
+        status: "running",
+      },
+    ];
+    const childTasks = [
+      {
+        id: NodeId.make("node:thread-management:dedup-nested"),
+        threadId: childThreadId,
+        runId: null,
+        origin: "app_owned",
+        childThreadId: grandchildThreadId,
+        status: "running",
+      },
+      {
+        id: NodeId.make("node:thread-management:dedup-cycle"),
+        threadId: childThreadId,
+        runId: null,
+        origin: "app_owned",
+        childThreadId: rootThreadId,
+        status: "running",
+      },
+    ];
+    const stoppedThreads: Array<ThreadId> = [];
+    const cancelledRuns: Array<RunId> = [];
+    const layerTest = ThreadManagementService.layer.pipe(
+      Layer.provide(
+        Layer.mergeAll(
+          Layer.mock(Orchestrator.OrchestratorV2)({
+            getThreadRecords: (threadId) =>
+              Effect.succeed({
+                subagents:
+                  threadId === rootThreadId
+                    ? rootTasks
+                    : threadId === childThreadId
+                      ? childTasks
+                      : [],
+                runs:
+                  threadId === childThreadId
+                    ? [
+                        {
+                          id: originalRunId,
+                          status: "completed",
+                          delegatedTaskId: originalTaskId,
+                        },
+                        {
+                          id: followupRunId,
+                          status: "queued",
+                          queueHeld: true,
+                          delegatedTaskId: followupTaskId,
+                        },
+                        {
+                          id: unrelatedRunId,
+                          status: "queued",
+                          queueHeld: true,
+                        },
+                      ]
+                    : [],
+                contextTransfers: [],
+              } as never),
+            dispatch: (command) =>
+              Effect.sync(() => {
+                if (command.type === "thread.stop") stoppedThreads.push(command.threadId);
+                if (command.type === "queued-run.cancel") cancelledRuns.push(command.runId);
+                return { sequence: stoppedThreads.length + cancelledRuns.length } as never;
+              }),
+          }),
+          layerManagementDependencies(),
+        ),
+      ),
+    );
+    const service = yield* ThreadManagementService.ThreadManagementService.pipe(
+      Effect.provide(layerTest),
+    );
+
+    yield* service.stopDelegatedTasks({
+      threadId: rootThreadId,
+      commandId: CommandId.make("command:thread-management:dedup-stop"),
+    });
+
+    expect(stoppedThreads).toEqual([childThreadId, grandchildThreadId]);
+    expect(cancelledRuns).toEqual([followupRunId]);
   }),
 );

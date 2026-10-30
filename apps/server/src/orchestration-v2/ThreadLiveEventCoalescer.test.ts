@@ -14,7 +14,7 @@ import * as Stream from "effect/Stream";
 import * as TestClock from "effect/testing/TestClock";
 import { describe, expect } from "vite-plus/test";
 import {
-  coalesceLiveToolUpdatedEvents,
+  coalesceLiveUpdatedEvents,
   coalesceThreadLiveStream,
   makeThreadLiveEventCoalescer,
 } from "./ThreadLiveEventCoalescer.ts";
@@ -95,15 +95,66 @@ function makeMessage(sequence: number, text = "Still working"): ThreadEvent {
   };
 }
 
+function makeStreamingMessage(
+  sequence: number,
+  options: { readonly id?: string; readonly text?: string; readonly streaming?: boolean } = {},
+): ThreadEvent {
+  const message = makeMessage(sequence, options.text ?? `text-${sequence}`);
+  if (message.event.type !== "message.updated") throw new Error("Expected message");
+  return {
+    ...message,
+    event: {
+      ...message.event,
+      payload: {
+        ...message.event.payload,
+        id: MessageId.make(options.id ?? "message"),
+        streaming: options.streaming ?? true,
+      },
+    },
+  };
+}
+
+function makeTextItem(
+  sequence: number,
+  options: {
+    readonly id?: string;
+    readonly text?: string;
+    readonly type?: "assistant_message" | "reasoning";
+    readonly status?: "running" | "completed";
+    readonly streaming?: boolean;
+  } = {},
+): ThreadEvent {
+  const tool = makeToolActivity(sequence);
+  if (tool.event.type !== "turn-item.updated" || tool.event.payload.type !== "command_execution")
+    throw new Error("Expected command item");
+  const { input: _input, output: _output, ...base } = tool.event.payload;
+  return {
+    ...tool,
+    event: {
+      ...tool.event,
+      payload: {
+        ...base,
+        id: TurnItemId.make(options.id ?? "item"),
+        type: options.type ?? "assistant_message",
+        messageId: MessageId.make("message"),
+        text: options.text ?? `text-${sequence}`,
+        status: options.status ?? "running",
+        streaming: options.streaming ?? true,
+      },
+    },
+  };
+}
+
+
 describe("ThreadLiveEventCoalescer", () => {
-  it("coalesces only calls with a stable toolCallId", () => {
+  it("preserves tool-call identity switches as insertion-order boundaries", () => {
     const events = [
       makeToolActivity(1, { toolCallId: "call-a" }),
       makeToolActivity(2, { toolCallId: "call-b" }),
       makeToolActivity(3, { toolCallId: "call-a" }),
     ];
 
-    expect(coalesceLiveToolUpdatedEvents(events).map((event) => event.sequence)).toEqual([2, 3]);
+    expect(coalesceLiveUpdatedEvents(events).map((event) => event.sequence)).toEqual([1, 2, 3]);
   });
 
   it("does not coalesce stable tool calls across turns", () => {
@@ -112,7 +163,7 @@ describe("ThreadLiveEventCoalescer", () => {
       makeToolActivity(2, { turnId: RunId.make("turn-new") }),
     ];
 
-    expect(coalesceLiveToolUpdatedEvents(events).map((event) => event.sequence)).toEqual([1, 2]);
+    expect(coalesceLiveUpdatedEvents(events).map((event) => event.sequence)).toEqual([1, 2]);
   });
 
   it("flushes a stable update run before a completion boundary", () => {
@@ -123,7 +174,24 @@ describe("ThreadLiveEventCoalescer", () => {
       makeToolActivity(4),
     ];
 
-    expect(coalesceLiveToolUpdatedEvents(events).map((event) => event.sequence)).toEqual([2, 3, 4]);
+    expect(coalesceLiveUpdatedEvents(events).map((event) => event.sequence)).toEqual([2, 3, 4]);
+  });
+
+  it("coalesces superseded streamed text without merging control or tool events into it", () => {
+    const events = [
+      makeStreamingMessage(1, { id: "message", text: "draft" }),
+      makeStreamingMessage(2, { id: "message", text: "latest" }),
+      makeTextItem(3, { id: "reasoning", type: "reasoning", text: "think" }),
+      makeTextItem(4, { id: "reasoning", type: "reasoning", text: "latest thought" }),
+      makeToolActivity(5),
+      makeToolActivity(6),
+      makeStreamingMessage(7, { id: "message", streaming: false, text: "final" }),
+      makeToolActivity(8, { kind: "tool.completed" }),
+      makeMessage(9, "control boundary"),
+    ];
+    expect(coalesceLiveUpdatedEvents(events).map((event) => event.sequence)).toEqual([
+      2, 4, 6, 7, 8, 9,
+    ]);
   });
 
   it.effect("flushes pending tool updates as soon as an unrelated event arrives", () =>

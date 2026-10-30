@@ -3,9 +3,11 @@ import { scopeThreadRef } from "@t3tools/client-runtime/environment";
 import { ThreadId } from "@t3tools/contracts";
 import { DraftId } from "./composerDraftStore";
 
+import * as Option from "effect/Option";
 import {
   buildDraftThreadRouteParams,
   buildThreadRouteParams,
+  isThreadRouteBootstrapComplete,
   resolveActiveThreadRouteRef,
   resolveThreadRouteRenderState,
   resolveThreadRouteRef,
@@ -152,5 +154,86 @@ describe("threadRoutes", () => {
         draftThreadExists: false,
       }),
     ).toBe("missing");
+  });
+
+  it("only treats live authoritative shell snapshots as complete bootstrap", () => {
+    expect(isThreadRouteBootstrapComplete(null)).toBe(false);
+    expect(isThreadRouteBootstrapComplete({ isPending: true, data: null })).toBe(false);
+
+    // Empty shell (no snapshot yet)
+    expect(
+      isThreadRouteBootstrapComplete({
+        isPending: false,
+        data: { status: "empty", snapshot: Option.none() },
+      }),
+    ).toBe(false);
+
+    // Cached shell from previous session must NOT be treated as complete bootstrap;
+    // otherwise newly created/imported server threads missing from cache cause a premature redirect.
+    expect(
+      isThreadRouteBootstrapComplete({
+        isPending: false,
+        data: { status: "cached", snapshot: Option.some({ threads: [] }) },
+      }),
+    ).toBe(false);
+
+    // Synchronizing shell in flight must NOT be treated as complete bootstrap
+    expect(
+      isThreadRouteBootstrapComplete({
+        isPending: false,
+        data: { status: "synchronizing", snapshot: Option.some({ threads: [] }) },
+      }),
+    ).toBe(false);
+
+    // Pending query must NOT be treated as complete bootstrap
+    expect(
+      isThreadRouteBootstrapComplete({
+        isPending: true,
+        data: { status: "live", snapshot: Option.some({ threads: [] }) },
+      }),
+    ).toBe(false);
+
+    // Live shell with snapshot IS complete bootstrap
+    expect(
+      isThreadRouteBootstrapComplete({
+        isPending: false,
+        data: { status: "live", snapshot: Option.some({ threads: [] }) },
+      }),
+    ).toBe(true);
+  });
+
+  it("holds in loading state during canonical presence and entity lag, and only marks missing on canonical absence", () => {
+    // Canonical presence + entity lag: live snapshot contains thread but entity atom hasn't propagated
+    expect(
+      resolveThreadRouteRenderState({
+        bootstrapComplete: true,
+        serverThreadExists: false,
+        serverThreadDeleted: false,
+        draftThreadExists: false,
+        canonicalThreadPresent: true,
+      }),
+    ).toBe("loading");
+
+    // Canonical absence: live snapshot confirms thread is truly absent
+    expect(
+      resolveThreadRouteRenderState({
+        bootstrapComplete: true,
+        serverThreadExists: false,
+        serverThreadDeleted: false,
+        draftThreadExists: false,
+        canonicalThreadPresent: false,
+      }),
+    ).toBe("missing");
+
+    // Once entity atom catches up and server thread exists, it becomes ready
+    expect(
+      resolveThreadRouteRenderState({
+        bootstrapComplete: true,
+        serverThreadExists: true,
+        serverThreadDeleted: false,
+        draftThreadExists: false,
+        canonicalThreadPresent: true,
+      }),
+    ).toBe("ready");
   });
 });

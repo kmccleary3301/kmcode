@@ -10,6 +10,7 @@ import {
   toolOutputImages,
   toolOutputIndicatesFailure,
 } from "@t3tools/shared/toolOutput";
+import { parseToolDeviceArguments, parseToolDeviceName } from "@t3tools/shared/toolDevice";
 
 const MAX_DETAIL_STRING_BYTES = 32_768;
 const MAX_DYNAMIC_VALUE_BYTES = 16_384;
@@ -95,9 +96,15 @@ export function projectTurnItemForWire(item: OrchestrationV2TurnItem): Orchestra
       };
     }
     case "file_change": {
-      // File identity and counts are enough for activity. Full diffs already
+      // File identity and counts are enough for ordinary activity; full diffs
       // have a dedicated read path and remain intact in persistence.
-      const { diffStr, oldStr: _old, newStr: _new, ...projected } = item;
+      // For xd devices, newStr is serialized tool input, not a file body.
+      // Bound the serialized arguments just like live dynamic-tool input.
+      const { diffStr, oldStr: _old, newStr, ...projected } = item;
+      if (parseToolDeviceName(item.fileName) !== undefined) {
+        const deviceArguments = summarizeDynamicValue(parseToolDeviceArguments(newStr));
+        return { ...projected, newStr: JSON.stringify(deviceArguments) ?? "{}" };
+      }
       // A failed edit stores the provider's error where the diff would be.
       return item.status === "failed" && diffStr?.trim()
         ? { ...projected, diffStr: truncateDetail(diffStr) }
@@ -116,8 +123,11 @@ export function projectTurnItemForWire(item: OrchestrationV2TurnItem): Orchestra
       return {
         ...projected,
         input: summarizeDynamicValue(item.input),
+        ...(item.details === undefined ? {} : { details: summarizeDynamicValue(item.details) }),
         ...(output === undefined ? {} : { output }),
-        ...(hasDynamicValue(rawOutput) ? { outputOmitted: true } : {}),
+        ...(hasDynamicValue(rawOutput) || hasDynamicValue(item.details)
+          ? { outputOmitted: true }
+          : {}),
       };
     }
     default:
@@ -183,6 +193,7 @@ export function projectTurnItemForDetail(item: OrchestrationV2TurnItem): Orchest
         ...item,
         input: boundDynamicValue(item.input),
         output: boundToolOutput(item.output),
+        ...(item.details === undefined ? {} : { details: boundDynamicValue(item.details) }),
       };
     case "subagent":
       return {
@@ -192,8 +203,15 @@ export function projectTurnItemForDetail(item: OrchestrationV2TurnItem): Orchest
         result:
           item.result === null ? null : (truncateDetail(item.result, MAX_ON_DEMAND_BYTES) ?? null),
       };
-    case "handoff":
     case "file_change":
+      // An opened edit pane draws the diff (live while the call streams).
+      return {
+        ...item,
+        diffStr: truncateDetail(item.diffStr, MAX_ON_DEMAND_BYTES),
+        oldStr: truncateDetail(item.oldStr, MAX_ON_DEMAND_BYTES),
+        newStr: truncateDetail(item.newStr, MAX_ON_DEMAND_BYTES),
+      };
+    case "handoff":
       return projectTurnItemForWire(item);
     default:
       return item;

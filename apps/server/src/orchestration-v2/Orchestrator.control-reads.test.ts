@@ -23,6 +23,7 @@ import * as Layer from "effect/Layer";
 import * as SqlClient from "effect/sql/SqlClient";
 import * as SqlitePersistence from "../persistence/Sqlite.ts";
 import { CodexProviderCapabilitiesV2 } from "./Adapters/CodexAdapterV2.ts";
+import * as EffectOutbox from "./EffectOutbox.ts";
 import * as Orchestrator from "./Orchestrator.ts";
 import * as ProjectionStore from "./ProjectionStore.ts";
 import type { ProviderAdapterV2Shape } from "./ProviderAdapter.ts";
@@ -42,6 +43,7 @@ const layerDatabase = SqlitePersistence.layerMemory;
 const layerTest = Layer.mergeAll(
   layerDatabase,
   ProjectionStore.layer.pipe(Layer.provide(layerDatabase)),
+  EffectOutbox.layer.pipe(Layer.provide(layerDatabase)),
   ProviderReplayHarness.layerWithRegistry(
     { name: "control-reads" },
     ProviderAdapterRegistry.layerFromAdapters([adapter]),
@@ -591,6 +593,11 @@ it.effect("keeps delegated child pull-request links independent of the parent", 
       runtimeMode: "full-access",
       interactionMode: "default",
       createdBy: "agent",
+      workspaceStrategy: {
+        type: "worktree",
+        baseRef: "parent-head",
+        startFromOrigin: false,
+      },
       creationSource: "mcp",
     });
     const updatedParent = yield* projections.getThreadProjection(parentThreadId);
@@ -601,6 +608,12 @@ it.effect("keeps delegated child pull-request links independent of the parent", 
     assert.equal(child.thread.branch, parent.thread.branch);
     assert.equal(child.thread.worktreePath, parent.thread.worktreePath);
     assert.equal(child.thread.lineage.parentThreadId, parentThreadId);
+    assert.equal(child.runs[0]?.status, "preparing");
+    assert.deepEqual(child.runs[0]?.workspacePreparation, {
+      type: "worktree",
+      baseRef: "parent-head",
+      startFromOrigin: false,
+    });
 
     const childPullRequest = {
       ...parentPullRequest,
@@ -622,5 +635,301 @@ it.effect("keeps delegated child pull-request links independent of the parent", 
     const parentAfterChildLink = yield* projections.getThreadProjection(parentThreadId);
     assert.deepEqual(parentAfterChildLink.thread.linkedPullRequest, parentPullRequest);
     assert.deepEqual(parentAfterChildLink.thread.pullRequests, parent.thread.pullRequests);
+  }).pipe(Effect.provide(layerTest)),
+);
+
+it.effect("finalizes a follow-up continuation without replacing the original result", () =>
+  Effect.gen(function* () {
+    const orchestrator = yield* Orchestrator.OrchestratorV2;
+    const projections = yield* ProjectionStore.ProjectionStoreV2;
+    const parentThreadId = ThreadId.make("thread:followup-parent");
+    const projectId = ProjectId.make("project:followup-parent");
+    const now = yield* DateTime.now;
+    yield* orchestrator.dispatch({
+      type: "thread.create",
+      commandId: CommandId.make("create-followup-parent"),
+      threadId: parentThreadId,
+      projectId,
+      title: "Follow-up parent",
+      modelSelection,
+      runtimeMode: "full-access",
+      interactionMode: "default",
+      branch: null,
+      worktreePath: null,
+      createdBy: "user",
+      creationSource: "web",
+    });
+    yield* orchestrator.dispatch({
+      type: "message.dispatch",
+      commandId: CommandId.make("start-followup-parent"),
+      threadId: parentThreadId,
+      messageId: MessageId.make("message:followup-parent"),
+      text: "Start a delegated task.",
+      attachments: [],
+      dispatchMode: { type: "start_immediately" },
+      createdBy: "user",
+      creationSource: "web",
+    });
+    const parent = yield* projections.getThreadProjection(parentThreadId);
+    const parentRun = parent.runs[0]!;
+    yield* orchestrator.dispatch({
+      type: "delegated_task.request",
+      commandId: CommandId.make("create-followup-original-task"),
+      parentThreadId,
+      parentRunId: parentRun.id,
+      parentNodeId: parentRun.rootNodeId!,
+      task: "Complete the original task.",
+      modelSelection,
+      runtimeMode: "full-access",
+      interactionMode: "default",
+      createdBy: "agent",
+      creationSource: "mcp",
+    });
+
+    const afterDelegation = yield* projections.getThreadProjection(parentThreadId);
+    const originalTask = afterDelegation.subagents[0]!;
+    const childThreadId = originalTask.childThreadId!;
+    const childBefore = yield* projections.getThreadProjection(childThreadId);
+    const originalChildRun = childBefore.runs[0]!;
+    assert.equal(originalChildRun.delegatedTaskId, originalTask.id);
+    yield* projections.apply({
+      id: EventId.make("original-followup-result-message"),
+      type: "message.updated",
+      threadId: childThreadId,
+      runId: originalChildRun.id,
+      nodeId: originalChildRun.rootNodeId!,
+      occurredAt: now,
+      payload: {
+        createdBy: "agent",
+        creationSource: "provider",
+        id: MessageId.make("message:original-followup-result"),
+        threadId: childThreadId,
+        runId: originalChildRun.id,
+        nodeId: originalChildRun.rootNodeId!,
+        role: "assistant",
+        text: "The original result stays published.",
+        attachments: [],
+        streaming: false,
+        createdAt: now,
+        updatedAt: now,
+      },
+    });
+    yield* projections.apply({
+      id: EventId.make("complete-followup-original-child-run"),
+      type: "run.updated",
+      threadId: childThreadId,
+      runId: originalChildRun.id,
+      occurredAt: now,
+      payload: {
+        ...originalChildRun,
+        status: "completed",
+        completedAt: now,
+      },
+    });
+    yield* orchestrator.recoverDelegatedTasks;
+    const afterOriginalCompletion = yield* projections.getThreadProjection(parentThreadId);
+    assert.equal(
+      afterOriginalCompletion.subagents.find((task) => task.id === originalTask.id)?.result,
+      "The original result stays published.",
+    );
+    assert.isTrue(
+      afterOriginalCompletion.contextTransfers.some(
+        (transfer) =>
+          transfer.type === "subagent_result" &&
+          transfer.sourcePoint.runId === originalChildRun.id,
+      ),
+    );
+
+    const followupCommand = {
+      type: "message.dispatch",
+      commandId: CommandId.make("dispatch-followup-child-message"),
+      threadId: childThreadId,
+      senderThreadId: parentThreadId,
+      messageId: MessageId.make("message:followup-child"),
+      text: "Continue with this follow-up.",
+      attachments: [],
+      modelSelection,
+      dispatchMode: { type: "start_immediately" },
+      createdBy: "agent",
+      creationSource: "mcp",
+    } as const;
+    yield* orchestrator.dispatch(followupCommand);
+
+    const afterFollowup = yield* projections.getThreadProjection(parentThreadId);
+    const originalAfter = afterFollowup.subagents.find((task) => task.id === originalTask.id)!;
+    const followupTask = afterFollowup.subagents.find((task) => task.id !== originalTask.id)!;
+    const childAfterFollowup = yield* projections.getThreadProjection(childThreadId);
+    const followupRun = childAfterFollowup.runs.find(
+      (run) => run.delegatedTaskId === followupTask.id,
+    );
+    assert.notEqual(followupTask.id, originalTask.id);
+    assert.equal(originalAfter.status, "completed");
+    assert.equal(originalAfter.result, "The original result stays published.");
+    assert.equal(followupTask.status, "running");
+    assert.isNull(followupTask.result);
+    assert.ok(followupRun);
+
+    yield* projections.apply({
+      id: EventId.make("cancel-followup-child-run"),
+      type: "run.updated",
+      threadId: childThreadId,
+      runId: followupRun!.id,
+      occurredAt: now,
+      payload: { ...followupRun!, status: "cancelled", completedAt: now },
+    });
+    const outbox = yield* EffectOutbox.EffectOutboxV2;
+    yield* outbox.enqueue([
+      {
+        id: `effect:restart-continuation:${followupRun!.id}`,
+        commandId: CommandId.make("queue-followup-restart-continuation"),
+        threadId: childThreadId,
+        request: {
+          type: "provider-runtime.continue",
+          sourceRunId: followupRun!.id,
+        },
+      },
+    ]);
+    yield* orchestrator.recoverDelegatedTasks;
+    const beforeContinuation = yield* projections.getThreadProjection(parentThreadId);
+    const stillPendingFollowup = beforeContinuation.subagents.find(
+      (task) => task.id === followupTask.id,
+    )!;
+    assert.equal(stillPendingFollowup.status, "running");
+    assert.isNull(stillPendingFollowup.result);
+    yield* orchestrator.dispatch({
+      type: "message.dispatch",
+      commandId: CommandId.make("continue-followup-child-task"),
+      threadId: childThreadId,
+      messageId: MessageId.make("message:continue-followup-child"),
+      text: "Continue where you left off.",
+      attachments: [],
+      dispatchMode: { type: "start_immediately" },
+      createdBy: "agent",
+      creationSource: "server",
+      restartContinuationOfRunId: followupRun!.id,
+    });
+    const childAfterContinuation = yield* projections.getThreadProjection(childThreadId);
+    const continuationRun = childAfterContinuation.runs.find(
+      (run) => run.restartContinuationOfRunId === followupRun!.id,
+    )!;
+    assert.equal(continuationRun.delegatedTaskId, followupTask.id);
+    yield* projections.apply({
+      id: EventId.make("followup-result-message"),
+      type: "message.updated",
+      threadId: childThreadId,
+      runId: continuationRun.id,
+      nodeId: continuationRun.rootNodeId!,
+      occurredAt: now,
+      payload: {
+        createdBy: "agent",
+        creationSource: "provider",
+        id: MessageId.make("message:followup-result"),
+        threadId: childThreadId,
+        runId: continuationRun.id,
+        nodeId: continuationRun.rootNodeId!,
+        role: "assistant",
+        text: "The follow-up result is independent.",
+        attachments: [],
+        streaming: false,
+        createdAt: now,
+        updatedAt: now,
+      },
+    });
+    yield* projections.apply({
+      id: EventId.make("complete-followup-child-continuation"),
+      type: "run.updated",
+      threadId: childThreadId,
+      runId: continuationRun.id,
+      occurredAt: now,
+      payload: { ...continuationRun, status: "completed", completedAt: now },
+    });
+    yield* orchestrator.recoverDelegatedTasks;
+    const afterFollowupCompletion = yield* projections.getThreadProjection(parentThreadId);
+    const completedOriginal = afterFollowupCompletion.subagents.find(
+      (task) => task.id === originalTask.id,
+    )!;
+    const completedFollowup = afterFollowupCompletion.subagents.find(
+      (task) => task.id === followupTask.id,
+    )!;
+    assert.equal(completedOriginal.result, "The original result stays published.");
+    assert.equal(completedFollowup.status, "completed");
+    assert.equal(completedFollowup.result, "The follow-up result is independent.");
+    assert.equal(completedFollowup.completionDelivery?.state, "claimed");
+    assert.isTrue(
+      afterFollowupCompletion.runs
+        .find((run) => run.id === parentRun.id)
+        ?.delegatedCompletion?.delivery?.taskIds.includes(followupTask.id),
+    );
+    assert.deepEqual(
+      afterFollowupCompletion.contextTransfers
+        .filter((transfer) => transfer.type === "subagent_result")
+        .map((transfer) => transfer.sourcePoint.runId)
+        .toSorted(),
+      [originalChildRun.id, continuationRun.id].toSorted(),
+    );
+    // Replaying the same accepted child message cannot create another task or run.
+    yield* orchestrator.dispatch(followupCommand);
+    const afterRetry = yield* projections.getThreadProjection(parentThreadId);
+    const childAfterRetry = yield* projections.getThreadProjection(childThreadId);
+    assert.equal(afterRetry.subagents.length, 2);
+    assert.equal(
+      childAfterRetry.runs.filter((run) => run.delegatedTaskId === followupTask.id).length,
+      2,
+    );
+    assert.equal(
+      afterRetry.subagents.find((task) => task.id === originalTask.id)?.result,
+      "The original result stays published.",
+    );
+    const monitorNotification = {
+      type: "message.dispatch",
+      commandId: CommandId.make("dispatch-child-monitor-notification"),
+      threadId: childThreadId,
+      messageId: MessageId.make("message:child-monitor-notification"),
+      text: "The pull request is still open.",
+      attachments: [],
+      modelSelection,
+      dispatchMode: { type: "queue_after_active" },
+      createdBy: "agent",
+      creationSource: "provider",
+      notification: {
+        source: { kind: "monitor" },
+        outcome: "updated",
+        summary: "The pull request is still open.",
+      },
+    } as const;
+    yield* orchestrator.dispatch(monitorNotification);
+    assert.equal((yield* projections.getThreadProjection(parentThreadId)).subagents.length, 2);
+
+    const backgroundNotification = {
+      type: "message.dispatch",
+      commandId: CommandId.make("dispatch-child-background-notification"),
+      threadId: childThreadId,
+      messageId: MessageId.make("message:child-background-notification"),
+      text: "A background task finished; inspect its result.",
+      attachments: [],
+      modelSelection,
+      dispatchMode: { type: "queue_after_active" },
+      createdBy: "agent",
+      creationSource: "provider",
+      notification: {
+        source: { kind: "background_task" },
+        outcome: "completed",
+        summary: "A background task finished.",
+      },
+    } as const;
+    yield* orchestrator.dispatch(backgroundNotification);
+    const afterBackgroundFollowup = yield* projections.getThreadProjection(parentThreadId);
+    const backgroundTask = afterBackgroundFollowup.subagents.find(
+      (task) => task.id !== originalTask.id && task.id !== followupTask.id,
+    );
+    assert.equal(backgroundTask?.origin, "app_owned");
+    assert.equal(backgroundTask?.prompt, backgroundNotification.text);
+    assert.equal(backgroundTask?.completionWake, "always");
+    const childAfterBackgroundFollowup = yield* projections.getThreadProjection(childThreadId);
+    assert.isTrue(
+      childAfterBackgroundFollowup.runs.some(
+        (run) => run.delegatedTaskId === backgroundTask?.id,
+      ),
+    );
   }).pipe(Effect.provide(layerTest)),
 );

@@ -46,23 +46,55 @@ export const layer: Layer.Layer<TurnItemPositionStoreV2, never, SqlClient.SqlCli
       runOrdinal: suppliedRunOrdinal,
     }) =>
       Effect.gen(function* () {
-        const runRows =
-          runId === null
-            ? []
-            : yield* sql<{ readonly ordinal: number }>`
-                SELECT ordinal
-                FROM orchestration_v2_projection_runs
-                WHERE thread_id = ${threadId} AND run_id = ${runId}
-                LIMIT 1
-              `;
-        const runOrdinal = suppliedRunOrdinal ?? runRows[0]?.ordinal ?? null;
-        const lowerBound = runOrdinal === null ? 0 : runOrdinal * 1_000_000;
-        const upperBound = runOrdinal === null ? 999_999 : lowerBound + 999_999;
+        const existing = yield* sql<{ readonly ordinal: number }>`
+          SELECT ordinal
+          FROM orchestration_v2_turn_item_positions
+          WHERE thread_id = ${threadId} AND turn_item_id = ${turnItemId}
+          LIMIT 1
+        `;
+        if (existing[0] !== undefined) return existing[0].ordinal;
+        // Each run owns a block of 1,000,000 positions and keeps the block its first item
+        // got. That first item opens a block after every block in use, so runs read in the
+        // order they started even when a later message starts ahead of queued ones.
+        let block = 0;
+        if (runId !== null) {
+          const pinned = yield* sql<{ readonly ordinal: number | null }>`
+            SELECT MIN(ordinal) AS ordinal
+            FROM orchestration_v2_turn_item_positions
+            WHERE thread_id = ${threadId} AND run_id = ${runId}
+          `;
+          const pinnedOrdinal = pinned[0]?.ordinal ?? null;
+          if (pinnedOrdinal !== null) {
+            block = Math.floor(pinnedOrdinal / 1_000_000);
+          } else {
+            const runRows =
+              suppliedRunOrdinal === undefined
+                ? yield* sql<{ readonly ordinal: number }>`
+                    SELECT ordinal
+                    FROM orchestration_v2_projection_runs
+                    WHERE thread_id = ${threadId} AND run_id = ${runId}
+                    LIMIT 1
+                  `
+                : [];
+            const latest = yield* sql<{ readonly ordinal: number | null }>`
+              SELECT MAX(ordinal) AS ordinal
+              FROM orchestration_v2_turn_item_positions
+              WHERE thread_id = ${threadId}
+            `;
+            block = Math.max(
+              suppliedRunOrdinal ?? runRows[0]?.ordinal ?? 0,
+              Math.floor((latest[0]?.ordinal ?? 0) / 1_000_000) + 1,
+            );
+          }
+        }
+        const lowerBound = block * 1_000_000;
+        const upperBound = lowerBound + 999_999;
         yield* sql`
-          INSERT INTO orchestration_v2_turn_item_positions (thread_id, turn_item_id, ordinal)
+          INSERT INTO orchestration_v2_turn_item_positions (thread_id, turn_item_id, run_id, ordinal)
           SELECT
             ${threadId},
             ${turnItemId},
+            ${runId},
             COALESCE(MAX(ordinal), ${lowerBound}) + 1
           FROM orchestration_v2_turn_item_positions
           WHERE thread_id = ${threadId}

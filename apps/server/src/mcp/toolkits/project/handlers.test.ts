@@ -310,14 +310,17 @@ const clientLaunchHarness = (input: {
   readonly runtimeModeCeiling: "approval-required" | "auto-accept-edits" | "auto" | "full-access";
   readonly launched: Array<ThreadLaunch.ThreadLaunchInput>;
   readonly workspaceRoot?: string;
+  readonly requestNamespace?: string;
 }) => {
   const projectId = ProjectId.make("project:client-target");
   const modelSelection = { instanceId: ProviderInstanceId.make("claude"), model: "claude-opus" };
+  const launchedShells = new Map<string, OrchestrationV2ThreadShell>();
+  const acceptedLaunches = new Map<string, ThreadLaunch.ThreadLaunchResult>();
   const layerDependencies = Layer.mergeAll(
     NodeCrypto.layer,
     Layer.succeed(McpInvocationContext.McpInvocationContext, {
       environmentId: EnvironmentId.make("environment"),
-      requestNamespace: "client:session-1",
+      requestNamespace: input.requestNamespace ?? "client:session-1",
       thread: undefined,
       client: {
         sessionId: "session-1",
@@ -327,15 +330,21 @@ const clientLaunchHarness = (input: {
       issuedAt: 0,
       capabilities: new Set(["orchestration" as const]),
     }),
-    Layer.mock(ThreadManagement.ThreadManagementService)({}),
+    Layer.mock(ThreadManagement.ThreadManagementService)({
+      getThreadShell: (threadId) => Effect.succeed(launchedShells.get(threadId) ?? null),
+    }),
     Layer.mock(ThreadLaunch.ThreadLaunchService)({
       launch: (launch) => {
+        const accepted = acceptedLaunches.get(launch.commandId);
+        if (accepted !== undefined) return Effect.succeed(accepted);
+        const threadId = launch.threadId;
+        if (threadId === undefined) return Effect.die("launch did not receive a thread id");
         input.launched.push(launch);
-        return Effect.succeed({
-          threadId: launch.threadId,
+        const result = {
+          threadId,
           projection: {
             thread: {
-              id: launch.threadId,
+              id: threadId,
               projectId: launch.projectId,
               modelSelection: launch.modelSelection,
               title: launch.title,
@@ -343,7 +352,19 @@ const clientLaunchHarness = (input: {
             runs: [],
           },
           resumed: false,
-        } as unknown as ThreadLaunch.ThreadLaunchResult);
+        } as unknown as ThreadLaunch.ThreadLaunchResult;
+        launchedShells.set(
+          threadId,
+          {
+            id: threadId,
+            projectId: launch.projectId,
+            modelSelection: launch.modelSelection,
+            title: launch.title,
+            deletedAt: null,
+          } as OrchestrationV2ThreadShell,
+        );
+        acceptedLaunches.set(launch.commandId, result);
+        return Effect.succeed(result);
       },
     }),
     Layer.mock(Project.ProjectService)({
@@ -372,6 +393,55 @@ const clientLaunchHarness = (input: {
   );
   return { projectId, modelSelection, dependencies: layerDependencies };
 };
+it.effect("uses a caller-scoped clientRequestId to replay a thread launch", () =>
+  Effect.gen(function* () {
+    const launched: Array<ThreadLaunch.ThreadLaunchInput> = [];
+    const { projectId, dependencies } = clientLaunchHarness({
+      runtimeModeCeiling: "auto-accept-edits",
+      launched,
+    });
+    const toolkit = yield* ProjectToolkit.pipe(
+      Effect.provide(
+        McpToolAccess.HandlersLayer.layer(ProjectHandlers.layer).pipe(Layer.provide(dependencies)),
+      ),
+    );
+    const handle = (params: Parameters<typeof toolkit.handle<"t3_thread_launch">>[1]) =>
+      toolkit
+        .handle("t3_thread_launch", params)
+        .pipe(Stream.unwrap, Stream.runCollect, Effect.provide(dependencies));
+    const request = {
+      title: "Audit",
+      projectId,
+      message: "Review the change",
+      clientRequestId: "retry-this-launch",
+    };
+    const first = yield* handle(request);
+    const replay = yield* handle(request);
+    expect(launched).toHaveLength(1);
+    expect(replay.at(-1)?.result).toEqual(first.at(-1)?.result);
+    const otherCallerLaunches: Array<ThreadLaunch.ThreadLaunchInput> = [];
+    const otherCaller = clientLaunchHarness({
+      runtimeModeCeiling: "auto-accept-edits",
+      launched: otherCallerLaunches,
+      requestNamespace: "client:other-session",
+    });
+    const otherToolkit = yield* ProjectToolkit.pipe(
+      Effect.provide(
+        McpToolAccess.HandlersLayer.layer(ProjectHandlers.layer).pipe(
+          Layer.provide(otherCaller.dependencies),
+        ),
+      ),
+    );
+    yield* otherToolkit
+      .handle("t3_thread_launch", request)
+      .pipe(
+        Stream.unwrap,
+        Stream.runCollect,
+        Effect.provide(otherCaller.dependencies),
+      );
+    expect(otherCallerLaunches[0]?.commandId).not.toBe(launched[0]?.commandId);
+  }),
+);
 
 it.effect("a client launches at its ceiling with the project's default model", () =>
   Effect.gen(function* () {

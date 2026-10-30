@@ -1,7 +1,7 @@
 import { ThreadHoverCardPopup } from "../ThreadHoverCard";
 import { AgentElapsed } from "./AgentElapsed";
-import { projectedSubagentsToRuntime } from "@t3tools/client-runtime/state/subagentRuntime";
-import type { ReactNode } from "react";
+import { resolveSubagentLifecycle } from "@t3tools/client-runtime/state/subagentRuntime";
+import { use, useEffect, useId, useRef, useState, type ReactNode } from "react";
 import { useThreadShell, useProject } from "../../state/entities";
 import { SubagentTooltipContent } from "./SubagentTooltipContent";
 import { useAtomValue } from "@effect/atom-react";
@@ -12,23 +12,33 @@ import * as DateTime from "effect/DateTime";
 import { WorkLogRow } from "./WorkLog";
 import { resolveHandoffEndpoints, type HandoffTimelineRun } from "@t3tools/client-runtime/handoff";
 import { Fragment } from "react";
-import { formatSubagentDisplayTitle } from "@t3tools/client-runtime/state/subagent-display";
+import {
+  formatSubagentDisplayTitle,
+  subagentDisplayName,
+} from "@t3tools/client-runtime/state/subagent-display";
 import {
   ProviderDriverKind,
   type OrchestrationV2Notification,
   type OrchestrationV2TurnItem,
   type OrchestrationV2Subagent,
+  type OrchestrationV2SubagentLiveContent,
   type ProviderInstanceId,
   type ServerProvider,
   type ThreadId,
   type EnvironmentId,
   type NodeId,
   type ScopedThreadRef,
+  type TurnItemId,
 } from "@t3tools/contracts";
+import { isOrchestrationV2WorkActive } from "@t3tools/contracts";
 import type { TimestampFormat } from "@t3tools/contracts/settings";
 import {
   BotIcon,
+  CheckIcon,
+  ChevronDownIcon,
   ChevronRightIcon,
+  CircleDashedIcon,
+  CircleXIcon,
   ArrowRightLeftIcon,
   ArrowRightIcon,
   GitForkIcon,
@@ -46,6 +56,20 @@ import { cn } from "~/lib/utils";
 import { TimelineSystemDivider } from "./TimelineSystemDivider";
 import { Button, InlineButton } from "../ui/button";
 import { T3Wordmark } from "../T3Wordmark";
+import { AsciiLoader } from "../ui/ascii-loader";
+import { ActivityDisclosurePanel } from "./ActivityDisclosure";
+import { GlyphSwap } from "./GlyphSwap";
+import { RollingText } from "./RollingText";
+import { EXCERPT_FOLD_DELAY_MS } from "./timelineActivityPolicy";
+import { observeVisibleAnimation } from "~/lib/visibleAnimation";
+import { useChildThreadLiveStep } from "./childThreadSteps";
+import {
+  LiveViewPausedNote,
+  useSubagentLiveContent,
+} from "../../hooks/useSubagentLiveContent";
+import ChatMarkdown from "../ChatMarkdown";
+import { TranscriptStyleCtx } from "./transcriptStyle";
+const MINIMAL_SUBAGENT_SETTLE_HOLD_MS = 700;
 
 const LIFECYCLE_TYPES = new Set<OrchestrationV2TurnItem["type"]>([
   "run_interrupt_request",
@@ -221,7 +245,11 @@ export function V2LifecycleRow(props: {
           (provider) => provider.instanceId === item.providerInstanceId,
         )}
         providers={props.providerStatuses}
-        title={formatSubagentDisplayTitle(item.title ?? "Subagent")}
+        title={subagentDisplayName(item) ?? "Subagent"}
+        task={item.prompt}
+        liveContent={item.liveContent ?? null}
+        turnItemId={item.id}
+        currentTool={item.currentTool}
         result={item.result}
         progress={item.progress}
         startedAt={item.startedAt}
@@ -269,14 +297,39 @@ const SETTLED_SUBAGENT_STATUSES = new Set<OrchestrationV2TurnItem["status"]>([
 /** The server's placeholder when a child ends without output; the status dot already says it. */
 const GENERIC_CHILD_END = /^Child task ended with status\b/i;
 
-/** One line of a markdown result: drop list bullets, code ticks, and link targets. */
-function plainDetail(text: string): string {
+/** One line of a markdown result: drop list bullets, emphasis, code ticks, and link targets. */
+export function plainDetail(text: string): string {
   return text
     .replace(/\[([^\]]+)\]\([^)]*\)/g, "$1")
     .replace(/`/g, "")
     .replace(/^[ \t]*[-*][ \t]+/gm, "")
+    .replace(/(\*\*|__)(.+?)\1/g, "$2")
+    .replace(/(^|[\s(])[*_]([^*_\s][^*_]*?)[*_](?=[\s).,;:!?]|$)/gm, "$1$2")
     .replace(/\s+/g, " ")
     .trim();
+}
+
+/** A JSON object result as its scalar fields, `key value · …`; null for any other result. */
+export function subagentJsonResultSummary(text: string): string | null {
+  try {
+    const value: unknown = JSON.parse(text);
+    if (typeof value === "object" && value !== null && !Array.isArray(value)) {
+      const fields = Object.entries(value as Record<string, unknown>).flatMap(([key, field]) => {
+        if (field !== null && typeof field === "object") return [];
+        const fieldText = field === null ? "null" : String(field);
+        return [`${plainDetail(key)} ${plainDetail(fieldText)}`];
+      });
+      return fields.length > 0 ? fields.join(" · ") : "Object result";
+    }
+  } catch {
+    // The result is ordinary text rather than a JSON object.
+  }
+  return null;
+}
+
+/** A result as one plain line. */
+export function subagentResultDetail(text: string): string | null {
+  return subagentJsonResultSummary(text) ?? (plainDetail(text) || null);
 }
 
 function isoOrNull(value: DateTime.Utc | null | undefined): string | null {
@@ -330,6 +383,157 @@ export function SubagentAvatar({
     </span>
   );
 }
+/** Shared Minimal/KM delegation header and outlined agent card. */
+export function MinimalSubagentGroup(props: {
+  readonly names: string;
+  readonly active: boolean;
+  readonly driver?: ProviderDriverKind | undefined;
+  readonly provider?: ServerProvider | undefined;
+  readonly expanded: boolean;
+  readonly onExpandedChange: (expanded: boolean) => void;
+  readonly children: ReactNode;
+}) {
+  const panelId = useId();
+  return (
+    <>
+      <button
+        type="button"
+        aria-label={`${props.active ? "Delegating to" : "Delegated to"} ${props.names}`}
+        aria-expanded={props.expanded}
+        aria-controls={panelId}
+        onClick={() => props.onExpandedChange(!props.expanded)}
+        className="minimal-agents-header"
+      >
+        <GlyphSwap
+          state={props.active ? "live" : "settled"}
+          render={(state) => (state === "live" ? <AsciiLoader /> : <BotIcon />)}
+          className="step-glyph minimal-agents-glyph"
+          aria-hidden="true"
+        />
+        <span className="minimal-agents-label" aria-hidden="true">
+          <RollingText text={props.active ? "Delegating to" : "Delegated to"} />
+          {props.driver ? <SubagentAvatar driver={props.driver} provider={props.provider} /> : null}
+          <span className="minimal-agents-names">{props.names}</span>
+        </span>
+      </button>
+      <ActivityDisclosurePanel open={props.expanded} id={panelId} className="min-w-0">
+        <div className="minimal-agents-card">{props.children}</div>
+      </ActivityDisclosurePanel>
+    </>
+  );
+}
+
+/** Compact task, live excerpt, result, and metadata shared by both subagent renderers. */
+export function MinimalSubagentDetails(props: {
+  readonly title: string;
+  readonly task: string;
+  readonly active: boolean;
+  readonly rowActivity: string | null;
+  readonly liveStep: string | null;
+  readonly liveContent: string | null;
+  readonly result: string | null;
+  readonly failed: boolean;
+  readonly model: string | null;
+  readonly metadata?: string | null | undefined;
+  readonly threadId: ThreadId | null;
+  readonly onOpenThread: (threadId: ThreadId) => void;
+}) {
+  const model = props.model?.trim() ?? "";
+  const normalizedModel = model.toLowerCase().replace(/[^a-z0-9]/g, "");
+  const normalizedTitle = props.title.toLowerCase().replace(/[^a-z0-9]/g, "");
+  const modelLabel = normalizedModel && !normalizedTitle.includes(normalizedModel) ? model : null;
+  const metadata = props.metadata?.trim() || null;
+  const footerMetadata = [modelLabel, metadata].filter(Boolean).join(" · ");
+  const threadId = props.threadId;
+  const liveStep = props.liveStep?.trim() || null;
+  const rowActivity = props.rowActivity?.trim() || null;
+  const distinctLiveStep =
+    liveStep && plainDetail(liveStep) !== plainDetail(rowActivity ?? "") ? liveStep : null;
+  const task = props.task.trim();
+  const liveContent = props.active ? props.liveContent?.trim() || null : null;
+  const result = props.result?.trim() || null;
+  const taskRef = useRef<HTMLDivElement>(null);
+  const [taskTruncated, setTaskTruncated] = useState(false);
+  useEffect(() => {
+    const node = taskRef.current;
+    if (!node) return;
+    const updateOverflow = () => setTaskTruncated(node.scrollHeight > node.clientHeight + 1);
+    const mutations = new MutationObserver(updateOverflow);
+    mutations.observe(node, { childList: true, subtree: true, characterData: true });
+    const resize =
+      typeof ResizeObserver === "undefined" ? null : new ResizeObserver(updateOverflow);
+    resize?.observe(node);
+    updateOverflow();
+    return () => {
+      mutations.disconnect();
+      resize?.disconnect();
+    };
+  }, [task]);
+  return (
+    <div className="minimal-agent-details-content">
+      {task ? (
+        <div
+          ref={taskRef}
+          data-subagent-task
+          data-truncated={taskTruncated ? "" : undefined}
+          className="subagent-details-task"
+        >
+          <ChatMarkdown text={task} cwd={undefined} parseRawHtml={false} />
+        </div>
+      ) : null}
+      {liveContent ? (
+        <div data-subagent-live-content="">
+          <ChatMarkdown
+            text={liveContent}
+            cwd={undefined}
+            parseRawHtml={false}
+            isStreaming={props.active}
+            className="subagent-details-live"
+          />
+        </div>
+      ) : null}
+      {props.active && distinctLiveStep ? (
+        <p data-subagent-live-step className="subagent-details-step">
+          <span aria-hidden="true" className="subagent-details-step-glyph">
+            <AsciiLoader />
+          </span>
+          <span className="font-mono">{distinctLiveStep}</span>
+        </p>
+      ) : null}
+      {result ? (
+        <div data-subagent-result="">
+          <ChatMarkdown
+            text={result}
+            cwd={undefined}
+            parseRawHtml={false}
+            className={props.failed ? "text-destructive" : "text-muted-foreground"}
+          />
+        </div>
+      ) : null}
+      {footerMetadata || threadId ? (
+        <div className="minimal-agent-details-footer">
+          {footerMetadata ? (
+            <span data-subagent-metadata className="min-w-0 truncate">
+              {footerMetadata}
+            </span>
+          ) : null}
+          {threadId ? (
+            <button
+              type="button"
+              data-subagent-open-thread
+              aria-label="Open child thread"
+              onClick={() => props.onOpenThread(threadId)}
+              className="minimal-agent-details-thread-link"
+            >
+              Open thread →
+            </button>
+          ) : null}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
 
 /** The status a notification reported, frozen at the time it arrived. */
 const NOTIFICATION_OUTCOME_STATUS: Record<
@@ -351,10 +555,11 @@ const NOTIFICATION_OUTCOME_LABEL: Record<OrchestrationV2Notification["outcome"],
   unknown: "Finished",
 };
 
-/** A notification about one subagent, drawn as that subagent's card. Renders `fallback` when the parent has no record of it. */
+/** Draws a notification for its exact task IDs, or the legacy subagent thread. */
 export function SubagentNotificationLink(props: {
   readonly parentRef: ScopedThreadRef;
-  readonly childThreadId: ThreadId;
+  readonly childThreadId?: ThreadId;
+  readonly taskIds?: ReadonlyArray<NodeId>;
   readonly outcome: OrchestrationV2Notification["outcome"];
   readonly createdAt: string;
   readonly timestampFormat: TimestampFormat;
@@ -362,13 +567,20 @@ export function SubagentNotificationLink(props: {
   readonly onOpenThread: (threadId: ThreadId) => void;
   readonly fallback: ReactNode;
 }) {
-  const agent = useAtomValue(
-    environmentThreadDetails.threadAtom(props.parentRef),
-    (thread) =>
-      thread?.projection.subagents.find((agent) => agent.childThreadId === props.childThreadId) ??
-      null,
-  );
+  const agent = useAtomValue(environmentThreadDetails.threadAtom(props.parentRef), (thread) => {
+    const subagents = thread?.projection.subagents ?? [];
+    if (props.taskIds !== undefined) {
+      if (props.taskIds.length !== 1) return null;
+      const [taskId] = props.taskIds;
+      if (taskId === undefined) return null;
+      return subagents.find((candidate) => candidate.id === taskId) ?? null;
+    }
+    if (props.childThreadId === undefined) return null;
+    return subagents.find((candidate) => candidate.childThreadId === props.childThreadId) ?? null;
+  });
   if (agent === null) return props.fallback;
+  const threadId =
+    props.taskIds !== undefined ? agent.childThreadId : (props.childThreadId ?? agent.childThreadId);
   return (
     <SubagentTimelineLink
       parentRef={props.parentRef}
@@ -381,12 +593,14 @@ export function SubagentNotificationLink(props: {
         (provider) => provider.instanceId === agent.providerInstanceId,
       )}
       providers={props.providerStatuses}
-      title={formatSubagentDisplayTitle(agent.title ?? "Subagent")}
+      title={subagentDisplayName(agent) ?? "Subagent"}
+      task={agent.prompt}
+      currentTool={agent.currentTool}
       result={agent.result}
       progress={agent.progress}
       startedAt={agent.startedAt}
       completedAt={agent.completedAt}
-      threadId={props.childThreadId}
+      threadId={threadId}
       onOpenThread={props.onOpenThread}
       event={{
         status: NOTIFICATION_OUTCOME_STATUS[props.outcome],
@@ -406,6 +620,10 @@ function SubagentTimelineLink(props: {
   readonly provider: ServerProvider | undefined;
   readonly providers: ReadonlyArray<ServerProvider>;
   readonly title: string;
+  readonly task: string;
+  readonly liveContent?: OrchestrationV2SubagentLiveContent | null | undefined;
+  readonly turnItemId?: TurnItemId | null | undefined;
+  readonly currentTool: OrchestrationV2Subagent["currentTool"];
   readonly result: string | null;
   readonly progress: string | undefined;
   readonly status: OrchestrationV2TurnItem["status"];
@@ -424,8 +642,28 @@ function SubagentTimelineLink(props: {
     environmentThreadDetails.threadAtom(props.parentRef),
     (thread) => thread?.projection.subagents.find((agent) => agent.id === props.subagentId) ?? null,
   );
+  const { liveContent, rateLimited } = useSubagentLiveContent(props.parentRef, {
+    active: agent !== null && isOrchestrationV2WorkActive(agent.status),
+    subagentId: props.subagentId,
+    turnItemId: props.turnItemId,
+    persisted: props.liveContent,
+  });
   const threadId = props.threadId;
-  const liveStatus = agent?.status ?? props.status;
+  const lifecycle = resolveSubagentLifecycle(
+    {
+      status: props.status,
+      startedAt: isoOrNull(props.startedAt),
+      completedAt: isoOrNull(props.completedAt),
+    },
+    agent
+      ? {
+          status: agent.status,
+          startedAt: isoOrNull(agent.startedAt),
+          completedAt: isoOrNull(agent.completedAt),
+        }
+      : undefined,
+  );
+  const liveStatus = lifecycle.status;
   const status = props.event ? props.event.status : liveStatus;
   const statusLabel = props.event?.label ?? subagentStatusVisual(liveStatus).label;
   const result = (agent?.result ?? props.result)?.trim();
@@ -435,11 +673,243 @@ function SubagentTimelineLink(props: {
   const detail =
     rawDetail && !GENERIC_CHILD_END.test(rawDetail) ? plainDetail(rawDetail) || null : null;
   const failed = status === "failed";
-  const timing = {
-    status: liveStatus,
-    startedAt: isoOrNull(agent?.startedAt ?? props.startedAt),
-    completedAt: isoOrNull(agent?.completedAt ?? props.completedAt),
-  };
+  const transcriptStyle = use(TranscriptStyleCtx);
+  const isTerminal = transcriptStyle === "terminal";
+  const opensWhileActive = transcriptStyle === "km" || transcriptStyle === "minimal-plus";
+  const shownStatus = status ?? liveStatus;
+  const active = isOrchestrationV2WorkActive(shownStatus);
+  const displayLiveContent =
+    liveContent?.kind === "assistant" ? liveContent.text : null;
+  const [cardExpandedPreference, setCardExpandedPreference] = useState<boolean | undefined>();
+  const [detailsExpandedPreference, setDetailsExpandedPreference] = useState<boolean | undefined>();
+  const [cardSettleHold, setCardSettleHold] = useState(false);
+  const [detailsSettleHold, setDetailsSettleHold] = useState(false);
+  const [wasActive, setWasActive] = useState(active);
+  const detailsId = useId();
+  if (wasActive !== active) {
+    setWasActive(active);
+    setCardSettleHold(!active);
+    setDetailsSettleHold(!active);
+  }
+  useEffect(() => {
+    if (!cardSettleHold) return;
+    const timer = setTimeout(() => setCardSettleHold(false), MINIMAL_SUBAGENT_SETTLE_HOLD_MS);
+    return () => clearTimeout(timer);
+  }, [cardSettleHold]);
+  useEffect(() => {
+    if (!detailsSettleHold) return;
+    const timer = setTimeout(() => setDetailsSettleHold(false), EXCERPT_FOLD_DELAY_MS);
+    return () => clearTimeout(timer);
+  }, [detailsSettleHold]);
+  const cardExpanded = cardExpandedPreference ?? (active || cardSettleHold);
+  const detailsExpanded =
+    detailsExpandedPreference ?? (opensWhileActive && (active || detailsSettleHold));
+  const timing = lifecycle;
+  const childLiveStep = useChildThreadLiveStep(
+    props.parentRef.environmentId,
+    !isTerminal && active ? threadId : null,
+  );
+  const currentTool = agent?.currentTool ?? props.currentTool;
+  const liveActivity =
+    currentTool?.intent?.trim() ||
+    (currentTool?.name
+      ? currentTool.argsPreview?.trim()
+        ? `${currentTool.name} ${currentTool.argsPreview.trim()}`
+        : currentTool.name
+      : childLiveStep ?? progress ?? (shownStatus === "pending" ? "Starting up" : "Thinking"));
+  const task = (agent?.prompt ?? props.task).trim();
+  const tooltip = (
+    <ThreadHoverCardPopup>
+      <SubagentTimelineTooltip
+        {...props}
+        elapsed={<AgentElapsed agent={timing} />}
+        overlayActive={agent !== null && isOrchestrationV2WorkActive(agent.status)}
+        model={agent?.model ?? null}
+        status={liveStatus}
+        result={agent?.result ?? props.result}
+        progress={agent?.progress ?? props.progress}
+        liveContent={liveContent}
+      />
+    </ThreadHoverCardPopup>
+  );
+  if (!isTerminal) {
+    const rowFailed = shownStatus === "failed";
+    const lineDetail = active
+      ? plainDetail(liveActivity) || (shownStatus === "pending" ? "Starting up" : "Thinking")
+      : ((result && !GENERIC_CHILD_END.test(result) ? subagentResultDetail(result) : null) ??
+        (shownStatus === "completed" ? null : statusLabel));
+    const elapsed = (
+      <span className="minimal-agent-elapsed tabular-nums">
+        <AgentElapsed agent={timing} />
+      </span>
+    );
+    const row = (
+      <article
+        data-settled={active ? undefined : ""}
+        data-failed={rowFailed ? "" : undefined}
+        className="minimal-agent-row"
+      >
+        <div className="minimal-agent-line">
+          <Tooltip>
+            <TooltipTrigger
+              delay={200}
+              render={
+                threadId === null ? (
+                  <div
+                    data-v2-item-type="subagent"
+                    aria-description={statusLabel}
+                    className="minimal-agent-main"
+                  >
+                    <span className="minimal-agent-glyph" aria-hidden="true">
+                      {active ? (
+                        <AsciiLoader />
+                      ) : shownStatus === "completed" ? (
+                        <CheckIcon />
+                      ) : SETTLED_SUBAGENT_STATUSES.has(shownStatus) ? (
+                        <CircleXIcon className={rowFailed ? "status-failed-mark" : undefined} />
+                      ) : (
+                        <CircleDashedIcon />
+                      )}
+                    </span>
+                    {props.origin === "app_owned" ? (
+                      <span className="minimal-agent-provider" aria-hidden="true">
+                        <ProviderInstanceIcon
+                          driverKind={props.driver}
+                          displayName={props.provider?.displayName ?? props.driver}
+                          acpRegistryIconUrl={props.provider?.iconUrl}
+                          iconClassName="size-3.5"
+                        />
+                      </span>
+                    ) : null}
+                    <span
+                      ref={active ? observeVisibleAnimation : undefined}
+                      className={cn("minimal-agent-text", active && "cursor-subagent-shimmer")}
+                    >
+                      <span className="minimal-agent-title">{props.title}</span>
+                      {lineDetail ? (
+                        <span
+                          className={cn(
+                            "minimal-agent-activity",
+                            rowFailed && "minimal-agent-activity-failed",
+                          )}
+                        >
+                          {lineDetail}
+                        </span>
+                      ) : null}
+                    </span>
+                    {elapsed}
+                  </div>
+                ) : (
+                  <button
+                    type="button"
+                    data-v2-item-type="subagent"
+                    aria-label={`Open ${props.title}`}
+                    aria-description={statusLabel}
+                    onClick={() => props.onOpenThread(threadId)}
+                    className="minimal-agent-main cursor-pointer"
+                  >
+                    <span className="minimal-agent-glyph" aria-hidden="true">
+                      {active ? (
+                        <AsciiLoader />
+                      ) : shownStatus === "completed" ? (
+                        <CheckIcon />
+                      ) : SETTLED_SUBAGENT_STATUSES.has(shownStatus) ? (
+                        <CircleXIcon className={rowFailed ? "status-failed-mark" : undefined} />
+                      ) : (
+                        <CircleDashedIcon />
+                      )}
+                    </span>
+                    {props.origin === "app_owned" ? (
+                      <span className="minimal-agent-provider" aria-hidden="true">
+                        <ProviderInstanceIcon
+                          driverKind={props.driver}
+                          displayName={props.provider?.displayName ?? props.driver}
+                          acpRegistryIconUrl={props.provider?.iconUrl}
+                          iconClassName="size-3.5"
+                        />
+                      </span>
+                    ) : null}
+                    <span
+                      ref={active ? observeVisibleAnimation : undefined}
+                      className={cn("minimal-agent-text", active && "cursor-subagent-shimmer")}
+                    >
+                      <span className="minimal-agent-title">{props.title}</span>
+                      {lineDetail ? (
+                        <span
+                          className={cn(
+                            "minimal-agent-activity",
+                            rowFailed && "minimal-agent-activity-failed",
+                          )}
+                        >
+                          {lineDetail}
+                        </span>
+                      ) : null}
+                    </span>
+                    {elapsed}
+                  </button>
+                )
+              }
+            />
+            {tooltip}
+          </Tooltip>
+          <button
+            type="button"
+            data-subagent-details-toggle
+            aria-expanded={detailsExpanded}
+            aria-controls={detailsId}
+            aria-label={`${detailsExpanded ? "Hide" : "Show"} details for ${props.title}`}
+            onClick={() => setDetailsExpandedPreference(!detailsExpanded)}
+            className="minimal-agent-details-toggle"
+          >
+            <ChevronDownIcon aria-hidden="true" />
+          </button>
+        </div>
+        <ActivityDisclosurePanel
+          open={detailsExpanded}
+          id={detailsId}
+          className={cn(
+            "minimal-agent-details min-w-0",
+            props.origin === "app_owned" && "minimal-agent-details-has-provider",
+          )}
+        >
+          <MinimalSubagentDetails
+            title={props.title}
+            task={task}
+            active={active}
+            rowActivity={active ? plainDetail(liveActivity) : null}
+            liveStep={active ? childLiveStep ?? progress ?? null : null}
+            liveContent={displayLiveContent}
+            result={
+              result && !GENERIC_CHILD_END.test(result)
+                ? (subagentJsonResultSummary(result) ?? result)
+                : null
+            }
+            failed={rowFailed}
+            model={agent?.model ?? null}
+            threadId={threadId}
+            onOpenThread={props.onOpenThread}
+          />
+          {active && rateLimited ? (
+            <div className="mt-1 text-3xs text-muted-foreground">
+              <LiveViewPausedNote />
+            </div>
+          ) : null}
+        </ActivityDisclosurePanel>
+      </article>
+    );
+    return (
+      <MinimalSubagentGroup
+        names={props.title}
+        active={active}
+        driver={props.driver}
+        provider={props.provider}
+        expanded={cardExpanded}
+        onExpandedChange={setCardExpandedPreference}
+      >
+        {row}
+      </MinimalSubagentGroup>
+    );
+  }
   const content = (
     <>
       <SubagentAvatar
@@ -517,22 +987,17 @@ function SubagentTimelineLink(props: {
           )
         }
       />
-      <ThreadHoverCardPopup>
-        <SubagentTimelineTooltip
-          {...props}
-          elapsed={agent ? <AgentElapsed agent={projectedSubagentsToRuntime([agent])[0]!} /> : null}
-          model={agent?.model ?? null}
-          status={liveStatus}
-          result={agent?.result ?? props.result}
-          progress={agent?.progress ?? props.progress}
-        />
-      </ThreadHoverCardPopup>
+      {tooltip}
     </Tooltip>
   );
 }
 
 function SubagentTimelineTooltip(
-  props: Parameters<typeof SubagentTimelineLink>[0] & { model: string | null; elapsed: ReactNode },
+  props: Parameters<typeof SubagentTimelineLink>[0] & {
+    model: string | null;
+    elapsed: ReactNode;
+    overlayActive: boolean;
+  },
 ) {
   const environmentId = props.parentRef.environmentId;
   const parent = useThreadShell(props.parentRef)?.source;
@@ -554,11 +1019,16 @@ function SubagentTimelineTooltip(
       driver={props.driver}
       elapsed={props.elapsed}
       status={props.status}
+      overlayActive={props.overlayActive}
       result={props.result}
       progress={props.progress}
       parentThread={parent}
       childThread={child}
       parentProject={parentProject ?? undefined}
+      threadRef={props.parentRef}
+      subagentId={props.subagentId}
+      turnItemId={props.turnItemId}
+      liveContent={props.liveContent}
       childProject={childProject ?? undefined}
     />
   );

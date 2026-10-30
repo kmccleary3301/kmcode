@@ -17,6 +17,7 @@ import * as DateTime from "effect/DateTime";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
+import * as Option from "effect/Option";
 import * as Queue from "effect/Queue";
 import * as Stream from "effect/Stream";
 import { CodexProviderCapabilitiesV2 } from "./Adapters/CodexAdapterV2.ts";
@@ -520,7 +521,7 @@ const nextTurnSelectionHarness = Effect.fn("nextTurnSelectionHarness")(function*
     { runEffectWorker: false },
   );
   // Creates the thread and starts its first turn on `runSelection`.
-  const startFirstTurn = Effect.gen(function* () {
+  const startFirstTurn = (text = "first") => Effect.gen(function* () {
     const orchestrator = yield* Orchestrator.OrchestratorV2;
     const worker = yield* EffectWorker.OrchestrationEffectWorkerV2;
     const threadId = ThreadId.make(`thread:${name}`);
@@ -546,20 +547,24 @@ const nextTurnSelectionHarness = Effect.fn("nextTurnSelectionHarness")(function*
       Stream.runDrain,
       Effect.forkScoped,
     );
-    yield* orchestrator.dispatch({
-      type: "message.dispatch",
-      commandId: CommandId.make("first"),
-      threadId,
-      messageId: MessageId.make("message:first"),
-      text: "first",
-      attachments: [],
-      modelSelection: runSelection,
-      dispatchMode: { type: "start_immediately" },
-      createdBy: "user",
-      creationSource: "web",
-    });
-    yield* worker.drain();
-    yield* Fiber.join(running);
+    const initialDispatch = yield* orchestrator
+      .dispatch({
+        type: "message.dispatch",
+        commandId: CommandId.make("first"),
+        threadId,
+        messageId: MessageId.make("message:first"),
+        text,
+        attachments: [],
+        dispatchMode: { type: "start_immediately" },
+        createdBy: "user",
+        creationSource: "web",
+      })
+      .pipe(Effect.timeoutOption("5 seconds"));
+    assert.isTrue(Option.isSome(initialDispatch), "initial turn should dispatch");
+    const startedEffects = yield* worker.drain().pipe(Effect.timeoutOption("5 seconds"));
+    assert.isTrue(Option.isSome(startedEffects), "provider start effects should drain");
+    const runningTurn = yield* Fiber.join(running).pipe(Effect.timeoutOption("5 seconds"));
+    assert.isTrue(Option.isSome(runningTurn), "provider should report a running turn");
     return threadId;
   });
   return { events, started, steered, layer, startFirstTurn };
@@ -574,7 +579,7 @@ it.effect("steers a changed turn-scoped selection into a provider that cannot re
       yield* Effect.gen(function* () {
         const orchestrator = yield* Orchestrator.OrchestratorV2;
         const worker = yield* EffectWorker.OrchestrationEffectWorkerV2;
-        const threadId = yield* startFirstTurn;
+        const threadId = yield* startFirstTurn();
         const steer = (id: string, selection: ModelSelection) =>
           orchestrator
             .dispatch({
@@ -649,7 +654,7 @@ it.effect("starts a steer that missed the turn on the saved next-turn selection"
       yield* Effect.gen(function* () {
         const orchestrator = yield* Orchestrator.OrchestratorV2;
         const worker = yield* EffectWorker.OrchestrationEffectWorkerV2;
-        const threadId = yield* startFirstTurn;
+        const threadId = yield* startFirstTurn();
         const first = started[0]!;
         yield* orchestrator.dispatch({
           type: "message.dispatch",
@@ -703,6 +708,135 @@ it.effect("starts a steer that missed the turn on the saved next-turn selection"
         assert.equal(started[1]?.message.messageId, MessageId.make("message:steer"));
         assert.deepEqual(started[1]?.modelSelection, composerSelection);
         assert.deepEqual(projection.thread.modelSelection, composerSelection);
+      }).pipe(Effect.provide(layer));
+    }),
+  ),
+);
+it.live("skips active compaction when promoting a queued message to steer", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const { events, started, layer, startFirstTurn } = yield* nextTurnSelectionHarness(
+        "steering-compaction-promotion",
+      );
+      yield* Effect.gen(function* () {
+        const orchestrator = yield* Orchestrator.OrchestratorV2;
+        const worker = yield* EffectWorker.OrchestrationEffectWorkerV2;
+        const threadId = yield* startFirstTurn();
+        const compactionRun = started[0]!;
+        const initialProjection = yield* orchestrator.getThreadProjection(threadId);
+        const initialMessage = initialProjection.messages.find(
+          (message) => message.id === compactionRun.message.messageId,
+        );
+        assert.isDefined(initialMessage);
+        if (initialMessage === undefined) return;
+        const eventSink = yield* EventSink.EventSinkV2;
+        const now = yield* DateTime.now;
+        // The fake provider keeps a regular active turn while the projection models native /compact.
+        yield* eventSink.write({
+          events: [
+            {
+              id: EventId.make("event:compaction-message"),
+              type: "message.updated",
+              threadId,
+              runId: compactionRun.runId,
+              providerInstanceId: instanceId,
+              occurredAt: now,
+              payload: { ...initialMessage, text: "/compact", updatedAt: now },
+            },
+          ],
+        });
+        const followupMessageId = MessageId.make("message:compaction-followup");
+        const queuedMessage = yield* orchestrator
+          .dispatch({
+            type: "message.dispatch",
+            commandId: CommandId.make("queue-followup"),
+            threadId,
+            messageId: followupMessageId,
+            text: "follow-up instead of compacting",
+            attachments: [],
+            modelSelection: runSelection,
+            dispatchMode: { type: "queue_after_active" },
+            createdBy: "user",
+            creationSource: "web",
+          })
+          .pipe(Effect.timeoutOption("5 seconds"));
+        assert.isTrue(Option.isSome(queuedMessage), "follow-up should queue");
+        const queuedProjection = yield* orchestrator.getThreadProjection(threadId);
+        const queuedRun = queuedProjection.runs.find(
+          (run) => run.userMessageId === followupMessageId,
+        );
+        assert.ok(queuedRun);
+        if (queuedRun === undefined) return;
+        const compactionSettled = yield* orchestrator.streamDomainEvents.pipe(
+          Stream.filter(
+            (event) =>
+              event.type === "run.updated" &&
+              event.payload.id === compactionRun.runId &&
+              event.payload.status !== "waiting" &&
+              event.payload.status !== "running",
+          ),
+          Stream.take(1),
+          Stream.runDrain,
+          Effect.forkScoped,
+        );
+        const promoted = yield* orchestrator
+          .dispatch({
+            type: "queued-message.promote-to-steer",
+            commandId: CommandId.make("promote-followup"),
+            threadId,
+            queuedRunId: queuedRun.id,
+            targetRunId: compactionRun.runId,
+          })
+          .pipe(Effect.timeoutOption("5 seconds"));
+        assert.isTrue(Option.isSome(promoted), "promotion should interrupt compaction");
+        const afterPromotion = yield* orchestrator.getThreadProjection(threadId);
+        assert.equal(afterPromotion.runs.find((run) => run.id === queuedRun.id)?.queuePosition, 1);
+        assert.equal(
+          afterPromotion.runs.find((run) => run.id === compactionRun.runId)?.status,
+          "running",
+        );
+        assert.isTrue(
+          afterPromotion.turnItems.some(
+            (item) => item.runId === compactionRun.runId && item.type === "run_interrupt_request",
+          ),
+          "promotion should request interruption and let the provider report terminal state",
+        );
+        const activeTurn = afterPromotion.providerTurns[0]!;
+        yield* Queue.offer(events, {
+          type: "provider_turn.updated",
+          driver,
+          providerTurn: {
+            ...activeTurn,
+            status: "interrupted",
+            completedAt: yield* DateTime.now,
+          },
+        });
+        yield* Queue.offer(events, {
+          type: "turn.terminal",
+          driver,
+          providerThreadId: activeTurn.providerThreadId,
+          providerTurnId: activeTurn.id,
+          runOrdinal: compactionRun.runOrdinal,
+          status: "interrupted",
+          failure: null,
+          threadDisposition: "reusable",
+        });
+        const stoppedEffects = yield* worker.drain().pipe(Effect.timeoutOption("5 seconds"));
+        assert.isTrue(Option.isSome(stoppedEffects), "interrupt effects should drain");
+        const settled = yield* Fiber.join(compactionSettled).pipe(Effect.timeoutOption("2 seconds"));
+        assert.isTrue(Option.isSome(settled), "compaction should settle after its interrupt");
+        const settledEffects = yield* worker.drain().pipe(Effect.timeoutOption("5 seconds"));
+        assert.isTrue(Option.isSome(settledEffects), "settled compaction effects should drain");
+        const resumed = yield* orchestrator.resumeQueuedRuns.pipe(Effect.timeoutOption("5 seconds"));
+        assert.isTrue(Option.isSome(resumed), "queued message should resume");
+        const followupEffects = yield* worker.drain().pipe(Effect.timeoutOption("5 seconds"));
+        assert.isTrue(Option.isSome(followupEffects), "follow-up effects should drain");
+
+        const final = yield* orchestrator.getThreadProjection(threadId);
+        assert.equal(final.runs.find((run) => run.id === queuedRun.id)?.status, "running");
+        assert.equal(started.length, 2);
+        assert.equal(started[1]?.message.messageId, followupMessageId);
+        assert.equal(started[1]?.message.text, "follow-up instead of compacting");
       }).pipe(Effect.provide(layer));
     }),
   ),

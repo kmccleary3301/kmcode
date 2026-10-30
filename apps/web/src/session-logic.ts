@@ -36,7 +36,10 @@ import type {
   ThreadPendingUserInput,
 } from "@t3tools/client-runtime/state/thread-requests";
 import type { ThreadRunSummary, ThreadRuntimeSummary } from "@t3tools/client-runtime/state/shell";
-import { threadRuntimeHasInterruptibleRun } from "@t3tools/client-runtime/state/thread-execution";
+import {
+  threadRuntimeHasActiveWork,
+  threadRuntimeHasInterruptibleRun,
+} from "@t3tools/client-runtime/state/thread-execution";
 import { turnItemIsWorkspacePreparation } from "@t3tools/client-runtime/state/turn-item-presentation";
 
 import {
@@ -50,6 +53,7 @@ import {
 import * as DateTime from "effect/DateTime";
 import * as Equal from "effect/Equal";
 import { shallow } from "zustand/vanilla/shallow";
+import { isNativeWaitTool } from "./components/chat/NativeWaitingPane.logic";
 
 export { formatDuration } from "@t3tools/shared/orchestrationTiming";
 export {
@@ -224,10 +228,16 @@ export function workEntryIndicatesToolNeutralStatus(entry: WorkLogEntry): boolea
 }
 
 export function isLatestRunSettled(
-  latestRun: Pick<ThreadRunSummary, "runId" | "startedAt" | "completedAt" | "status"> | null,
+  latestRun:
+    | Pick<
+        ThreadRunSummary,
+        "runId" | "startedAt" | "completedAt" | "status" | "turnEnded"
+      >
+    | null,
   runtime: Pick<ThreadRuntimeSummary, "status" | "activeRunId"> | null,
 ): boolean {
   if (latestRun === null) return false;
+  if (latestRun.turnEnded === true) return true;
   if (
     latestRun.status === "preparing" ||
     latestRun.status === "queued" ||
@@ -244,9 +254,13 @@ export function deriveActiveWorkStartedAt(
     ThreadRunSummary,
     "runId" | "startedAt" | "requestedAt" | "completedAt" | "status"
   > | null,
-  runtime: Pick<ThreadRuntimeSummary, "status" | "activeRunId" | "activityStartedAt"> | null,
+  runtime: Pick<
+    ThreadRuntimeSummary,
+    "status" | "activeRunId" | "activityStartedAt" | "activityRunWorkCompletedAt"
+  > | null,
   sendStartedAt: string | null,
 ): string | null {
+  if (runtime?.activityRunWorkCompletedAt != null) return null;
   const startedAt = resolveThreadWorkingStartedAt({ latestRun, runtime });
   // Local dispatch has a clock only until the server supplies the owning run.
   return startedAt ?? (runtime?.activeRunId == null ? sendStartedAt : null);
@@ -338,6 +352,7 @@ const STANDALONE_V2_ITEM_TYPES = new Set<OrchestrationV2ProjectedTurnItem["item"
   "run_interrupt_request",
   "run_interrupt_result",
   "secret_request",
+  "todo_list",
   "subagent",
 ]);
 
@@ -433,7 +448,7 @@ export function providerErrorPresentation(
   };
 }
 
-function projectedWorkEntry(row: OrchestrationV2ProjectedTurnItem): WorkLogEntry {
+export function projectedWorkEntry(row: OrchestrationV2ProjectedTurnItem): WorkLogEntry {
   const { item } = row;
   const title = item.title?.trim() || null;
   const common = {
@@ -638,8 +653,7 @@ export function deriveTimelineEntriesFromVisibleTurnItems(
   for (const row of input.visibleTurnItems) {
     const { item } = row;
     if (turnItemIsWorkspacePreparation(item)) continue;
-    // Task progress belongs in the composer, not between conversation entries.
-    if (item.type === "todo_list" || item.type === "checkpoint") continue;
+    if (item.type === "checkpoint") continue;
     if (item.type === "user_message" && foldedAnswerMessageIds.has(item.messageId)) continue;
     const createdAt = projectedItemCreatedAt(row);
     const attempt = resolveAttempt(item);
@@ -760,7 +774,11 @@ export function deriveTimelineEntriesFromVisibleTurnItems(
       continue;
     }
 
-    if (STANDALONE_V2_ITEM_TYPES.has(item.type)) {
+    if (
+      STANDALONE_V2_ITEM_TYPES.has(item.type) ||
+      (item.type === "dynamic_tool" && item.toolName === "todo") ||
+      isNativeWaitTool(item)
+    ) {
       entries.push({
         id: item.id,
         kind: "event",
@@ -1077,16 +1095,21 @@ export function deriveRevertTurnCountByUserMessageId(input: {
   return byUserMessageId;
 }
 
-export function derivePhase(runtime: ThreadRuntimeSummary | null): SessionPhase {
+export function derivePhase(
+  runtime: ThreadRuntimeSummary | null,
+  latestRun: Pick<ThreadRunSummary, "status" | "turnEnded"> | null = null,
+): SessionPhase {
   if (runtime === null) return "disconnected";
-  if (
-    runtime.status === "preparing" ||
-    runtime.status === "starting" ||
-    runtime.status === "queued"
-  )
-    return "connecting";
-  if (runtime.status === "running" || runtime.status === "waiting") return "running";
-  return "ready";
+  if (latestRun?.turnEnded === true) return "ready";
+  if (runtime.status === "preparing" || runtime.status === "starting") return "connecting";
+  if (runtime.status === "queued") {
+    return threadRuntimeHasInterruptibleRun(runtime) ? "running" : "connecting";
+  }
+  if (runtime.status === "running" || runtime.status === "waiting") {
+    if (threadRuntimeHasActiveWork(runtime)) return "running";
+    return threadRuntimeHasActiveWork(null, latestRun) ? "connecting" : "ready";
+  }
+  return threadRuntimeHasActiveWork(null, latestRun) ? "connecting" : "ready";
 }
 
 /**
@@ -1099,10 +1122,7 @@ export function deriveCanInterruptRunningThread(
   hasActiveThread: boolean,
   runtime: ThreadRuntimeSummary | null,
 ): boolean {
-  return (
-    hasActiveThread &&
-    (derivePhase(runtime) === "running" || threadRuntimeHasInterruptibleRun(runtime))
-  );
+  return hasActiveThread && threadRuntimeHasInterruptibleRun(runtime);
 }
 
 export type { TurnDiffSummary };

@@ -96,6 +96,7 @@ function piModelsFromSettings(
 function parseDiscoveredModels(
   data: unknown,
   defaultThinkingLevel: unknown,
+  binary: PiDialect["binary"],
 ): ReadonlyArray<ServerProviderModel> {
   const models = recordField(data, "models");
   if (!Array.isArray(models)) return [];
@@ -113,7 +114,7 @@ function parseDiscoveredModels(
       name: recordString(model, "name") ?? slug,
       subProvider: provider,
       isCustom: false,
-      capabilities: thinkingCapabilitiesForPiModel(model, defaultThinkingLevel),
+      capabilities: thinkingCapabilitiesForPiModel(model, defaultThinkingLevel, binary),
     });
   }
   return parsed;
@@ -159,6 +160,7 @@ const discoverPiViaRpc = (
     const discoveredModels = parseDiscoveredModels(
       modelsData,
       recordString(stateData, "thinkingLevel"),
+      dialect.binary,
     );
     const { slashCommands, skills } = parsePiDiscoveredCommands(commandsData);
     return {

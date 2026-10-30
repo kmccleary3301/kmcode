@@ -46,7 +46,30 @@ describe("ProviderSettingsForm helpers", () => {
       label: "Server password",
       description: "Stored in plain text on disk.",
       control: "password",
+      secret: true,
     });
+  });
+
+  it("replaces a secret only when entered and explicitly clears it with an empty value", () => {
+    const opencode = DRIVER_OPTION_BY_VALUE[ProviderDriverKind.make("opencode")];
+    const serverPassword = deriveProviderSettingsFields(opencode!).find(
+      (field) => field.key === "serverPassword",
+    )!;
+
+    expect(
+      nextProviderConfigWithFieldValue(
+        { serverPassword: "••••••" },
+        serverPassword,
+        "replacement",
+      ),
+    ).toEqual({ serverPassword: "replacement" });
+    expect(
+      nextProviderConfigWithFieldValue(
+        { serverPassword: "••••••" },
+        { ...serverPassword, clearWhenEmpty: "persist" },
+        "",
+      ),
+    ).toEqual({ serverPassword: "" });
   });
 
   it("uses a dedicated environment field instead of legacy Cursor CLI settings", () => {
@@ -106,6 +129,10 @@ describe("ProviderSettingsForm helpers", () => {
       "agent-platform",
     ]);
     expect(fields.find((field) => field.key === "apiKey")?.control).toBe("password");
+    expect(fields.find((field) => field.key === "apiKey")).toMatchObject({
+      control: "password",
+      secret: true,
+    });
   });
 
   it("shows the auto-compaction threshold for Claude providers", () => {

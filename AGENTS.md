@@ -5,6 +5,16 @@ come from upstream; upstream maintainer names, statistics, release channels, and
 are not KM Code ownership or distribution claims. Preserve upstream attribution and the
 compatibility identifiers and state paths used by existing installations.
 
+## Local disk footprint
+
+- New worktrees stay code-only. Worktree setup does not run automatically.
+- Keep dependencies installed in at most one active worktree on this machine. Install only when a requested run or scoped check needs them.
+- Use pnpm's shared package store. Do not copy whole dependency trees or share one mutable `node_modules` directory across different lockfiles.
+- Build only the requested target and artifact format. Do not produce extra desktop installers or platform builds.
+- Keep retained verification app bundles inside a `.noindex` directory on macOS so Spotlight does not offer them as installed applications.
+- Remove owned build outputs, runtime copies, caches, and scratch artifacts after verification. Remove unused clean worktrees; preserve uncommitted code, credentials, and user data.
+
+
 T3 Code is a minimal GUI for coding agents. A Node WebSocket server wraps provider CLIs and agents (Codex, Claude Code, Cursor, Grok, OpenCode, Antigravity) and serves web, desktop, and mobile clients.
 
 You can think of T3 Code as an open source "bring-your-own-subscription" alternative to apps like Claude Desktop, Codex App, Cursor Glass and Conductor.
@@ -82,7 +92,7 @@ The most common defect in this repo is a change that works on the path you teste
 
 ## Dev servers
 
-- `vp i` installs. Worktrees get this from the t3.json setup script; if module resolution looks broken, it probably did not run.
+- `vp i` installs. Run the t3.json setup action manually only in the one active worktree that needs dependencies; missing modules in other worktrees are intentional.
 - `vp run dev` starts server and web. In a worktree, state defaults to that worktree's gitignored `.t3`, which deliberately outranks an ambient `T3CODE_HOME` so you cannot land on shared state by accident. An explicit `--home-dir` still wins.
 - Ports derive from the worktree path and are stable across restarts, but read the real ones from the `[dev-runner]` line since occupied ports shift.
 - Sharing over the tailnet is three steps: run `vp run dev --share` in the background, wait for the `pairingUrl:` line in its output, then give that full URL to an unpaired browser. Do not wire up `tailscale serve` by hand, open the URL yourself, or consume the user's pairing link. A browser with the reusable dev cookie can use the bare origin. If a normal one-time token was consumed, mint a fresh one with `node apps/server/src/bin.ts pair`. It carries standard scopes, while the startup URL carries admin scopes needed for Connections settings.

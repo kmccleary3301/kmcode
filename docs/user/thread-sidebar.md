@@ -124,6 +124,9 @@ device keeps its own choice.
 While this is on, the active list is ordered by when each thread last came back to you, so you
 cannot drag or move threads within it. Your saved order returns when you turn it off.
 
+Threads waiting for background work show `Waiting` in the sidebar, with an elapsed
+timer that starts when their run completes.
+
 ## Settle finished work
 
 Choose **Settle thread** from its menu to move finished work out of the active list
@@ -184,6 +187,10 @@ On web and desktop, open the command palette with `Cmd/Ctrl+K` to search threads
 across connected environments. Message search starts after two characters and
 includes your messages and final agent responses.
 
+The palette omits child threads created for subagents but keeps forks. Title-prefix
+and whole-word matches rank above matches inside a word; recent activity breaks ties
+between title matches.
+
 Use **Settings → Keybindings** to find or customize shortcuts for searching files
 and copying a thread reference. A copied reference uses the thread's pull request
 link when available, otherwise its thread ID. See [keybindings](./keybindings.md)
@@ -224,6 +231,8 @@ thread open that thread instead.
 Subagent threads started by the agent can't take messages; message the parent
 thread instead. When such a subagent needs an approval or an answer, the parent
 thread asks for it.
+
+On web and desktop, open a child thread's parent from the header breadcrumb.
 
 Expand a tool call in the conversation to see its full command and output.
 Summaries shorten shell wrappers and can still describe the latest call after it

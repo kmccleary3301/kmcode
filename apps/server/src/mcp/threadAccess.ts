@@ -23,16 +23,25 @@ export const unavailable = () =>
   });
 
 /** Decider string rejections are public; wrapped storage and hydration causes are not. */
-export const dispatchFailure = (error: OrchestratorV2Error) =>
-  (error._tag === "OrchestratorDispatchError" ||
-    error._tag === "OrchestratorCommandRejectedError") &&
-  typeof error.cause === "string" &&
-  error.cause.length > 0
+type ThreadDispatchError =
+  | OrchestratorV2Error
+  | ThreadManagement.ThreadManagementProviderInstanceDisabledError;
+
+export const dispatchFailure = (error: ThreadDispatchError) =>
+  error._tag === "ThreadManagementProviderInstanceDisabledError"
     ? new OrchestratorMcpFailure({
-        code: "orchestration_error",
-        message: Array.from(error.cause).slice(0, 1000).join(""),
+        code: "invalid_request",
+        message: error.message,
       })
-    : unavailable();
+    : (error._tag === "OrchestratorDispatchError" ||
+          error._tag === "OrchestratorCommandRejectedError") &&
+        typeof error.cause === "string" &&
+        error.cause.length > 0
+      ? new OrchestratorMcpFailure({
+          code: "orchestration_error",
+          message: Array.from(error.cause).slice(0, 1000).join(""),
+        })
+      : unavailable();
 
 /**
  * The most a caller may hand to the threads it targets. A thread caller is

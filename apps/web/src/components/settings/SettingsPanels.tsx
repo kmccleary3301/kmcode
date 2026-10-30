@@ -6,7 +6,7 @@ import { PRIVACY_POLICY_URL } from "../../legalLinks";
 import { ArchiveIcon, ArchiveX, CheckIcon, ChevronRightIcon, SettingsIcon } from "lucide-react";
 import { Link, useNavigate } from "@tanstack/react-router";
 import type { CSSProperties, ReactNode } from "react";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   type BackgroundActivityProfile,
   type DesktopUpdateChannel,
@@ -32,19 +32,23 @@ import {
   MAX_CODE_FONT_SIZE,
   MAX_GLASS_OPACITY,
   MAX_INTERFACE_FONT_SIZE,
+  MAX_LIVE_STEPS_KEPT_OPEN,
   MAX_PANEL_ANIMATION_DURATION_MS,
   MAX_PROMPT_FONT_SIZE,
   MAX_SIDEBAR_AUTO_SETTLE_AFTER_DAYS,
   MAX_TERMINAL_FONT_SIZE,
+  MAX_TEXT_FONT_SIZE,
   MIN_CODE_FONT_SIZE,
   MIN_APPEARANCE_CONTRAST,
   MIN_GLASS_OPACITY,
   MIN_INTERFACE_FONT_SIZE,
+  MIN_LIVE_STEPS_KEPT_OPEN,
   MIN_PANEL_ANIMATION_DURATION_MS,
   MIN_PROMPT_FONT_SIZE,
   MIN_SIDEBAR_AUTO_SETTLE_AFTER_DAYS,
   type ResponseStreamingMode,
   MIN_TERMINAL_FONT_SIZE,
+  MIN_TEXT_FONT_SIZE,
   type QuitConfirmationMode,
   SidebarProjectSortOrder,
 } from "@t3tools/contracts/settings";
@@ -174,8 +178,17 @@ import {
   useSettingsSearchTargetId,
 } from "./settingsLayout";
 import { searchableSetting } from "./settingsSearch";
+import { TRANSCRIPT_STYLE_OPTIONS } from "../chat/transcriptStyle";
+import { LoaderGallery } from "../chat/LoaderGallery";
 import { ProjectFavicon } from "../ProjectFavicon";
 import { PanelAnimationsPreview } from "./PanelAnimationsPreview";
+
+// The preview renders a real transcript; load it with the Appearance page, not settings.
+const TranscriptStylePicker = lazy(() =>
+  import("./TranscriptStylePreview").then((module) => ({
+    default: module.TranscriptStylePicker,
+  })),
+);
 
 const ENVIRONMENT_IDENTIFICATION_LABELS: Record<EnvironmentIdentificationMode, string> = {
   artwork: "Artwork",
@@ -204,6 +217,11 @@ const TIMESTAMP_FORMAT_LABELS = {
   locale: "System default",
   "12-hour": "12-hour",
   "24-hour": "24-hour",
+} as const;
+const TOOL_DETAIL_LABELS = {
+  compact: "Compact",
+  rich: "Rich",
+  minimal: "Minimal",
 } as const;
 
 const CHAT_WIDTH_LABELS: Record<ChatWidth, string> = {
@@ -553,6 +571,12 @@ export function useSettingsRestore(onRestored?: () => void) {
         ? ["Diff colors"]
         : []),
       ...(settings.chatWidth !== DEFAULT_UNIFIED_SETTINGS.chatWidth ? ["Chat width"] : []),
+      ...(settings.transcriptStyle !== DEFAULT_UNIFIED_SETTINGS.transcriptStyle
+        ? ["Transcript style"]
+        : []),
+      ...(settings.liveStepsKeptOpen !== DEFAULT_UNIFIED_SETTINGS.liveStepsKeptOpen
+        ? ["Steps kept open"]
+        : []),
       ...(settings.panelAnimationDurationMs !== DEFAULT_UNIFIED_SETTINGS.panelAnimationDurationMs
         ? ["Panel animations"]
         : []),
@@ -563,6 +587,7 @@ export function useSettingsRestore(onRestored?: () => void) {
       ...(settings.timestampFormat !== DEFAULT_UNIFIED_SETTINGS.timestampFormat
         ? ["Time format"]
         : []),
+      ...(settings.toolDetail !== DEFAULT_UNIFIED_SETTINGS.toolDetail ? ["Tool detail"] : []),
       ...(settings.notificationMode !== DEFAULT_UNIFIED_SETTINGS.notificationMode
         ? ["Thread notifications"]
         : []),
@@ -680,6 +705,8 @@ export function useSettingsRestore(onRestored?: () => void) {
       settings.appearanceContrast,
       settings.diffColorScheme,
       settings.chatWidth,
+      settings.transcriptStyle,
+      settings.liveStepsKeptOpen,
       settings.enableAgentBrowserAccess,
       settings.confirmQuit,
       settings.confirmThreadArchive,
@@ -705,6 +732,7 @@ export function useSettingsRestore(onRestored?: () => void) {
       settings.fontFamilyTerminal,
       settings.fontSizeCode,
       settings.fontSizeInterface,
+      settings.fontSizeText,
       settings.fontSizePrompt,
       settings.fontSizeTerminal,
       settings.glassOpacity,
@@ -723,6 +751,7 @@ export function useSettingsRestore(onRestored?: () => void) {
       settings.sidebarThreadPreviewCount,
       settings.showSkillsInSlashMenu,
       settings.timestampFormat,
+      settings.toolDetail,
       settings.notificationMode,
       settings.inAppNotificationsEnabled,
       settings.wordWrap,
@@ -798,7 +827,10 @@ export function useSettingsRestore(onRestored?: () => void) {
       appearanceContrast: DEFAULT_UNIFIED_SETTINGS.appearanceContrast,
       diffColorScheme: DEFAULT_UNIFIED_SETTINGS.diffColorScheme,
       chatWidth: DEFAULT_UNIFIED_SETTINGS.chatWidth,
+      transcriptStyle: DEFAULT_UNIFIED_SETTINGS.transcriptStyle,
+      liveStepsKeptOpen: DEFAULT_UNIFIED_SETTINGS.liveStepsKeptOpen,
       timestampFormat: DEFAULT_UNIFIED_SETTINGS.timestampFormat,
+      toolDetail: DEFAULT_UNIFIED_SETTINGS.toolDetail,
       notificationMode: DEFAULT_UNIFIED_SETTINGS.notificationMode,
       inAppNotificationsEnabled: DEFAULT_UNIFIED_SETTINGS.inAppNotificationsEnabled,
       wordWrap: DEFAULT_UNIFIED_SETTINGS.wordWrap,
@@ -845,6 +877,7 @@ export function useSettingsRestore(onRestored?: () => void) {
       fontFamilyCode: DEFAULT_UNIFIED_SETTINGS.fontFamilyCode,
       fontFamilyTerminal: DEFAULT_UNIFIED_SETTINGS.fontFamilyTerminal,
       fontSizeInterface: DEFAULT_UNIFIED_SETTINGS.fontSizeInterface,
+      fontSizeText: DEFAULT_UNIFIED_SETTINGS.fontSizeText,
       fontSizePrompt: DEFAULT_UNIFIED_SETTINGS.fontSizePrompt,
       fontSizeCode: DEFAULT_UNIFIED_SETTINGS.fontSizeCode,
       fontSizeTerminal: DEFAULT_UNIFIED_SETTINGS.fontSizeTerminal,
@@ -1467,6 +1500,87 @@ export function AppearanceSettingsPanel() {
             </div>
           }
         />
+
+        <SettingsRow
+          {...searchableSetting("transcript-style")}
+          description={TRANSCRIPT_STYLE_OPTIONS[settings.transcriptStyle].description}
+          resetAction={
+            settings.transcriptStyle !== DEFAULT_UNIFIED_SETTINGS.transcriptStyle ? (
+              <SettingResetButton
+                label="transcript style"
+                onClick={() =>
+                  updateSettings({ transcriptStyle: DEFAULT_UNIFIED_SETTINGS.transcriptStyle })
+                }
+              />
+            ) : null
+          }
+        >
+          <Suspense fallback={<div className="h-120" />}>
+            <TranscriptStylePicker
+              value={settings.transcriptStyle}
+              onChange={(transcriptStyle) => updateSettings({ transcriptStyle })}
+            />
+          </Suspense>
+        </SettingsRow>
+
+        <SettingsRow
+          {...searchableSetting("live-steps-kept-open")}
+          description="Minimal+ keeps this many of a running turn's latest edits, commands and subagents open; older ones fold as work continues, and all fold when the turn ends."
+          resetAction={
+            settings.liveStepsKeptOpen !== DEFAULT_UNIFIED_SETTINGS.liveStepsKeptOpen ? (
+              <SettingResetButton
+                label="steps kept open"
+                onClick={() =>
+                  updateSettings({ liveStepsKeptOpen: DEFAULT_UNIFIED_SETTINGS.liveStepsKeptOpen })
+                }
+              />
+            ) : null
+          }
+          control={
+            <div className="w-full sm:w-40">
+              <Select
+                value={String(settings.liveStepsKeptOpen)}
+                disabled={settings.transcriptStyle !== "minimal-plus"}
+                onValueChange={(value) => {
+                  const liveStepsKeptOpen = Number(value);
+                  if (
+                    Number.isInteger(liveStepsKeptOpen) &&
+                    liveStepsKeptOpen >= MIN_LIVE_STEPS_KEPT_OPEN &&
+                    liveStepsKeptOpen <= MAX_LIVE_STEPS_KEPT_OPEN
+                  ) {
+                    updateSettings({ liveStepsKeptOpen });
+                  }
+                }}
+              >
+                <SelectTrigger size="sm" className="w-full min-w-0" aria-label="Steps kept open">
+                  <SelectValue>
+                    {settings.liveStepsKeptOpen === 0
+                      ? "Running only"
+                      : `Latest ${settings.liveStepsKeptOpen}`}
+                  </SelectValue>
+                </SelectTrigger>
+                <SelectPopup align="end" alignItemWithTrigger={false}>
+                  {Array.from(
+                    { length: MAX_LIVE_STEPS_KEPT_OPEN - MIN_LIVE_STEPS_KEPT_OPEN + 1 },
+                    (_, index) => MIN_LIVE_STEPS_KEPT_OPEN + index,
+                  ).map((count) => (
+                    <SelectItem key={count} value={String(count)}>
+                      {count === 0 ? "Running only" : `Latest ${count}`}
+                      {count === DEFAULT_UNIFIED_SETTINGS.liveStepsKeptOpen ? " (default)" : ""}
+                    </SelectItem>
+                  ))}
+                </SelectPopup>
+              </Select>
+            </div>
+          }
+        />
+
+        <SettingsRow
+          {...searchableSetting("transcript-loaders")}
+          description="Every working indicator the transcript uses, running live."
+        >
+          <LoaderGallery />
+        </SettingsRow>
       </SettingsSection>
 
       <SettingsSection id="motion" title="Motion">
@@ -1591,7 +1705,20 @@ function TextFontRow() {
       defaultValue={DEFAULT_UNIFIED_SETTINGS.fontFamilyText}
       value={settings.fontFamilyText}
       onValueChange={(fontFamilyText) => updateSettings({ fontFamilyText })}
-      onReset={() => updateSettings({ fontFamilyText: DEFAULT_UNIFIED_SETTINGS.fontFamilyText })}
+      onReset={() =>
+        updateSettings({
+          fontFamilyText: DEFAULT_UNIFIED_SETTINGS.fontFamilyText,
+          fontSizeText: DEFAULT_UNIFIED_SETTINGS.fontSizeText,
+        })
+      }
+      size={{
+        label: "Text font size",
+        min: MIN_TEXT_FONT_SIZE,
+        max: MAX_TEXT_FONT_SIZE,
+        value: settings.fontSizeText,
+        defaultValue: DEFAULT_UNIFIED_SETTINGS.fontSizeText,
+        onChange: (fontSizeText) => updateSettings({ fontSizeText }),
+      }}
       preview={<TextFontPreview />}
     />
   );
@@ -2027,9 +2154,14 @@ function FontFamilySettingsRow({
         value={draft}
       />
     );
+  const sizeRatio = size === undefined ? 0 : (size.value - size.min) / (size.max - size.min);
+  const sizeSliderStyle = {
+    "--settings-slider-progress": `${sizeRatio * 100}%`,
+    "--settings-slider-fill-offset": `${0.5 - sizeRatio}rem`,
+  } as CSSProperties;
   const control = (
-    <div className="flex w-full items-center gap-2 sm:w-auto">
-      <div className="min-w-0 flex-1 sm:w-44 sm:flex-none">{familyControl}</div>
+    <div className="grid w-full min-w-0 grid-cols-[minmax(0,1fr)_5.5rem] items-center gap-x-2 gap-y-1 sm:w-68">
+      <div className={size === undefined ? "col-span-2 min-w-0" : "min-w-0"}>{familyControl}</div>
       {size !== undefined ? (
         <Select
           value={String(size.value)}
@@ -2041,7 +2173,7 @@ function FontFamilySettingsRow({
             }
           }}
         >
-          <SelectTrigger size="sm" className="w-22 shrink-0" aria-label={size.label}>
+          <SelectTrigger size="sm" className="w-full min-w-0" aria-label={size.label}>
             <SelectValue>{size.value} px</SelectValue>
           </SelectTrigger>
           <SelectPopup align="end" alignItemWithTrigger={false}>
@@ -2054,6 +2186,21 @@ function FontFamilySettingsRow({
             )}
           </SelectPopup>
         </Select>
+      ) : null}
+      {size !== undefined ? (
+        <input
+          type="range"
+          aria-label={`${size.label} slider`}
+          aria-valuetext={`${size.value} pixels`}
+          className="settings-slider col-span-2 w-full min-w-0 pointer-coarse:min-h-11"
+          data-t3-part="slider"
+          min={size.min}
+          max={size.max}
+          step={1}
+          value={size.value}
+          style={sizeSliderStyle}
+          onChange={(event) => size.onChange(Number(event.currentTarget.value))}
+        />
       ) : null}
     </div>
   );
@@ -2564,6 +2711,47 @@ export function GeneralSettingsPanel() {
                 </SelectItem>
                 <SelectItem hideIndicator value="24-hour">
                   {TIMESTAMP_FORMAT_LABELS["24-hour"]}
+                </SelectItem>
+              </SelectPopup>
+            </Select>
+          }
+        />
+        <SettingsRow
+          {...searchableSetting("tool-detail")}
+          description="Compact hides direct file-read bodies and diff hunk headers; edits remain live. Rich keeps current tool details. Minimal keeps steps collapsed until clicked."
+          resetAction={
+            settings.toolDetail !== DEFAULT_UNIFIED_SETTINGS.toolDetail ? (
+              <SettingResetButton
+                label="tool detail"
+                onClick={() =>
+                  updateSettings({
+                    toolDetail: DEFAULT_UNIFIED_SETTINGS.toolDetail,
+                  })
+                }
+              />
+            ) : null
+          }
+          control={
+            <Select
+              value={settings.toolDetail}
+              onValueChange={(value) => {
+                if (value === "compact" || value === "rich" || value === "minimal") {
+                  updateSettings({ toolDetail: value });
+                }
+              }}
+            >
+              <SelectTrigger size="sm" className="w-full sm:w-44" aria-label="Tool detail">
+                <SelectValue>{TOOL_DETAIL_LABELS[settings.toolDetail]}</SelectValue>
+              </SelectTrigger>
+              <SelectPopup align="end" alignItemWithTrigger={false}>
+                <SelectItem hideIndicator value="compact">
+                  {TOOL_DETAIL_LABELS.compact}
+                </SelectItem>
+                <SelectItem hideIndicator value="rich">
+                  {TOOL_DETAIL_LABELS.rich}
+                </SelectItem>
+                <SelectItem hideIndicator value="minimal">
+                  {TOOL_DETAIL_LABELS.minimal}
                 </SelectItem>
               </SelectPopup>
             </Select>

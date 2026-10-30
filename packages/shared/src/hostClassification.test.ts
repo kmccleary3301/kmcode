@@ -53,6 +53,11 @@ describe("isPublicFaviconHost", () => {
       "home.arpa",
       "box.tailnet.ts.net",
       "AIR.TAILE8BEA7.TS.NET",
+      "grafana.corp",
+      "build.lan",
+      "wiki.intranet",
+      "grafana.internal.acme-corp.com",
+      "jira.corp.acme-corp.com",
     ]) {
       expect(isPublicFaviconHost(host), host).toBe(false);
     }

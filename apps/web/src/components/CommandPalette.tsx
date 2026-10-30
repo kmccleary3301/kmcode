@@ -131,7 +131,11 @@ import {
 } from "../lib/projectPaths";
 import { onOpenCommandPalette } from "../commandPaletteBus";
 import { isPreviewFocused } from "../lib/previewFocus";
-import { getAppearanceRuntime } from "../appearanceRuntime";
+import {
+  allocateAppearanceGeneration,
+  finishAppearanceIntent,
+  getAppearanceRuntime,
+} from "../appearanceRuntime";
 import { isTerminalFocused } from "../lib/terminalFocus";
 import {
   PULL_REQUESTS_PANEL_REF,
@@ -817,45 +821,6 @@ function OpenCommandPaletteDialog(props: {
       unsubscribe?.();
     };
   }, []);
-  const runAppearanceCommand = useCallback(async (command: AppearanceCommand): Promise<void> => {
-    if (
-      command.type === "reset" &&
-      !window.confirm(
-        "Reset all appearance packages and snippets? A recovery copy is kept where supported.",
-      )
-    ) {
-      return;
-    }
-    const runtime = await getAppearanceRuntime();
-    const snapshot = runtime.getSnapshot();
-    if (
-      command.type === "preference" &&
-      command.preference.packageId !== undefined &&
-      snapshot.packages[command.preference.packageId]?.enabled === false
-    ) {
-      const enabled = await runtime.execute({
-        type: "enable",
-        id: command.preference.packageId,
-      });
-      if (enabled.status !== "applied") {
-        throw new Error(
-          enabled.status === "rejected"
-            ? (enabled.diagnostics[0]?.message ?? "Appearance package could not be enabled.")
-            : "Appearance package activation was cancelled.",
-        );
-      }
-    }
-    const result = await runtime.execute(command);
-    if (result.status !== "applied") {
-      throw new Error(
-        result.status === "rejected"
-          ? (result.diagnostics[0]?.message ?? "Appearance command was rejected.")
-          : "Appearance command was cancelled.",
-      );
-    }
-    setAppearanceSnapshot(result.snapshot);
-  }, []);
-  const keybindings = useAtomValue(primaryServerKeybindingsAtom);
   const {
     theme,
     themeHalves,
@@ -865,6 +830,75 @@ function OpenCommandPaletteDialog(props: {
     setTheme,
     setThemeHalf,
   } = useTheme();
+  const runAppearanceCommand = useCallback(
+    async (command: AppearanceCommand): Promise<void> => {
+      if (
+        command.type === "reset" &&
+        !window.confirm(
+          "Reset all appearance packages and snippets? A recovery copy is kept where supported.",
+        )
+      ) {
+        return;
+      }
+      // Library themes belong to the stored theme preference. Writing the
+      // runtime alone would leave Settings showing one theme while another is
+      // painted, and the next mode change or restart would flip between them.
+      const libraryTheme =
+        command.type === "preference" && command.preference.packageId !== undefined
+          ? getThemeDefinition(command.preference.packageId)
+          : null;
+      if (command.type === "preference" && libraryTheme !== null) {
+        if (!setTheme(libraryTheme.id) || !setAppearanceMode(command.preference.mode)) {
+          throw new Error("Couldn’t save the theme selection.");
+        }
+        return;
+      }
+      const generation =
+        command.generation ??
+        allocateAppearanceGeneration(
+          command.type === "preference" ? command.preference : undefined,
+        );
+      try {
+        const runtime = await getAppearanceRuntime();
+        const snapshot = runtime.getSnapshot();
+        if (
+          command.type === "preference" &&
+          command.preference.packageId !== undefined &&
+          snapshot.packages[command.preference.packageId]?.enabled === false
+        ) {
+          const enabled = await runtime.execute({
+            type: "enable",
+            id: command.preference.packageId,
+            apply: false,
+            generation,
+          });
+          if (enabled.status === "rejected") {
+            throw new Error(
+              enabled.diagnostics[0]?.message ?? "Appearance package could not be enabled.",
+            );
+          }
+          if (enabled.status === "cancelled") {
+            return;
+          }
+        }
+        const result = await runtime.execute({
+          ...command,
+          generation,
+        });
+        if (result.status === "rejected") {
+          throw new Error(result.diagnostics[0]?.message ?? "Appearance command was rejected.");
+        }
+        if (result.status === "cancelled") {
+          return;
+        }
+        setAppearanceSnapshot(result.snapshot);
+      } finally {
+        finishAppearanceIntent(generation);
+      }
+    },
+    [setAppearanceMode, setTheme],
+  );
+  const keybindings = useAtomValue(primaryServerKeybindingsAtom);
   const customThemes = useCustomThemes();
   const environmentThemes = useEnvironmentThemeDefinitions();
   const themeCards = useMemo(() => {

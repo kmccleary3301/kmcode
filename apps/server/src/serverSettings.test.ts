@@ -1666,6 +1666,78 @@ it.layer(NodeServices.layer)("server settings", (it) => {
       }).pipe(Effect.provide(layerServerSettingsWithSecrets())),
   );
 
+  it.effect("redacts password settings and preserves them when other fields are updated", () =>
+    Effect.gen(function* () {
+      const serverSettings = yield* ServerSettingsModule.ServerSettingsService;
+      const instanceId = ProviderInstanceId.make("opencode_secret");
+      const antigravityId = ProviderInstanceId.make("antigravity_secret");
+      const saved = yield* serverSettings.updateSettings({
+        providers: {
+          opencode: { serverUrl: "http://127.0.0.1:4096", serverPassword: "legacy-opencode-secret" },
+          antigravity: { apiKey: "legacy-antigravity-secret" },
+        },
+        providerInstances: {
+          [instanceId]: {
+            driver: ProviderDriverKind.make("opencode"),
+            config: { serverUrl: "http://127.0.0.1:4096", serverPassword: "instance-opencode-secret" },
+          },
+          [antigravityId]: {
+            driver: ProviderDriverKind.make("antigravity"),
+            config: { apiKey: "instance-antigravity-secret" },
+          },
+        },
+      });
+      const client = ServerSettingsModule.redactServerSettingsForClient(saved);
+      const serialized = JSON.stringify(client);
+      for (const secret of [
+        "legacy-opencode-secret",
+        "legacy-antigravity-secret",
+        "instance-opencode-secret",
+        "instance-antigravity-secret",
+      ]) {
+        assert.notInclude(serialized, secret);
+      }
+      assert.equal(client.providers.opencode.serverPassword, "••••••");
+      assert.equal(client.providers.antigravity.apiKey, "••••••");
+
+      const opencode = client.providerInstances[instanceId]!;
+      const antigravity = client.providerInstances[antigravityId]!;
+      yield* serverSettings.updateSettings({
+        providers: {
+          opencode: { ...client.providers.opencode, serverUrl: "http://127.0.0.1:4097" },
+          antigravity: { ...client.providers.antigravity, gcpProject: "updated-project" },
+        },
+        providerInstances: {
+          [instanceId]: {
+            ...opencode,
+            config: {
+              ...(opencode.config as Record<string, unknown>),
+              serverUrl: "http://127.0.0.1:4097",
+            },
+          },
+          [antigravityId]: {
+            ...antigravity,
+            config: {
+              ...(antigravity.config as Record<string, unknown>),
+              gcpProject: "updated-project",
+            },
+          },
+        },
+      });
+      const updated = yield* serverSettings.getSettings;
+      assert.equal(updated.providers.opencode.serverPassword, "legacy-opencode-secret");
+      assert.equal(updated.providers.antigravity.apiKey, "legacy-antigravity-secret");
+      assert.equal(
+        (updated.providerInstances[instanceId]?.config as Record<string, unknown>).serverPassword,
+        "instance-opencode-secret",
+      );
+      assert.equal(
+        (updated.providerInstances[antigravityId]?.config as Record<string, unknown>).apiKey,
+        "instance-antigravity-secret",
+      );
+    }).pipe(Effect.provide(layerServerSettings())),
+  );
+
   it.effect(
     "keeps GitHub tokens per host in the secret store and tells clients only that one is set",
     () =>

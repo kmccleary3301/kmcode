@@ -61,6 +61,7 @@ export function QueuedRunsControl({
   >;
   /** The saved queue entry stays visible while its draft is edited in the composer. */
   readonly editingRunId: RunId | null;
+  readonly editBlockedReason: string | null;
   readonly onEditQueuedRun: (request: EditQueuedRunRequest) => void;
   readonly onCancelEdit: () => void;
 }) {
@@ -215,7 +216,14 @@ export function QueuedRunsControl({
     // moving the caret inside that draft.
     editLatest(repeat) {
       const latest = queued.at(-1);
-      if (!latest || props.editingRunId !== null || busyRunId !== null) return false;
+      if (
+        !latest ||
+        props.editingRunId !== null ||
+        props.editBlockedReason !== null ||
+        busyRunId !== null
+      ) {
+        return false;
+      }
       if (!repeat) {
         setExpanded(true);
         props.onEditQueuedRun({
@@ -416,30 +424,34 @@ export function QueuedRunsControl({
                     ) : (
                       <>
                         <Tooltip>
-                          <TooltipTrigger
-                            render={
-                              <Button
-                                size="icon-xs"
-                                variant="ghost-muted"
-                                aria-label="Edit queued message"
-                                disabled={item.runId === null || busyRunId !== null}
-                                onClick={() => {
-                                  if (item.runId !== null && item.messageId !== null) {
-                                    props.onEditQueuedRun({
-                                      runId: item.runId,
-                                      messageId: item.messageId,
-                                      text: item.text,
-                                      attachments: item.attachments,
-                                    });
-                                  }
-                                }}
-                              />
-                            }
-                          >
-                            <PencilIcon />
+                          <TooltipTrigger render={<span className="flex shrink-0" />}>
+                            <Button
+                              size="icon-xs"
+                              variant="ghost-muted"
+                              aria-label="Edit queued message"
+                              disabled={
+                                item.runId === null ||
+                                busyRunId !== null ||
+                                props.editBlockedReason !== null
+                              }
+                              onClick={() => {
+                                if (props.editBlockedReason !== null) return;
+                                if (item.runId !== null && item.messageId !== null) {
+                                  props.onEditQueuedRun({
+                                    runId: item.runId,
+                                    messageId: item.messageId,
+                                    text: item.text,
+                                    attachments: item.attachments,
+                                  });
+                                }
+                              }}
+                            >
+                              <PencilIcon />
+                            </Button>
                           </TooltipTrigger>
                           <TooltipPopup>
-                            {`Edit in the composer${item.serverIndex === queued.length - 1 && props.editShortcutLabel ? ` (${props.editShortcutLabel})` : ""}`}
+                            {props.editBlockedReason ??
+                              `Edit in the composer${item.serverIndex === queued.length - 1 && props.editShortcutLabel ? ` (${props.editShortcutLabel})` : ""}`}
                           </TooltipPopup>
                         </Tooltip>
                         <Tooltip>
@@ -465,7 +477,9 @@ export function QueuedRunsControl({
                           <TooltipPopup>
                             {activeRun === null
                               ? "There is no active run to steer"
-                              : `Send as a steer instead${item.serverIndex === 0 && props.steerShortcutLabel ? ` (${props.steerShortcutLabel})` : ""}`}
+                              : workflow?.promoteSkipsCompaction
+                                ? "Cancel compaction and send this message"
+                                : `Send as a steer instead${item.serverIndex === 0 && props.steerShortcutLabel ? ` (${props.steerShortcutLabel})` : ""}`}
                           </TooltipPopup>
                         </Tooltip>
                         <Tooltip>

@@ -2,7 +2,7 @@ import type { DesktopAppearancePackageDocument } from "@t3tools/contracts";
 import { DownloadIcon, PlusIcon } from "lucide-react";
 import type { ChangeEvent, DragEvent, UIEvent } from "react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { getAppearanceRuntime } from "../../appearanceRuntime";
+import { allocateAppearanceGeneration, getAppearanceRuntime } from "../../appearanceRuntime";
 import { cn } from "../../lib/utils";
 import {
   inspectBrowserAppearancePackage,
@@ -513,30 +513,37 @@ export function ThemeImportDialog({
   const handlePackageAction = useCallback(
     async (action: "preview" | "install" | "activate") => {
       if (packageReview === null) return;
+      const generation = allocateAppearanceGeneration();
       const previewGeneration = packagePreviewGenerationRef.current;
       setIsReading(true);
       try {
         const runtime = await getAppearanceRuntime();
         const result =
           action === "preview"
-            ? await previewBrowserAppearancePackage(runtime, packageReview)
-            : await installBrowserAppearancePackage(runtime, packageReview, action === "activate");
+            ? await previewBrowserAppearancePackage(runtime, packageReview, generation)
+            : await installBrowserAppearancePackage(
+                runtime,
+                packageReview,
+                action === "activate",
+                generation,
+              );
+        if (result.status === "cancelled") {
+          return;
+        }
         if (result.status !== "applied") {
           setError(
-            result.status === "rejected"
-              ? result.diagnostics
-                  .map(
-                    (diagnostic) =>
-                      `${diagnostic.severity}: ${diagnostic.file ?? "package"}${diagnostic.line === undefined ? "" : `:${diagnostic.line}`}${diagnostic.column === undefined ? "" : `:${diagnostic.column}`} — ${diagnostic.message} ${diagnostic.recovery}`,
-                  )
-                  .join(" — ")
-              : "Appearance package action was cancelled.",
+            result.diagnostics
+              .map(
+                (diagnostic) =>
+                  `${diagnostic.severity}: ${diagnostic.file ?? "package"}${diagnostic.line === undefined ? "" : `:${diagnostic.line}`}${diagnostic.column === undefined ? "" : `:${diagnostic.column}`} — ${diagnostic.message} ${diagnostic.recovery}`,
+              )
+              .join(" — "),
           );
           return;
         }
         if (action === "preview") {
           if (previewGeneration !== packagePreviewGenerationRef.current) {
-            await runtime.execute({ type: "preview", preview: null });
+            await runtime.execute({ type: "preview", preview: null, generation });
             return;
           }
           activatePackagePreviewLease();
@@ -689,6 +696,7 @@ export function ThemeImportDialog({
                       size="sm"
                       variant="outline"
                       onClick={() => {
+                        const generation = allocateAppearanceGeneration();
                         const previewGeneration = packagePreviewGenerationRef.current;
                         void getAppearanceRuntime()
                           .then(async (runtime) => ({
@@ -696,15 +704,19 @@ export function ThemeImportDialog({
                             result: await runtime.execute({
                               type: "preview",
                               preview: { packageId: summary.id },
+                              generation,
                             }),
                           }))
                           .then(async ({ runtime, result }) => {
+                            if (result.status === "cancelled") {
+                              return;
+                            }
                             if (result.status !== "applied") {
                               setError("Desktop package preview could not be applied.");
                               return;
                             }
                             if (previewGeneration !== packagePreviewGenerationRef.current) {
-                              await runtime.execute({ type: "preview", preview: null });
+                              await runtime.execute({ type: "preview", preview: null, generation });
                               return;
                             }
                             activatePackagePreviewLease();
@@ -717,11 +729,15 @@ export function ThemeImportDialog({
                       disabled={isReading}
                       size="sm"
                       onClick={() => {
+                        const generation = allocateAppearanceGeneration();
                         void getAppearanceRuntime()
-                          .then((runtime) => runtime.execute({ type: "enable", id: summary.id }))
+                          .then((runtime) =>
+                            runtime.execute({ type: "enable", id: summary.id, generation }),
+                          )
                           .then((result) => {
                             if (result.status === "applied") onOpenChange(false);
-                            else setError("Desktop package activation could not be applied.");
+                            else if (result.status === "rejected")
+                              setError("Desktop package activation could not be applied.");
                           });
                       }}
                     >

@@ -1447,7 +1447,7 @@ index 95465f2..d7cbe1c 100644
      }
    }
 diff --git a/react.js b/react.js
-index 914d2da..0c2917d 100644
+index 914d2da..aa9ade3 100644
 --- a/react.js
 +++ b/react.js
 @@ -4702,7 +4702,8 @@ function maybeUpdateAnchoredEndSpace(ctx) {
@@ -1473,7 +1473,51 @@ index 914d2da..0c2917d 100644
    }
    return nextSize;
  }
-@@ -5651,6 +5658,18 @@ var ContainerSlot = typedMemo(function ContainerSlot2(props) {
+@@ -4978,12 +4985,26 @@ var ContainerLayoutCoordinator = typedMemo(function ContainerLayoutCoordinatorComponent({
+ }) {
+   const ctx = useStateContext();
+   const [containerLayoutEpoch] = useArr$(["containerLayoutEpoch"]);
++  const layoutPasses = React3__namespace.useRef(0);
+   React3__namespace.useLayoutEffect(() => {
+-    {
+-      const targetContainerIds = getContainerLayoutEffectScope(ctx);
+-      if (targetContainerIds !== void 0) {
+-        measureContainersInLayoutEffect(ctx, targetContainerIds);
+-      }
++    const targetContainerIds = getContainerLayoutEffectScope(ctx);
++    if (targetContainerIds === void 0) return;
++    if (layoutPasses.current === 0) {
++      queueMicrotask(() => { layoutPasses.current = 0; });
+     }
++    // Correcting large estimates can mount one row per commit. Bound the
++    // synchronous chain below React's nested-update limit, then keep measuring
++    // the latest pending rows on the next frame. Idle lists schedule no work.
++    if (layoutPasses.current++ < 8) {
++      measureContainersInLayoutEffect(ctx, targetContainerIds);
++    } else {
++      ctx.pendingContainerIds = targetContainerIds;
++      ctx.state.scheduledWork.frame(() => {
++        const pendingIds = getContainerLayoutEffectScope(ctx);
++        if (pendingIds !== void 0) {
++          measureContainersInLayoutEffect(ctx, pendingIds);
++        }
++      }, "containerLayout");
++    }
+   }, [ctx, containerLayoutEpoch]);
+   return children;
+@@ -5410,7 +5417,10 @@ function processContainerLayout({ containerId, ctx, rectangle, ref, state }) {
+       size: layout
+     });
+   };
+-  const shouldDeferWebShrinkLayoutUpdate = !isInMVCPActiveMode(listState) && previousSize !== void 0 && size + 1 < previousSize;
++  // Patched: apply shrinks in the frame they are observed. Deferring them a
++  // frame paints the rows below at their old positions over a gap whenever a
++  // row collapses (a live card settling, an exit glide).
++  const shouldDeferWebShrinkLayoutUpdate = false;
+   if (shouldDeferWebShrinkLayoutUpdate) {
+     scheduleWebShrinkMeasurement(state, () => {
+       var _a4;
+@@ -5651,6 +5661,18 @@ var ContainerSlot = typedMemo(function ContainerSlot2(props) {
  });
  
  // src/utils/reordering.ts
@@ -1492,7 +1536,7 @@ index 914d2da..0c2917d 100644
  function sortDOMElements(container, indexByElement) {
    const elements = Array.from(container.children);
    if (elements.length <= 1) return elements;
-@@ -5690,9 +5709,9 @@ function sortDOMElements(container, indexByElement) {
+@@ -5690,9 +5712,9 @@ function sortDOMElements(container, indexByElement) {
          }
        }
        if (nextStableElement) {
@@ -1504,7 +1548,7 @@ index 914d2da..0c2917d 100644
        }
      }
    }
-@@ -6446,8 +6465,8 @@ function ScrollAdjust() {
+@@ -6446,8 +6468,8 @@ function ScrollAdjust() {
                window.getComputedStyle(contentNode)[axis.paddingEndProp]
              );
              const temporaryPaddingEnd = `${(currentPaddingEnd || 0) + pad}px`;
@@ -1515,7 +1559,7 @@ index 914d2da..0c2917d 100644
              scrollBy();
              if (resetPaddingRafRef.current !== void 0) {
 diff --git a/react.mjs b/react.mjs
-index 95465f2..b73bfdf 100644
+index 95465f2..401457c 100644
 --- a/react.mjs
 +++ b/react.mjs
 @@ -4681,7 +4681,8 @@ function maybeUpdateAnchoredEndSpace(ctx) {
@@ -1541,7 +1585,51 @@ index 95465f2..b73bfdf 100644
    }
    return nextSize;
  }
-@@ -5630,6 +5637,18 @@ var ContainerSlot = typedMemo(function ContainerSlot2(props) {
+@@ -4957,12 +4964,26 @@ var ContainerLayoutCoordinator = typedMemo(function ContainerLayoutCoordinatorComponent({
+ }) {
+   const ctx = useStateContext();
+   const [containerLayoutEpoch] = useArr$(["containerLayoutEpoch"]);
++  const layoutPasses = React3.useRef(0);
+   React3.useLayoutEffect(() => {
+-    {
+-      const targetContainerIds = getContainerLayoutEffectScope(ctx);
+-      if (targetContainerIds !== void 0) {
+-        measureContainersInLayoutEffect(ctx, targetContainerIds);
+-      }
++    const targetContainerIds = getContainerLayoutEffectScope(ctx);
++    if (targetContainerIds === void 0) return;
++    if (layoutPasses.current === 0) {
++      queueMicrotask(() => { layoutPasses.current = 0; });
+     }
++    // Correcting large estimates can mount one row per commit. Bound the
++    // synchronous chain below React's nested-update limit, then keep measuring
++    // the latest pending rows on the next frame. Idle lists schedule no work.
++    if (layoutPasses.current++ < 8) {
++      measureContainersInLayoutEffect(ctx, targetContainerIds);
++    } else {
++      ctx.pendingContainerIds = targetContainerIds;
++      ctx.state.scheduledWork.frame(() => {
++        const pendingIds = getContainerLayoutEffectScope(ctx);
++        if (pendingIds !== void 0) {
++          measureContainersInLayoutEffect(ctx, pendingIds);
++        }
++      }, "containerLayout");
++    }
+   }, [ctx, containerLayoutEpoch]);
+   return children;
+@@ -5389,7 +5396,10 @@ function processContainerLayout({ containerId, ctx, rectangle, ref, state }) {
+       size: layout
+     });
+   };
+-  const shouldDeferWebShrinkLayoutUpdate = !isInMVCPActiveMode(listState) && previousSize !== void 0 && size + 1 < previousSize;
++  // Patched: apply shrinks in the frame they are observed. Deferring them a
++  // frame paints the rows below at their old positions over a gap whenever a
++  // row collapses (a live card settling, an exit glide).
++  const shouldDeferWebShrinkLayoutUpdate = false;
+   if (shouldDeferWebShrinkLayoutUpdate) {
+     scheduleWebShrinkMeasurement(state, () => {
+       var _a4;
+@@ -5630,6 +5640,18 @@ var ContainerSlot = typedMemo(function ContainerSlot2(props) {
  });
  
  // src/utils/reordering.ts
@@ -1560,7 +1648,7 @@ index 95465f2..b73bfdf 100644
  function sortDOMElements(container, indexByElement) {
    const elements = Array.from(container.children);
    if (elements.length <= 1) return elements;
-@@ -5669,9 +5688,9 @@ function sortDOMElements(container, indexByElement) {
+@@ -5669,9 +5691,9 @@ function sortDOMElements(container, indexByElement) {
          }
        }
        if (nextStableElement) {
@@ -1572,7 +1660,7 @@ index 95465f2..b73bfdf 100644
        }
      }
    }
-@@ -6425,8 +6444,8 @@ function ScrollAdjust() {
+@@ -6425,8 +6447,8 @@ function ScrollAdjust() {
                window.getComputedStyle(contentNode)[axis.paddingEndProp]
              );
              const temporaryPaddingEnd = `${(currentPaddingEnd || 0) + pad}px`;

@@ -1,5 +1,11 @@
 import { makeProviderTextDeltaCoalescer } from "./ProviderTextDeltaCoalescer.ts";
 import {
+  CLAUDE_WORKFLOW_TASK_TYPE,
+  hasClaudeWorkflowSnapshot,
+  mergeClaudeWorkflowProgress,
+  parseClaudeWorkflowRunHandles,
+} from "./claudeWorkflowProgress.ts";
+import {
   dynamicToolTitle,
   formatReadToolLabel,
   formatSearchToolLabel,
@@ -51,12 +57,14 @@ import {
   type OrchestrationV2PlanStep,
   type OrchestrationV2PendingBackgroundTask,
   type OrchestrationV2ProviderRetry,
+  type OrchestrationV2WorkflowRunHandles,
   type OrchestrationV2ProviderSession,
   type OrchestrationV2ProviderThread,
   type OrchestrationV2ProviderTurn,
   type OrchestrationV2RuntimeRequest,
   type OrchestrationV2UserInputQuestion,
   type OrchestrationV2Subagent,
+  type OrchestrationV2SubagentWorkflow,
   type OrchestrationV2TurnItem,
   type OrchestrationV2WebSearchResult,
   type ProviderApprovalDecision,
@@ -327,6 +335,9 @@ export interface ClaudeAgentSdkQuerySession {
     mode: PermissionMode,
   ) => Effect.Effect<void, ClaudeAgentSdkQueryRunnerError>;
   readonly interrupt: Effect.Effect<void, ClaudeAgentSdkQueryRunnerError>;
+  readonly stopTask?: (
+    taskId: string,
+  ) => Effect.Effect<void, ClaudeAgentSdkQueryRunnerError>;
   readonly close: Effect.Effect<void, ClaudeAgentSdkQueryRunnerError>;
 }
 
@@ -435,6 +446,7 @@ export interface ClaudeAgentSdkLoggedQueryOptions {
   readonly pathToClaudeCodeExecutable?: ClaudeAgentSdkQueryOptions["pathToClaudeCodeExecutable"];
   readonly hasExtraArgs?: true;
   readonly allowDangerouslySkipPermissions?: true;
+  readonly perTaskStopAffordance?: true;
   readonly hasCanUseTool?: true;
   readonly hasEnvironment?: true;
   readonly hasMcpServers?: true;
@@ -471,6 +483,14 @@ export type ClaudeAgentSdkProtocolLogEvent =
       readonly payload: {
         readonly type: "query.set_permission_mode";
         readonly mode: PermissionMode;
+      };
+    }
+  | {
+      readonly direction: "outgoing";
+      readonly stage: "decoded";
+      readonly payload: {
+        readonly type: "query.stop_task";
+        readonly taskId: string;
       };
     }
   | {
@@ -556,6 +576,7 @@ export function loggedClaudeQueryOptions(
       : {}),
     ...(options.canUseTool === undefined ? {} : { hasCanUseTool: true }),
     ...(options.env === undefined ? {} : { hasEnvironment: true }),
+    ...(options.perTaskStopAffordance === true ? { perTaskStopAffordance: true } : {}),
     ...(options.mcpServers === undefined ? {} : { hasMcpServers: true }),
   };
 }
@@ -707,6 +728,19 @@ export const layerQueryRunner: Layer.Layer<
               }),
             ),
           ),
+          stopTask: (taskId) =>
+            Effect.tryPromise({
+              try: () => queryRuntime.stopTask(taskId),
+              catch: (cause) => queryRunnerError(cause, "stopTask"),
+            }).pipe(
+              Effect.tap(() =>
+                logProtocolEvent({
+                  direction: "outgoing",
+                  stage: "decoded",
+                  payload: { type: "query.stop_task", taskId },
+                }),
+              ),
+            ),
           close: Queue.shutdown(promptQueue).pipe(
             Effect.andThen(closeClaudeQuery(queryRuntime)),
             Effect.tap(() =>
@@ -863,6 +897,7 @@ export function makeClaudeQueryOptions(input: {
       (launchArgSkipPermissions === null || launchArgSkipPermissions === "true"
         ? "bypassPermissions"
         : (input.permissionMode ?? "default")),
+    perTaskStopAffordance: true,
     includePartialMessages: true,
     ...(compiledSelection.effort === undefined
       ? {}
@@ -957,6 +992,9 @@ export const CLAUDE_T3_MCP_TOOL_TIMEOUT_MS = 65 * 60 * 1_000;
 // not pre-approved), but read-only sandboxes pre-approve only the annotated
 // read-only orchestrator tools so a read-only session cannot silently spawn
 // threads or scheduled tasks.
+// The SDK places `mcpServers` in an inline `--mcp-config` process argument.
+// Keep its bearer value in the child environment and reference it from config.
+const CLAUDE_T3_MCP_AUTHORIZATION_ENV = "T3_CODE_MCP_AUTHORIZATION";
 export function claudeMcpQueryOverrides(input: {
   readonly threadId: ThreadId;
   readonly readOnlySandbox: boolean;
@@ -964,6 +1002,7 @@ export function claudeMcpQueryOverrides(input: {
 }): {
   readonly allowedTools?: ReadonlyArray<string>;
   readonly mcpServers?: ClaudeQueryOptions["mcpServers"];
+  readonly mcpEnvironment?: Readonly<Record<string, string>>;
 } {
   const session = McpProviderSession.readMcpProviderSession(input.threadId);
   if (session === undefined) {
@@ -979,11 +1018,12 @@ export function claudeMcpQueryOverrides(input: {
         type: "http",
         url: session.endpoint,
         headers: {
-          Authorization: session.authorizationHeader,
+          Authorization: `\${${CLAUDE_T3_MCP_AUTHORIZATION_ENV}}`,
         },
         timeout: CLAUDE_T3_MCP_TOOL_TIMEOUT_MS,
       },
     },
+    mcpEnvironment: { [CLAUDE_T3_MCP_AUTHORIZATION_ENV]: session.authorizationHeader },
   };
 }
 
@@ -1613,6 +1653,7 @@ export function claudeEffectiveQueryPolicyKey(
   mcpOverrides: {
     readonly allowedTools?: ReadonlyArray<string>;
     readonly mcpServers?: ClaudeQueryOptions["mcpServers"];
+    readonly mcpEnvironment?: Readonly<Record<string, string>>;
   },
 ): string {
   return JSON.stringify({
@@ -1623,6 +1664,7 @@ export function claudeEffectiveQueryPolicyKey(
         : { allowedTools: mcpOverrides.allowedTools }),
     }),
     mcpServers: mcpOverrides.mcpServers,
+    mcpEnvironment: mcpOverrides.mcpEnvironment,
   });
 }
 
@@ -1784,7 +1826,10 @@ function claudePendingBackgroundTask(input: {
   // that started it tells it apart from a background Bash command.
   readonly startedByMonitor: boolean;
   readonly description: string | undefined;
+  readonly command: string | undefined;
+  readonly startedAt: string;
 }): OrchestrationV2PendingBackgroundTask {
+  const command = input.command?.trim();
   return {
     taskId: input.taskId,
     kind: input.startedByMonitor
@@ -1795,6 +1840,8 @@ function claudePendingBackgroundTask(input: {
     ...(input.description !== undefined && input.description.trim().length > 0
       ? { description: input.description }
       : {}),
+    ...(command ? { command } : {}),
+    startedAt: input.startedAt,
   };
 }
 
@@ -1831,9 +1878,16 @@ function claudePendingBackgroundTasksFromRoster(
   return Array.from(roster.values());
 }
 
+/**
+ * Roster snapshots name a task but not its command or start; `known` keeps
+ * what an earlier task_started or snapshot recorded, and `now` dates a task
+ * first seen here.
+ */
 function parseClaudeBackgroundTaskEntry(
   entry: unknown,
   monitorTasks: ReadonlyMap<string, unknown>,
+  known: (taskId: string) => OrchestrationV2PendingBackgroundTask | undefined,
+  now: DateTime.Utc,
 ): OrchestrationV2PendingBackgroundTask | null {
   if (entry === null || typeof entry !== "object") {
     return null;
@@ -1850,11 +1904,14 @@ function parseClaudeBackgroundTaskEntry(
     return null;
   }
   const description = Reflect.get(entry, "description");
+  const previous = known(taskId);
   return claudePendingBackgroundTask({
     taskId,
     taskType,
     startedByMonitor: monitorTasks.has(taskId),
     description: typeof description === "string" ? description : undefined,
+    command: previous?.command,
+    startedAt: previous?.startedAt ?? DateTime.formatIso(now),
   });
 }
 
@@ -3927,6 +3984,13 @@ export function makeClaudeAdapterV2(
               ? readPath
               : undefined;
           const itemType = input.classification.itemType;
+          // Task and Agent launches have separate subagent lifecycle projections.
+          const intent =
+            itemType === "web_search" ||
+            input.classification.normalizedName === "task" ||
+            input.classification.normalizedName === "agent"
+              ? undefined
+              : firstStringInputField(input.toolInput, ["description"]);
           const webSearchPatterns = webSearchPatternsFromClaudeTool({
             toolInput: input.toolInput,
             output: input.output,
@@ -3943,6 +4007,7 @@ export function makeClaudeAdapterV2(
               ? {
                   ...itemBase,
                   type: "command_execution",
+                  ...(intent === undefined ? {} : { intent }),
                   input: commandInputFromClaudeTool(input.toolName, input.toolInput),
                   ...(outputText.length === 0 ? {} : { output: outputText }),
                 }
@@ -3951,6 +4016,7 @@ export function makeClaudeAdapterV2(
                     ...itemBase,
                     type: "file_change",
                     fileName: fileNameFromClaudeTool(input.toolName, input.toolInput),
+                    ...(intent === undefined ? {} : { intent }),
                     ...(outputText.length === 0 ? {} : { diffStr: outputText }),
                   }
                 : itemType === "web_search"
@@ -3979,6 +4045,7 @@ export function makeClaudeAdapterV2(
                   : {
                       ...itemBase,
                       type: "dynamic_tool",
+                      ...(intent === undefined ? {} : { intent }),
                       ...(input.presentation?.toolIcon === undefined
                         ? {}
                         : { toolIcon: input.presentation.toolIcon }),
@@ -4101,6 +4168,19 @@ export function makeClaudeAdapterV2(
           );
         });
 
+        const withWorkflowMemberThreadIds = (
+          workflow: OrchestrationV2SubagentWorkflow,
+          coordinatorChildThreadId: ThreadId,
+        ): OrchestrationV2SubagentWorkflow => ({
+          ...workflow,
+          agents: workflow.agents.map((member) => ({
+            ...member,
+            childThreadId: idAllocator.derive.threadFromProviderThread({
+              driver: CLAUDE_PROVIDER,
+              nativeThreadId: `${coordinatorChildThreadId}:agent:${member.index}`,
+            }),
+          })),
+        });
         const updateClaudeSubagentNode = Effect.fnUntraced(function* (input: {
           readonly context: ActiveClaudeTurnContext;
           readonly taskId: string;
@@ -4108,6 +4188,9 @@ export function makeClaudeAdapterV2(
           readonly prompt?: string;
           readonly title?: string;
           readonly model?: string;
+          readonly workflowName?: string;
+          readonly workflowRunHandles?: OrchestrationV2WorkflowRunHandles;
+          readonly workflowFrame?: unknown;
           // The subagent whose own Agent call started this one; read only
           // when this call registers the subagent.
           readonly owner?: ActiveClaudeSubagent;
@@ -4208,6 +4291,18 @@ export function makeClaudeAdapterV2(
                     existingSubagent.task,
                   )
                 : existingSubagent.task;
+          const workflow = mergeClaudeWorkflowProgress({
+            previous: priorTask?.workflow,
+            ...(input.workflowName === undefined ? {} : { name: input.workflowName }),
+            ...(input.workflowRunHandles === undefined
+              ? {}
+              : { runHandles: input.workflowRunHandles }),
+            message: input.workflowFrame,
+          });
+          const workflowWithThreads =
+            workflow === undefined
+              ? undefined
+              : withWorkflowMemberThreadIds(workflow, childThreadId);
           const task = {
             ...(priorTask ?? {
               id: nodeId,
@@ -4248,6 +4343,7 @@ export function makeClaudeAdapterV2(
             ...(input.title === undefined ? {} : { title: input.title }),
             ...(input.model === undefined ? {} : { model: input.model }),
             ...(input.progress === undefined ? {} : { progress: input.progress }),
+            ...(workflowWithThreads === undefined ? {} : { workflow: workflowWithThreads }),
             ...(input.result === undefined ? {} : { result: input.result }),
             ...(isReopen ? { startedAt: now } : {}),
             completedAt: input.status === "running" ? null : (priorTask?.completedAt ?? now),
@@ -5547,8 +5643,19 @@ export function makeClaudeAdapterV2(
               (taskId, task) =>
                 task.nativeThreadId === input.nativeThreadId && !listedTaskIds.has(taskId),
             );
+            const currentRoster = rosterForNativeThread(
+              yield* Ref.get(pendingBackgroundTasksByNativeThread),
+              input.nativeThreadId,
+            );
+            const lastKnown = yield* Ref.get(lastKnownOpaqueTasks);
+            const now = yield* DateTime.now;
             for (const entry of roster) {
-              const task = parseClaudeBackgroundTaskEntry(entry, monitorTasks);
+              const task = parseClaudeBackgroundTaskEntry(
+                entry,
+                monitorTasks,
+                (taskId) => currentRoster.get(taskId) ?? lastKnown.get(taskId),
+                now,
+              );
               if (task !== null) {
                 nextTasks.push(task);
               }
@@ -5565,6 +5672,10 @@ export function makeClaudeAdapterV2(
             if (!isClaudeNonSubagentTask(message) || message.is_backgrounded === false) {
               return false;
             }
+            const toolCall =
+              message.tool_use_id === undefined || input.activeContext === null
+                ? undefined
+                : findToolCall(input.activeContext, message.tool_use_id);
             yield* upsertPendingBackgroundTask(
               input.nativeThreadId,
               claudePendingBackgroundTask({
@@ -5577,6 +5688,11 @@ export function makeClaudeAdapterV2(
                 }),
                 description:
                   typeof message.description === "string" ? message.description : undefined,
+                command:
+                  toolCall === undefined
+                    ? undefined
+                    : firstStringInputField(toolCall.input, ["command"]),
+                startedAt: DateTime.formatIso(toolCall?.startedAt ?? (yield* DateTime.now)),
               }),
             );
             rosterChanged = true;
@@ -6213,6 +6329,15 @@ export function makeClaudeAdapterV2(
                   new Set(current).add(message.task_id),
                 );
               }
+              const isWorkflow =
+                claudeTaskTypeFromSdkMessage(message) === CLAUDE_WORKFLOW_TASK_TYPE;
+              const reportedWorkflowName = Reflect.get(message, "workflow_name");
+              const workflowName =
+                isWorkflow &&
+                typeof reportedWorkflowName === "string" &&
+                reportedWorkflowName.trim().length > 0
+                  ? reportedWorkflowName.trim()
+                  : undefined;
               yield* recoverResumedClaudeSubagent({
                 context,
                 nativeThreadId: liveQuery.nativeThreadId,
@@ -6227,6 +6352,12 @@ export function makeClaudeAdapterV2(
                 ...(message.prompt === undefined ? {} : { prompt: message.prompt }),
                 ...(model === undefined ? {} : { model }),
                 ...(owner === undefined ? {} : { owner }),
+                ...(isWorkflow
+                  ? {
+                      ...(workflowName === undefined ? {} : { workflowName }),
+                      workflowFrame: message,
+                    }
+                  : {}),
                 title: message.description,
                 status: "running",
                 reopen: true,
@@ -6240,8 +6371,12 @@ export function makeClaudeAdapterV2(
               liveQuery.nativeThreadId,
               message.task_id,
             );
+            const carriesWorkflowTelemetry = hasClaudeWorkflowSnapshot(message);
+            const isWorkflowCoordinator =
+              (yield* Ref.get(sessionSubagentsByTaskId)).get(message.task_id)?.task.workflow !==
+              undefined;
             if (
-              progress.length > 0 &&
+              (carriesWorkflowTelemetry || (progress.length > 0 && !isWorkflowCoordinator)) &&
               !context.ignoredTaskIds.has(message.task_id) &&
               !isBackgroundTask
             ) {
@@ -6249,7 +6384,8 @@ export function makeClaudeAdapterV2(
                 context,
                 taskId: message.task_id,
                 ...(message.tool_use_id === undefined ? {} : { toolUseId: message.tool_use_id }),
-                progress,
+                ...(progress.length === 0 ? {} : { progress }),
+                workflowFrame: message,
                 status: "running",
               });
             }
@@ -6372,6 +6508,16 @@ export function makeClaudeAdapterV2(
             // that settled last, which never saw a subagent an earlier turn
             // launched (a nested one whose Agent call returns now).
             const subagent = yield* resolveSubagentByToolUseId(context, toolResult.tool_use_id);
+            const runHandles = parseClaudeWorkflowRunHandles(claudeNativeToolOutputValue(output));
+            if (subagent !== undefined && runHandles !== undefined) {
+              yield* updateClaudeSubagentNode({
+                context,
+                taskId: subagent.task.nativeTaskRef?.nativeId ?? String(subagent.task.id),
+                toolUseId: toolResult.tool_use_id,
+                workflowRunHandles: runHandles,
+                status: "running",
+              });
+            }
             // A resume task_started reuses the resuming tool call's
             // tool_use_id (e.g. SendMessage), whose tool_result only
             // acknowledges delivery. Only the Agent launch's tool_result may
@@ -7328,9 +7474,14 @@ export function makeClaudeAdapterV2(
             cwd: turnInput.runtimePolicy.cwd,
             attachmentsDir,
             settings: adapterOptions.settings,
-            environment: adapterOptions.environment,
+            environment: { ...adapterOptions.environment, ...mcpOverrides.mcpEnvironment },
             tools: queryPolicy.tools ?? CLAUDE_CODE_PRESET_TOOLS,
-            ...mcpOverrides,
+            ...(mcpOverrides.allowedTools === undefined
+              ? {}
+              : { allowedTools: mcpOverrides.allowedTools }),
+            ...(mcpOverrides.mcpServers === undefined
+              ? {}
+              : { mcpServers: mcpOverrides.mcpServers }),
             permissionMode: queryPolicy.permissionMode,
             ...(queryPolicy.allowDangerouslySkipPermissions === undefined
               ? {}
@@ -7932,6 +8083,42 @@ export function makeClaudeAdapterV2(
               message: { ...turnInput.message, text: "/compact" },
             }),
           steerTurn,
+          stopTask: ({ providerThread, taskId }) =>
+            Effect.gen(function* () {
+              const liveQuery = yield* Ref.get(queryContext);
+              const task = (yield* Ref.get(sessionSubagentsByTaskId)).get(taskId);
+              if (
+                liveQuery === null ||
+                liveQuery.stopping ||
+                liveQuery.nativeThreadId !== providerThread.nativeThreadRef?.nativeId ||
+                task === undefined ||
+                task.task.threadId !== providerThread.appThreadId ||
+                task.task.workflow === undefined ||
+                task.task.status !== "running" ||
+                liveQuery.subagentsFromEarlierProcesses.has(task)
+              ) {
+                return yield* new ProviderAdapter.ProviderAdapterProtocolError({
+                  driver: CLAUDE_PROVIDER,
+                  detail: "No running workflow task belongs to this provider thread",
+                });
+              }
+              if (liveQuery.query.stopTask === undefined) {
+                return yield* new ProviderAdapter.ProviderAdapterProtocolError({
+                  driver: CLAUDE_PROVIDER,
+                  detail: "Claude runtime does not support task-scoped workflow stop",
+                });
+              }
+              yield* liveQuery.query.stopTask(taskId).pipe(
+                Effect.mapError(
+                  (cause) =>
+                    new ProviderAdapter.ProviderAdapterProtocolError({
+                      driver: CLAUDE_PROVIDER,
+                      detail: "Workflow stop request failed",
+                      cause,
+                    }),
+                ),
+              );
+            }),
           interruptTurn,
           respondToRuntimeRequest: Effect.fn("ClaudeAdapterV2.respondToRuntimeRequest")(
             function* (requestInput) {

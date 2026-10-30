@@ -54,6 +54,18 @@ The MCP HTTP server resolves the bearer token and supplies the resulting
 `McpInvocationScope` to tool handlers. Orchestration handlers additionally
 check the `orchestration` capability before reading or mutating state.
 
+Models normally call MCP tools, not a separate session-management CLI. The
+internal `t3 acp-mcp-bridge` stdio adapter and
+`t3 acp-mcp-call <tool-name> <json>` fallback forward to the same endpoint using
+the injected session credentials.
+
+Desktop and web use the same orchestration implementation. Electron launches
+the bundled server and renders its bundled web client; there is no separate
+desktop tool or RPC allowlist. OMP/Pi MCP extensions are materialized inside
+the selected backend's base directory in either app. Desktop builds must be
+rebuilt and repackaged to include these changes; a web build does not replace
+an already-installed desktop release.
+
 ## Provider Injection
 
 ### Codex V2
@@ -170,20 +182,31 @@ extension is installed, the adapter observes its documented `details.results`
 shape and projects task cards with no child thread id. Unknown result shapes
 remain ordinary dynamic tool output.
 
+### OMP V2
+
+OMP uses the same T3-owned extension bridge, launched in RPC mode with the
+extension path and scoped MCP environment variables above. Registered tools
+appear through OMP's `xd://` routes. Its native MCP support does not require a
+second orchestration implementation.
+
+App-owned OMP child sessions support delegation, messaging, reads, waits, and
+cancellation through the shared V2 lifecycle. Native OMP subagents remain owned
+by OMP; Claude-native workflow stopping is not emulated for other providers.
+
 ### Provider Support
 
 A provider instance can run child tasks when its live `ProviderInstance`
 exposes a V2 `orchestrationAdapter` — the same registration the orchestrator
 resolves when a `delegated_task.request` executes. That covers Codex, Claude
 Agent SDK, Cursor Agent SDK, Grok, generic registry agents over ACP, OpenCode,
-OpenCode 2, Pi, Antigravity, and any future driver that builds an adapter.
+OpenCode 2, Pi, OMP, Antigravity, and any future driver that builds an adapter.
 Capability discovery still reports other registered provider instances, but
 marks them unavailable for orchestration when no adapter resolves. This keeps
 provider selection model-visible without allowing a request that cannot run.
 
 ## Tool Surface
 
-The server exposes eleven orchestration tools.
+The toolkits expose delegated-task, thread, schedule, and native-workflow controls.
 
 ### `orchestrator_capabilities`
 
@@ -200,8 +223,11 @@ adapter support, disabled state, missing executable, or missing authentication.
 
 ### `delegate_task`
 
-Creates a T3-owned child thread and immediately dispatches the supplied task
-prompt.
+Creates a T3-owned child thread and dispatches the supplied task prompt.
+`isolation: "shared"` inherits the parent's checkout. With
+`isolation: "worktree"`, the child starts in a new worktree at the parent's
+committed HEAD, without copying uncommitted tracked edits. Workspace preparation
+runs before the provider starts, honoring the configured setup-script completion policy.
 
 ```ts
 type DelegateTaskInput = {
@@ -214,6 +240,7 @@ type DelegateTaskInput = {
   title?: string;
   role?: "implementation" | "research" | "review" | "design" | "test" | "general";
   mode?: "async" | "wait";
+  isolation?: "shared" | "worktree";
   timeoutMs?: number;
   clientRequestId?: string;
   runtimeMode?: "inherit" | "approval-required" | "auto-accept-edits" | "full-access";
@@ -228,22 +255,30 @@ that driver; an explicit `providerInstanceId` is honored exactly and fails
 when unavailable. Selecting a different provider without a model uses that
 provider's first advertised model.
 
-Each delegated review round uses a new `delegate_task` call with the original brief,
-prior findings, responses, and unresolved objections. Track each round by its own `taskId` and use
-a distinct `clientRequestId` per round, stable across retries of that round.
-`childThreadId` is backing storage, not a target for another review round through
-`t3_thread_send`. Ordinary thread messaging remains available for user-requested
-conversations; it does not reopen a completed task. There is no task-level follow-up
-API for preserving the same reviewer session.
+Capability discovery reports each provider's supported `runtimeModes`. Inherited
+mode selection steps down to a supported mode within the caller's ceiling.
+An explicit unsupported mode, or an inherited ceiling with no supported mode,
+is rejected rather than silently escalating.
+
+Task identity is distinct from backing thread identity. Sending a new message
+to a completed app-owned child with `t3_thread_send` allocates a fresh `taskId`
+while retaining the child session. Track that ID for the follow-up's result;
+the original task's published result stays unchanged. Use a distinct
+`clientRequestId` per logical follow-up, stable across retries. Restart
+continuations retain the task identity they continue.
 
 Delegation requires an active parent run owned by the MCP credential's
 provider session. The request becomes the V2 command
 `delegated_task.request`.
 
 `mode: "async"` returns the current durable state immediately.
-`mode: "wait"` waits for the task result, including nested work and completion follow-ups, or until
-the timeout expires. A wait timeout does not cancel the child; the result sets
-`waitTimedOut: true`, and the caller can continue with `task_status`.
+`mode: "wait"` returns on a result, a blocking question, or timeout. A blocking
+question sets `hasPendingQuestion: true` without making the task terminal;
+inspect and answer it with `t3_pending_request_list`, `t3_pending_request_read`,
+and `t3_pending_request_respond` using the child thread ID. Suggested
+`initialAnswer` text is preserved when provided. Completion still wakes the
+parent after a question releases its wait. A timeout does not cancel the child
+and sets `waitTimedOut: true`.
 
 ```ts
 type DelegateTaskResult = {
@@ -254,6 +289,7 @@ type DelegateTaskResult = {
   status: "queued" | "running" | "waiting" | "completed" | "failed" | "cancelled" | "interrupted";
   workState: "working" | "waiting_for_children" | "result_available";
   hasPendingChildRuns: boolean;
+  hasPendingQuestion: boolean;
   providerInstanceId: string;
   model: string | null;
   summary: string | null;
@@ -269,23 +305,24 @@ type DelegateTaskResult = {
 ### `task_status`
 
 Reads a delegated task from the parent thread's durable projection. A task ID
-from another parent thread is rejected. `childRunId` identifies the original
-run. `workState` distinguishes active work, a finished turn waiting for children,
-and an available result. The task remains nonterminal until its known work
-finishes. Its published `summary` and result transfer then remain stable across
-later follow-ups. `hasPendingChildRuns` reports later queued or executing turns;
+from another parent thread is rejected. `childRunId` identifies that task's
+run, including its current restart continuation. `workState` distinguishes active
+work, a finished turn waiting for children, and an available result. The task
+remains nonterminal until its known work finishes. Its published `summary` and
+result transfer then remain stable across later tasks on the same child thread.
+`hasPendingChildRuns` reports later queued or executing turns;
 `latestTerminal*` exposes later executed, non-monitor results without replacing
 the published task result.
 
 ### `task_cancel`
 
-Stops the child thread with the internal `thread.stop` command, then stops every
-task the child delegated, and disposes automatic parent delivery. Like a user Stop,
-`thread.stop` interrupts the running turn, holds queued turns, and ends pull request
-watches. A nonterminal task with no interruptible run is rejected. A terminal task
-returns its existing status, and its child thread still stops, including later
-runs and watch wakes. Published task results remain available. It accepts an
-optional cancellation reason.
+Stops the child thread and its delegated descendants, disposing automatic parent
+delivery. Like a user Stop, this interrupts active work, holds queued turns, and
+ends pull request watches. The selected task's own queued runs are cancelled,
+including held runs; unrelated queued turns remain held rather than cancelled.
+Reused child threads are traversed once. A nonterminal task with no stoppable
+run is rejected. A terminal task keeps its published status and result while
+later work on its child still stops. An optional cancellation reason is accepted.
 
 ### `create_threads`
 
@@ -345,6 +382,7 @@ messages, and proposed plans. The `activity` view also returns summarized tool,
 reasoning, checkpoint, handoff, and runtime-request items. Large item text is
 bounded and reports whether it was truncated. `afterPosition` and
 `nextPosition` support incremental reads.
+Activity items identifying native or app-owned subagents include `subagentId`.
 
 Thread and message results include required `createdBy` and `creationSource`
 provenance. MCP-created threads and user-role messages use `createdBy: "agent"`
@@ -372,6 +410,8 @@ resultant title, title-regeneration marker, and linked pull request. Reusing a
 `clientRequestId` for the same action and thread replays the same command
 receipt. Thread list and read results expose the linked pull request, and thread
 detail also exposes an in-flight title regeneration.
+List and read also expose the complete `pullRequests` array, rather than only
+the primary linked pull request.
 
 ### `t3_thread_send`
 
@@ -387,6 +427,8 @@ Sends a message to any ordinary or delegated thread in the environment:
 The target runtime and interaction modes may not be broader than the caller's.
 Stable command and message IDs are derived from `clientRequestId` for
 idempotent retries.
+When the message creates a new delegated follow-up, the result includes its
+fresh `taskId`.
 
 ### `t3_thread_wait`
 
@@ -402,26 +444,43 @@ Without `runId`, it selects the newest interruptible run. A terminal run is
 returned unchanged, and a thread with no active provider turn returns
 `no_active_run`.
 
+### `t3_workflow_stop`
+
+Stops one running Claude-native workflow coordinator using the owning `threadId`
+and its `subagentId` from an activity read. It stops the whole workflow, including
+phases and agents, without interrupting the parent thread or other workflows.
+Individual phases and agents are not independently stoppable. Stale sessions,
+non-coordinator entries, and unsupported providers return explicit errors.
+The same operation is exposed through the app's workflow controls.
+
+Provider-native child thread IDs can identify transcript-only projections. Stop
+targets the owning thread and coordinator, not those child IDs. The WebSocket
+operation and UI controls require `orchestration:operate`.
+
+### Deferred Self-Settlement
+
+`t3_thread_organize` with `action: "settle"` defers an agent's request to settle
+its own active thread. The response sets `settlesWhenTurnEnds: true`; the thread
+settles after that run completes successfully, not while the agent is still
+responding. Failed or interrupted runs do not trigger that settlement.
+
 ## Delegated Task Lifecycle
 
 The MCP server is a command ingress into V2. It does not call provider adapters
 directly.
 
-```text
-provider model
-  -> MCP tools/call delegate_task
-  -> authenticated OrchestratorMcpService
-  -> shared ThreadManagementService
-  -> V2 delegated_task.request command
-  -> child thread + child run
-  -> parent app_owned subagent projection
-  -> parent/child execution nodes
-  -> consumed subagent_spawn context transfer
-  -> normal provider effect and runtime ingestion
-  -> child run reaches a terminal state
-  -> parent subagent/node/turn item finalized
-  -> consumed subagent_result context transfer
-  -> wait result or later task_status result
+```mermaid
+flowchart TD
+  Harness["Harness session"] --> MCP["Scoped MCP tool call"]
+  MCP --> Command["V2 command and durable receipt"]
+  Command --> Child["Child thread, task ID, and run"]
+  Child --> Workspace{"Workspace ready?"}
+  Workspace -->|shared| Runtime["Provider adapter and event ingestion"]
+  Workspace -->|worktree| Prepare["Committed-HEAD worktree and setup"]
+  Prepare --> Runtime
+  Runtime -->|blocking question| Question["Nonterminal wait response; completion wake retained"]
+  Runtime -->|terminal| Finalize["Task-specific result transfer"]
+  Finalize --> Result["Wait response, task_status, or parent wake"]
 ```
 
 The child thread has lineage relationship `subagent` and points back to the
@@ -438,8 +497,8 @@ results use the latest assistant content from the final work turn.
 
 ## Policy And Idempotency
 
-- A child runtime mode may stay equal to or become narrower than the parent
-  mode. It may not escalate privileges.
+- A child runtime mode must be supported by its provider and stay within the
+  caller's ceiling. Inheritance may step down; it may not escalate privileges.
 - A child interaction mode may stay equal to or narrow from `default` to
   `plan`. It may not escalate from `plan` to `default`.
 - Thread tools take any thread in the environment as a target. For a thread
@@ -447,8 +506,9 @@ results use the latest assistant content from the final work turn.
 - A tool that changes another thread needs the calling thread's live run, and
   the target's runtime and interaction modes may not be broader than the
   caller's. This is the same privilege ceiling as child creation.
-- Provider instances must be enabled, installed, available, authenticated, and
-  backed by a V2 adapter.
+- Provider instances must be enabled for the selected project, installed,
+  available, authenticated, and backed by a V2 adapter. Accepted command receipts
+  replay before a later provider-disable guard, without creating duplicate work.
 - A requested model must be advertised by the selected provider when the
   provider publishes a model list.
 - `clientRequestId` derives stable command, thread, and message IDs within the
@@ -494,8 +554,9 @@ orchestration_error
 ## Verification
 
 The integration test uses the real MCP toolkit registration, V2 orchestrator,
-SQL persistence, event ingestion, projections, and checkpoints. Only the
-external provider adapters are deterministic test implementations.
+SQL persistence, event ingestion, projections, and checkpoints. External provider
+adapters are deterministic; unused Git and workspace-launch APIs are test seams.
+Workspace preparation has separate launch-service coverage.
 
 Coverage includes:
 
@@ -506,11 +567,17 @@ Coverage includes:
 - spawn and result context transfers;
 - async status polling;
 - cancellation;
+- fresh follow-up task identity and preserved original results;
 - batch ordinary-thread creation;
 - thread listing and timeline reads, including another project's threads;
 - ordinary-thread send, wait, steering, and interruption;
 - inheritance and per-thread provider overrides; and
 - idempotent retries.
+
+Isolated MCP smoke checks also cover question-aware waits, suggested answers,
+held-queue cancellation, deferred self-settlement, and denial of invalid native
+workflow stops without interrupting the caller. These do not make paid model
+requests or prove live provider execution.
 
 Provider adapter tests separately verify Codex, Claude, Cursor, Grok, and ACP
 Registry behavior and MCP injection. The provider-session manager test verifies

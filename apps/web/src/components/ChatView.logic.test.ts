@@ -18,6 +18,7 @@ import {
   MessageId,
   ProjectId,
   ProviderInstanceId,
+  ProviderThreadId,
   ThreadId,
   RunId,
   TurnItemId,
@@ -69,6 +70,7 @@ import {
   deriveCommittedServerUserMessageIds,
   deriveComposerSendState,
   deriveLockedProvider,
+  resolveNativeProviderIdentity,
   dismissBranchMismatchForSession,
   getStartedThreadModelChangeBlockReason,
   hasEnvironmentReconnectWarningGraceElapsed,
@@ -1447,6 +1449,187 @@ describe("resolveComposerProviderSelection", () => {
       ).toBeUndefined();
     },
   );
+
+  it("resolves detached native OMP harness when thread model selection is Codex", () => {
+    const ompEntry = entry("omp", "omp");
+    const codexEntry = entry("codex", "codex");
+    const entries = [ompEntry, codexEntry];
+    const thread = makeThread({
+      id: ThreadId.make("thread-omp-1"),
+      modelSelection: { instanceId: codexEntry.instanceId, model: "gpt-6-luna" },
+      itemCount: 1,
+      runtime: null,
+    });
+    const baseProjection = makeThreadProjectionFixture();
+    const projection = {
+      ...baseProjection,
+      thread: {
+        ...baseProjection.thread,
+        id: thread.id,
+        activeProviderThreadId: ProviderThreadId.make("omp-thread-root"),
+        modelSelection: thread.modelSelection,
+      },
+      providerThreads: [
+        {
+          id: ProviderThreadId.make("omp-thread-root"),
+          driver: ProviderDriverKind.make("omp"),
+          providerInstanceId: ompEntry.instanceId,
+          providerSessionId: null,
+          appThreadId: thread.id,
+          ownerNodeId: null,
+          nativeThreadRef: null,
+          nativeConversationHeadRef: null,
+          status: "idle" as const,
+          firstRunOrdinal: null,
+          lastRunOrdinal: null,
+          handoffIds: [],
+          forkedFrom: null,
+          createdAt: baseProjection.thread.createdAt,
+          updatedAt: baseProjection.thread.updatedAt,
+        },
+      ],
+    };
+
+    const nativeIdentity = resolveNativeProviderIdentity({
+      runtime: thread.runtime,
+      projection,
+    });
+    expect(nativeIdentity).toEqual({
+      driver: ProviderDriverKind.make("omp"),
+      instanceId: ompEntry.instanceId,
+    });
+
+    const lockedProvider = deriveLockedProvider({
+      thread,
+      selectedProvider: null,
+      threadProvider: thread.modelSelection.instanceId,
+      providers: entries.map((e) => e.snapshot),
+      nativeDriver: nativeIdentity?.driver ?? null,
+    });
+    expect(lockedProvider).toBe("omp");
+
+    const selection = resolveComposerProviderSelection({
+      entries,
+      candidateInstanceIds: [
+        null,
+        thread.runtime?.providerInstanceId,
+        nativeIdentity?.instanceId,
+        thread.modelSelection.instanceId,
+      ],
+      lockedProvider,
+      lockedInstanceId: nativeIdentity?.instanceId,
+    });
+    expect(selection.selectedProviderEntry?.instanceId).toBe(ompEntry.instanceId);
+  });
+
+  it("gives attached runtime precedence over detached native provider thread", () => {
+    const threadId = ThreadId.make("thread-1");
+    const baseProjection = makeThreadProjectionFixture();
+    const projection = {
+      ...baseProjection,
+      thread: {
+        ...baseProjection.thread,
+        id: threadId,
+        activeProviderThreadId: ProviderThreadId.make("omp-thread-root"),
+      },
+      providerThreads: [
+        {
+          id: ProviderThreadId.make("omp-thread-root"),
+          driver: ProviderDriverKind.make("omp"),
+          providerInstanceId: ProviderInstanceId.make("omp"),
+          providerSessionId: null,
+          appThreadId: threadId,
+          ownerNodeId: null,
+          nativeThreadRef: null,
+          nativeConversationHeadRef: null,
+          status: "idle" as const,
+          firstRunOrdinal: null,
+          lastRunOrdinal: null,
+          handoffIds: [],
+          forkedFrom: null,
+          createdAt: baseProjection.thread.createdAt,
+          updatedAt: baseProjection.thread.updatedAt,
+        },
+      ],
+    };
+    const runtime = {
+      ...readySession,
+      providerName: ProviderDriverKind.make("claudeAgent"),
+      providerInstanceId: ProviderInstanceId.make("claude_work"),
+    };
+
+    const identity = resolveNativeProviderIdentity({ runtime, projection });
+    expect(identity).toEqual({
+      driver: ProviderDriverKind.make("claudeAgent"),
+      instanceId: ProviderInstanceId.make("claude_work"),
+    });
+  });
+
+  it("matches native instance from catalog when detached", () => {
+    const threadId = ThreadId.make("thread-1");
+    const ompCustom = entry("omp", "omp_custom");
+    const codex = entry("codex", "codex");
+    const baseProjection = makeThreadProjectionFixture();
+    const projection = {
+      ...baseProjection,
+      thread: {
+        ...baseProjection.thread,
+        id: threadId,
+        activeProviderThreadId: ProviderThreadId.make("omp-thread-root"),
+      },
+      providerThreads: [
+        {
+          id: ProviderThreadId.make("omp-thread-root"),
+          driver: ProviderDriverKind.make("omp"),
+          providerInstanceId: ompCustom.instanceId,
+          providerSessionId: null,
+          appThreadId: threadId,
+          ownerNodeId: null,
+          nativeThreadRef: null,
+          nativeConversationHeadRef: null,
+          status: "idle" as const,
+          firstRunOrdinal: null,
+          lastRunOrdinal: null,
+          handoffIds: [],
+          forkedFrom: null,
+          createdAt: baseProjection.thread.createdAt,
+          updatedAt: baseProjection.thread.updatedAt,
+        },
+      ],
+    };
+
+    const identity = resolveNativeProviderIdentity({ runtime: null, projection });
+    expect(identity?.instanceId).toBe(ompCustom.instanceId);
+
+    const selection = resolveComposerProviderSelection({
+      entries: [ompCustom, codex],
+      candidateInstanceIds: [null, null, identity?.instanceId, codex.instanceId],
+      lockedProvider: identity?.driver ?? null,
+      lockedInstanceId: identity?.instanceId,
+    });
+    expect(selection.selectedProviderEntry?.instanceId).toBe(ompCustom.instanceId);
+  });
+
+  it("falls back to desired selection when native projection is absent or loading", () => {
+    const codex = entry("codex", "codex");
+    const thread = makeThread({
+      modelSelection: { instanceId: codex.instanceId, model: "gpt-6-luna" },
+      itemCount: 1,
+      runtime: null,
+    });
+
+    const loadingIdentity = resolveNativeProviderIdentity({ runtime: null, projection: null });
+    expect(loadingIdentity).toBeNull();
+
+    const lockedProvider = deriveLockedProvider({
+      thread,
+      selectedProvider: null,
+      threadProvider: thread.modelSelection.instanceId,
+      providers: [codex.snapshot],
+      nativeDriver: loadingIdentity?.driver ?? null,
+    });
+    expect(lockedProvider).toBe("codex");
+  });
 
   it("leaves a new draft free to select a different driver", () => {
     const original = entry("claudeAgent", "claude_work");

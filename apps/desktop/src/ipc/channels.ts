@@ -135,3 +135,11 @@ export const RECEIVE_PROVIDER_AUTH_CALLBACK_CHANNEL = "desktop:receive-provider-
 export const CANCEL_PROVIDER_AUTH_CALLBACK_CHANNEL = "desktop:cancel-provider-auth-callback";
 export const TAKE_LEGACY_LOCAL_STORAGE_CHANNEL = "desktop:take-legacy-local-storage";
 export const COMPLETE_LEGACY_LOCAL_STORAGE_CHANNEL = "desktop:complete-legacy-local-storage";
+
+export const PORT_FORWARD_LIST_CHANNEL = "desktop:port-forward-list";
+export const PORT_FORWARD_START_CHANNEL = "desktop:port-forward-start";
+export const PORT_FORWARD_STOP_CHANNEL = "desktop:port-forward-stop";
+export const PORT_FORWARD_STOP_ALL_CHANNEL = "desktop:port-forward-stop-all";
+export const PORT_FORWARD_CHANGED_CHANNEL = "desktop:port-forward-changed";
+export const PORT_FORWARD_CONNECTION_REQUEST_CHANNEL = "desktop:port-forward-connection-request";
+export const PORT_FORWARD_RESOLVE_CONNECTION_CHANNEL = "desktop:port-forward-resolve-connection";

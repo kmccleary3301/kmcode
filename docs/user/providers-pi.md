@@ -30,8 +30,8 @@ Pi skills appear in the composer's `$` menu. This includes user skills and proje
 loads for the current workspace; selecting one uses Pi's native skill expansion.
 
 Pi loads its normal user and project extensions. Blocking `select`, `confirm`, `input`, and `editor`
-dialogs work in T3 Code. Notifications appear in the work log. Pi terminal decoration such as
-titles, status lines, and widgets does not have a T3 Code equivalent.
+dialogs work in T3 Code. Notifications appear in the work log. Arbitrary terminal-only
+decoration is not mirrored; supported structured OMP displays are described below.
 
 ## Permission Modes
 
@@ -53,6 +53,37 @@ T3 Code's `delegate_task` tool creates durable child threads in the shared subag
 installs Pi's example `subagent` extension, T3 Code also shows its task progress and results in that
 UI. Pi runs those children without a session, so they cannot be opened or resumed as T3 Code
 threads.
+
+## OMP completion and timing
+
+Oh My Pi can finish a tool call while its background subagents continue. T3 Code follows OMP's
+native settlement state for the root turn and tracks each child's native completion separately.
+Completed child timers stay fixed while other children work; resumed jobs start a new activation
+without reopening unrelated completed children.
+
+The same recorded state is used on desktop and after a web client reconnects. An assistant's final
+text alone is not a completion signal. Older sessions whose terminal event was lost need an
+evidence-backed repair rather than another model request.
+
+## Native OMP displays
+
+OMP task panes show reported names, roles, current tools, completion percentage, requests,
+context usage, and API-equivalent cost. Missing values stay absent. Sparse waiting snapshots
+retain previously reported task metadata; a new activation starts with fresh progress.
+
+Shell commands and Python/JavaScript evaluations keep input above output at desktop and phone
+widths. Native plans show phases and item states. Waiting panes follow actual task, shell,
+and eval jobs, stop their shimmer when dependencies settle, and retain fixed terminal durations.
+IRC notices keep their sender and recipient. Structured search results use separate Query,
+Answer, Sources, and Metadata sections. Rich tool panes also offer a collapsed raw result for
+details not represented by the dedicated view.
+
+## Thread harness identity
+
+An existing native OMP conversation remains an OMP thread after reconnect or runtime detach.
+The model picker uses its attached runtime or recorded root provider thread as the harness
+identity, rather than a stale preferred-model setting. A model named `openai-codex/...` inside
+OMP is still running through OMP, not the separate Codex harness.
 
 ## Troubleshooting
 

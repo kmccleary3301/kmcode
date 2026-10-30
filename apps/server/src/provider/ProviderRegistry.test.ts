@@ -61,6 +61,7 @@ import type { ProviderInstance, ProviderWorkspaceSnapshot } from "./ProviderDriv
 import * as ProviderInstanceRegistry from "./ProviderInstanceRegistry.ts";
 import * as ProviderRegistry from "./ProviderRegistry.ts";
 import { makeManualOnlyProviderMaintenanceCapabilities } from "./providerMaintenance.ts";
+import * as ThreadLiveOverlay from "../orchestration-v2/ThreadLiveOverlay.ts";
 const decodeServerSettings = Schema.decodeSync(ServerSettings);
 const encodeServerSettings = Schema.encodeSync(ServerSettings);
 const encodedDefaultServerSettings = encodeServerSettings(DEFAULT_SERVER_SETTINGS);
@@ -2721,6 +2722,7 @@ it.layer(
             OpenCodeRuntime.layer.pipe(Layer.provide(OpenCodeServerLedger.layerTest)),
           ),
           Layer.provideMerge(layerBackgroundPolicyAlwaysRun),
+          Layer.provideMerge(ThreadLiveOverlay.layer),
           // NO spawner mock — `ChildProcessSpawner` is supplied by the
           // outer `NodeServices.layer` on `it.layer(...)` and will
           // genuinely spawn a subprocess. The missing-binary ENOENT is
@@ -2838,6 +2840,7 @@ it.layer(
           ),
           Layer.provideMerge(NodeServices.layer),
           Layer.provideMerge(layerBackgroundPolicyAlwaysRun),
+          Layer.provideMerge(ThreadLiveOverlay.layer),
         );
         const runtimeServices = yield* Layer.build(layerProviderRegistry).pipe(
           Scope.provide(scope),
@@ -2943,6 +2946,7 @@ it.layer(
             OpenCodeRuntime.layer.pipe(Layer.provide(OpenCodeServerLedger.layerTest)),
           ),
           Layer.provideMerge(NodeServices.layer),
+          Layer.provideMerge(ThreadLiveOverlay.layer),
           Layer.provideMerge(layerBackgroundPolicyAlwaysRun),
         );
         const runtimeServices = yield* Layer.build(layerProviderRegistry).pipe(
@@ -3031,6 +3035,7 @@ it.layer(
                 throw new Error(`Unexpected args: ${command} ${joined}`);
               }),
             ),
+            Layer.provideMerge(ThreadLiveOverlay.layer),
           );
           const runtimeServices = yield* Layer.build(
             Layer.mergeAll(

@@ -11,6 +11,7 @@ import type { ProviderInstanceEntry } from "../../providerInstances";
 import { Button } from "../ui/button";
 import { ProviderInstanceIcon } from "./ProviderInstanceIcon";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
+import { LiveViewPausedNote } from "../../hooks/useSubagentLiveContent";
 
 /**
  * Stands in for the composer on a provider-native subagent thread. The
@@ -30,6 +31,7 @@ export function ProviderSubagentBar(props: {
   readonly onOpenParent: (() => void) | null;
   readonly onOpenAgents?: (() => void) | null;
   readonly liveContent?: OrchestrationV2SubagentLiveContent | null;
+  readonly liveViewRateLimited?: boolean;
 }) {
   const statusRef = useRef<HTMLSpanElement>(null);
   const { status } = props;
@@ -107,6 +109,11 @@ export function ProviderSubagentBar(props: {
             </div>
           </TooltipPopup>
         </Tooltip>
+      ) : null}
+      {props.liveViewRateLimited && !props.liveContent ? (
+        <span className="max-w-xs truncate text-xs text-muted-foreground">
+          <LiveViewPausedNote />
+        </span>
       ) : null}
       <span className="ms-auto shrink-0 text-muted-foreground max-sm:hidden">Runs on its own</span>
       {props.onOpenAgents ? (

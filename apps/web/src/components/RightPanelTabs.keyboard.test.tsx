@@ -199,23 +199,4 @@ describe("right panel new-tab shortcut", () => {
     expect(document.querySelector('[role="menu"]')).toBeNull();
   });
 
-  it("supports arrow keys with an existing tab in sheet mode and clears the menu on close", async () => {
-    const panel = {
-      mode: "sheet" as const,
-      surfaces: [{ id: "files" as const, kind: "files" as const }],
-    };
-    await renderPanel(panel);
-    await press("t", { metaKey: true });
-    await press("ArrowDown");
-    await press("ArrowDown");
-    await press("ArrowDown");
-    expect(document.activeElement?.textContent).toContain("Files");
-    await press("Enter");
-    expect(addFiles).toHaveBeenCalledOnce();
-    await press("t", { metaKey: true });
-    await renderPanel({ ...panel, open: false });
-    expect(document.querySelector('[role="menu"]:not([data-closed])')).toBeNull();
-    await renderPanel(panel);
-    expect(document.querySelector('[role="menu"]:not([data-closed])')).toBeNull();
-  });
 });

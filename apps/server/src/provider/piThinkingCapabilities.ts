@@ -2,6 +2,8 @@ import { type ModelCapabilities, type ProviderOptionChoice } from "@t3tools/cont
 import { createModelCapabilities } from "@t3tools/shared/model";
 import * as Predicate from "effect/Predicate";
 
+import type { PiDialect } from "./piDialect.ts";
+
 /**
  * Pi's full thinking ladder. Extra High (`xhigh`) and Max are opt-in per
  * model via `thinkingLevelMap`; advertising them globally makes
@@ -28,10 +30,17 @@ export const EMPTY_PI_MODEL_CAPABILITIES: ModelCapabilities = createModelCapabil
 export function thinkingCapabilitiesForPiModel(
   model: unknown,
   defaultThinkingLevel: unknown,
+  binary: PiDialect["binary"],
 ): ModelCapabilities {
-  const levels = supportedPiThinkingLevelsFromModel(model);
+  const levels =
+    binary === "omp"
+      ? supportedOmpThinkingLevelsFromModel(model)
+      : supportedPiThinkingLevelsFromModel(model);
   if (levels.length === 0) return EMPTY_PI_MODEL_CAPABILITIES;
-  const defaultLevel = clampPiThinkingLevel(defaultThinkingLevel, levels);
+  const defaultLevel =
+    binary === "omp"
+      ? clampOmpThinkingLevel(defaultThinkingLevel, levels)
+      : clampPiThinkingLevel(defaultThinkingLevel, levels);
   return createModelCapabilities({
     optionDescriptors: [
       {
@@ -70,6 +79,23 @@ function clampPiThinkingLevel(
 }
 
 /**
+ * Mirrors OMP's `clampThinkingLevelForModel`: the highest supported effort at
+ * or below the request, else the lowest effort. `off` only matches itself.
+ */
+function clampOmpThinkingLevel(
+  input: unknown,
+  availableLevels: ReadonlyArray<PiThinkingLevel>,
+): PiThinkingLevel | undefined {
+  if (input === "off") return "off";
+  const requestedIndex = PI_THINKING_LEVELS.findIndex((level) => level === input);
+  if (requestedIndex === -1) return undefined;
+  const efforts = availableLevels.filter((level) => level !== "off");
+  return (
+    efforts.findLast((level) => PI_THINKING_LEVELS.indexOf(level) <= requestedIndex) ?? efforts[0]
+  );
+}
+
+/**
  * Mirror of `@earendil-works/pi-ai` `getSupportedThinkingLevels`.
  *
  * A reasoning model always exposes off through high unless a map entry is
@@ -84,6 +110,18 @@ function supportedPiThinkingLevelsFromModel(model: unknown): ReadonlyArray<PiThi
     if (level === "xhigh" || level === "max") return mapped !== undefined;
     return true;
   });
+}
+
+/**
+ * Mirror of OMP's `getSupportedThinkingLevels`: `off`, then the effort ladder
+ * baked into `thinking.efforts`. OMP models carry no `thinkingLevelMap`; a
+ * reasoning model without an effort ladder gets no selector.
+ */
+function supportedOmpThinkingLevelsFromModel(model: unknown): ReadonlyArray<PiThinkingLevel> {
+  if (recordField(model, "reasoning") !== true) return [];
+  const efforts = recordField(recordField(model, "thinking"), "efforts");
+  if (!Array.isArray(efforts) || efforts.length === 0) return [];
+  return PI_THINKING_LEVELS.filter((level) => level === "off" || efforts.includes(level));
 }
 
 function thinkingLevelMapFromModel(model: unknown): Record<string, unknown> | undefined {

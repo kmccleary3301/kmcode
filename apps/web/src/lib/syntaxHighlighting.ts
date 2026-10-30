@@ -30,7 +30,7 @@ const FALLBACK_SYNTAX_THEME_NAMES = {
   dark: "github-dark",
 } as const;
 
-function syntaxThemeRegistration(name: string, variant: NormalizedAppearanceVariant) {
+export function syntaxThemeRegistration(name: string, variant: NormalizedAppearanceVariant) {
   return {
     name,
     type: variant.appearance,

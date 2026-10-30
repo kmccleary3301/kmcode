@@ -155,14 +155,17 @@ export const layer: Layer.Layer<
                 INSERT INTO orchestration_v2_turn_item_positions (
                   thread_id,
                   turn_item_id,
+                  run_id,
                   ordinal
                 )
                 VALUES (
                   ${stored.event.threadId},
                   ${stored.event.payload.id},
+                  ${stored.event.payload.runId},
                   ${stored.event.payload.ordinal}
                 )
                 ON CONFLICT(thread_id, turn_item_id) DO UPDATE SET
+                  run_id = excluded.run_id,
                   ordinal = excluded.ordinal
                 `;
               }

@@ -1,17 +1,24 @@
 import { describe, expect, it } from "vite-plus/test";
 import * as Schema from "effect/Schema";
 
-import type { ProjectId } from "./baseSchemas.ts";
+import { ProjectId } from "./baseSchemas.ts";
+import { AuthOrchestrationOperateScope, AuthSettingsWriteScope } from "./auth.ts";
 import { ProviderDriverKind, ProviderInstanceId } from "./providerInstance.ts";
 import {
   ClientSettingsSchema,
   ClientSettingsPatch,
   ClaudeSettings,
+  AntigravitySettings,
+  OpenCodeSettings,
   DEFAULT_SERVER_SETTINGS,
+  isSecretSetting,
+  requiredScopesForProjectMutation,
   resolveProviderInstanceEnabled,
+  resolveProjectProviderInstanceEnabled,
   ServerSettings,
   ServerSettingsPatch,
 } from "./settings.ts";
+import { ProjectMutation } from "./project.ts";
 
 const decodeClientSettings = Schema.decodeUnknownSync(ClientSettingsSchema);
 const decodeClientSettingsPatch = Schema.decodeUnknownSync(ClientSettingsPatch);
@@ -20,6 +27,39 @@ const decodeServerSettings = Schema.decodeUnknownSync(ServerSettings);
 const decodeServerSettingsPatch = Schema.decodeUnknownSync(ServerSettingsPatch);
 const encodeServerSettings = Schema.encodeSync(ServerSettings);
 const decodeClaudeSettings = Schema.decodeUnknownSync(ClaudeSettings);
+
+describe("project mutation authorization scopes", () => {
+  it("requires settings-write when scripts are changed", () => {
+    const mutation = Schema.decodeUnknownSync(ProjectMutation)({
+      type: "project.update",
+      commandId: "command:project-update",
+      projectId: "project:test",
+      scripts: [],
+    });
+    expect(requiredScopesForProjectMutation(mutation)).toEqual([
+      AuthOrchestrationOperateScope,
+      AuthSettingsWriteScope,
+    ]);
+  });
+
+  it("requires only orchestration operate for other project mutations", () => {
+    const mutation = Schema.decodeUnknownSync(ProjectMutation)({
+      type: "project.update",
+      commandId: "command:project-update",
+      projectId: "project:test",
+      name: "Renamed",
+    });
+    expect(requiredScopesForProjectMutation(mutation)).toEqual([AuthOrchestrationOperateScope]);
+  });
+});
+
+describe("provider setting secrets", () => {
+  it("identifies password controls from field annotations", () => {
+    expect(isSecretSetting(AntigravitySettings.fields.apiKey)).toBe(true);
+    expect(isSecretSetting(OpenCodeSettings.fields.serverPassword)).toBe(true);
+    expect(isSecretSetting(OpenCodeSettings.fields.serverUrl)).toBe(false);
+  });
+});
 
 describe("ServerSettings response streaming", () => {
   it("defaults to paragraph buffering", () => {
@@ -103,6 +143,32 @@ describe("ClientSettings rich text composer", () => {
     const preference = { composerRichTextEnabled: false };
     expect(decodeClientSettingsPatch(preference)).toEqual(preference);
     expect(encodeClientSettings(decodeClientSettings(preference))).toMatchObject(preference);
+  });
+});
+
+describe("ClientSettings port forwarding exclusions", () => {
+  it("defaults to no exclusions and round-trips environment-scoped targets", () => {
+    const exclusion = {
+      environmentId: "env-remote",
+      remotePort: 5173,
+      hidden: false,
+    };
+    expect(decodeClientSettings({}).portForwardExclusions).toEqual([]);
+    expect(decodeClientSettingsPatch({ portForwardExclusions: [exclusion] })).toEqual({
+      portForwardExclusions: [exclusion],
+    });
+    expect(
+      encodeClientSettings(decodeClientSettings({ portForwardExclusions: [exclusion] }))
+        .portForwardExclusions,
+    ).toEqual([exclusion]);
+  });
+
+  it.each([0, 65536])("rejects out-of-range excluded port %s", (remotePort) => {
+    expect(() =>
+      decodeClientSettingsPatch({
+        portForwardExclusions: [{ environmentId: "env-remote", remotePort, hidden: true }],
+      }),
+    ).toThrow();
   });
 });
 
@@ -344,6 +410,32 @@ describe("ClientSettings chat width", () => {
   it("rejects unsupported widths", () => {
     expect(() => decodeClientSettings({ chatWidth: "huge" })).toThrow();
     expect(() => decodeClientSettingsPatch({ chatWidth: "huge" })).toThrow();
+  });
+});
+
+describe("ClientSettings transcript style", () => {
+  it("defaults to the Minimal transcript for settings without a saved style", () => {
+    expect(decodeClientSettings({}).transcriptStyle).toBe("minimal");
+  });
+
+  it.each(["km", "terminal", "minimal", "minimal-plus"])("round-trips the %s style", (transcriptStyle) => {
+    const settings = decodeClientSettings({ transcriptStyle });
+    expect(encodeClientSettings(settings).transcriptStyle).toBe(transcriptStyle);
+    expect(decodeClientSettingsPatch({ transcriptStyle }).transcriptStyle).toBe(transcriptStyle);
+  });
+
+  it("rejects unsupported styles", () => {
+    expect(() => decodeClientSettings({ transcriptStyle: "cards" })).toThrow();
+  });
+
+  it("keeps Minimal+'s latest two steps open unless configured", () => {
+    expect(decodeClientSettings({}).liveStepsKeptOpen).toBe(2);
+    expect(decodeClientSettingsPatch({ liveStepsKeptOpen: 0 })).toEqual({ liveStepsKeptOpen: 0 });
+    expect(decodeClientSettingsPatch({ liveStepsKeptOpen: 8 })).toEqual({ liveStepsKeptOpen: 8 });
+  });
+
+  it.each([-1, 9, 1.5])("rejects an invalid kept-open step count: %s", (value) => {
+    expect(() => decodeClientSettingsPatch({ liveStepsKeptOpen: value })).toThrow();
   });
 });
 
@@ -938,6 +1030,37 @@ describe("provider enabled defaults", () => {
     expect(
       resolveProviderInstanceEnabled({ driver: codex, enabled: false, config: { enabled: true } }),
     ).toBe(false);
+  });
+
+  it("applies project provider overrides and preserves default-instance behavior", () => {
+    const projectId = ProjectId.make("project:provider-enable-overrides");
+    const codexId = ProviderInstanceId.make("codex");
+    const disabledCodexId = ProviderInstanceId.make("codex-work");
+    const ompId = ProviderInstanceId.make("omp");
+    const unknownId = ProviderInstanceId.make("not-configured");
+    const settings = decodeServerSettings({
+      providerInstances: {
+        [codexId]: { driver: "codex", enabled: true, config: {} },
+        [disabledCodexId]: { driver: "codex", enabled: false, config: {} },
+      },
+      projectSettingsOverrides: {
+        [projectId]: {
+          providerInstances: {
+            [codexId]: { enabled: false },
+            [disabledCodexId]: { enabled: true },
+          },
+        },
+      },
+    });
+
+    expect(resolveProjectProviderInstanceEnabled(settings, projectId, codexId)).toBe(false);
+    expect(resolveProjectProviderInstanceEnabled(settings, null, codexId)).toBe(true);
+    expect(resolveProjectProviderInstanceEnabled(settings, projectId, disabledCodexId)).toBe(true);
+    expect(resolveProjectProviderInstanceEnabled(settings, null, disabledCodexId)).toBe(false);
+    expect(resolveProjectProviderInstanceEnabled(settings, null, ompId)).toBe(
+      resolveProviderInstanceEnabled({ driver: ProviderDriverKind.make("omp"), config: {} }),
+    );
+    expect(resolveProjectProviderInstanceEnabled(settings, null, unknownId)).toBe(false);
   });
 });
 

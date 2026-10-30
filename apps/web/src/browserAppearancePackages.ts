@@ -447,21 +447,40 @@ export async function installBrowserAppearancePackage(
   runtime: AppearanceRuntime,
   review: BrowserAppearancePackageReview,
   activate: boolean,
+  generation?: number,
 ) {
   const id = review.profile.metadata.id;
   const result = review.replacing
-    ? await runtime.execute({ type: "update", id, package: review.input })
-    : await runtime.execute({ type: "install", package: review.input, activate: false });
+    ? await runtime.execute({
+        type: "update",
+        id,
+        package: review.input,
+        apply: false,
+        ...(generation !== undefined ? { generation } : {}),
+      })
+    : await runtime.execute({
+        type: "install",
+        package: review.input,
+        activate: false,
+        apply: false,
+        ...(generation !== undefined ? { generation } : {}),
+      });
   if (result.status !== "applied" || !activate) return result;
-  return runtime.execute({ type: "enable", id });
+  return runtime.execute({
+    type: "enable",
+    id,
+    ...(generation !== undefined ? { generation } : {}),
+  });
 }
 
 export function previewBrowserAppearancePackage(
   runtime: AppearanceRuntime,
   review: BrowserAppearancePackageReview,
+  generation?: number,
 ) {
   return runtime.execute({
     type: "preview",
+    ...(generation !== undefined ? { generation } : {}),
     preview: {
       profile: review.profile,
       package: {

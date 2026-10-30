@@ -3,11 +3,12 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
-import type {
-  ProviderSettingsFormAnnotation,
-  ProviderSettingsFormControl,
-  ProviderSettingsFormOption,
-  ProviderSettingsFormSchemaAnnotation,
+import {
+  isSecretSetting,
+  type ProviderSettingsFormAnnotation,
+  type ProviderSettingsFormControl,
+  type ProviderSettingsFormOption,
+  type ProviderSettingsFormSchemaAnnotation,
 } from "@t3tools/contracts";
 import { PlusIcon, XIcon } from "lucide-react";
 
@@ -31,6 +32,7 @@ export interface ProviderSettingsFieldModel {
   readonly defaultBooleanValue?: boolean | undefined;
   /** Choices for a `select` control. The first entry is the default. */
   readonly options?: ReadonlyArray<ProviderSettingsFormOption> | undefined;
+  readonly secret?: boolean | undefined;
 }
 
 function titleizeFieldKey(key: string): string {
@@ -122,6 +124,7 @@ export function deriveProviderSettingsFields(
             : formAnnotation.placeholder !== undefined
               ? { placeholder: formAnnotation.placeholder }
               : {}),
+          ...(isSecretSetting(fieldSchema) ? { secret: true } : {}),
           clearWhenEmpty: formAnnotation.clearWhenEmpty ?? "omit",
           ...(formAnnotation.control === "switch"
             ? { defaultBooleanValue: readFieldBooleanDefault(fieldSchema) }
@@ -244,6 +247,78 @@ function readProviderConfigString(config: unknown, key: string): string {
   if (config === null || typeof config !== "object") return "";
   const value = (config as Record<string, unknown>)[key];
   return typeof value === "string" ? value : "";
+}
+
+function ProviderSettingsSecretInput({
+  field,
+  value,
+  inputId,
+  variant,
+  descriptionId,
+  onChange,
+}: {
+  readonly field: ProviderSettingsFieldModel;
+  readonly value: unknown;
+  readonly inputId: string;
+  readonly variant: ProviderSettingsFormProps["variant"];
+  readonly descriptionId?: string | undefined;
+  readonly onChange: ProviderSettingsFormProps["onChange"];
+}) {
+  const configured = readProviderConfigString(value, field.key).length > 0;
+  const placeholder = configured ? "Leave blank to keep the current value" : field.placeholder;
+  const commit = (next: string) => {
+    if (next.length > 0) onChange(nextProviderConfigWithFieldValue(value, field, next));
+  };
+  return (
+    <div className="flex items-center gap-1.5">
+      {variant === "dialog" ? (
+        <Input
+          id={inputId}
+          type="password"
+          autoComplete="off"
+          aria-describedby={descriptionId}
+          className="min-w-0"
+          value=""
+          onChange={(event) => commit(event.target.value)}
+          placeholder={placeholder}
+          spellCheck={false}
+        />
+      ) : (
+        <DraftInput
+          id={inputId}
+          aria-describedby={descriptionId}
+          size="sm"
+          className={cn(
+            "min-w-0",
+            variant === "settings" &&
+              "w-full max-w-full @min-[32rem]/settings-row:w-56",
+            variant === "card" && "mt-1.5",
+          )}
+          type="password"
+          autoComplete="off"
+          value=""
+          onCommit={commit}
+          placeholder={placeholder}
+          spellCheck={false}
+        />
+      )}
+      {configured ? (
+        <Button
+          type="button"
+          size="icon-micro"
+          variant="ghost-destructive"
+          onClick={() =>
+            onChange(
+              nextProviderConfigWithFieldValue(value, { ...field, clearWhenEmpty: "persist" }, ""),
+            )
+          }
+          aria-label={`Clear ${field.label}`}
+        >
+          <XIcon />
+        </Button>
+      ) : null}
+    </div>
+  );
 }
 
 function readProviderConfigBoolean(config: unknown, key: string, defaultValue = false): boolean {
@@ -371,7 +446,16 @@ function ProviderSettingsFieldRow({
   if (variant === "settings") {
     const descriptionId = field.description ? `${inputId}-description` : undefined;
     const control =
-      field.control === "switch" ? (
+      field.secret ? (
+        <ProviderSettingsSecretInput
+          field={field}
+          value={value}
+          inputId={inputId}
+          variant={variant}
+          descriptionId={descriptionId}
+          onChange={onChange}
+        />
+      ) : field.control === "switch" ? (
         <Switch
           checked={readProviderConfigBoolean(value, field.key, field.defaultBooleanValue)}
           onCheckedChange={(checked) =>
@@ -407,15 +491,12 @@ function ProviderSettingsFieldRow({
           aria-describedby={descriptionId}
           size="sm"
           className="w-full max-w-full @min-[32rem]/settings-row:w-56"
-          type={field.control === "password" ? "password" : undefined}
-          autoComplete={field.control === "password" ? "off" : undefined}
           value={readProviderConfigString(value, field.key)}
           onCommit={(next) => onChange(nextProviderConfigWithFieldValue(value, field, next))}
           placeholder={field.placeholder}
           spellCheck={false}
         />
       );
-
     return (
       <SettingsRow
         title={
@@ -485,6 +566,26 @@ function ProviderSettingsFieldRow({
           />
           {description}
         </label>
+      </FieldFrame>
+    );
+  }
+
+  if (field.secret) {
+    return (
+      <FieldFrame variant={variant}>
+        <div>
+          <label htmlFor={inputId} className={cn(variant === "card" && "block")}>
+            {label}
+          </label>
+          <ProviderSettingsSecretInput
+            field={field}
+            value={value}
+            inputId={inputId}
+            variant={variant}
+            onChange={onChange}
+          />
+          {description}
+        </div>
       </FieldFrame>
     );
   }

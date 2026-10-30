@@ -9,7 +9,6 @@ import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 /** Unsupported and broken versions fail mid-turn, so they warn even when ready. */
 function getIncompatibleVersion(status: ServerProvider) {
   const compatibility = status.compatibilityAdvisory;
-  if (status.status === "error" && status.auth.status === "unauthenticated") return null;
   return compatibility?.status === "broken" ||
     (status.status === "ready" && compatibility?.status === "unsupported")
     ? compatibility
@@ -62,7 +61,6 @@ export function hasProviderSetup(status: ServerProvider): boolean {
 /** Broken-version guidance takes precedence over startup failures it can cause. */
 export function getProviderStatusMessage(status: ServerProvider): string {
   if (
-    status.auth.status !== "unauthenticated" &&
     status.compatibilityAdvisory?.status === "broken" &&
     status.compatibilityAdvisory.message
   ) {
@@ -102,7 +100,7 @@ export const ProviderStatusBanner = memo(function ProviderStatusBanner({
   }
 
   const providerName = status.displayName?.trim() || formatProviderDriverKindLabel(status.driver);
-  const isUnauthenticated = status.status === "error" && status.auth.status === "unauthenticated";
+  const isUnauthenticated = status.auth.status === "unauthenticated";
   const incompatible = getIncompatibleVersion(status);
   const title = isUnauthenticated
     ? `${providerName} is unauthenticated`

@@ -1,3 +1,4 @@
+import { OrchestratorMcpFailure } from "@t3tools/contracts";
 import { OrchestratorToolkit } from "./tools.ts";
 import * as Effect from "effect/Effect";
 
@@ -5,7 +6,7 @@ import * as McpInvocationContext from "../../McpInvocationContext.ts";
 import * as McpToolAccess from "../../McpToolAccess.ts";
 import * as OrchestratorMcpService from "../../OrchestratorMcpService.ts";
 import * as ThreadMetadataMcpService from "../../ThreadMetadataMcpService.ts";
-
+import { readCaller } from "../../threadAccess.ts";
 const handlers = {
   orchestrator_capabilities: McpToolAccess.reads(() =>
     Effect.gen(function* () {
@@ -129,6 +130,26 @@ const handlers = {
         const scope = yield* McpInvocationContext.McpInvocationContext;
         const service = yield* OrchestratorMcpService.OrchestratorMcpService;
         return yield* service.interruptThread(scope, input);
+      }),
+  ),
+  t3_workflow_stop: McpToolAccess.writesThreads(
+    (input) => [input.threadId],
+    (input) =>
+      Effect.gen(function* () {
+        const { threads } = yield* readCaller();
+        return yield* threads.stopWorkflow(input).pipe(
+          Effect.mapError(
+            (cause) =>
+              new OrchestratorMcpFailure({
+                code:
+                  cause.reason === "unavailable" || cause.reason === "stop-failed"
+                    ? "orchestration_error"
+                    : "invalid_request",
+                message: cause.message,
+              }),
+          ),
+          Effect.as({}),
+        );
       }),
   ),
 } satisfies McpToolAccess.Handlers<typeof OrchestratorToolkit.tools>;

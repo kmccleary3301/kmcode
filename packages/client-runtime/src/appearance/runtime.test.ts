@@ -18,6 +18,7 @@ import {
   type AppearanceCompiledOutput,
   type AppearanceCompilerAdapter,
   type AppearancePersistedState,
+  type AppearanceSnapshot,
   type AppearanceStorageAdapter,
 } from "./model.ts";
 import { createAppearanceRuntime, createEmptyAppearanceState } from "./runtime.ts";
@@ -884,6 +885,103 @@ describe("appearance runtime transactions", () => {
     expect(runtime.getSnapshot().resolved.baseVariant?.colors.canvas).toBe(
       themeCanvas(T3_CHAT_THEME, "light"),
     );
+  });
+
+  it("skips DOM apply when executing preparatory commands with apply: false", async () => {
+    const appliedSnapshots: AppearanceSnapshot[] = [];
+    const storage = new MemoryStorage();
+    const runtime = await createAppearanceRuntime({
+      storage,
+      compiler: compilerThatNormalizes(),
+      apply: {
+        apply: async (compiled) => {
+          appliedSnapshots.push(compiled.input.state);
+        },
+      },
+    });
+
+    const initialApplies = appliedSnapshots.length;
+
+    const result = await runtime.execute({
+      type: "preference",
+      preference: { mode: "dark" },
+      apply: false,
+    });
+
+    expect(result.status).toBe("applied");
+    expect(runtime.getSnapshot().preference.mode).toBe("dark");
+    expect(appliedSnapshots.length).toBe(initialApplies);
+  });
+
+  it("cancels stale commands when newer generation is dispatched", async () => {
+    let resolveFirst!: () => void;
+    const firstBlocked = new Promise<void>((r) => {
+      resolveFirst = r;
+    });
+
+    let delayActive = false;
+    const baseCompiler = compilerThatNormalizes();
+    const delayedCompiler: AppearanceCompilerAdapter = {
+      ...baseCompiler,
+      compile: async (input, signal) => {
+        if (delayActive && input.state.preference.mode === "dark") {
+          await firstBlocked;
+        }
+        return baseCompiler.compile(input, signal);
+      },
+    };
+
+    const runtime = await createAppearanceRuntime({
+      storage: new MemoryStorage(),
+      compiler: delayedCompiler,
+      apply: { apply: async () => undefined },
+    });
+
+    delayActive = true;
+    const p1 = runtime.execute({
+      type: "preference",
+      preference: { mode: "dark" },
+      generation: 1,
+    });
+
+    const p2 = runtime.execute({
+      type: "preference",
+      preference: { mode: "light" },
+      generation: 2,
+    });
+
+    resolveFirst();
+    const [res1, res2] = await Promise.all([p1, p2]);
+    expect(res1.status).toBe("cancelled");
+    expect(res2.status).toBe("applied");
+    expect(runtime.getSnapshot().preference.mode).toBe("light");
+  });
+
+  it("suppresses self-commit storage notifications from triggering redundant reconciles or cancelling local intent", async () => {
+    const memory = new MemoryStorage();
+    const storage: AppearanceStorageAdapter = {
+      load: () => memory.load(),
+      commit: async (expectedRevision, state) => {
+        await memory.commit(expectedRevision, state);
+        memory.emit(state);
+      },
+      subscribe: (listener) => memory.subscribe(listener),
+    };
+    const runtime = await createAppearanceRuntime({
+      storage,
+      compiler: compilerThatNormalizes(),
+      apply: { apply: async () => undefined },
+    });
+
+    const res = await runtime.execute({
+      type: "preference",
+      preference: { mode: "dark" },
+      generation: 1,
+    });
+
+    expect(res.status).toBe("applied");
+    expect(runtime.getSnapshot().preference.mode).toBe("dark");
+    expect(memory.state.preference.mode).toBe("dark");
   });
 });
 

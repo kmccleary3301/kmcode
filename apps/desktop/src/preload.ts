@@ -6,6 +6,11 @@ import type {
   DesktopPreviewRecordingFrame,
   DesktopPreviewTabState,
   DesktopSnapShotEvent,
+  ForwardedPort,
+  PortForwardConnectionRequest,
+  PortForwardConnectionResolution,
+  PortForwardKey,
+  PortForwardStart,
 } from "@t3tools/contracts";
 import { exposeClerkBridge } from "@clerk/electron/preload";
 import { contextBridge, ipcRenderer, webFrame, webUtils } from "electron";
@@ -559,5 +564,40 @@ contextBridge.exposeInMainWorld("desktopBridge", {
       return () =>
         ipcRenderer.removeListener(IpcChannels.PREVIEW_POINTER_EVENT_CHANNEL, wrappedListener);
     },
+  },
+  portForwarding: {
+    list: () => ipcRenderer.invoke(IpcChannels.PORT_FORWARD_LIST_CHANNEL),
+    start: (input: PortForwardStart) =>
+      ipcRenderer.invoke(IpcChannels.PORT_FORWARD_START_CHANNEL, input),
+    stop: (input: PortForwardKey) =>
+      ipcRenderer.invoke(IpcChannels.PORT_FORWARD_STOP_CHANNEL, input),
+    stopAll: () => ipcRenderer.invoke(IpcChannels.PORT_FORWARD_STOP_ALL_CHANNEL),
+    onChanged: (listener: (ports: readonly ForwardedPort[]) => void) => {
+      const wrappedListener = (_event: Electron.IpcRendererEvent, raw: unknown) => {
+        if (Array.isArray(raw)) {
+          listener(raw as readonly ForwardedPort[]);
+        }
+      };
+      ipcRenderer.on(IpcChannels.PORT_FORWARD_CHANGED_CHANNEL, wrappedListener);
+      return () => {
+        ipcRenderer.removeListener(IpcChannels.PORT_FORWARD_CHANGED_CHANNEL, wrappedListener);
+      };
+    },
+    onConnectionRequest: (listener: (request: PortForwardConnectionRequest) => void) => {
+      const wrappedListener = (_event: Electron.IpcRendererEvent, raw: unknown) => {
+        if (typeof raw === "object" && raw !== null) {
+          listener(raw as PortForwardConnectionRequest);
+        }
+      };
+      ipcRenderer.on(IpcChannels.PORT_FORWARD_CONNECTION_REQUEST_CHANNEL, wrappedListener);
+      return () => {
+        ipcRenderer.removeListener(
+          IpcChannels.PORT_FORWARD_CONNECTION_REQUEST_CHANNEL,
+          wrappedListener,
+        );
+      };
+    },
+    resolveConnection: (input: PortForwardConnectionResolution) =>
+      ipcRenderer.invoke(IpcChannels.PORT_FORWARD_RESOLVE_CONNECTION_CHANNEL, input),
   },
 } satisfies DesktopBridge);

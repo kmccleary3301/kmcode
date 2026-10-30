@@ -1,8 +1,10 @@
 import { describe, expect, it } from "vite-plus/test";
 
 import {
+  activityToolResultPreview,
   formatActivityDetailValue,
   parseActivityDetail,
+  parseActivityToolPresentation,
   type ActivityDetailInput,
 } from "./activityDetails.ts";
 
@@ -479,5 +481,89 @@ describe("parseActivityDetail with OrchestrationV2TurnItem", () => {
       kind: "diff",
       path: "src/app.ts",
     });
+  });
+});
+describe("bounded activity result previews", () => {
+  it("keeps a short command result head and drops a long tail", () => {
+    const output = `2 tests passed\n${"No errors\n".repeat(80)}result-tail-marker`;
+    const preview = activityToolResultPreview(
+      { type: "command_execution", output },
+      "command",
+    );
+
+    expect(preview?.label).toBe("Output");
+    expect(preview?.text).toContain("2 tests passed");
+    expect(preview?.text).not.toContain("result-tail-marker");
+    expect(preview?.text.length).toBeLessThanOrEqual(223);
+  });
+
+  it("keeps read, search, and diff previews relevant to their result", () => {
+    const readPreview = activityToolResultPreview(
+      { type: "dynamic_tool", output: "const first = true;\nconst second = false;" },
+      "read",
+    );
+    const searchPreview = activityToolResultPreview(
+      {
+        type: "file_search",
+        status: "completed",
+        results: [{ fileName: "src/example.ts", line: 12, preview: "return result;" }],
+      },
+      "search",
+    );
+    const diffPreview = activityToolResultPreview(
+      { type: "file_change", diffStr: "@@ -1 +1 @@\n-const value = 1;\n+const value = 2;" },
+      "diff",
+    );
+
+    expect(readPreview?.text).toContain("const first = true;");
+    expect(searchPreview?.text).toContain("src/example.ts:12");
+    expect(searchPreview?.text).toContain("return result;");
+    expect(diffPreview?.text).toContain("-const value = 1;");
+    expect(diffPreview?.text).toContain("+const value = 2;");
+  });
+  it("shows a concise completion result for writes", () => {
+    const preview = activityToolResultPreview(
+      { type: "dynamic_tool", output: "Created src/app.ts" },
+      "write",
+    );
+
+    expect(preview?.text).toContain("Created src/app.ts");
+  });
+
+  it("shows useful error text from native result objects", () => {
+    const preview = activityToolResultPreview(
+      { type: "dynamic_tool", output: { isError: true, error: "Permission denied" } },
+      "unknown",
+    );
+
+    expect(preview?.text).toBe("Permission denied");
+  });
+
+  it("summarizes unknown structured results without serializing their full contents", () => {
+    const preview = activityToolResultPreview(
+      {
+        type: "dynamic_tool",
+        output: {
+          state: "ready",
+          records: Array.from({ length: 10_000 }, (_, index) => `record-${index}`),
+          details: { secret: "not part of the compact summary" },
+        },
+      },
+      "unknown",
+    );
+
+    expect(preview?.text).toContain("state: ready");
+    expect(preview?.text).toContain("records: 10000 items");
+    expect(preview?.text).not.toContain("record-9999");
+    expect(preview?.text).not.toContain("not part of the compact summary");
+  });
+
+  it("classifies exec tools and keeps their command target in the head", () => {
+    expect(
+      parseActivityToolPresentation("tool", {
+        name: "exec_command",
+        input: { command: "pnpm test" },
+      }),
+    ).toMatchObject({ family: "command", summary: "pnpm test" });
   });
 });

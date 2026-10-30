@@ -929,6 +929,15 @@ describe("resolveSidebarThreadStatus", () => {
     ).toBe("working");
   });
 
+  it("keeps a background-job wait in the active working status", () => {
+    expect(
+      resolveSidebarThreadStatus({
+        ...idle,
+        runtime: { ...runtime, waitingOnBackgroundJob: true },
+      }),
+    ).toBe("working");
+  });
+
   it("keeps usage-limit stops Limited and visible until the thread recovers", () => {
     const limited = {
       ...runtime,
@@ -1251,8 +1260,37 @@ describe("resolveThreadStatusPill", () => {
       }),
     ).toMatchObject({ label: "Working", pulse: true });
   });
+  it("presents an active background-job wait as monitoring instead of working", () => {
+    expect(
+      resolveThreadStatusPill({
+        thread: {
+          ...baseThread,
+          runtime: { ...baseThread.runtime, waitingOnBackgroundJob: true },
+        },
+      }),
+    ).toMatchObject({ label: "Monitoring", pulse: false });
+  });
 
-  it("shows waiting for an idle thread with pending background tasks", () => {
+  it("shows Finishing when the activity run ended before the latest queued run", () => {
+    const latestQueuedRun = {
+      ...makeLatestRun({ startedAt: null, completedAt: null }),
+      runId: RunId.make("queued-run"),
+      status: "queued" as const,
+      workCompletedAt: null,
+    };
+    const runtimeWithEndedActivity = Object.assign(
+      { ...baseThread.runtime, activeRunId: RunId.make("activity-run") },
+      { activityRunWorkCompletedAt: "2026-03-09T10:00:15.000Z" },
+    );
+
+    expect(
+      resolveThreadStatusPill({
+        thread: { ...baseThread, latestRun: latestQueuedRun, runtime: runtimeWithEndedActivity },
+      }),
+    ).toMatchObject({ label: "Finishing", pulse: false });
+  });
+
+  it("presents an idle thread with pending background tasks as monitoring", () => {
     expect(
       resolveThreadStatusPill({
         thread: {
@@ -1266,7 +1304,7 @@ describe("resolveThreadStatusPill", () => {
         },
       }),
     ).toMatchObject({
-      label: "Waiting",
+      label: "Monitoring",
       colorClass: "text-sidebar-muted-foreground",
       dotClass: "bg-sidebar-muted-foreground",
       pulse: false,
@@ -1401,9 +1439,9 @@ describe("resolveProjectStatusIndicator", () => {
     ).toMatchObject({ label: "Plan Ready", dotClass: "bg-violet-500" });
   });
 
-  it("ranks waiting below active work and above plan-ready", () => {
-    const waiting = {
-      label: "Waiting" as const,
+  it("ranks monitoring below active work and above plan-ready", () => {
+    const monitoring = {
+      label: "Monitoring" as const,
       colorClass: "text-sidebar-muted-foreground",
       dotClass: "bg-sidebar-muted-foreground",
       pulse: false,
@@ -1411,7 +1449,7 @@ describe("resolveProjectStatusIndicator", () => {
 
     expect(
       resolveProjectStatusIndicator([
-        waiting,
+        monitoring,
         {
           label: "Working",
           colorClass: "text-sky-600",
@@ -1428,9 +1466,9 @@ describe("resolveProjectStatusIndicator", () => {
           dotClass: "bg-violet-500",
           pulse: false,
         },
-        waiting,
+        monitoring,
       ]),
-    ).toMatchObject({ label: "Waiting" });
+    ).toMatchObject({ label: "Monitoring" });
   });
 });
 
@@ -2075,7 +2113,7 @@ describe("navigation after parking a thread", () => {
 describe("unseen completion with background work", () => {
   it.each([
     { kind: "command", status: "ready", topStatus: "done", receded: false, pill: "Completed" },
-    { kind: "monitor", status: "waiting", topStatus: "waiting", receded: true, pill: "Waiting" },
+    { kind: "monitor", status: "waiting", topStatus: "waiting", receded: true, pill: "Monitoring" },
   ] as const)("presents a completed thread with a $kind roster", (expected) => {
     const thread = presentThreadShell(localEnvironmentId, {
       ...makeThreadFixture().source,

@@ -1,6 +1,6 @@
 import { useAtomValue } from "@effect/atom-react";
 import { enabledEnvironmentIds } from "@t3tools/client-runtime/state/connections";
-import { arrayElementsEqual } from "@t3tools/client-runtime/state/entities";
+import { arrayElementsEqual, parseThreadKey, threadKey } from "@t3tools/client-runtime/state/entities";
 import {
   createEnvironmentThreadDetailAtoms,
   createEnvironmentThreadShellAtoms,
@@ -8,6 +8,7 @@ import {
   EMPTY_ENVIRONMENT_THREAD_STATE,
   type EnvironmentThreadState,
   createThreadEnvironmentAtoms,
+  environmentThreadLiveOverlayAtom,
 } from "@t3tools/client-runtime/state/threads";
 import type { EnvironmentId, OrchestrationV2ThreadShell, ThreadId } from "@t3tools/contracts";
 import * as Option from "effect/Option";
@@ -29,6 +30,23 @@ export const environmentThreadShells = createEnvironmentThreadShellAtoms({
   catalogValueAtom: environmentCatalog.catalogValueAtom,
   snapshotAtom: threadEnvironment.snapshotAtom,
 });
+
+const threadLiveOverlayViewAtoms = Atom.family((key: string) => {
+  const { environmentId, threadId } = parseThreadKey(key);
+  const overlayAtom = environmentThreadLiveOverlayAtom(environmentId, threadId);
+  const subscriptionAtom = environmentThreads.liveOverlaySubscriptionAtom(environmentId, threadId);
+  return Atom.make((get) => {
+    get.mount(subscriptionAtom);
+    return get(overlayAtom);
+  }).pipe(Atom.setIdleTTL(0), Atom.withLabel(`web-thread-live-overlay:${key}`));
+});
+
+export function environmentThreadLiveOverlayViewAtom(
+  environmentId: EnvironmentId,
+  threadId: ThreadId,
+) {
+  return threadLiveOverlayViewAtoms(threadKey({ environmentId, threadId }));
+}
 
 const EMPTY_THREAD_STATE_ATOM = Atom.make(AsyncResult.success(EMPTY_ENVIRONMENT_THREAD_STATE)).pipe(
   Atom.withLabel("web-environment-thread:empty"),

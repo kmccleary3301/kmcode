@@ -176,14 +176,14 @@ export function ComposerBannerStack({ className, items, attachedAbove }: Compose
             tabIndex={-1}
             data-composer-banner-stack-expanded-items="true"
             className={cn(
-              "grid transition-[grid-template-rows] duration-150 ease-out focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-ring",
+              "grid transition-[grid-template-rows] duration-(--motion-duration) ease-disclosure focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-ring",
               stackExpanded ? "grid-rows-[1fr]" : "grid-rows-[0fr]",
             )}
           >
             <div className="min-h-0 overflow-hidden">
               <div
                 className={cn(
-                  "transform-gpu space-y-2 pb-2 transition-[opacity,transform] duration-150 ease-out will-change-[opacity,transform]",
+                  "transform-gpu space-y-2 pb-2 transition-[opacity,transform,visibility] duration-(--motion-duration) ease-disclosure will-change-[opacity,transform]",
                   stackExpanded
                     ? "pointer-events-auto visible translate-y-0 opacity-100"
                     : "pointer-events-none invisible translate-y-1 opacity-0",
@@ -193,7 +193,7 @@ export function ComposerBannerStack({ className, items, attachedAbove }: Compose
                   <div
                     key={item.id}
                     className={cn(
-                      "transition-[opacity,translate] duration-220 ease-in",
+                      "transition-[opacity,translate] duration-(--motion-duration) ease-disclosure",
                       exitingItemId === item.id
                         ? "pointer-events-none translate-y-28 opacity-0"
                         : "opacity-100",
@@ -221,7 +221,7 @@ export function ComposerBannerStack({ className, items, attachedAbove }: Compose
         <div
           key={frontItem.id}
           className={cn(
-            "relative z-10 transition-[opacity,translate] duration-220 ease-in",
+            "relative z-10 transition-[opacity,translate] duration-220 ease-out",
             exitingItemId === frontItem.id
               ? "pointer-events-none translate-y-16 opacity-0"
               : "opacity-100",

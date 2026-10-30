@@ -857,6 +857,10 @@ export async function createAppearanceRuntime(
 
   const listeners = new Set<() => void>();
   let tail: Promise<void> = Promise.resolve();
+  let latestDispatchedGeneration = 0;
+  let pendingCommitRevision: number | null = null;
+  let isLocalOperationInProgress = false;
+  let isResetRecoveryInProgress = false;
 
   const notify = (): void => {
     for (const listener of listeners) {
@@ -871,8 +875,17 @@ export async function createAppearanceRuntime(
   const reconcile = async (
     external: AppearancePersistedState,
     source: "storage" | "broadcast",
+    capturedGeneration?: number,
+    shouldApply = true,
   ): Promise<void> => {
-    if (external.revision <= state.revision) return;
+    if (
+      isResetRecoveryInProgress ||
+      isLocalOperationInProgress ||
+      external.revision <= state.revision ||
+      (pendingCommitRevision !== null && external.revision === pendingCommitRevision)
+    ) {
+      return;
+    }
     const compatibilityExternal = revalidatePersistedCompatibility(
       { ...external, environmentPackages: state.environmentPackages },
       internals.compiler,
@@ -893,11 +906,20 @@ export async function createAppearanceRuntime(
     let reconciledState = result.state;
     let nextSnapshot = snapshotFor(reconciledState, result.preview, options.systemAppearance);
     let compiled: AppearanceCompiledOutput | undefined;
+    const reconcileGeneration = capturedGeneration;
+    if (reconcileGeneration !== undefined && reconcileGeneration < latestDispatchedGeneration) {
+      return;
+    }
     try {
       compiled = await internals.compiler.compile({
         state: nextSnapshot,
         resolved: nextSnapshot.resolved,
+        ...(reconcileGeneration !== undefined ? { generation: reconcileGeneration } : {}),
       });
+      if (reconcileGeneration !== undefined && reconcileGeneration < latestDispatchedGeneration) {
+        compiled.dispose?.();
+        return;
+      }
       if (compiled.diagnostics !== undefined) {
         reconciledState = immutable({
           ...reconciledState,
@@ -909,18 +931,29 @@ export async function createAppearanceRuntime(
           input: { state: nextSnapshot, resolved: nextSnapshot.resolved },
         };
       }
-      await internals.apply.apply(compiled);
+      if (shouldApply) {
+        await internals.apply.apply(compiled);
+        if (reconcileGeneration !== undefined && reconcileGeneration < latestDispatchedGeneration) {
+          await internals.apply.apply(currentCompiled);
+          compiled.dispose?.();
+          return;
+        }
+      }
       const replaced = currentCompiled;
       state = immutable(reconciledState);
       preview = result.preview;
       currentSnapshot = nextSnapshot;
-      currentCompiled = compiled;
-      replaced.dispose?.();
+      if (shouldApply) {
+        currentCompiled = compiled;
+        replaced.dispose?.();
+      } else {
+        compiled.dispose?.();
+      }
       notify();
     } catch {
       compiled?.dispose?.();
       try {
-        await internals.apply.apply(currentCompiled);
+        if (shouldApply) await internals.apply.apply(currentCompiled);
       } catch {
         // External failures retain the current last-good snapshot even if repaint also fails.
       }
@@ -931,10 +964,19 @@ export async function createAppearanceRuntime(
   const enqueueReconcile = (
     external: AppearancePersistedState,
     source: "storage" | "broadcast",
+    capturedGeneration?: number,
   ): Promise<void> => {
+    if (
+      isResetRecoveryInProgress ||
+      isLocalOperationInProgress ||
+      external.revision <= state.revision ||
+      (pendingCommitRevision !== null && external.revision === pendingCommitRevision)
+    ) {
+      return Promise.resolve();
+    }
     const work = tail.then(
-      () => reconcile(external, source),
-      () => reconcile(external, source),
+      () => reconcile(external, source, capturedGeneration),
+      () => reconcile(external, source, capturedGeneration),
     );
     tail = work.then(
       () => undefined,
@@ -945,11 +987,34 @@ export async function createAppearanceRuntime(
 
   if (!options.forceSafeMode) {
     options.storage.subscribe((external) => {
-      void enqueueReconcile(external, "storage");
+      if (
+        isResetRecoveryInProgress ||
+        isLocalOperationInProgress ||
+        external.revision <= state.revision ||
+        (pendingCommitRevision !== null && external.revision === pendingCommitRevision)
+      ) {
+        return;
+      }
+      const captured = options.allocateGeneration?.();
+      if (captured !== undefined) {
+        latestDispatchedGeneration = Math.max(latestDispatchedGeneration, captured);
+      }
+      void enqueueReconcile(external, "storage", captured);
     });
     options.broadcast?.subscribe((event) => {
-      if (event.revision <= state.revision) return;
-      void enqueueReconcile(event.state, "broadcast");
+      if (
+        isResetRecoveryInProgress ||
+        isLocalOperationInProgress ||
+        event.revision <= state.revision ||
+        (pendingCommitRevision !== null && event.revision === pendingCommitRevision)
+      ) {
+        return;
+      }
+      const captured = options.allocateGeneration?.();
+      if (captured !== undefined) {
+        latestDispatchedGeneration = Math.max(latestDispatchedGeneration, captured);
+      }
+      void enqueueReconcile(event.state, "broadcast", captured);
     });
     try {
       // Subscribe before loading so a revision written during startup is
@@ -965,21 +1030,51 @@ export async function createAppearanceRuntime(
     command: AppearanceCommand,
     signal?: AbortSignal,
   ): Promise<AppearanceCommandResult> => {
+    if (command.generation !== undefined) {
+      if (command.generation < latestDispatchedGeneration) {
+        return Promise.resolve({
+          status: "cancelled",
+          command: command.type,
+          snapshot: currentSnapshot,
+        });
+      }
+      latestDispatchedGeneration = Math.max(latestDispatchedGeneration, command.generation);
+    }
     const run = async (retryConflict = true): Promise<AppearanceCommandResult> => {
       const commandType = command.type;
+      const commandGeneration =
+        typeof command === "object" &&
+        command !== null &&
+        "generation" in command &&
+        typeof command.generation === "number"
+          ? command.generation
+          : undefined;
       if (cancellation(signal))
         return { status: "cancelled", command: commandType, snapshot: currentSnapshot };
+      if (commandGeneration !== undefined && commandGeneration < latestDispatchedGeneration) {
+        return {
+          status: "cancelled",
+          command: commandType,
+          snapshot: currentSnapshot,
+        };
+      }
       const persists =
-        command.type !== "external-reconcile" &&
         command.type !== "preview" &&
         command.type !== "environment-packages" &&
         command.type !== "refresh";
       if (!options.forceSafeMode && persists) {
         try {
-          await reconcile(await internals.storage.load(), "storage");
+          await reconcile(await internals.storage.load(), "storage", commandGeneration, false);
         } catch {
           // The existing snapshot remains usable; the ensuing optimistic
           // commit still rejects rather than overwriting unknown durable state.
+        }
+        if (commandGeneration !== undefined && commandGeneration < latestDispatchedGeneration) {
+          return {
+            status: "cancelled",
+            command: commandType,
+            snapshot: currentSnapshot,
+          };
         }
       }
       const oldState = state;
@@ -1090,9 +1185,20 @@ export async function createAppearanceRuntime(
       }
       let nextSnapshot = snapshotFor(candidateState, candidate.preview, options.systemAppearance);
       let compiled = oldCompiled;
+      if (commandGeneration !== undefined && commandGeneration < latestDispatchedGeneration) {
+        return {
+          status: "cancelled",
+          command: commandType,
+          snapshot: currentSnapshot,
+        };
+      }
       try {
         compiled = await internals.compiler.compile(
-          { state: nextSnapshot, resolved: nextSnapshot.resolved },
+          {
+            state: nextSnapshot,
+            resolved: nextSnapshot.resolved,
+            ...(commandGeneration !== undefined ? { generation: commandGeneration } : {}),
+          },
           signal,
         );
         if (compiled.diagnostics !== undefined) {
@@ -1103,16 +1209,35 @@ export async function createAppearanceRuntime(
           nextSnapshot = snapshotFor(candidateState, candidate.preview, options.systemAppearance);
           compiled = {
             ...compiled,
-            input: { state: nextSnapshot, resolved: nextSnapshot.resolved },
+            input: {
+              state: nextSnapshot,
+              resolved: nextSnapshot.resolved,
+              ...(commandGeneration !== undefined ? { generation: commandGeneration } : {}),
+            },
           };
         }
         if (cancellation(signal)) {
           compiled.dispose?.();
           return { status: "cancelled", command: commandType, snapshot: oldSnapshot };
         }
-        await internals.apply.apply(compiled, signal);
-        if (cancellation(signal)) {
-          await internals.apply.apply(oldCompiled);
+        if (commandGeneration !== undefined && commandGeneration < latestDispatchedGeneration) {
+          compiled.dispose?.();
+          return { status: "cancelled", command: commandType, snapshot: oldSnapshot };
+        }
+        if (command.apply !== false) {
+          await internals.apply.apply(compiled, signal);
+          if (cancellation(signal)) {
+            await internals.apply.apply(oldCompiled);
+            compiled.dispose?.();
+            return { status: "cancelled", command: commandType, snapshot: oldSnapshot };
+          }
+          if (commandGeneration !== undefined && commandGeneration < latestDispatchedGeneration) {
+            await internals.apply.apply(oldCompiled);
+            compiled.dispose?.();
+            return { status: "cancelled", command: commandType, snapshot: oldSnapshot };
+          }
+        }
+        if (commandGeneration !== undefined && commandGeneration < latestDispatchedGeneration) {
           compiled.dispose?.();
           return { status: "cancelled", command: commandType, snapshot: oldSnapshot };
         }
@@ -1129,17 +1254,32 @@ export async function createAppearanceRuntime(
             environmentPackages: [],
           };
           if (command.type === "reset" && internals.storage.recover !== undefined) {
-            const recovered = await internals.storage.recover(persistedCandidate, signal);
+            isResetRecoveryInProgress = true;
+            isLocalOperationInProgress = true;
+            let recovered: AppearancePersistedState;
+            try {
+              recovered = await internals.storage.recover(persistedCandidate, signal);
+              pendingCommitRevision = recovered.revision;
+            } finally {
+              isResetRecoveryInProgress = false;
+              isLocalOperationInProgress = false;
+            }
             candidateState = immutable(
               options.forceSafeMode ? { ...recovered, safeMode: true } : recovered,
             );
             nextSnapshot = snapshotFor(candidateState, candidate.preview, options.systemAppearance);
             const recoveredCompiled = await internals.compiler.compile(
-              { state: nextSnapshot, resolved: nextSnapshot.resolved },
+              {
+                state: nextSnapshot,
+                resolved: nextSnapshot.resolved,
+                ...(commandGeneration !== undefined ? { generation: commandGeneration } : {}),
+              },
               signal,
             );
             try {
-              await internals.apply.apply(recoveredCompiled, signal);
+              if (command.apply !== false) {
+                await internals.apply.apply(recoveredCompiled, signal);
+              }
             } catch (error) {
               recoveredCompiled.dispose?.();
               throw error;
@@ -1147,6 +1287,8 @@ export async function createAppearanceRuntime(
             compiled.dispose?.();
             compiled = recoveredCompiled;
           } else {
+            isLocalOperationInProgress = true;
+            pendingCommitRevision = persistedCandidate.revision;
             try {
               await internals.storage.commit(
                 candidateSourceState.revision,
@@ -1154,6 +1296,8 @@ export async function createAppearanceRuntime(
                 signal,
               );
             } catch (error) {
+              isLocalOperationInProgress = false;
+              pendingCommitRevision = null;
               if (!retryConflict) throw error;
               let durable: AppearancePersistedState;
               try {
@@ -1163,12 +1307,18 @@ export async function createAppearanceRuntime(
               }
               if (durable.revision <= candidateSourceState.revision) throw error;
               if (compiled !== oldCompiled) compiled.dispose?.();
-              await reconcile(durable, "storage");
+              await reconcile(durable, "storage", commandGeneration, false);
               return run(false);
+            } finally {
+              isLocalOperationInProgress = false;
+              pendingCommitRevision = null;
             }
           }
         }
       } catch (error) {
+        isResetRecoveryInProgress = false;
+        isLocalOperationInProgress = false;
+        pendingCommitRevision = null;
         try {
           await internals.apply.apply(oldCompiled);
         } catch {
@@ -1186,10 +1336,14 @@ export async function createAppearanceRuntime(
       }
       const replaced = currentCompiled;
       state = immutable(candidateState);
-      preview = candidate.preview;
+      pendingCommitRevision = null;
       currentSnapshot = nextSnapshot;
-      currentCompiled = compiled;
-      if (replaced !== compiled) replaced.dispose?.();
+      if (command.apply !== false) {
+        currentCompiled = compiled;
+        if (replaced !== compiled) replaced.dispose?.();
+      } else if (compiled !== currentCompiled) {
+        compiled.dispose?.();
+      }
       if (options.forceSafeMode && command.type === "reset") {
         persistedSafeMode = false;
       }

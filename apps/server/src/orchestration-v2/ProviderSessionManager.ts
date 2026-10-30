@@ -10,6 +10,7 @@ import {
   ProviderSessionId,
   ThreadId,
   type ProviderThreadId,
+  type RunId,
 } from "@t3tools/contracts";
 import * as Cause from "effect/Cause";
 import * as Clock from "effect/Clock";
@@ -41,6 +42,7 @@ import {
 import { ProviderWorkspaceMissingError } from "../provider/Errors.ts";
 import * as ProjectService from "../project/ProjectService.ts";
 import * as McpProviderSession from "../mcp/McpProviderSession.ts";
+import type { McpCapability } from "../mcp/McpInvocationContext.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import * as McpSessionRegistry from "../mcp/McpSessionRegistry.ts";
 import * as EventSink from "./EventSink.ts";
@@ -53,6 +55,7 @@ import {
   type ProviderAdapterV2Event,
   type ProviderAdapterV2EventSubscription,
   type ProviderAdapterV2SessionRuntime,
+  type ProviderAdapterV2SettlementResult,
 } from "./ProviderAdapter.ts";
 import * as ProviderAdapterRegistry from "./ProviderAdapterRegistry.ts";
 import * as ProjectionStore from "./ProjectionStore.ts";
@@ -169,6 +172,15 @@ export interface ProviderSessionManagerV2Shape {
   readonly get: (
     providerSessionId: ProviderSessionId,
   ) => Effect.Effect<Option.Option<ProviderAdapterV2SessionRuntime>, ProviderSessionManagerV2Error>;
+  /**
+   * Existing runtime-only gateway for safe settlement inspection.
+   * NEVER starts a provider query or session; inspects only live, bound runtimes.
+   */
+  readonly inspectSettlement: (input: {
+    readonly providerSessionId: ProviderSessionId;
+    readonly providerThread: OrchestrationV2ProviderThread;
+    readonly runId: RunId;
+  }) => Effect.Effect<ProviderAdapterV2SettlementResult | null, ProviderSessionManagerV2Error>;
   readonly close: (
     providerSessionId: ProviderSessionId,
   ) => Effect.Effect<void, ProviderSessionManagerV2Error>;
@@ -484,11 +496,17 @@ export const layerWithOptions = (
                 // same token or the process's tool calls fail auth.
                 const { browser: browserToolsAvailable, device: deviceToolsAvailable } =
                   yield* agentAccessSettings(threadId);
-                const capabilities = new Set<
-                  import("../mcp/McpInvocationContext.ts").McpCapability
-                >(["orchestration", "worktree", "pull-requests"]);
+                const capabilities = new Set<McpCapability>([
+                  "orchestration",
+                  "worktree",
+                  "pull-requests",
+                ]);
                 if (browserToolsAvailable) capabilities.add("preview");
                 if (deviceToolsAvailable) capabilities.add("device");
+                const subagent = yield* projectionStore.getThread(threadId).pipe(
+                  Effect.map((thread) => thread.lineage.relationshipToParent === "subagent"),
+                  Effect.orElseSucceed(() => false),
+                );
                 const existing = McpProviderSession.readMcpProviderSession(threadId);
                 if (existing !== undefined) {
                   // Reserve before the async resolve so a release cannot
@@ -510,6 +528,8 @@ export const layerWithOptions = (
                     resolved !== undefined &&
                     resolved.thread.threadId === threadId &&
                     resolved.thread.providerInstanceId === providerInstanceId &&
+                    // A credential issued while the lineage read failed is replaced once it works.
+                    (resolved.thread.subagent === true) === subagent &&
                     // A flipped browser-access setting must not survive through
                     // credential reuse: rotate so the new scope reflects it.
                     resolved.capabilities.has("preview") === browserToolsAvailable &&
@@ -525,6 +545,7 @@ export const layerWithOptions = (
                   providerInstanceId,
                   browserToolsAvailable,
                   capabilities,
+                  subagent,
                 });
                 McpProviderSession.setMcpProviderSession(credential.config);
                 reserveMcpCredential(threadId, credential.config.providerSessionId);
@@ -1685,6 +1706,7 @@ export const layerWithOptions = (
               modelFamily: normalizeModelMetricLabel(model),
             },
           });
+        const stopTask = runtime.stopTask;
         return {
           ...runtime,
           subscribeEvents,
@@ -1839,6 +1861,14 @@ export const layerWithOptions = (
             observeActivity(providerSessionId, touchActivity(providerSessionId)).pipe(
               Effect.andThen(runtime.interruptTurn(input).pipe(turnMetrics("interrupt"))),
             ),
+          ...(stopTask === undefined
+            ? {}
+            : {
+                stopTask: (input) =>
+                  observeActivity(providerSessionId, touchActivity(providerSessionId)).pipe(
+                    Effect.andThen(stopTask(input)),
+                  ),
+              }),
           respondToRuntimeRequest: (input) =>
             observeActivity(providerSessionId, touchActivity(providerSessionId)).pipe(
               Effect.andThen(
@@ -2221,6 +2251,31 @@ export const layerWithOptions = (
               (cause) =>
                 new ProviderSessionLookupError({
                   providerSessionId,
+                  cause,
+                }),
+            ),
+          ),
+        inspectSettlement: (input) =>
+          Effect.gen(function* () {
+            const entry = (yield* Ref.get(sessions)).get(sessionKey(input.providerSessionId));
+            if (entry === undefined) {
+              return null;
+            }
+            const runtime = entry.exposedRuntime;
+            if (runtime.inspectSettlement === undefined) {
+              return null;
+            }
+            return yield* runtime
+              .inspectSettlement({
+                providerThread: input.providerThread,
+                runId: input.runId,
+              })
+              .pipe(Effect.orElseSucceed(() => null));
+          }).pipe(
+            Effect.mapError(
+              (cause) =>
+                new ProviderSessionLookupError({
+                  providerSessionId: input.providerSessionId,
                   cause,
                 }),
             ),

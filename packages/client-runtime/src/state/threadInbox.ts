@@ -1,4 +1,5 @@
-import { threadRuntimeIsActive, type EnvironmentThreadShell } from "./models.ts";
+import { threadRuntimeHasActiveWork } from "./threadExecution.ts";
+import type { EnvironmentThreadShell } from "./models.ts";
 import { toSortableTimestamp } from "./threadSort.ts";
 
 // Working section beta, shared so web and mobile fold and order the inbox the
@@ -19,7 +20,12 @@ type WorkingThreadInput = Pick<
     it. Approvals, questions, plan prompts, and failures stay in the inbox. */
 export function isThreadWorking(thread: WorkingThreadInput): boolean {
   if (thread.hasPendingApprovals || thread.hasPendingUserInput) return false;
-  if (!threadRuntimeIsActive(thread.runtime) && thread.runtime?.status !== "idle") return false;
+  if (
+    !threadRuntimeHasActiveWork(thread.runtime, thread.latestRun) &&
+    thread.runtime?.status !== "idle"
+  ) {
+    return false;
+  }
   // A plan prompt outranks lingering background work: the user has to act on it.
   const run = thread.latestRun;
   const runSettled =

@@ -1,0 +1,52 @@
+diff --git a/dist/index.cjs b/dist/index.cjs
+index a75d1f370f8e2e9b55a06a63df32275d4d539f14..d529c60af5a6ba348d72a5b7f4dd428637d28d8b 100644
+--- a/dist/index.cjs
++++ b/dist/index.cjs
+@@ -3651,7 +3651,7 @@ function createMathExtension(singleDollar = "permissive") {
+           if (!isDisplay && singleDollar === "currency-safe") {
+             let openingCharacter = cx.char(pos + 1), closingCharacter = cx.char(close - 1), openingWhitespace = openingCharacter === 32 || openingCharacter === 9 || openingCharacter === 44, closingWhitespace = closingCharacter === 32 || closingCharacter === 9 || closingCharacter === 44, followingCharacter = cx.char(end), closesBeforeAmount = followingCharacter >= 48 && followingCharacter <= 57;
+             if (openingWhitespace || openingWhitespace !== closingWhitespace || closesBeforeAmount)
+-              return cx.addElement(cx.elt("RejectedInlineMath", pos, end));
++              return -1;
+           }
+           let nodeName = isDisplay ? "DisplayMath" : "InlineMath";
+           return cx.addElement(cx.elt(nodeName, pos, end));
+diff --git a/dist/index.mjs b/dist/index.mjs
+index 0f4dc14cc15361547a2e258707b5e483d9e00815..29692779cc87ecb0ff657297676e08e7bd3c1279 100644
+--- a/dist/index.mjs
++++ b/dist/index.mjs
+@@ -3510,7 +3510,7 @@ function createMathExtension(singleDollar = "permissive") {
+           if (!isDisplay && singleDollar === "currency-safe") {
+             let openingCharacter = cx.char(pos + 1), closingCharacter = cx.char(close - 1), openingWhitespace = openingCharacter === 32 || openingCharacter === 9 || openingCharacter === 44, closingWhitespace = closingCharacter === 32 || closingCharacter === 9 || closingCharacter === 44, followingCharacter = cx.char(end), closesBeforeAmount = followingCharacter >= 48 && followingCharacter <= 57;
+             if (openingWhitespace || openingWhitespace !== closingWhitespace || closesBeforeAmount)
+-              return cx.addElement(cx.elt("RejectedInlineMath", pos, end));
++              return -1;
+           }
+           let nodeName = isDisplay ? "DisplayMath" : "InlineMath";
+           return cx.addElement(cx.elt(nodeName, pos, end));
+diff --git a/dist/inline-parser.cjs b/dist/inline-parser.cjs
+index 44df4d31633c9dc97c9cb76fc8252b39a2b1530d..7e28b09f92deb88ad3f07c3e23e221c1a0f03e92 100644
+--- a/dist/inline-parser.cjs
++++ b/dist/inline-parser.cjs
+@@ -1144,7 +1144,7 @@ function createMathExtension(singleDollar = "permissive") {
+           if (!isDisplay && singleDollar === "currency-safe") {
+             let openingCharacter = cx.char(pos + 1), closingCharacter = cx.char(close - 1), openingWhitespace = openingCharacter === 32 || openingCharacter === 9 || openingCharacter === 44, closingWhitespace = closingCharacter === 32 || closingCharacter === 9 || closingCharacter === 44, followingCharacter = cx.char(end), closesBeforeAmount = followingCharacter >= 48 && followingCharacter <= 57;
+             if (openingWhitespace || openingWhitespace !== closingWhitespace || closesBeforeAmount)
+-              return cx.addElement(cx.elt("RejectedInlineMath", pos, end));
++              return -1;
+           }
+           let nodeName = isDisplay ? "DisplayMath" : "InlineMath";
+           return cx.addElement(cx.elt(nodeName, pos, end));
+diff --git a/dist/inline-parser.mjs b/dist/inline-parser.mjs
+index ba5d8fd4bec1615e6dcba63ffa4a62cd50f43128..7aafa68aa32f7cfb209c658d1badd1bfbf970573 100644
+--- a/dist/inline-parser.mjs
++++ b/dist/inline-parser.mjs
+@@ -1117,7 +1117,7 @@ function createMathExtension(singleDollar = "permissive") {
+           if (!isDisplay && singleDollar === "currency-safe") {
+             let openingCharacter = cx.char(pos + 1), closingCharacter = cx.char(close - 1), openingWhitespace = openingCharacter === 32 || openingCharacter === 9 || openingCharacter === 44, closingWhitespace = closingCharacter === 32 || closingCharacter === 9 || closingCharacter === 44, followingCharacter = cx.char(end), closesBeforeAmount = followingCharacter >= 48 && followingCharacter <= 57;
+             if (openingWhitespace || openingWhitespace !== closingWhitespace || closesBeforeAmount)
+-              return cx.addElement(cx.elt("RejectedInlineMath", pos, end));
++              return -1;
+           }
+           let nodeName = isDisplay ? "DisplayMath" : "InlineMath";
+           return cx.addElement(cx.elt(nodeName, pos, end));

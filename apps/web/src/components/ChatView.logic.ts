@@ -1,5 +1,6 @@
 import * as Option from "effect/Option";
 import type { EnvironmentThreadShell } from "@t3tools/client-runtime/state/shell";
+import type { ThreadRuntimeSummary } from "@t3tools/client-runtime/state/models";
 import {
   ANTIGRAVITY_DEFAULT_MODEL,
   type AssetCreateUrlInput,
@@ -8,6 +9,8 @@ import {
   type CommandId,
   type EnvironmentId,
   isProviderDriverKind,
+  type NodeId,
+  type OrchestrationV2ThreadProjection,
   ProjectId,
   type MessageId,
   type ModelSelection,
@@ -16,6 +19,7 @@ import {
   type ProviderInteractionMode,
   ProviderDriverKind,
   type ProviderInstanceId,
+  type ProviderThreadId,
   type ServerProvider,
   type ScopedProjectRef,
   type ScopedThreadRef,
@@ -581,14 +585,23 @@ export function resolveComposerProviderSelection(input: {
     input.entries.find((entry) => entry.instanceId === requestedInstanceId)?.driverKind ??
     input.entries[0]?.driverKind ??
     ProviderDriverKind.make("unconfigured");
+  const lockedEntry = input.entries.find((entry) => entry.instanceId === input.lockedInstanceId);
+  const effectiveLockedEntry =
+    input.lockedProvider && lockedEntry && lockedEntry.driverKind !== input.lockedProvider
+      ? undefined
+      : lockedEntry;
+  // A deleted profile stays locked; only a known wrong-driver entry is discarded.
+  const effectiveLockedInstanceId =
+    lockedEntry !== undefined && effectiveLockedEntry === undefined
+      ? null
+      : input.lockedInstanceId;
   const lockedContinuationGroupKey = input.lockedProvider
-    ? (input.entries.find((entry) => entry.instanceId === input.lockedInstanceId)
-        ?.continuationGroupKey ?? null)
+    ? (effectiveLockedEntry?.continuationGroupKey ?? null)
     : null;
   // Missing metadata must not move Antigravity history into another Google profile.
   const requiresExactInstance =
     input.lockedProvider === "antigravity" &&
-    input.lockedInstanceId != null &&
+    effectiveLockedInstanceId != null &&
     lockedContinuationGroupKey === null;
   const compatibleEntries = input.entries.filter(
     (entry) =>
@@ -612,7 +625,7 @@ export function resolveComposerProviderSelection(input: {
   const unavailableProviderInstanceId = selectedProviderEntry
     ? undefined
     : input.lockedProvider
-      ? (input.lockedInstanceId ?? requestedInstanceId)
+      ? (effectiveLockedInstanceId ?? requestedInstanceId)
       : requestedInstanceId;
   return {
     selectedProviderEntry,
@@ -1013,6 +1026,44 @@ export function threadShellHasStarted(
   );
 }
 
+export interface NativeProviderIdentity {
+  readonly driver: ProviderDriverKind | null;
+  readonly instanceId: ProviderInstanceId | null;
+}
+
+export function resolveNativeProviderIdentity(input: {
+  runtime?: Pick<ThreadRuntimeSummary, "providerName" | "providerInstanceId"> | null;
+  projection?: Pick<OrchestrationV2ThreadProjection, "thread" | "providerThreads"> | null;
+}): NativeProviderIdentity | null {
+  const sessionDriver = input.runtime?.providerName ?? null;
+  const sessionInstanceId = input.runtime?.providerInstanceId ?? null;
+  if (sessionDriver && isProviderDriverKind(sessionDriver)) {
+    return {
+      driver: sessionDriver,
+      instanceId: sessionInstanceId,
+    };
+  }
+
+  const activeProviderThreadId = input.projection?.thread?.activeProviderThreadId ?? null;
+  const threadId = input.projection?.thread?.id ?? null;
+  if (activeProviderThreadId !== null && threadId !== null && input.projection?.providerThreads) {
+    const rootProviderThread = input.projection.providerThreads.find(
+      (thread) =>
+        thread.id === activeProviderThreadId &&
+        thread.appThreadId === threadId &&
+        thread.ownerNodeId === null,
+    );
+    if (rootProviderThread && isProviderDriverKind(rootProviderThread.driver)) {
+      return {
+        driver: rootProviderThread.driver,
+        instanceId: rootProviderThread.providerInstanceId,
+      };
+    }
+  }
+
+  return null;
+}
+
 // Imported history has no session until its first prompt. Resolve its instance
 // through the environment's provider catalog before locking to a driver.
 export function deriveLockedProvider(input: {
@@ -1020,6 +1071,7 @@ export function deriveLockedProvider(input: {
   selectedProvider: string | null;
   threadProvider: string | null;
   providers: ReadonlyArray<Pick<ServerProvider, "instanceId" | "driver">>;
+  nativeDriver?: ProviderDriverKind | null;
 }): ProviderDriverKind | null {
   if (!threadHasStarted(input.thread)) {
     return null;
@@ -1027,6 +1079,9 @@ export function deriveLockedProvider(input: {
   const sessionProvider = input.thread?.runtime?.providerName ?? null;
   if (sessionProvider && isProviderDriverKind(sessionProvider)) {
     return sessionProvider;
+  }
+  if (input.nativeDriver && isProviderDriverKind(input.nativeDriver)) {
+    return input.nativeDriver;
   }
   // Preserve the existing lock while an instance is missing from the catalog;
   // a started thread must not silently fall back to a different driver.

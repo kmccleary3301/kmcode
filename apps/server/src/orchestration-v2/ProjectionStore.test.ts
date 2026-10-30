@@ -27,7 +27,9 @@ import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Schema from "effect/Schema";
+import * as Tracer from "effect/Tracer";
 import * as SqlClient from "effect/sql/SqlClient";
+import * as Statement from "effect/sql/Statement";
 import { projectThreadAwarenessV2 } from "@t3tools/shared/agentAwareness";
 
 import * as SqlitePersistence from "../persistence/Sqlite.ts";
@@ -588,12 +590,26 @@ it.layer(layerTest)("ProjectionStoreV2", (it) => {
         });
         yield* sql`INSERT INTO orchestration_v2_projection_turn_items ${sql.insert(rows)}`;
       }
+      const statements: Array<string> = [];
+      const tracer = Tracer.make({
+        span(options) {
+          const span = new Tracer.NativeSpan(options);
+          const end = span.end.bind(span);
+          span.end = (endTime, exit) => {
+            end(endTime, exit);
+            const query = span.attributes.get("db.query.text");
+            if (typeof query === "string") statements.push(query);
+          };
+          return span;
+        },
+      });
       const initial = yield* Effect.acquireUseRelease(
         Effect.sync(() => vi.spyOn(JSON, "parse")),
         (parse) =>
           projectionStore
             .getThreadSnapshotWindow(threadId, { rowLimit: 77, userTurnLimit: 10 })
             .pipe(
+              Effect.withTracer(tracer),
               Effect.tap(() =>
                 Effect.sync(() => {
                   // Tool outputs must not be allocated again just to collect cohort IDs.
@@ -606,6 +622,17 @@ it.layer(layerTest)("ProjectionStoreV2", (it) => {
             ),
         (parse) => Effect.sync(() => parse.mockRestore()),
       );
+      const windowStatement = statements.find((statement) => statement.includes("turn_anchors"));
+      assert.isDefined(windowStatement);
+      const windowPlan = yield* sql.unsafe<{ readonly parent: number; readonly detail: string }>(
+        `EXPLAIN QUERY PLAN ${windowStatement}`,
+      );
+      const topLevel = windowPlan.filter((row) => row.parent === 0).map((row) => row.detail);
+      assert.include(
+        topLevel,
+        "SEARCH item USING INDEX sqlite_autoindex_orchestration_v2_projection_turn_items_1 (turn_item_id=?)",
+      );
+      assert.notInclude(topLevel, "USE TEMP B-TREE FOR ORDER BY");
       // Only the selected turn cohort and two lookahead anchors are decoded.
       assert.lengthOf(initial.projection.turnItems, 12 * 102);
       const bounded = buildBoundedThreadProjection({
@@ -1903,7 +1930,99 @@ it.layer(layerTest)("ProjectionStoreV2", (it) => {
     }),
   );
 
-  it.effect("only exposes interruptible runs through the shell activeRunId", () =>
+  it.effect("patches thread activity without reading the whole payload", () =>
+    Effect.gen(function* () {
+      const projectionStore = yield* ProjectionStore.ProjectionStoreV2;
+      const createdAt = yield* DateTime.now;
+      const runOccurredAt = DateTime.add(createdAt, { seconds: 5 });
+      const threadId = ThreadId.make("thread:projection-activity-patch");
+      const runId = RunId.make("run:projection-activity-patch");
+      const rootNodeId = NodeId.make("node:projection-activity-patch");
+      const thread = {
+        createdBy: "user" as const,
+        creationSource: "web" as const,
+        id: threadId,
+        projectId: ProjectId.make("project:projection-activity-patch"),
+        title: "Projection activity patch",
+        providerInstanceId,
+        modelSelection,
+        runtimeMode: "full-access" as const,
+        interactionMode: "default" as const,
+        branch: "feature/activity",
+        worktreePath: null,
+        activeProviderThreadId: null,
+        lineage: {
+          parentThreadId: null,
+          relationshipToParent: null,
+          rootThreadId: threadId,
+        },
+        forkedFrom: null,
+        createdAt,
+        updatedAt: createdAt,
+        archivedAt: null,
+        settledOverride: null,
+        settledAt: null,
+        lastVisitedAt: createdAt,
+        deletedAt: null,
+      };
+
+      yield* projectionStore.apply({
+        id: EventId.make("event:projection-activity-patch:created"),
+        type: "thread.created",
+        threadId,
+        occurredAt: createdAt,
+        payload: thread,
+      });
+      const created = (yield* projectionStore.getThreadProjection(threadId)).thread;
+
+      const statements: Array<string> = [];
+      const recordStatements: Statement.Transformer = (statement) => {
+        statements.push(statement.compile()[0]);
+        return Effect.succeed(statement);
+      };
+      yield* projectionStore
+        .apply({
+          id: EventId.make("event:projection-activity-patch:run-created"),
+          type: "run.created",
+          threadId,
+          runId,
+          nodeId: rootNodeId,
+          driver,
+          providerInstanceId,
+          occurredAt: runOccurredAt,
+          payload: {
+            id: runId,
+            threadId,
+            ordinal: 1,
+            providerInstanceId,
+            modelSelection,
+            providerThreadId: null,
+            userMessageId: MessageId.make("message:projection-activity-patch"),
+            rootNodeId,
+            activeAttemptId: null,
+            status: "running",
+            requestedAt: runOccurredAt,
+            startedAt: runOccurredAt,
+            completedAt: null,
+            checkpointId: null,
+            contextHandoffId: null,
+          },
+        })
+        .pipe(Effect.provideService(Statement.CurrentTransformer, recordStatements));
+      assert.isEmpty(
+        statements.filter(
+          (statement) =>
+            /^\s*SELECT/i.test(statement) &&
+            statement.includes("orchestration_v2_projection_threads"),
+        ),
+      );
+
+      const active = (yield* projectionStore.getThreadProjection(threadId)).thread;
+      assert.deepEqual(active, { ...created, updatedAt: runOccurredAt });
+    }),
+  );
+
+  it.effect("keeps activity work completion distinct from a newer queued latest run", () =>
     Effect.gen(function* () {
       const projectionStore = yield* ProjectionStore.ProjectionStoreV2;
       const now = yield* DateTime.now;
@@ -1911,13 +2030,37 @@ it.layer(layerTest)("ProjectionStoreV2", (it) => {
       const projectId = ProjectId.make("project:projection-shell-interruptible");
       const runId = RunId.make("run:projection-shell-interruptible");
       const rootNodeId = NodeId.make("node:projection-shell-interruptible");
+      const providerThreadId = ProviderThreadId.make("provider-thread:projection-shell-interruptible");
+      const backgroundJobWaitSignal = {
+        taskId: "omp:async:provider-turn",
+        kind: "background_task" as const,
+        description: "Background job",
+      };
+      const providerThread: OrchestrationV2ProviderThread = {
+        id: providerThreadId,
+        driver,
+        providerInstanceId,
+        providerSessionId: null,
+        appThreadId: threadId,
+        ownerNodeId: null,
+        nativeThreadRef: null,
+        nativeConversationHeadRef: null,
+        status: "active",
+        firstRunOrdinal: null,
+        lastRunOrdinal: null,
+        handoffIds: [],
+        forkedFrom: null,
+        pendingBackgroundTasks: [backgroundJobWaitSignal],
+        createdAt: now,
+        updatedAt: now,
+      };
       const run = {
         id: runId,
         threadId,
         ordinal: 1,
         providerInstanceId,
         modelSelection,
-        providerThreadId: null,
+        providerThreadId,
         userMessageId: MessageId.make("message:projection-shell-interruptible"),
         rootNodeId,
         activeAttemptId: null,
@@ -1946,7 +2089,7 @@ it.layer(layerTest)("ProjectionStoreV2", (it) => {
           interactionMode: "default",
           branch: null,
           worktreePath: null,
-          activeProviderThreadId: null,
+          activeProviderThreadId: providerThreadId,
           lineage: {
             parentThreadId: null,
             relationshipToParent: null,
@@ -1961,6 +2104,14 @@ it.layer(layerTest)("ProjectionStoreV2", (it) => {
           lastVisitedAt: null,
           deletedAt: null,
         },
+      });
+      yield* projectionStore.apply({
+        id: EventId.make("event:projection-shell-interruptible:provider-thread"),
+        type: "provider-thread.updated",
+        threadId,
+        driver,
+        occurredAt: now,
+        payload: providerThread,
       });
       yield* projectionStore.apply({
         id: EventId.make("event:projection-shell-interruptible:running"),
@@ -1987,6 +2138,47 @@ it.layer(layerTest)("ProjectionStoreV2", (it) => {
         DateTime.toEpochMillis(now),
       );
       assert.isNull(shell?.latestRunCompletedAt);
+      assert.deepEqual(shell?.pendingBackgroundTasks, [backgroundJobWaitSignal]);
+      const activeProjection = yield* projectionStore.getThreadProjection(threadId);
+      assert.deepEqual(
+        ProjectionStore.threadShellFromProjection(activeProjection).pendingBackgroundTasks,
+        [backgroundJobWaitSignal],
+      );
+      yield* projectionStore.apply({
+        id: EventId.make("event:projection-shell-interruptible:provider-thread-cleared"),
+        type: "provider-thread.updated",
+        threadId,
+        driver,
+        occurredAt: now,
+        payload: { ...providerThread, pendingBackgroundTasks: [] },
+      });
+      const clearedShell = (yield* projectionStore.getShellSnapshot()).threads.find(
+        (thread) => thread.id === threadId,
+      );
+      assert.deepEqual(clearedShell?.pendingBackgroundTasks ?? [], []);
+      const workCompletedAt = DateTime.add(now, { seconds: 5 });
+      yield* projectionStore.apply({
+        id: EventId.make("event:projection-shell-interruptible:execution-ended"),
+        type: "run.updated",
+        threadId,
+        runId,
+        nodeId: rootNodeId,
+        driver,
+        occurredAt: workCompletedAt,
+        payload: { ...run, status: "running", workCompletedAt },
+      });
+      shell = (yield* projectionStore.getShellSnapshot()).threads.find(
+        (thread) => thread.id === threadId,
+      );
+      assert.equal(shell?.status, "running");
+      assert.equal(shell?.activeRunId, runId);
+      assert.isNull(shell?.latestRunCompletedAt);
+      assert.equal(
+        shell?.latestRunWorkCompletedAt &&
+          DateTime.toEpochMillis(shell.latestRunWorkCompletedAt),
+        DateTime.toEpochMillis(workCompletedAt),
+      );
+
 
       yield* projectionStore.apply({
         id: EventId.make("event:projection-shell-interruptible:waiting"),
@@ -1996,7 +2188,7 @@ it.layer(layerTest)("ProjectionStoreV2", (it) => {
         nodeId: rootNodeId,
         driver,
         occurredAt: now,
-        payload: { ...run, status: "waiting" },
+        payload: { ...run, status: "waiting", workCompletedAt },
       });
 
       shell = (yield* projectionStore.getShellSnapshot()).threads.find(
@@ -2032,6 +2224,9 @@ it.layer(layerTest)("ProjectionStoreV2", (it) => {
               status: activityStatus,
               startedAt: activityStatus === "preparing" ? null : now,
               completedAt: activityStatus === "completed" ? later : null,
+              ...(activityStatus === "running" || activityStatus === "waiting"
+                ? { workCompletedAt }
+                : {}),
             },
           });
           const projection = yield* projectionStore.getThreadProjection(threadId);
@@ -2044,6 +2239,16 @@ it.layer(layerTest)("ProjectionStoreV2", (it) => {
             value == null ? null : DateTime.toEpochMillis(value);
           assert.equal(timestamp(sqlShell.activityRunStartedAt), expected);
           assert.equal(timestamp(memoryShell.activityRunStartedAt), expected);
+          const expectedWorkCompletedAt =
+            activityStatus === "running" || activityStatus === "waiting" ? workCompletedAt : null;
+          assert.equal(timestamp(sqlShell.activityRunWorkCompletedAt), timestamp(expectedWorkCompletedAt));
+          assert.equal(
+            timestamp(memoryShell.activityRunWorkCompletedAt),
+            timestamp(expectedWorkCompletedAt),
+          );
+          if (status === "queued" && activityStatus === "waiting") {
+            assert.isNull(sqlShell.latestRunWorkCompletedAt);
+          }
           assert.equal(sqlShell.latestRunId, "run:clock:newer");
         }
       }

@@ -432,6 +432,9 @@ export const layer: Layer.Layer<
               }),
             ];
           case "node.updated":
+            // Providers resend unchanged nodes with text deltas; compare against the projection,
+            // since the server may have changed the node since the provider last sent it.
+            if (yield* projections.isNodeStored(input.event.node)) return [];
             return [
               yield* makeDomainEvent(input, {
                 type: "node.updated",
@@ -506,6 +509,9 @@ export const layer: Layer.Layer<
               }),
             ];
           }
+          case "run.execution-ended":
+            // RunExecutionService persists this guarded control milestone.
+            return [];
           case "turn.terminal":
             const dismissed = yield* dismissNativeUserInputs(input, input.event.providerTurnId);
             if (input.event.status !== "failed") {

@@ -35,6 +35,22 @@ The distinction matters. An excluded OS dialog is not an implementation gap. A m
 Raw CSS can style internal DOM details, but it is version-sensitive. Only documented supported tokens and stable selectors carry compatibility guarantees.
 The web hook vocabulary and compatibility policy are normative in [`appearance-selectors.md`](./appearance-selectors.md).
 
+## Theme intent ordering
+
+Web and desktop capture an appearance generation before asynchronous package preparation
+or persistence. The compiler and apply adapter carry that generation; stale work cannot
+paint or commit over a newer intent. Package preparation uses `apply: false` and keeps the
+current stylesheet and asset leases until the final preference is applied.
+
+Mode-only intents inherit any pending theme selection. Synchronous paint uses the SDK's
+`resolveAppearanceState` so variants, overrides, previews, and accessibility adjustments
+match the eventual compiled palette. System mode leaves Electron following the operating
+system rather than forcing its resolved appearance back through `matchMedia`.
+
+The chat canvas starts directly beneath the desktop header. The full-height chat
+layout must not inherit theme content padding: applying it to the entire canvas
+creates a strip beneath the header.
+
 ## Current source of truth
 
 This is the observed baseline, not a promise that these paths remain the final implementation locations.

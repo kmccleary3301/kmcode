@@ -103,6 +103,7 @@ const layerElectronMenu = (
 const configureMenu = (
   selectedAction: Deferred.Deferred<string>,
   applicationMenuTemplate: Deferred.Deferred<readonly Electron.MenuItemConstructorOptions[]>,
+  platform: DesktopEnvironment.MakeDesktopEnvironmentInput["platform"] = environmentInput.platform,
 ) =>
   Effect.gen(function* () {
     const menu = yield* DesktopApplicationMenu.DesktopApplicationMenu;
@@ -116,7 +117,7 @@ const configureMenu = (
         Layer.provideMerge(layerElectronDialog),
         Layer.provideMerge(layerElectronApp),
         Layer.provideMerge(
-          DesktopEnvironment.layer(environmentInput).pipe(
+          DesktopEnvironment.layer({ ...environmentInput, platform }).pipe(
             Layer.provide(Layer.mergeAll(NodeServices.layer, DesktopConfig.layerTest({}))),
           ),
         ),
@@ -243,6 +244,52 @@ describe("DesktopApplicationMenu", () => {
 
       zoomIn.click({} as Electron.MenuItem, {} as Electron.BrowserWindow, {} as KeyboardEvent);
       assert.equal(yield* Deferred.await(selectedAction), "zoom-in");
+    }),
+  );
+  it.effect("keeps CmdOrCtrl+W out of native window-close roles and accelerators", () =>
+    Effect.gen(function* () {
+      for (const platform of ["darwin", "linux", "win32"] as const) {
+        const selectedAction = yield* Deferred.make<string>();
+        const applicationMenuTemplate =
+          yield* Deferred.make<readonly Electron.MenuItemConstructorOptions[]>();
+
+        yield* configureMenu(selectedAction, applicationMenuTemplate, platform);
+
+        const template = yield* Deferred.await(applicationMenuTemplate);
+        const fileMenu = template.find((item) => item.label === "File");
+        assert.isDefined(fileMenu);
+        if (!Array.isArray(fileMenu.submenu)) {
+          throw new Error("Expected File menu submenu to be an array.");
+        }
+        const windowMenu = template.find((item) => item.role === "windowMenu");
+        assert.isDefined(windowMenu);
+        if (!Array.isArray(windowMenu.submenu)) {
+          throw new Error("Expected Window menu submenu to be an array.");
+        }
+        const menuItems = [...template, ...fileMenu.submenu, ...windowMenu.submenu];
+
+        assert.isUndefined(menuItems.find((item) => item.role === "close"));
+        assert.isUndefined(
+          menuItems.find((item) => item.accelerator?.toLowerCase().endsWith("+w")),
+        );
+
+        if (platform === "darwin") {
+          const closeWindowItem = fileMenu.submenu.find((item) => item.label === "Close Window");
+          assert.isDefined(closeWindowItem);
+          if (typeof closeWindowItem.click !== "function") {
+            throw new Error("Expected Close Window menu item to have a click handler.");
+          }
+          let windowClosed = false;
+          closeWindowItem.click(
+            {} as Electron.MenuItem,
+            { close: () => (windowClosed = true) } as unknown as Electron.BrowserWindow,
+            {} as KeyboardEvent,
+          );
+          assert.isTrue(windowClosed);
+        } else {
+          assert.isDefined(fileMenu.submenu.find((item) => item.role === "quit"));
+        }
+      }
     }),
   );
 });

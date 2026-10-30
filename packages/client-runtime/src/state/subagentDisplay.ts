@@ -29,9 +29,11 @@ export function subagentGroupSummary(
 export function summarizeSubagentStatuses(
   statuses: ReadonlyArray<OrchestrationV2TurnItemStatus>,
 ): string {
-  const counts = { working: 0, done: 0, failed: 0, stopped: 0, idle: 0 };
+  const counts = { queued: 0, working: 0, waiting: 0, done: 0, failed: 0, stopped: 0, idle: 0 };
   for (const status of statuses) {
-    if (status === "pending" || status === "running" || status === "waiting") counts.working += 1;
+    if (status === "pending") counts.queued += 1;
+    else if (status === "running") counts.working += 1;
+    else if (status === "waiting") counts.waiting += 1;
     else if (status === "completed") counts.done += 1;
     else if (status === "failed") counts.failed += 1;
     else if (status === "idle") counts.idle += 1;
@@ -51,6 +53,23 @@ export function formatSubagentDisplayTitle(title: string): string {
 
   const name = path[1]!.replace(/[_\s]+/gu, " ").trim();
   return name.replace(/(^|\s)\S/gu, (letter) => letter.toUpperCase()) || displayTitle;
+}
+
+/**
+ * An OMP agent's id is the name it was given (`0-Name` on older builds). Its
+ * reported title can be the agent type ("task") or the task text, so the id
+ * names it; other providers keep their title.
+ */
+export function subagentDisplayName(agent: {
+  readonly driver: string;
+  readonly nativeAgentId?: string | undefined;
+  readonly title?: string | null | undefined;
+}): string | null {
+  const ompName =
+    agent.driver === "omp" ? agent.nativeAgentId?.trim().replace(/^\d+-/u, "") : undefined;
+  if (ompName) return ompName;
+  const title = agent.title?.trim();
+  return title ? formatSubagentDisplayTitle(title) : null;
 }
 
 /** Match desktop's model resolution and show only changes from the parent's workspace. */

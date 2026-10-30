@@ -9,10 +9,9 @@ import {
 import { getSyntaxHighlighterPromise } from "../../lib/syntaxHighlighting";
 import { LRUCache } from "../../lib/lruCache";
 import { useTheme } from "../../hooks/useTheme";
-import { useCopyToClipboard } from "../../hooks/useCopyToClipboard";
+import { useClientSettings } from "../../hooks/useSettings";
 import { cn } from "~/lib/utils";
-import { Suspense, use, useCallback, useId, useMemo, useState, type UIEvent } from "react";
-import { CopyIcon } from "lucide-react";
+import { Suspense, use, useCallback, useMemo, useState, type UIEvent } from "react";
 import { RenderErrorBoundary } from "../RenderErrorBoundary";
 
 const TOOL_DETAIL_ROW_BATCH_SIZE = 48;
@@ -156,8 +155,10 @@ function DiffRows(props: {
   readonly highlightedLines: ReadonlyArray<string> | null;
   readonly hashLine: boolean;
 }) {
+  const compact = useClientSettings((settings) => settings.toolDetail === "compact");
   let highlightedIndex = 0;
   return props.rows.map((row, index) => {
+    if (compact && row.kind === "hunk" && row.text.startsWith("@@")) return null;
     const highlighted =
       row.kind === "added" || row.kind === "removed" || row.kind === "context"
         ? (props.highlightedLines?.[highlightedIndex++] ?? null)
@@ -438,22 +439,20 @@ function DetailSection(props: {
   readonly onImageExpand: ((source: string, alt: string) => void) | undefined;
 }) {
   return (
-    <section className="tool-pane-section">
-      <details className="tool-arguments-details">
-        <summary>{props.section.title}</summary>
-        {props.section.description ? (
-          <div className="tool-intent">{props.section.description}</div>
-        ) : null}
-        {props.section.blocks.map((block, index) => (
-          <DetailBlock
-            key={`${index}:${block.kind}`}
-            block={block}
-            onImageExpand={props.onImageExpand}
-            resultSide
-          />
-        ))}
-      </details>
-    </section>
+    <details className="tool-arguments-details">
+      <summary>{props.section.title}</summary>
+      {props.section.description ? (
+        <div className="tool-intent">{props.section.description}</div>
+      ) : null}
+      {props.section.blocks.map((block, index) => (
+        <DetailBlock
+          key={`${index}:${block.kind}`}
+          block={block}
+          onImageExpand={props.onImageExpand}
+          resultSide
+        />
+      ))}
+    </details>
   );
 }
 
@@ -461,63 +460,17 @@ function OutputSection(props: {
   readonly section: ActivityDetailSection;
   readonly onImageExpand: ((source: string, alt: string) => void) | undefined;
 }) {
-  const bodyId = useId();
-  const [expanded, setExpanded] = useState(true);
-  const outputText = props.section.blocks
-    .map((block) => formatActivityDetailValue(block))
-    .join("\n\n");
-  const { copyToClipboard, isCopied } = useCopyToClipboard({ target: "output" });
   return (
-    <section
-      className="tool-pane-section tool-io-result"
-      id={`${bodyId}-section`}
-      data-trackable-item
-      data-cell
-    >
-      <div
-        className="tool-pane-divider"
-        role="button"
-        tabIndex={0}
-        data-cell-toggle
-        aria-expanded={expanded}
-        aria-controls={bodyId}
-        onClick={() => setExpanded((value) => !value)}
-        onKeyDown={(event) => {
-          if (event.key === "Enter" || event.key === " ") {
-            event.preventDefault();
-            setExpanded((value) => !value);
-          }
-        }}
-      >
-        <span>Output</span>
-        <button
-          type="button"
-          className="copy-button"
-          data-copy-target
-          aria-label="Copy output"
-          onClick={(event) => {
-            event.stopPropagation();
-            copyToClipboard(outputText);
-          }}
-          onKeyDown={(event) => event.stopPropagation()}
-        >
-          <CopyIcon className="icon size-3.5" aria-hidden />
-          <span>{isCopied ? "Copied" : "Copy"}</span>
-        </button>
-      </div>
-      <div id={bodyId} className={cn("cell-body", !expanded && "hidden")}>
-        <div className="tool-result-content">
-          {props.section.blocks.map((block, index) => (
-            <DetailBlock
-              key={`${index}:${block.kind}`}
-              block={block}
-              onImageExpand={props.onImageExpand}
-              resultSide
-            />
-          ))}
-        </div>
-      </div>
-    </section>
+    <div className="tool-result-content">
+      {props.section.blocks.map((block, index) => (
+        <DetailBlock
+          key={`${index}:${block.kind}`}
+          block={block}
+          onImageExpand={props.onImageExpand}
+          resultSide
+        />
+      ))}
+    </div>
   );
 }
 
@@ -545,40 +498,48 @@ function InputSection(props: {
   if (description === undefined && contentBlocks.length === 0 && argumentBlocks.length === 0)
     return null;
   return (
-    <section className="tool-pane-section">
-      <div className="tool-call-content">
-        {description ? <div className="tool-intent">{description}</div> : null}
-        {contentBlocks.map((block, index) => (
-          <DetailBlock
-            key={`${index}:${block.kind}`}
-            block={block}
-            onImageExpand={props.onImageExpand}
-            resultSide={false}
-          />
-        ))}
-        {argumentBlocks.length > 0 ? (
-          <details className="tool-arguments-details">
-            <summary>Arguments</summary>
-            <pre className="tool-arguments-json">
-              <code>{argumentText}</code>
-            </pre>
-          </details>
-        ) : null}
-      </div>
-    </section>
+    <div className="tool-call-content">
+      {description ? <div className="tool-intent">{description}</div> : null}
+      {contentBlocks.map((block, index) => (
+        <DetailBlock
+          key={`${index}:${block.kind}`}
+          block={block}
+          onImageExpand={props.onImageExpand}
+          resultSide={false}
+        />
+      ))}
+      {argumentBlocks.length > 0 ? (
+        <details className="tool-arguments-details">
+          <summary>Arguments</summary>
+          <pre className="tool-arguments-json">
+            <code>{argumentText}</code>
+          </pre>
+        </details>
+      ) : null}
+    </div>
   );
 }
 
 export function ToolActivityPresenter(props: {
   readonly detail: ParsedActivityDetail;
+  readonly side?: "input" | "result" | undefined;
   readonly headerIntent?: string | undefined;
   readonly headerSummary?: string | undefined;
   readonly onImageExpand?: ((source: string, alt: string) => void) | undefined;
 }) {
-  const inputSections = props.detail.sections.filter((section) => section.title === "Input");
-  const resultSections = props.detail.sections.filter((section) => section.title === "Result");
+  const inputSections =
+    props.side === "result"
+      ? []
+      : props.detail.sections.filter((section) => section.title === "Input");
+  const resultSections =
+    props.side === "input"
+      ? []
+      : props.detail.sections.filter((section) => section.title === "Result");
   const additionalSections = props.detail.sections.filter(
-    (section) => section.title !== "Input" && section.title !== "Result",
+    (section) =>
+      section.title !== "Input" &&
+      section.title !== "Result" &&
+      !(props.side === "input" && ["Original output", "Result metadata"].includes(section.title)),
   );
   return (
     <>

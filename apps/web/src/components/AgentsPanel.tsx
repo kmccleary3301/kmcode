@@ -14,7 +14,7 @@ import {
 } from "@t3tools/contracts";
 import { deriveSubagentElapsedMs, formatDuration } from "@t3tools/shared/orchestrationTiming";
 import * as DateTime from "effect/DateTime";
-import { ArrowLeft, Bot, Wrench } from "lucide-react";
+import { ArrowLeft, Bot } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 
 import ChatMarkdown from "./ChatMarkdown";
@@ -23,6 +23,10 @@ import { orchestrationEnvironment } from "~/state/orchestration";
 import { ScrollArea } from "~/components/ui/scroll-area";
 import { Button } from "~/components/ui/button";
 import { ToolWorkEntryCard, type ToolWorkEntryCardEntry } from "./chat/ToolWorkEntryCard";
+import {
+  LiveViewPausedNote,
+  useSubagentLiveContent,
+} from "../hooks/useSubagentLiveContent";
 
 export type SubagentTurnItem = Extract<OrchestrationV2TurnItem, { type: "subagent" }>;
 
@@ -107,10 +111,7 @@ function TranscriptEntry({
 
   if (entry.kind === "tool") {
     return (
-      <ToolWorkEntryCard
-        entry={toolCardEntry(item)}
-        icon={<Wrench className="icon size-4 shrink-0" aria-hidden />}
-      />
+      <ToolWorkEntryCard entry={toolCardEntry(item)} icon={null} />
     );
   }
 
@@ -250,6 +251,16 @@ function SubagentTranscriptView({
   readonly onBack: () => void;
   readonly onSelect: (itemId: TurnItemId) => void;
 }) {
+  const threadRef = useMemo<ScopedThreadRef | null>(
+    () => (environmentId === null || threadId === null ? null : { environmentId, threadId }),
+    [environmentId, threadId],
+  );
+  const { liveContent, rateLimited } = useSubagentLiveContent(threadRef, {
+    active: isOrchestrationV2WorkActive(item.status),
+    subagentId: item.subagentId,
+    turnItemId: item.id,
+    persisted: item.liveContent,
+  });
   const selectableCandidates = useMemo(
     () => subagents.filter((candidate) => candidate.childThreadId === null),
     [subagents],
@@ -288,18 +299,22 @@ function SubagentTranscriptView({
         ) : null}
       </header>
 
-      {item.liveContent && isOrchestrationV2WorkActive(item.status) ? (
+      {isOrchestrationV2WorkActive(item.status) && liveContent ? (
         <section
           className="shrink-0 border-b border-border/60 bg-muted/20 px-3 py-2"
           data-t3-part="agent-live-content"
         >
           <div className="mb-1 font-mono text-3xs uppercase tracking-wide text-muted-foreground">
-            Live {item.liveContent.kind}
-            {item.liveContent.truncated ? " · preview truncated" : ""}
+            Live {liveContent.kind}
+            {liveContent.truncated ? " · preview truncated" : ""}
           </div>
           <pre className="max-h-40 overflow-auto whitespace-pre-wrap break-words font-mono text-xs leading-relaxed text-foreground/90">
-            {item.liveContent.text}
+            {liveContent.text}
           </pre>
+        </section>
+      ) : isOrchestrationV2WorkActive(item.status) && rateLimited ? (
+        <section className="shrink-0 border-b border-border/60 bg-muted/20 px-3 py-2">
+          <LiveViewPausedNote />
         </section>
       ) : null}
 
@@ -323,11 +338,19 @@ function SubagentTranscriptView({
 
 function SubagentRow({
   item,
+  threadRef,
   onSelect,
 }: {
   readonly item: SubagentTurnItem;
+  readonly threadRef: ScopedThreadRef | null;
   readonly onSelect: (itemId: TurnItemId) => void;
 }) {
+  const { liveContent, rateLimited } = useSubagentLiveContent(threadRef, {
+    active: isOrchestrationV2WorkActive(item.status),
+    subagentId: item.subagentId,
+    turnItemId: item.id,
+    persisted: item.liveContent,
+  });
   const isSelectable = item.childThreadId === null;
 
   return (
@@ -368,13 +391,17 @@ function SubagentRow({
         <div className="truncate text-2xs text-muted-foreground">{item.progress}</div>
       ) : null}
 
-      {item.liveContent ? (
+      {isOrchestrationV2WorkActive(item.status) && liveContent ? (
         <div className="mt-0.5 flex flex-col gap-0.5 rounded border border-border/40 bg-muted/20 px-1.5 py-1 font-mono text-3xs">
           <div className="flex items-center gap-1 uppercase tracking-wide text-muted-foreground">
-            <span className="font-semibold">{item.liveContent.kind}</span>
-            {item.liveContent.truncated ? <span>· preview truncated</span> : null}
+            <span className="font-semibold">{liveContent.kind}</span>
+            {liveContent.truncated ? <span>· preview truncated</span> : null}
           </div>
-          <div className="line-clamp-2 break-words text-foreground/90">{item.liveContent.text}</div>
+          <div className="line-clamp-2 break-words text-foreground/90">{liveContent.text}</div>
+        </div>
+      ) : isOrchestrationV2WorkActive(item.status) && rateLimited ? (
+        <div className="mt-0.5 rounded border border-border/40 bg-muted/20 px-1.5 py-1">
+          <LiveViewPausedNote />
         </div>
       ) : null}
     </div>
@@ -386,6 +413,10 @@ export function AgentsPanel({
   threadId = null,
   subagents,
 }: AgentsPanelProps) {
+  const threadRef = useMemo<ScopedThreadRef | null>(
+    () => (environmentId === null || threadId === null ? null : { environmentId, threadId }),
+    [environmentId, threadId],
+  );
   const [selectedItemId, setSelectedItemId] = useState<TurnItemId | null>(null);
 
   const selectedItem = useMemo(
@@ -428,7 +459,12 @@ export function AgentsPanel({
       <ScrollArea className="min-h-0 flex-1">
         <div className="flex flex-col gap-2 p-2">
           {subagents.map((item) => (
-            <SubagentRow key={item.id} item={item} onSelect={setSelectedItemId} />
+            <SubagentRow
+              key={item.id}
+              item={item}
+              threadRef={threadRef}
+              onSelect={setSelectedItemId}
+            />
           ))}
         </div>
       </ScrollArea>

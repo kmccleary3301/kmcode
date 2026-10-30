@@ -119,6 +119,10 @@
       "types": "./src/toolActivity.ts",
       "import": "./src/toolActivity.ts"
     },
+    "./toolDevice": {
+      "types": "./src/toolDevice.ts",
+      "import": "./src/toolDevice.ts"
+    },
     "./toolOutput": {
       "types": "./src/toolOutput.ts",
       "import": "./src/toolOutput.ts"

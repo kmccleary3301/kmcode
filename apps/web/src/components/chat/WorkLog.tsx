@@ -14,17 +14,7 @@ export function WorkLogBlock({
   children: ReactNode;
 }) {
   return (
-    <div
-      className={
-        continues || layout === "group-header"
-          ? "pb-0"
-          : layout === "group-content"
-            ? "pb-1"
-            : "pb-2"
-      }
-    >
-      {children}
-    </div>
+    <div className={continues || layout === "group-header" ? "pb-0" : "pb-1"}>{children}</div>
   );
 }
 
@@ -46,15 +36,13 @@ type RowContent = {
 
 function WorkLogLine({ icon, label, trailing, wrapLabel }: RowContent) {
   return (
-    <div
-      className={cn(
-        "flex min-h-6 min-w-0 gap-1.5 text-sm leading-relaxed select-none [&_*]:select-none",
-        // A wrapped label keeps its icon beside the first line.
-        wrapLabel ? "items-start" : "items-center",
-      )}
-    >
+    // The glyph and trailing meta sit on the first line, even when a label
+    // wraps or carries a subline below it.
+    <div className="flex min-h-6 min-w-0 items-start gap-2 text-sm leading-6 select-none [&_*]:select-none">
       {icon ? (
-        <span className="relative flex size-6 shrink-0 items-center justify-center">{icon}</span>
+        <span className="step-glyph relative flex h-6 w-4 shrink-0 items-center justify-center">
+          {icon}
+        </span>
       ) : null}
       <div
         className={cn(
@@ -103,13 +91,23 @@ export function WorkLogRow({
   label,
   trailing,
   wrapLabel = false,
+  hideHeader = false,
   children,
   ...rowProps
-}: RowContent & Omit<ComponentProps<"div">, "className" | "style">) {
+}: RowContent &
+  Omit<ComponentProps<"div">, "className" | "style"> & {
+    hideHeader?: boolean | undefined;
+  }) {
   const className = useRowClassName(rowProps.onClick !== undefined);
   return (
     <div {...rowProps} className={className}>
-      <WorkLogLine icon={icon} label={label} trailing={trailing} wrapLabel={wrapLabel} />
+      {hideHeader ? (
+        <div hidden>
+          <WorkLogLine icon={icon} label={label} trailing={trailing} wrapLabel={wrapLabel} />
+        </div>
+      ) : (
+        <WorkLogLine icon={icon} label={label} trailing={trailing} wrapLabel={wrapLabel} />
+      )}
       {children}
     </div>
   );
@@ -127,7 +125,7 @@ export function WorkLogDetails({
       className={cn(
         "cursor-auto",
         kind === "text"
-          ? "ms-7 flex max-h-96 flex-col gap-3 overflow-auto px-0.5 py-1 select-text"
+          ? "ms-6 flex max-h-96 flex-col gap-3 overflow-auto pe-0.5 py-1 select-text"
           : kind === "panel"
             ? "mt-0.5 mb-1.5"
             : "mt-1",

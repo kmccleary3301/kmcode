@@ -232,7 +232,6 @@ export const ClaudeProviderCapabilitiesV2 = {
     emitsTurnCompleted: true,
     supportsInterrupt: true,
     supportsActiveSteering: true,
-    activeSteeringInterruptsTools: true,
     supportsSteeringByInterruptRestart: false,
     supportsQueuedMessages: true,
     terminalStatusQuality: "strong",
@@ -2670,12 +2669,6 @@ function terminalStatusFromResult(
   return "failed";
 }
 
-function isClaudeActiveSteeringAbortResult(message: SDKResultMessage): boolean {
-  return (
-    message.terminal_reason === "aborted_streaming" || message.terminal_reason === "aborted_tools"
-  );
-}
-
 function isClaudeProviderContinuationTurn(
   input: ProviderAdapter.ProviderAdapterV2TurnInput,
 ): boolean {
@@ -3005,6 +2998,12 @@ interface ActiveClaudeTurnContext {
   // Root frames seen before the echo; held only when the CLI echoes early.
   gatedFramesBeforeEcho: number;
   readonly heldRootFrames: Array<SDKMessage>;
+  // Active steering messages sent to the live query. A provider turn can
+  // span several native SDK turns while these queued prompts are consumed.
+  pendingSteerRequests: number;
+  readonly pendingSteerUuids: Set<string>;
+  pendingSteerResult: SDKResultMessage | null;
+  finalizing: boolean;
 }
 
 interface ActiveClaudeProviderRetry {
@@ -3322,7 +3321,6 @@ export function makeClaudeAdapterV2(
         const events = yield* Queue.unbounded<ProviderAdapter.ProviderAdapterV2Event>();
         const activeTurn = yield* Ref.make<ActiveClaudeTurnContext | null>(null);
         const interruptedTurns = yield* Ref.make(new Set<OrchestrationV2ProviderTurn["id"]>());
-        const steeredTurns = yield* Ref.make(new Set<OrchestrationV2ProviderTurn["id"]>());
         const queryContext = yield* Ref.make<ClaudeLiveQueryContext | null>(null);
         const openedNativeThreads = yield* Ref.make(new Set<string>());
         const latestPlanByKind = yield* Ref.make(new Map<string, OrchestrationV2PlanArtifact>());
@@ -5299,6 +5297,12 @@ export function makeClaudeAdapterV2(
           readonly threadDisposition?: "reusable" | "broken";
           readonly result?: SDKResultMessage;
         }) {
+          if (input.context.finalizing) {
+            return;
+          }
+          input.context.finalizing = true;
+          input.context.pendingSteerUuids.clear();
+          input.context.pendingSteerResult = null;
           yield* reasoningDeltas.flushTurn(input.context.nativeTurnId);
           // A subagent still running in the background keeps its open calls:
           // their results arrive after this turn. One left by an earlier CLI
@@ -7028,17 +7032,25 @@ export function makeClaudeAdapterV2(
           }
 
           if (message.type === "result") {
-            const completedAt = yield* DateTime.now;
-            const interrupted = (yield* Ref.get(interruptedTurns)).has(context.providerTurnId);
-            const wasSteered = (yield* Ref.get(steeredTurns)).has(context.providerTurnId);
-            if (!interrupted && wasSteered && isClaudeActiveSteeringAbortResult(message)) {
+            if (context.finalizing) {
               return;
             }
-            yield* Ref.update(steeredTurns, (current) => {
-              const next = new Set(current);
-              next.delete(context.providerTurnId);
-              return next;
-            });
+            const completedAt = yield* DateTime.now;
+            const interrupted = (yield* Ref.get(interruptedTurns)).has(context.providerTurnId);
+            for (const uuid of claudeEchoedPromptUuids(message)) {
+              context.pendingSteerUuids.delete(uuid);
+            }
+            if (
+              !interrupted &&
+              (context.pendingSteerRequests > 0 || context.pendingSteerUuids.size > 0)
+            ) {
+              context.pendingSteerResult =
+                context.pendingSteerRequests > 0 && context.pendingSteerUuids.size === 0
+                  ? message
+                  : null;
+              return;
+            }
+            context.pendingSteerResult = null;
             const usageLimited =
               context.authenticationFailureMessage === undefined &&
               (context.rejectedRateLimitTypes.size > 0 || context.latestAssistantRateLimited) &&
@@ -8055,6 +8067,10 @@ export function makeClaudeAdapterV2(
               rejectedRateLimitTypes: new Set(),
               rateLimitResetTimes: new Map(),
               latestAssistantRateLimited: false,
+              pendingSteerRequests: 0,
+              pendingSteerUuids: new Set(),
+              pendingSteerResult: null,
+              finalizing: false,
               subagentsByTaskId: new Map(),
               subagentsByToolUseId: new Map(),
               subagentNodesByTaskId: new Map(),
@@ -8270,30 +8286,94 @@ export function makeClaudeAdapterV2(
                 detail: `Claude provider thread ${turnInput.providerThread.id} has no live query.`,
               });
             }
-            const currentTurn = yield* Ref.get(activeTurn);
-            if (currentTurn?.providerTurnId !== turnInput.providerTurnId) {
+            const currentTurn = yield* Ref.modify(activeTurn, (current) => {
+              if (current?.providerTurnId !== turnInput.providerTurnId || current.finalizing) {
+                return [null, current] as const;
+              }
+              current.pendingSteerRequests += 1;
+              return [current, current] as const;
+            });
+            if (currentTurn === null) {
               return yield* new ProviderAdapter.ProviderAdapterProtocolError({
                 driver: CLAUDE_PROVIDER,
                 detail: `Claude provider turn ${turnInput.providerTurnId} is not the active turn.`,
               });
             }
-            const userMessage = yield* makeClaudeUserMessageWithAttachments({
-              text: applyClaudePromptEffortPrefix(
-                turnInput.message.text,
-                compileClaudeModelSelection(currentTurn.input.modelSelection).promptEffort,
+            let steerUuid: string | undefined;
+            let offered = false;
+            yield* Effect.gen(function* () {
+              const uuid = yield* crypto.randomUUIDv4.pipe(
+                Effect.filterOrFail(isClaudePromptUuid),
+                Effect.mapError(
+                  (cause) =>
+                    new ProviderAdapter.ProviderAdapterProtocolError({
+                      driver: CLAUDE_PROVIDER,
+                      detail: "Failed to allocate a Claude steer uuid.",
+                      payload: cause,
+                    }),
+                ),
+              );
+              steerUuid = uuid;
+              const userMessage = yield* makeClaudeUserMessageWithAttachments({
+                text: applyClaudePromptEffortPrefix(
+                  turnInput.message.text,
+                  compileClaudeModelSelection(currentTurn.input.modelSelection).promptEffort,
+                ),
+                attachments: turnInput.message.attachments,
+                priority: "next",
+                attachmentsDir,
+                fileSystem,
+                skillNames: yield* userInvocableSkillNames(currentTurn.input.runtimePolicy.cwd),
+                uuid,
+              });
+              if (currentTurn.finalizing) {
+                return yield* new ProviderAdapter.ProviderAdapterProtocolError({
+                  driver: CLAUDE_PROVIDER,
+                  detail: `Claude provider turn ${turnInput.providerTurnId} is not the active turn.`,
+                });
+              }
+              const hasPendingToolApproval = Array.from(
+                (yield* Ref.get(pendingRuntimeRequests)).values(),
+              ).some(
+                (request) =>
+                  request.type === "approval" && request.requestKind !== "mcp-elicitation",
+              );
+              // The permission-gated tool has not started, so a redirect must
+              // not wait for its approval. Every other steer waits for a safe
+              // tool boundary instead of aborting in-flight work.
+              const priority = hasPendingToolApproval ? "now" : "next";
+              currentTurn.pendingSteerUuids.add(uuid);
+              yield* existing.query.offer({ ...userMessage, priority });
+              offered = true;
+            }).pipe(
+              Effect.ensuring(
+                Effect.gen(function* () {
+                  if (!offered && steerUuid !== undefined) {
+                    currentTurn.pendingSteerUuids.delete(steerUuid);
+                  }
+                  currentTurn.pendingSteerRequests -= 1;
+                  if (
+                    currentTurn.pendingSteerRequests > 0 ||
+                    currentTurn.pendingSteerUuids.size > 0
+                  ) {
+                    currentTurn.pendingSteerResult = null;
+                    return;
+                  }
+                  const deferredResult = currentTurn.pendingSteerResult;
+                  currentTurn.pendingSteerResult = null;
+                  if (
+                    deferredResult !== null &&
+                    !currentTurn.finalizing &&
+                    (yield* Ref.get(activeTurn))?.providerTurnId === currentTurn.providerTurnId
+                  ) {
+                    yield* handleRoutedSdkMessage({
+                      query: existing.query,
+                      message: deferredResult,
+                    });
+                  }
+                }),
               ),
-              attachments: turnInput.message.attachments,
-              priority: "now",
-              attachmentsDir,
-              fileSystem,
-              skillNames: yield* userInvocableSkillNames(currentTurn.input.runtimePolicy.cwd),
-            });
-            yield* Ref.update(steeredTurns, (current) => {
-              const next = new Set(current);
-              next.add(turnInput.providerTurnId);
-              return next;
-            });
-            yield* existing.query.offer(userMessage);
+            );
           },
           (effect, turnInput) =>
             effect.pipe(

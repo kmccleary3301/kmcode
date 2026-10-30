@@ -73,10 +73,52 @@
   .user-bubble,
   .tool-card,
   .tool-result-standalone,
-  .tool-io-pane,
+  .tool-io-pane:not(.borderless-step-row),
   .agent-response-card {
     border: 1px solid var(--line-strong);
     background: var(--surface);
+  }
+  /* One step pitch: every single-line step, tool row, compact read, group or
+     thought header, is a 20px line in a 28px row, and rows touch, so a run of
+     steps keeps one rhythm. Two-line steps (intent over action) add one line. */
+  .tool-io-pane.borderless-step-row {
+    border: 0;
+    background: transparent;
+    border-radius: 0;
+    box-shadow: none;
+    min-height: 1.75rem;
+  }
+  /* Only rows that mount while live animate; history and virtualized remounts stay still. */
+  .tool-io-pane.step-row-enter {
+    animation: motion-enter var(--motion-duration) var(--ease-disclosure);
+  }
+  .tool-io-pane.borderless-step-row .tool-header {
+    min-height: 1.75rem;
+    padding: 0;
+    border-bottom: 0;
+    background: transparent;
+  }
+  .tool-io-pane.borderless-step-row .tool-header-disclosure {
+    padding-block: 0.25rem;
+  }
+  .tool-io-pane.borderless-step-row .tool-header-disclosure:hover {
+    background: var(--surface-hover);
+    border-radius: 4px;
+  }
+  .tool-compact-line {
+    padding: 0.25rem 0.125rem;
+    line-height: 1.25rem;
+  }
+  /* Outcome and duration sit in the line, in the object's size and grey. */
+  .tool-row-meta {
+    display: inline-flex;
+    flex: 0 0 auto;
+    gap: 0.375rem;
+    color: var(--muted-foreground);
+    font-family: var(--font-sans);
+    font-weight: 400;
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
   }
   .turn-wrapper {
     position: relative;
@@ -158,10 +200,6 @@
   .trace-meta[data-cell-toggle]:hover {
     color: var(--foreground-soft);
   }
-  .cell-body {
-    min-width: 0;
-  }
-
   /* Thinking is an unobtrusive disclosure, not a card. */
   .thinking-accordion {
     border-left: 2px solid var(--line-strong);
@@ -186,7 +224,7 @@
   }
   .thinking-summary .thinking-chevron {
     display: flex;
-    transition: transform 140ms ease;
+    transition: transform var(--motion-duration) var(--ease-disclosure);
   }
   .thinking-summary .thinking-chevron .icon {
     width: 0.8rem;
@@ -211,23 +249,66 @@
   .tool-result-standalone {
     scroll-margin-top: 5.5rem;
   }
-  .tool-card.tool-output-error,
-  .tool-result-standalone.tool-output-error,
-  .tool-io-pane.tool-output-error {
-    border-color: var(--danger);
+  .tool-io-pane.borderless-step-row.tool-output-error {
+    border: 0;
+    box-shadow: none;
   }
   .tool-header {
     display: flex;
+    align-items: stretch;
+    justify-content: space-between;
+    gap: 0.5rem;
+    min-height: 2.35rem;
+    padding: 0.12rem 0.65rem;
+  }
+  .tool-header-disclosure {
+    display: flex;
+    flex: 1 1 auto;
     align-items: flex-start;
     justify-content: space-between;
     gap: 0.85rem;
-    min-height: 2.35rem;
-    padding: 0.12rem 0.65rem;
+    min-width: 0;
+    padding: 0;
+    border: 0;
+    background: transparent;
+    color: inherit;
+    font: inherit;
+    text-align: left;
     cursor: pointer;
     user-select: none;
   }
-  .tool-header:hover {
-    background: var(--surface-subtle);
+  .tool-header-disclosure--static {
+    cursor: default;
+  }
+  button.tool-header-disclosure:active {
+    transform: scale(0.995);
+  }
+  @media (hover: hover) and (pointer: fine) {
+    button.tool-header-disclosure:hover {
+      background: var(--surface-subtle);
+    }
+  }
+  .tool-header-actions {
+    display: flex;
+    flex: 0 0 auto;
+    align-items: center;
+  }
+  .tool-disclosure-chevron {
+    flex: 0 0 auto;
+    width: 0.9rem;
+    height: 0.9rem;
+    margin-top: 0.12rem;
+    color: var(--foreground-faint);
+    transition: transform var(--motion-duration) var(--ease-disclosure);
+  }
+  /* Reduced motion keeps the fade and drops all travel; it outranks the blanket rule below. */
+  @media (prefers-reduced-motion: reduce) {
+    .tool-io-pane.step-row-enter {
+      animation: motion-fade var(--motion-duration) ease-out !important;
+    }
+    button.tool-header-disclosure:active {
+      transform: none;
+    }
   }
   .tool-header-left,
   .tool-header-right {
@@ -262,20 +343,24 @@
     text-overflow: ellipsis;
     white-space: nowrap;
   }
+  /* Favicons and the chevron centre on the first line, like the glyph. */
   .tool-header-right {
     flex: 0 0 auto;
+    align-self: flex-start;
+    min-height: 1.25rem;
     color: var(--foreground-faint);
-    font-size: 0.68rem;
     white-space: nowrap;
   }
   .tool-timestamp {
     white-space: nowrap;
     font-variant-numeric: tabular-nums;
   }
-  .tool-elapsed {
-    white-space: nowrap;
-    color: var(--foreground-faint);
-    font-variant-numeric: tabular-nums;
+  .tool-state {
+    color: var(--foreground-soft);
+    font-weight: 600;
+  }
+  .tool-body[hidden] {
+    display: none;
   }
   .tool-body {
     display: flex;
@@ -291,21 +376,25 @@
     display: block;
     color: var(--kmt-foreground);
     font-family: var(--font-sans);
-    font-size: 0.84rem;
-    font-weight: 550;
-    line-height: 1.4;
+    font-size: 0.875rem;
+    font-weight: 500;
+    line-height: 1.25rem;
     overflow-wrap: anywhere;
   }
   .tool-heading-details {
     display: flex;
     align-items: baseline;
-    gap: 0.5rem;
+    gap: 0.375rem;
     min-width: 0;
-    margin-top: 0.18rem;
     color: var(--foreground-faint);
+    font-size: 0.875rem;
+    line-height: 1.25rem;
   }
-  .tool-header:has(.tool-intent) {
+  .tool-header:has(.tool-intent) .tool-header-disclosure {
     padding-block: 0.55rem;
+  }
+  .tool-io-pane.borderless-step-row .tool-header:has(.tool-intent) .tool-header-disclosure {
+    padding-block: 0.25rem;
   }
   .tool-result-standalone > .trace-meta,
   .tool-result-standalone > .trace-meta .trace-meta-left {
@@ -314,19 +403,10 @@
   .tool-result-standalone > .trace-meta .trace-meta-left > .icon {
     margin-top: 0.12rem;
   }
-  .is-collapsed .cell-body {
-    display: none;
-  }
   /* Plain output keeps a reading inset; numbered scrollers use their own compact gutters. */
   .tool-result-standalone > .trace-meta {
     margin-bottom: 0;
     padding: 0.55rem 0.65rem;
-  }
-  .tool-result-standalone > .cell-body {
-    padding-bottom: 0.65rem;
-  }
-  .tool-result-standalone > .cell-body > .tool-result-content {
-    padding-left: 2.05rem;
   }
   .tool-result-standalone
     :is(pre.tool-code, .tool-result-code, .tool-output-code, .docs-code-block__body) {
@@ -431,8 +511,11 @@
     max-width: 100%;
     color: var(--foreground-faint);
     cursor: pointer;
-    font-family: var(--font-mono);
-    font-size: 0.68rem;
+    font-family: var(--font-sans);
+    font-size: 0.65rem;
+    font-weight: 500;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
   }
   .tool-arguments-details > summary:hover {
     color: var(--foreground-soft);
@@ -474,6 +557,7 @@
     overflow-wrap: anywhere;
   }
   .tool-option-key {
+    font-family: var(--font-sans);
     color: var(--foreground-faint);
   }
   .tool-option code {
@@ -510,9 +594,6 @@
   .tool-output-label {
     color: var(--foreground-soft);
     font-weight: 600;
-  }
-  .tool-output-error .tool-output-label {
-    color: var(--danger);
   }
   .tool-output-meta {
     margin-left: auto;
@@ -586,6 +667,9 @@
     height: 0.78rem;
   }
   .tool-io-pane {
+    container-type: inline-size;
+    min-width: 0;
+    max-width: 100%;
     overflow: hidden;
     border-radius: 0;
     box-shadow: 0 16px 40px -34px rgba(0, 0, 0, 0.6);
@@ -597,36 +681,187 @@
     border-bottom: 1px solid var(--line);
     background: var(--surface-subtle);
   }
-  .tool-io-pane .tool-header:hover {
+  .tool-io-pane .tool-header-disclosure:hover {
     background: var(--surface-hover);
   }
   .tool-io-body {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+    min-width: 0;
+    max-width: 100%;
     gap: 0;
     padding: 0;
   }
-  .tool-pane-section {
-    min-width: 0;
-    padding: 0.9rem;
+  .tool-io-pane.borderless-step-row .tool-body {
+    background: transparent;
+    border: 0;
+    padding: 0;
   }
-  .tool-pane-section + .tool-pane-section {
-    border-top: 1px solid var(--line);
+  /* Spacing is padding on the content box, inside the collapsing track: margins
+     on the grid item survive the collapse and snap away when the panel unmounts,
+     and glides measure the content box without its margins. */
+  .tool-io-pane.borderless-step-row .tool-body .activity-disclosure-content {
+    margin-left: 7px;
+    padding: 0.25rem 0 0.5rem 1rem;
+    border-left: 1px solid var(--border);
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
   }
+  /* A wait tree's trunk is the step's rail. The rail hands off to the rows:
+     each draws its trunk segment and branch on the rail's line (1px border,
+     then the content's 1rem padding), the first reaching up through the top
+     padding to the header, the last ending the trunk in a rounded elbow. */
+  .tool-io-pane.borderless-step-row
+    .tool-body
+    .activity-disclosure-content:has(> [data-t3-part="native-wait-tool"]:first-child) {
+    border-left-color: transparent;
+  }
+  .tool-io-pane.borderless-step-row .wait-tree-row {
+    position: relative;
+  }
+  .tool-io-pane.borderless-step-row .wait-tree-row::before,
+  .tool-io-pane.borderless-step-row .wait-tree-row:not(:last-child)::after {
+    content: "";
+    position: absolute;
+    left: calc(-1rem - 1px);
+    width: 0.625rem;
+    pointer-events: none;
+  }
+  .tool-io-pane.borderless-step-row .wait-tree-row::before {
+    top: 0;
+    bottom: 0;
+    border-left: 1px solid var(--border);
+  }
+  .tool-io-pane.borderless-step-row .wait-tree-row:first-child::before {
+    top: -0.25rem;
+  }
+  .tool-io-pane.borderless-step-row .wait-tree-row:last-child::before {
+    bottom: calc(50% - 0.5px);
+    border-bottom: 1px solid var(--border);
+    border-bottom-left-radius: 4px;
+  }
+  .tool-io-pane.borderless-step-row .wait-tree-row:not(:last-child)::after {
+    top: calc(50% - 0.5px);
+    border-top: 1px solid var(--border);
+  }
+  /* A job's type and id trail its label one grey further back. */
+  .wait-tree-id {
+    color: color-mix(in srgb, var(--muted-foreground) 62%, transparent);
+  }
+  .wait-tree-id code {
+    font-size: 0.75rem;
+  }
+  .tool-section-label,
   .tool-pane-divider {
     display: flex;
     align-items: center;
     justify-content: space-between;
     gap: 0.8rem;
-    margin: 0 0 0.55rem;
+    margin: 0 0 0.35rem;
     color: var(--foreground-faint);
-    font-family: var(--font-mono);
-    font-size: 0.62rem;
-    font-weight: 650;
-    letter-spacing: 0.14em;
+    font-family: var(--font-sans);
+    font-size: 0.65rem;
+    font-weight: 500;
+    letter-spacing: 0.06em;
     text-transform: uppercase;
   }
-  .tool-io-result > .tool-pane-divider[data-cell-toggle] {
+  .tool-io-pane.borderless-step-row .tool-disclosure-chevron {
+    width: 0.75rem;
+    height: 0.75rem;
+    margin-top: 0;
+    opacity: 0.7;
+  }
+  .tool-io-pane.borderless-step-row .tool-pane-divider .copy-button,
+  [data-native-search-pane] .tool-pane-divider .copy-button {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 1.5rem;
+    height: 1.5rem;
+    min-height: 1.5rem;
+    padding: 0;
+    border: 1px solid transparent;
+    border-radius: 4px;
+    background: transparent;
+    color: var(--foreground-faint);
+    opacity: 0;
+    transition:
+      opacity 120ms ease,
+      background-color 120ms ease,
+      color 120ms ease;
+  }
+  .tool-io-pane.borderless-step-row .tool-pane-divider:hover .copy-button,
+  .tool-io-pane.borderless-step-row .tool-pane-divider:focus-within .copy-button,
+  .tool-io-pane.borderless-step-row .tool-pane-divider .copy-button:focus-visible,
+  .tool-io-pane.borderless-step-row .tool-pane-divider .copy-button[data-copied],
+  [data-native-search-pane] .tool-pane-divider:hover .copy-button,
+  [data-native-search-pane] .tool-pane-divider:focus-within .copy-button,
+  [data-native-search-pane] .tool-pane-divider .copy-button:focus-visible,
+  [data-native-search-pane] .tool-pane-divider .copy-button[data-copied] {
+    opacity: 1;
+  }
+  .tool-io-pane.borderless-step-row .tool-pane-divider .copy-button:hover,
+  [data-native-search-pane] .tool-pane-divider .copy-button:hover {
+    border-color: var(--line);
+    background: var(--surface-hover);
+    color: var(--kmt-foreground);
+  }
+  .tool-io-pane.borderless-step-row
+    :is(
+      pre.tool-code,
+      .tool-result-code,
+      .tool-output-code,
+      .tool-arguments-json,
+      .tool-diff,
+      .tool-listing,
+      .tool-code-panel
+    ),
+  .tool-io-pane.borderless-step-row .docs-code-block {
+    background: var(--code-bg);
+    border: 1px solid var(--line);
+    border-radius: 4px;
+    padding: 0.5rem 0.75rem;
+    font-family: var(--font-mono);
+    font-size: 12px;
+    line-height: 1.625;
+  }
+  .tool-output-disclosure {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.35rem;
+    min-width: 0;
+    padding: 0.15rem 0;
+    border: 0;
+    background: transparent;
+    color: inherit;
+    font: inherit;
+    text-align: left;
     cursor: pointer;
-    user-select: none;
+  }
+  .tool-output-disclosure:hover {
+    color: var(--foreground-soft);
+  }
+  .tool-output-disclosure .tool-disclosure-chevron {
+    width: 0.75rem;
+    height: 0.75rem;
+    margin-top: 0;
+  }
+  .tool-header-disclosure[aria-expanded="true"] .tool-disclosure-chevron,
+  .tool-output-disclosure[aria-expanded="true"] .tool-disclosure-chevron,
+  [data-expanded="true"] .tool-disclosure-chevron {
+    transform: rotate(180deg);
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .tool-disclosure-chevron {
+      transition: none !important;
+    }
+  }
+  [data-instant] .tool-disclosure-chevron,
+  .tool-disclosure-chevron[data-instant],
+  .tool-header-disclosure[data-instant] .tool-disclosure-chevron,
+  .tool-output-disclosure[data-instant] .tool-disclosure-chevron {
+    transition: none !important;
   }
   .tool-io-pane .tool-call-content,
   .tool-io-pane .tool-result-content {
@@ -639,34 +874,6 @@
   .tool-io-pane :is(pre.tool-code, .tool-result-code, .tool-output-code) {
     max-height: 27rem;
     overflow: auto;
-  }
-  .tool-io-result {
-    scroll-margin-top: 5.5rem;
-  }
-  .tool-io-result .tool-output-label,
-  .tool-io-result .tool-output-header .copy-button {
-    display: none;
-  }
-  .tool-io-result .tool-output-header {
-    min-height: 1.7rem;
-    padding-top: 0;
-    border-bottom: 0;
-    background: transparent;
-  }
-  .tool-io-result .tool-output-container {
-    border: 0;
-    border-radius: 0;
-    background: transparent;
-  }
-  .tool-io-result .tool-output-code {
-    padding: 0.75rem 0;
-  }
-  .tool-io-result .tool-output-toggle {
-    border-top-color: var(--line);
-  }
-  .tool-io-result :is(.tool-listing-rows, .tool-diff) {
-    margin-inline: -0.9rem;
-    max-width: none;
   }
   .tool-diff {
     display: grid;
@@ -770,31 +977,31 @@
     margin-top: 1.5em;
     margin-bottom: 0.5em;
     color: var(--kmt-foreground);
-    font-size: 2.5rem;
-    font-weight: 700;
-    line-height: 1.1;
-    letter-spacing: -0.025em;
-  }
-  .markdown-renderer h2,
-  .markdown-v2-output h2,
-  .prose h2 {
-    margin-top: 1.5em;
-    margin-bottom: 0.75em;
-    color: var(--kmt-foreground);
-    font-size: 1.75rem;
+    font-size: 1.25rem;
     font-weight: 700;
     line-height: 1.2;
     letter-spacing: -0.02em;
   }
+  .markdown-renderer h2,
+  .markdown-v2-output h2,
+  .prose h2 {
+    margin-top: 1.4em;
+    margin-bottom: 0.6em;
+    color: var(--kmt-foreground);
+    font-size: 1.15rem;
+    font-weight: 700;
+    line-height: 1.25;
+    letter-spacing: -0.015em;
+  }
   .markdown-renderer h3,
   .markdown-v2-output h3,
   .prose h3 {
-    margin-top: 1.5em;
-    margin-bottom: 0.75em;
+    margin-top: 1.3em;
+    margin-bottom: 0.5em;
     color: var(--kmt-foreground);
-    font-size: 1.25rem;
+    font-size: 1.05rem;
     font-weight: 650;
-    line-height: 1.4;
+    line-height: 1.35;
   }
   .markdown-renderer h4,
   .markdown-v2-output h4,
@@ -1154,7 +1361,6 @@
     max-width: 100%;
     max-height: 27rem;
     overflow: auto;
-    overscroll-behavior: contain;
   }
   .tool-listing-row {
     display: grid;
@@ -1277,6 +1483,10 @@
       flex-wrap: wrap;
       row-gap: 0.35rem;
     }
+    .tool-header-disclosure {
+      flex: 1 1 100%;
+      flex-wrap: wrap;
+    }
     .tool-header-left {
       flex: 1 1 100%;
     }
@@ -1289,6 +1499,9 @@
       row-gap: 0.15rem;
       white-space: normal;
     }
+    .tool-header-actions {
+      margin-left: auto;
+    }
     .tool-heading-details {
       flex-wrap: wrap;
       row-gap: 0.15rem;
@@ -1300,14 +1513,31 @@
     .tool-body {
       padding-left: 1rem;
     }
+    /* A step stays one line: the object truncates before its inline outcome and
+       duration, and the favicons and chevron stay on the headline. */
+    .borderless-step-row .tool-header,
+    .borderless-step-row .tool-header-disclosure,
+    .borderless-step-row .tool-heading-details {
+      flex-wrap: nowrap;
+    }
+    .borderless-step-row .tool-header-left {
+      flex: 1 1 auto;
+    }
+    .borderless-step-row .tool-header-right {
+      flex: 0 0 auto;
+      flex-wrap: nowrap;
+      white-space: nowrap;
+    }
   }
-  @media (prefers-reduced-motion: reduce) {
-    *,
-    *::before,
-    *::after {
-      scroll-behavior: auto !important;
-      transition-duration: 0.01ms !important;
-      animation-duration: 0.01ms !important;
+  @media (pointer: coarse) {
+    .tool-header-disclosure,
+    .tool-header-actions .copy-button,
+    .tool-output-disclosure,
+    .tool-pane-divider .copy-button,
+    .omp-pane-actions .copy-button {
+      min-width: 44px;
+      min-height: 44px;
+      opacity: 1;
     }
   }
 }
@@ -1329,10 +1559,112 @@
   --kmt-success: #72d49b;
 }
 
+.status-failed-mark {
+  color: color-mix(in srgb, var(--destructive) 60%, var(--muted-foreground));
+}
+.status-blocked-mark {
+  color: color-mix(in srgb, var(--warning) 70%, var(--muted-foreground));
+}
+/* A filled check with the tick knocked out: a finished agent or to-do. */
+.check-mark circle {
+  fill: currentColor;
+}
+.check-mark path {
+  fill: none;
+  stroke: var(--background);
+  stroke-width: 1.6;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+.status-diff-added {
+  color: color-mix(in srgb, var(--success) 70%, var(--muted-foreground));
+}
+
+.status-diff-removed {
+  color: color-mix(in srgb, var(--destructive) 70%, var(--muted-foreground));
+}
+
+.km-transcript .native-search-answer-markdown {
+  color: color-mix(in srgb, var(--foreground) 85%, transparent);
+  font-size: 0.8125rem;
+  line-height: 1.5;
+}
+
+.km-transcript .native-search-answer-markdown :is(h1, h2, h3, h4, h5, h6) {
+  font-size: inherit;
+}
+
 /* LegendList uses separate rows instead of the viewer’s .assistant-stream flex gap. */
 .km-transcript .km-transcript-row {
   padding-bottom: 1.25rem;
 }
+/* Rapid work packs like a list: each step row carries its own height, so
+   consecutive rows touch. The run's last row leaves the block gap through
+   WorkLogBlock's trailing space alone, the same gap prose leaves above a step. */
+.km-transcript .km-transcript-row[data-work-log] {
+  padding-block: 0;
+}
+/* Subagent cards are a destination, not a step: they get room around them. */
+.km-transcript .km-transcript-row[data-subagent-group] {
+  padding-top: 0.5rem;
+}
+.km-transcript .km-transcript-row[data-row-gap="tight"] {
+  padding-bottom: 0.375rem;
+}
+.km-transcript .km-transcript-row[data-row-gap="close"] {
+  padding-bottom: 0.5rem;
+}
+/* A header sits on its open group at the step pitch. */
+.km-transcript .km-transcript-row[data-open-group-header="true"] {
+  padding-bottom: 0;
+}
+/* One glyph column for every step, work-log row or tool row: a 2px inset
+   (the hover box's edge), a 1rem gutter, 14px glyphs, an 8px gap. */
+.km-transcript .step-glyph svg {
+  width: 0.875rem;
+  height: 0.875rem;
+}
+.km-transcript .tool-io-pane.borderless-step-row .tool-header-disclosure {
+  padding-inline: 0.125rem;
+}
+/* Scrollers inside steps (capped live regions, tool output, code panes) never
+   show a scrollbar; their edge fades mark content beyond. Messages and the
+   timeline itself keep theirs. */
+.km-transcript .km-transcript-row:not([data-timeline-row-kind="message"]) * {
+  scrollbar-width: none;
+}
+.km-transcript .km-transcript-row:not([data-timeline-row-kind="message"]) *::-webkit-scrollbar {
+  display: none;
+}
+/* Agent markdown inherits the surrounding transcript's compact type scale. */
+:is(.subagent-details-task, [data-subagent-result]) > .chat-markdown,
+.chat-markdown.subagent-details-live {
+  font-size: inherit;
+  line-height: inherit;
+}
+.chat-markdown.subagent-details-live,
+.subagent-details-task > .chat-markdown,
+[data-native-task-context] .chat-markdown {
+  color: inherit;
+}
+[data-native-task-context] .chat-markdown {
+  font-size: inherit;
+  line-height: inherit;
+}
+
+.chat-markdown .chat-markdown-mermaid .stream-mdx-mermaid-block {
+  margin: 0 !important;
+  border: 0 !important;
+  border-radius: 0 !important;
+  background: transparent;
+}
+.chat-markdown .chat-markdown-mermaid .stream-mdx-mermaid-toolbar {
+  display: none !important;
+}
+.chat-markdown .chat-markdown-mermaid .stream-mdx-mermaid-diagram {
+  padding: 0 !important;
+}
+
 
 .chat-markdown .katex-display {
   max-width: 100%;
@@ -1345,4 +1677,43 @@
   margin: 0;
   border: 0;
   border-radius: 0;
+}
+
+/* Activity disclosure panel: an interruptible grid-track collapse that closes
+   exactly as it opens. */
+.activity-disclosure-panel {
+  display: grid;
+  grid-template-rows: 0fr;
+  transition: grid-template-rows var(--motion-duration) var(--ease-disclosure);
+}
+
+.activity-disclosure-panel[data-open] {
+  grid-template-rows: 1fr;
+}
+/* A panel mounting open starts from the closed track for one frame (Base UI's
+   starting style), so opening a closed disclosure grows instead of appearing. */
+.activity-disclosure-panel[data-starting-style] {
+  grid-template-rows: 0fr;
+}
+
+.activity-disclosure-inner {
+  min-height: 0;
+  overflow: hidden;
+}
+
+/* The measured box for content glides: flow-root keeps child margins inside it. */
+.activity-disclosure-content {
+  display: flow-root;
+}
+
+/* Keyboard toggles and instant overrides skip disclosure transition without affecting child animations */
+.activity-disclosure-panel[data-instant] {
+  transition: none !important;
+}
+
+/* Reduced motion guard: instant state change with zero travel */
+@media (prefers-reduced-motion: reduce) {
+  .activity-disclosure-panel {
+    transition: none !important;
+  }
 }

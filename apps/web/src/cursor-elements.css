@@ -1,0 +1,630 @@
+/* Cursor-style agent elements: the to-do panel docked under a prompt, the
+ * thinking row, live subagent rows, and the composer's Working hub. Square-ish
+ * (≤6px radius), 1px borders, sans labels; theme tokens are full colors, so
+ * tints go through color-mix. */
+
+/* AsciiLoader: ten braille frames stacked 1em apart, stepped by transform. */
+[data-ascii-loader] {
+  display: inline-block;
+  flex-shrink: 0;
+  height: 1em;
+  overflow: hidden;
+  font-family: var(--font-mono);
+  line-height: 1;
+  vertical-align: -0.12em;
+  user-select: none;
+}
+[data-ascii-loader] > span {
+  display: block;
+  white-space: pre;
+  animation: ascii-loader 800ms steps(10) infinite;
+  animation-play-state: var(--visible-animation-state, running);
+}
+@keyframes ascii-loader {
+  to {
+    transform: translateY(-10em);
+  }
+}
+
+/* OMP terminal loaders: frame stacks are stepped with CSS only. */
+[data-terminal-spinner],
+[data-thinking-pulse] {
+  display: inline-block;
+  flex-shrink: 0;
+  height: 1em;
+  overflow: hidden;
+  font-family: var(--font-mono);
+  line-height: 1;
+  vertical-align: -0.12em;
+  user-select: none;
+}
+[data-terminal-spinner] > span,
+[data-thinking-pulse] > span {
+  display: block;
+  white-space: pre;
+}
+[data-terminal-spinner] > span {
+  animation: terminal-spinner 640ms steps(8) infinite;
+}
+@keyframes terminal-spinner {
+  to {
+    transform: translateY(-8em);
+  }
+}
+[data-thinking-pulse] > span {
+  animation: thinking-pulse 1200ms linear infinite;
+}
+@keyframes thinking-pulse {
+  0% {
+    transform: translateY(0);
+    animation-timing-function: steps(1, end);
+  }
+  5.833% {
+    transform: translateY(-1em);
+    animation-timing-function: steps(1, end);
+  }
+  13.62% {
+    transform: translateY(-2em);
+    animation-timing-function: steps(1, end);
+  }
+  26.12% {
+    transform: translateY(-3em);
+    animation-timing-function: steps(1, end);
+  }
+  43.333% {
+    transform: translateY(-4em);
+    animation-timing-function: steps(1, end);
+  }
+  62.5% {
+    transform: translateY(-5em);
+    animation-timing-function: steps(1, end);
+  }
+  79.72% {
+    transform: translateY(-6em);
+    animation-timing-function: steps(1, end);
+  }
+  92.22% {
+    transform: translateY(-7em);
+    animation-timing-function: steps(1, end);
+  }
+  100% {
+    transform: translateY(-8em);
+  }
+}
+
+/* Search results: round favicons overlap like an avatar stack. Each one pops
+ * out of its left neighbour and settles into place with a small overshoot,
+ * one after another, so the sources gather into the stack; the newest pulses
+ * while the search is live. */
+.favicon-stack {
+  display: inline-flex;
+  align-items: center;
+  min-height: 14px;
+  font-family: var(--font-sans);
+  line-height: 1;
+  vertical-align: middle;
+  white-space: nowrap;
+}
+.favicon-stack-item {
+  position: relative;
+  display: inline-flex;
+  width: 14px;
+  height: 14px;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  margin-left: -4px;
+  overflow: hidden;
+  /* A ring in the page colour separates overlapping circles. */
+  border: 1px solid var(--background);
+  border-radius: 9999px;
+  background: var(--background);
+  box-sizing: border-box;
+  opacity: 0;
+  animation: favicon-stack-pop 460ms cubic-bezier(0.34, 1.45, 0.64, 1) both;
+}
+.favicon-stack-item:first-child {
+  margin-left: 0;
+}
+.favicon-stack-item > img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  border-radius: inherit;
+  object-fit: cover;
+}
+.favicon-stack-overflow {
+  margin-left: 4px;
+  color: var(--muted-foreground);
+  font-size: 0.625rem;
+  line-height: 1;
+}
+.favicon-stack[data-active="true"] .favicon-stack-item[data-latest="true"] > img:not([hidden]) {
+  animation: favicon-stack-breathe 1.8s linear infinite;
+}
+@keyframes favicon-stack-pop {
+  from {
+    opacity: 0;
+    transform: translateX(-6px) scale(0.55);
+  }
+  45% {
+    opacity: 1;
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+@keyframes favicon-stack-enter {
+  to {
+    opacity: 1;
+  }
+}
+@keyframes favicon-stack-breathe {
+  50% {
+    opacity: 0.78;
+  }
+}
+
+/* Settings preview: labels stay typographic, never pill-shaped. */
+.loader-gallery-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(8rem, 1fr));
+  gap: 0.75rem;
+}
+.loader-gallery-item {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 0.25rem;
+}
+.loader-gallery-label {
+  color: var(--muted-foreground);
+  font-family: var(--font-sans);
+  font-size: 0.75rem;
+  line-height: 1rem;
+}
+.loader-gallery-preview {
+  display: flex;
+  min-height: 2rem;
+  align-items: center;
+  gap: 0.5rem;
+  color: var(--muted-foreground);
+}
+.loader-gallery-globe-preview {
+  gap: 0.625rem;
+}
+
+/* To-dos: a bordered panel attached under the prompt bubble. */
+.cursor-todo-panel {
+  margin-inline: 0.75rem;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-top: 0;
+  border-radius: 0 0 6px 6px;
+  background: color-mix(in srgb, var(--card) 70%, transparent);
+}
+.cursor-todo-header {
+  display: flex;
+  align-items: center;
+  gap: 0.375rem;
+  width: 100%;
+  padding: 0.4rem 0.75rem;
+  border: 0;
+  background: transparent;
+  color: var(--muted-foreground);
+  font: inherit;
+  font-size: 0.75rem;
+  line-height: 1rem;
+  text-align: left;
+  cursor: pointer;
+  transition: color 150ms ease-out;
+}
+.cursor-todo-header:hover {
+  color: var(--foreground);
+}
+.cursor-todo-header [data-chevron] {
+  transition: transform var(--motion-duration) var(--ease-disclosure);
+}
+.cursor-todo-header[aria-expanded="false"] [data-chevron] {
+  transform: rotate(-90deg);
+}
+.cursor-todo-rows {
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+  margin: 0;
+  padding: 0 0.75rem 0.55rem;
+  list-style: none;
+}
+.cursor-todo-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.5rem;
+  color: var(--foreground);
+  font-size: 0.8125rem;
+  line-height: 1.25rem;
+}
+.cursor-todo-row[data-status="completed"] {
+  color: var(--muted-foreground);
+}
+/* A dropped task takes the failure tone (`.status-failed-mark`) and a blocked
+   one the warning tone (`.status-blocked-mark`), mark and all. */
+.cursor-todo-row[data-status="abandoned"],
+.cursor-todo-row[data-status="abandoned"] .cursor-todo-mark {
+  color: color-mix(in srgb, var(--destructive) 60%, var(--muted-foreground));
+}
+.cursor-todo-row[data-status="blocked"],
+.cursor-todo-row[data-status="blocked"] .cursor-todo-mark {
+  color: color-mix(in srgb, var(--warning) 70%, var(--muted-foreground));
+}
+.cursor-todo-mark {
+  display: inline-flex;
+  flex-shrink: 0;
+  align-items: center;
+  justify-content: center;
+  width: 0.875rem;
+  height: 1.25rem;
+  color: var(--muted-foreground);
+}
+.cursor-todo-row[data-status="current"] .cursor-todo-mark {
+  color: var(--foreground);
+}
+
+/* Turn recap: a settled turn's to-dos and edited files, one line under its
+   answer that opens to both lists. */
+.turn-recap {
+  margin-top: 0.75rem;
+}
+.turn-recap-header {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.375rem;
+  margin-inline: -0.25rem;
+  padding: 0.125rem 0.25rem;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--muted-foreground);
+  font: inherit;
+  font-size: 0.8125rem;
+  line-height: 1.25rem;
+  text-align: left;
+  cursor: pointer;
+  transition: color 150ms ease-out;
+}
+.turn-recap-chevron {
+  transition: transform var(--motion-duration) var(--ease-disclosure);
+}
+.turn-recap-header[aria-expanded="true"] .turn-recap-chevron {
+  transform: rotate(90deg);
+}
+.turn-recap-body {
+  margin-top: 0.375rem;
+  padding-top: 0.5rem;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+}
+.turn-recap-files {
+  margin: 0;
+  padding: 0 0.375rem 0.375rem;
+  list-style: none;
+}
+.turn-recap-body .cursor-todo-rows + .turn-recap-files {
+  padding-top: 0.375rem;
+  border-top: 1px solid var(--border);
+}
+.turn-recap-file {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  width: 100%;
+  min-width: 0;
+  padding: 0.25rem 0.375rem;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--foreground);
+  font: inherit;
+  font-size: 0.8125rem;
+  line-height: 1.25rem;
+  text-align: left;
+  cursor: pointer;
+}
+.turn-recap-file-name {
+  flex-shrink: 0;
+  max-width: 60%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.turn-recap-file-dir {
+  min-width: 0;
+  overflow: hidden;
+  color: color-mix(in srgb, var(--muted-foreground) 62%, transparent);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+:is(.turn-recap-header, .turn-recap-file):focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: -2px;
+}
+@media (hover: hover) and (pointer: fine) {
+  .turn-recap-header:hover {
+    color: var(--foreground);
+  }
+  .turn-recap-file:hover {
+    background: color-mix(in srgb, var(--foreground) 5%, transparent);
+  }
+}
+
+/* A sweep of foreground across muted text marks live work. */
+.cursor-subagent-shimmer {
+  background: linear-gradient(
+    90deg,
+    var(--muted-foreground) 0%,
+    var(--muted-foreground) 35%,
+    var(--foreground) 50%,
+    var(--muted-foreground) 65%,
+    var(--muted-foreground) 100%
+  );
+  background-size: 250% 100%;
+  -webkit-background-clip: text;
+  background-clip: text;
+  -webkit-text-fill-color: transparent;
+  animation: cursor-shimmer 2.2s linear infinite;
+  /* Off screen it holds still: a background sweep repaints every frame. */
+  animation-play-state: var(--visible-animation-state, paused);
+}
+/* A live line that just changed resolves in and keeps its sweep. An element
+   runs one animation list, so the swap is listed beside the sweep instead
+   of replacing it. */
+.cursor-subagent-shimmer.motion-swap-text {
+  animation:
+    motion-swap-text-in var(--motion-duration) var(--ease-disclosure),
+    cursor-shimmer 2.2s linear infinite;
+  animation-play-state: running, var(--visible-animation-state, paused);
+}
+@keyframes cursor-shimmer {
+  from {
+    background-position: 100% 0;
+  }
+  to {
+    background-position: -150% 0;
+  }
+}
+
+.cursor-subagent-row {
+  display: flex;
+  flex-direction: column;
+  gap: 0.125rem;
+  padding: 0.375rem 0.5rem;
+  border-radius: 6px;
+  transition: background-color 150ms ease-out;
+}
+.cursor-subagent-row:hover {
+  background: color-mix(in srgb, var(--foreground) 4%, transparent);
+}
+
+/* Thinking: muted sans header; the live thought streams in a short live
+   region that glides taller, then follows its newest line (useBottomStick). */
+.cursor-thinking-header {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+  color: var(--muted-foreground);
+  font-size: 0.875rem;
+  line-height: 1.5rem;
+}
+.cursor-thinking-scroller[data-streaming="true"] [data-bottom-stick-viewport] {
+  max-height: min(10rem, 40dvh);
+}
+
+/* The thought itself reads in its header's tone, apart from replies and tool
+   rows. Transcript prose paints paragraphs, headings and bold at full
+   foreground, so they inherit here instead. */
+.cursor-thinking-scroller .chat-markdown {
+  color: var(--muted-foreground);
+}
+.cursor-thinking-scroller .chat-markdown :is(.markdown-renderer, .markdown-v2-output),
+.cursor-thinking-scroller
+  .chat-markdown
+  :is(.markdown-renderer, .markdown-v2-output)
+  :is(h1, h2, h3, h4, h5, h6, strong, em) {
+  color: inherit;
+}
+
+/* To-do and goal status bumps are tabs on the composer's top edge, outside
+   its shell: absolutely placed so showing one never grows the composer, and
+   portal popovers keep their details out of the layout too. */
+.cursor-composer-status-bumps {
+  position: absolute;
+  bottom: 100%;
+  left: 1.25rem;
+  right: 1.25rem;
+  z-index: 1;
+  display: flex;
+  flex-wrap: nowrap;
+  align-items: flex-end;
+  gap: 0.25rem;
+  pointer-events: none;
+  transition:
+    left var(--motion-duration) var(--ease-disclosure),
+    right var(--motion-duration) var(--ease-disclosure);
+}
+/* An attached drawer (working hub, banners) sits between the tabs and the
+   composer, inset by the form gutter plus the drawer inset. Seat the tabs on
+   the drawer's straight top edge, clear of its rounded corners, so the drawer
+   never cuts under them. */
+.cursor-composer-status-bumps:has(
+    ~ [data-slot="composer-banner-attachment"] [data-composer-banner-surface="attached"]
+  ) {
+  --cursor-composer-drawer-tab-inset: calc(
+    min(var(--t3-content-gutter, 24px), 1rem) + var(--chat-composer-drawer-inset) + 1rem
+  );
+  left: var(--cursor-composer-drawer-tab-inset);
+  right: var(--cursor-composer-drawer-tab-inset);
+}
+.cursor-composer-status-bumps > * {
+  pointer-events: auto;
+}
+.cursor-composer-status-bumps:empty {
+  display: none;
+}
+[data-composer-status-bump] {
+  display: inline-flex;
+  min-width: 0;
+  max-width: min(100%, 20rem);
+  align-items: center;
+  gap: 0.375rem;
+  overflow: hidden;
+  padding: 0.25rem 0.55rem 0.3rem;
+  border: 1px solid var(--border);
+  border-bottom: 0;
+  border-radius: 6px 6px 0 0;
+  background: color-mix(in srgb, var(--card) 80%, transparent);
+  color: var(--foreground);
+  font-family: var(--font-sans);
+  font-size: 0.75rem;
+  line-height: 1rem;
+  text-align: left;
+  white-space: nowrap;
+  cursor: pointer;
+  animation: cursor-composer-status-bump-enter var(--motion-duration)
+    var(--ease-out-quint, cubic-bezier(0.23, 1, 0.32, 1)) both;
+  transition:
+    background-color 150ms ease-out,
+    opacity var(--motion-duration) var(--ease-disclosure),
+    transform var(--motion-duration) var(--ease-disclosure);
+}
+/* Bumps with a presence flag enter and leave through the transition; a filled
+   entrance animation would hold their opacity over the exit. */
+[data-composer-status-bump-visible] {
+  animation: none;
+}
+[data-composer-status-bump-visible="false"] {
+  opacity: 0;
+  transform: translateY(4px);
+  pointer-events: none;
+}
+[data-composer-status-bump]:focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: 2px;
+}
+@media (hover: hover) and (pointer: fine) {
+  [data-composer-status-bump]:hover {
+    background: color-mix(in srgb, var(--foreground) 5%, var(--card));
+  }
+}
+@keyframes cursor-composer-status-bump-enter {
+  from {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+}
+@keyframes cursor-composer-status-bump-fade {
+  from {
+    opacity: 0;
+  }
+}
+[data-composer-status-popup][data-t3-part="popover"] {
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--popover);
+  color: var(--popover-foreground);
+  box-shadow: var(--shadow-composer);
+}
+.cursor-composer-hub-panel {
+  max-height: min(24rem, 55dvh);
+  overflow-y: auto;
+  padding: 0.5rem 0.75rem 0.6rem;
+}
+/* Positioned so its rows' sr-only labels (absolute) scroll and clip with it;
+   otherwise they escape to the popover viewport and give it a second scrollbar. */
+.cursor-composer-status-panel {
+  position: relative;
+  max-height: min(24rem, 55dvh);
+  overflow-y: auto;
+  padding: 0.625rem 0.75rem;
+  font-family: var(--font-sans);
+  font-size: 0.8125rem;
+  line-height: 1.25rem;
+}
+.cursor-composer-status-heading {
+  margin: 0 0 0.25rem;
+  color: var(--foreground);
+  font-size: 0.75rem;
+  font-weight: 600;
+  line-height: 1rem;
+}
+.cursor-composer-status-copy {
+  margin: 0;
+  overflow-wrap: anywhere;
+  color: var(--foreground);
+}
+.cursor-composer-status-usage {
+  margin: 0.375rem 0 0;
+  color: var(--muted-foreground);
+  font-size: 0.75rem;
+}
+.cursor-composer-status-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 0.25rem;
+  margin-top: 0.5rem;
+}
+[data-composer-todo-details] .cursor-todo-rows {
+  padding-inline: 0;
+  padding-bottom: 0;
+}
+.cursor-composer-hub-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 0.25rem;
+}
+.cursor-composer-hub-row {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 0.5rem;
+  overflow: hidden;
+  padding: 0.2rem 0;
+  font-size: 0.8125rem;
+  line-height: 1.25rem;
+  white-space: nowrap;
+}
+/* Row spacing lives inside each collapsing row, so a leaving row takes its gap with it. */
+.cursor-composer-hub-rows > .motion-row + .motion-row .cursor-composer-hub-row {
+  margin-top: 0.25rem;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .cursor-todo-header [data-chevron],
+  .turn-recap-chevron {
+    transition: none;
+  }
+  [data-composer-status-bump]:not([data-composer-status-bump-visible]) {
+    animation: cursor-composer-status-bump-fade var(--motion-duration) ease-out both;
+  }
+  [data-composer-status-bump] {
+    transition: opacity var(--motion-duration) ease-out !important;
+    transform: none !important;
+  }
+  .cursor-subagent-shimmer {
+    animation: none;
+    background: none;
+    -webkit-text-fill-color: currentColor;
+  }
+  [data-ascii-loader] > span,
+  [data-terminal-spinner] > span,
+  [data-thinking-pulse] > span {
+    animation: none;
+  }
+  .favicon-stack-item {
+    animation: favicon-stack-enter var(--motion-duration) var(--ease-disclosure) both;
+  }
+  .favicon-stack[data-active="true"] .favicon-stack-item[data-latest="true"] > img {
+    animation: none;
+  }
+}

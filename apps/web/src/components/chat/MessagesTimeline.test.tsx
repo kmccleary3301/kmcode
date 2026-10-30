@@ -2,13 +2,21 @@
 
 import {
   ApprovalRequestId,
-  CheckpointRef,
   EnvironmentId,
   MessageId,
   ProjectId,
   RunId,
   ThreadId,
+  TurnItemId,
 } from "@t3tools/contracts";
+import type {
+  OrchestrationV2ProjectedTurnItem,
+  OrchestrationV2TurnItem,
+} from "@t3tools/contracts";
+import { RegistryContext } from "@effect/atom-react";
+import { formatDuration } from "@t3tools/shared/orchestrationTiming";
+import * as DateTime from "effect/DateTime";
+import { Atom, AtomRegistry } from "effect/reactivity";
 import {
   act,
   createRef,
@@ -18,8 +26,10 @@ import {
   type ReactElement,
 } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
-import { createRoot } from "react-dom/client";
+import { createRoot, type Root } from "react-dom/client";
 import { create, type ReactTestRenderer } from "react-test-renderer";
+import { environmentThreadDetails } from "../../state/threads";
+import type { TimelineEntry } from "../../session-logic";
 import { shouldUseRestingComposerLayout } from "../composerFooterLayout";
 import { useComposerFocusState } from "./useComposerFocusState";
 import { beforeAll, beforeEach, describe, expect, it, vi } from "vite-plus/test";
@@ -30,6 +40,8 @@ const activityTestState = vi.hoisted(() => ({
   expandedRuns: false,
   subagentTooltips: false,
 }));
+// The list mock mounts every row from `from` on, standing in for virtualization.
+const legendListWindow = vi.hoisted(() => ({ from: 0 }));
 
 // Expose tooltip contents in the renderer without requiring a browser portal.
 vi.mock("../ui/tooltip", async (importOriginal) => {
@@ -82,6 +94,7 @@ vi.mock("./MessagesTimeline.logic", async (importOriginal) => {
 });
 
 beforeEach(() => {
+  legendListWindow.from = 0;
   activityTestState.subagentTooltips = false;
   activityTestState.expanded = false;
   activityTestState.expandedRuns = false;
@@ -93,6 +106,7 @@ vi.mock("@legendapp/list/react", async () => {
   const LegendList = (props: {
     data: Array<{ id: string }>;
     keyExtractor: (item: { id: string }) => string;
+    getItemType?: (item: { id: string }) => string;
     renderItem: (args: { item: { id: string } }) => ReactNode;
     ListHeaderComponent?: ReactNode;
     ListFooterComponent?: ReactNode;
@@ -103,16 +117,6 @@ vi.mock("@legendapp/list/react", async () => {
       onReady?: (info: { anchorIndex: number }) => void;
       onSizeChanged?: (size: number) => void;
     };
-    maintainScrollAtEnd?:
-      | boolean
-      | {
-          animated?: boolean;
-          on?: {
-            dataChange?: boolean;
-            itemLayout?: boolean;
-            layout?: boolean;
-          };
-        };
     maintainVisibleContentPosition?:
       | boolean
       | {
@@ -157,31 +161,12 @@ vi.mock("@legendapp/list/react", async () => {
             ? Boolean(props.maintainVisibleContentPosition.shouldRestorePosition)
             : undefined
         }
-        data-maintain-scroll-at-end={props.maintainScrollAtEnd ? "enabled" : undefined}
-        data-maintain-scroll-at-end-animated={
-          typeof props.maintainScrollAtEnd === "object"
-            ? props.maintainScrollAtEnd.animated
-            : undefined
-        }
-        data-maintain-scroll-at-end-data-change={
-          typeof props.maintainScrollAtEnd === "object"
-            ? props.maintainScrollAtEnd.on?.dataChange
-            : undefined
-        }
-        data-maintain-scroll-at-end-item-layout={
-          typeof props.maintainScrollAtEnd === "object"
-            ? props.maintainScrollAtEnd.on?.itemLayout
-            : undefined
-        }
-        data-maintain-scroll-at-end-layout={
-          typeof props.maintainScrollAtEnd === "object"
-            ? props.maintainScrollAtEnd.on?.layout
-            : undefined
-        }
       >
         {props.ListHeaderComponent}
-        {props.data.map((item) => (
-          <div key={props.keyExtractor(item)}>{props.renderItem({ item })}</div>
+        {props.data.slice(legendListWindow.from).map((item) => (
+          <div key={props.keyExtractor(item)} data-item-type={props.getItemType?.(item)}>
+            {props.renderItem({ item })}
+          </div>
         ))}
         {props.ListFooterComponent}
       </div>
@@ -426,13 +411,17 @@ function buildLongUserMessageText(tail = "deep hidden detail only after expand")
   ).join("\n");
 }
 
-function buildUserTimelineEntry(text: string) {
+function buildUserTimelineEntry(
+  text: string,
+  entryId = "entry-1",
+  messageId = "message-1",
+) {
   return {
-    id: "entry-1",
+    id: entryId,
     kind: "message" as const,
     createdAt: MESSAGE_CREATED_AT,
     message: {
-      id: MessageId.make("message-1"),
+      id: MessageId.make(messageId),
       role: "user" as const,
       text,
       runId: null,
@@ -443,8 +432,12 @@ function buildUserTimelineEntry(text: string) {
   };
 }
 
-function buildAssistantTimelineEntry(text: string) {
-  const entry = buildUserTimelineEntry(text);
+function buildAssistantTimelineEntry(
+  text: string,
+  entryId = "entry-1",
+  messageId = "message-1",
+) {
+  const entry = buildUserTimelineEntry(text, entryId, messageId);
   return {
     ...entry,
     message: {
@@ -481,7 +474,117 @@ function buildSnapShotTimelineEntry(previewUrl?: string) {
   };
 }
 
+// Snapshot Markdown compiles in an effect, so these tests need mounted DOM output.
+
+type MountedTimeline = {
+  container: HTMLDivElement;
+  root: Root;
+};
+
+async function mountTimeline(element: ReactElement): Promise<MountedTimeline> {
+  vi.unstubAllGlobals();
+  vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+  vi.stubGlobal(
+    "requestAnimationFrame",
+    (callback: FrameRequestCallback) =>
+      window.setTimeout(() => callback(performance.now()), 0),
+  );
+  vi.stubGlobal("cancelAnimationFrame", (handle: number) => window.clearTimeout(handle));
+  vi.stubGlobal(
+    "ResizeObserver",
+    class {
+      observe() {}
+      disconnect() {}
+    },
+  );
+
+  const container = document.createElement("div");
+  document.body.append(container);
+  const root = createRoot(container);
+  try {
+    await act(async () => {
+      root.render(element);
+    });
+    return { container, root };
+  } catch (error) {
+    await act(async () => root.unmount());
+    container.remove();
+    vi.unstubAllGlobals();
+    throw error;
+  }
+}
+
+async function waitForTimelineMarkdown(
+  container: HTMLElement,
+  ready: (container: HTMLElement) => boolean,
+) {
+  const deadline = Date.now() + 10_000;
+  while (true) {
+    if (container.querySelector("[data-markdown-error]")) {
+      throw new Error("Timeline Markdown compilation failed");
+    }
+    if (!container.querySelector("[data-markdown-pending]") && ready(container)) return;
+    if (Date.now() >= deadline) {
+      throw new Error("Timed out waiting for compiled timeline Markdown");
+    }
+    await act(async () => {
+      await new Promise<void>((resolve) => window.setTimeout(resolve, 0));
+    });
+  }
+}
+
+async function unmountTimeline({ container, root }: MountedTimeline) {
+  try {
+    await act(async () => root.unmount());
+  } finally {
+    container.remove();
+    vi.unstubAllGlobals();
+  }
+}
+
+async function renderTimelineToMarkupAfterMarkdown(
+  element: ReactElement,
+  ready: (container: HTMLElement) => boolean,
+) {
+  const mounted = await mountTimeline(element);
+  try {
+    await waitForTimelineMarkdown(mounted.container, ready);
+    return mounted.container.innerHTML;
+  } finally {
+    await unmountTimeline(mounted);
+  }
+}
+
+function findWorkEntryDisclosure(container: HTMLElement, expanded: boolean) {
+  const disclosure = Array.from(
+    container.querySelectorAll<HTMLElement>('[role="button"], .tool-header-disclosure'),
+  ).find(
+    (node) =>
+      node.getAttribute("aria-expanded") === String(expanded) &&
+      (node.getAttribute("aria-label")?.trim().length ?? 0) > 0,
+  );
+  if (!disclosure) throw new Error(`No ${expanded ? "expanded" : "collapsed"} work disclosure`);
+  return disclosure;
+}
+
 describe("MessagesTimeline", () => {
+  it("buckets messages by role and logarithmic text length", () => {
+    const markup = renderToStaticMarkup(
+      <MessagesTimeline
+        {...buildProps()}
+        timelineEntries={[
+          buildUserTimelineEntry("x".repeat(999), "entry-short", "message-short"),
+          buildUserTimelineEntry("x".repeat(2000), "entry-long", "message-long"),
+          buildAssistantTimelineEntry("x".repeat(2000), "entry-assistant", "message-assistant"),
+        ]}
+      />,
+    );
+
+    expect(markup).toContain('data-item-type="message:user:0"');
+    expect(markup).toContain('data-item-type="message:user:1"');
+    expect(markup).toContain('data-item-type="message:assistant:1"');
+  });
+
   it("shows dynamic tool input without cached output when the row is expanded", async () => {
     activityTestState.expanded = true;
     vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
@@ -516,13 +619,23 @@ describe("MessagesTimeline", () => {
           />,
         );
       });
-      const row = renderer!.root.findByProps({ "aria-label": "Example tool" });
-      await act(() => row.props.onClick());
-      const visible = JSON.stringify(renderer!.toJSON());
-      expect(visible).toContain("KEEP_TOOL_INPUT");
-      expect(visible).not.toContain("RAW_CACHED_TOOL_OUTPUT");
-      await act(() => row.props.onClick());
-      expect(JSON.stringify(renderer!.toJSON())).not.toContain("KEEP_TOOL_INPUT");
+      const cardToggle = renderer!.root.find(
+        (node) => node.type === "button" && node.props.className === "tool-header-disclosure",
+      );
+      if (cardToggle && cardToggle.props["aria-expanded"] === false) {
+        await act(() => cardToggle.props.onClick());
+      }
+      const textOf = (node: ReactTestRenderer["root"]) =>
+        node
+          .findAll(() => true)
+          .flatMap((child) => child.children)
+          .filter((child) => typeof child === "string")
+          .join(" ");
+      const inputPane = renderer!.root.find(
+        (node) => node.type === "section" && node.props["aria-label"] === "Input",
+      );
+      expect(textOf(inputPane)).toContain("KEEP_TOOL_INPUT");
+      expect(textOf(renderer!.root)).not.toContain("RAW_CACHED_TOOL_OUTPUT");
     } finally {
       await act(() => renderer?.unmount());
     }
@@ -651,13 +764,24 @@ describe("MessagesTimeline", () => {
         });
         // The user scrolled up to read, so the composer is resting.
         await act(() => composerState!.setIsComposerScrollCollapsed(true));
-        const toggle = renderer!.root.findByProps({ "aria-expanded": false });
-        await act(() => toggle.props.onClick());
-        await flushFrame();
-        await flushFrame();
+        const getToggle = () => {
+          const toggle = renderer!.root.findAll(
+            (node) =>
+              typeof node.type === "string" && typeof node.props["aria-expanded"] === "boolean",
+          )[0];
+          if (toggle === undefined) throw new Error("Missing work disclosure");
+          return toggle;
+        };
+        let toggle = getToggle();
+        if (toggle.props["aria-expanded"] === false) {
+          await act(() => toggle.props.onClick());
+          await flushFrame();
+          await flushFrame();
+        }
         expect(isResting).toBe(true);
 
         timelineIsAtEnd = false;
+        toggle = getToggle();
         await act(() => toggle.props.onClick());
         await flushFrame();
         timelineIsAtEnd = isAtEnd;
@@ -697,7 +821,7 @@ describe("MessagesTimeline", () => {
 
   it("preserves XML-like source inside user code spans and fences", async () => {
     const { MessagesTimeline } = await import("./MessagesTimeline");
-    const markup = renderToStaticMarkup(
+    const markup = await renderTimelineToMarkupAfterMarkdown(
       <MessagesTimeline
         {...buildProps()}
         timelineEntries={[
@@ -712,17 +836,24 @@ describe("MessagesTimeline", () => {
           ),
         ]}
       />,
+      (container) =>
+        Array.from(container.querySelectorAll("code")).some(
+          (code) => code.textContent === '<tag attr="x">',
+        ),
     );
 
-    expect(markup).toMatch(
-      /<code\b[^>]*data-inline-code=""[^>]*>&lt;tag attr=&quot;x&quot;&gt;<\/code>/,
+    const document = new DOMParser().parseFromString(markup, "text/html");
+    expect(
+      [...document.querySelectorAll("code")].some((code) => code.textContent === '<tag attr="x">'),
+    ).toBe(true);
+    expect(document.querySelector("pre code")?.textContent).toContain(
+      '<root><child enabled="true" /></root>',
     );
-    expect(markup).toContain("&lt;root&gt;&lt;child enabled=&quot;true&quot; /&gt;&lt;/root&gt;");
-  });
+  }, 20_000);
 
   it("does not render markdown title attributes in user messages", async () => {
     const { MessagesTimeline } = await import("./MessagesTimeline");
-    const markup = renderToStaticMarkup(
+    const markup = await renderTimelineToMarkupAfterMarkdown(
       <MessagesTimeline
         {...buildProps()}
         timelineEntries={[
@@ -731,13 +862,63 @@ describe("MessagesTimeline", () => {
           ),
         ]}
       />,
+      (container) =>
+        container.querySelector('a[href="https://example.com"]') !== null &&
+        container.querySelector('img[src="https://example.com/image.png"]') !== null,
     );
 
     expect(markup).toContain('href="https://example.com"');
     expect(markup).toContain('src="https://example.com/image.png"');
     expect(markup).not.toContain('title="link tip"');
     expect(markup).not.toContain('title="image tip"');
-  });
+  }, 20_000);
+
+  it("continues to render sanitized raw HTML in assistant messages", async () => {
+    const { MessagesTimeline } = await import("./MessagesTimeline");
+    const markup = await renderTimelineToMarkupAfterMarkdown(
+      <MessagesTimeline
+        {...buildProps()}
+        timelineEntries={[
+          buildAssistantTimelineEntry("<details><summary>More</summary>Details</details>"),
+        ]}
+      />,
+      (container) => container.querySelector('[data-markdown-details=""]') !== null,
+    );
+
+    expect(markup).toContain('data-markdown-details=""');
+    expect(markup).toContain("More");
+    expect(markup).not.toContain("&lt;details&gt;");
+  }, 20_000);
+
+  it("sanitizes executable HTML while preserving supported assistant markup", async () => {
+    const { MessagesTimeline } = await import("./MessagesTimeline");
+    const markup = await renderTimelineToMarkupAfterMarkdown(
+      <MessagesTimeline
+        {...buildProps()}
+        timelineEntries={[
+          buildAssistantTimelineEntry(
+            [
+              '<details open onclick="globalThis.__t3Xss = 1">',
+              "<summary>Safe details</summary>",
+              "<script>globalThis.__t3Xss = 2</script>",
+              '<img src="x" onerror="globalThis.__t3Xss = 3">',
+              '<a href="javascript:globalThis.__t3Xss = 4">Unsafe link</a>',
+              "</details>",
+            ].join(""),
+          ),
+        ]}
+      />,
+      (container) => container.querySelector('[data-markdown-details=""]') !== null,
+    );
+
+    expect(markup).toContain('data-markdown-details=""');
+    expect(markup).toContain("Safe details");
+    expect(markup).not.toMatch(/<script(?:\s|>)/i);
+    expect(markup).not.toContain("onclick=");
+    expect(markup).not.toContain("onerror=");
+    expect(markup).not.toContain("javascript:");
+    expect(markup).not.toContain("globalThis.__t3Xss");
+  }, 20_000);
 
   it("renders unsafe user HTML as inert source text", async () => {
     const { MessagesTimeline } = await import("./MessagesTimeline");
@@ -760,50 +941,6 @@ describe("MessagesTimeline", () => {
     expect(markup).not.toMatch(/<img(?:\s|>)/i);
   });
 
-  it("continues to render sanitized raw HTML in assistant messages", async () => {
-    const { MessagesTimeline } = await import("./MessagesTimeline");
-    const markup = renderToStaticMarkup(
-      <MessagesTimeline
-        {...buildProps()}
-        timelineEntries={[
-          buildAssistantTimelineEntry("<details><summary>More</summary>Details</details>"),
-        ]}
-      />,
-    );
-
-    expect(markup).toContain('data-markdown-details=""');
-    expect(markup).toContain("More");
-    expect(markup).not.toContain("&lt;details&gt;");
-  });
-
-  it("sanitizes executable HTML while preserving supported assistant markup", async () => {
-    const { MessagesTimeline } = await import("./MessagesTimeline");
-    const markup = renderToStaticMarkup(
-      <MessagesTimeline
-        {...buildProps()}
-        timelineEntries={[
-          buildAssistantTimelineEntry(
-            [
-              '<details open onclick="globalThis.__t3Xss = 1">',
-              "<summary>Safe details</summary>",
-              "<script>globalThis.__t3Xss = 2</script>",
-              '<img src="x" onerror="globalThis.__t3Xss = 3">',
-              '<a href="javascript:globalThis.__t3Xss = 4">Unsafe link</a>',
-              "</details>",
-            ].join(""),
-          ),
-        ]}
-      />,
-    );
-
-    expect(markup).toContain('data-markdown-details=""');
-    expect(markup).toContain("Safe details");
-    expect(markup).not.toMatch(/<script(?:\s|>)/i);
-    expect(markup).not.toContain("onclick=");
-    expect(markup).not.toContain("onerror=");
-    expect(markup).not.toContain("javascript:");
-    expect(markup).not.toContain("globalThis.__t3Xss");
-  });
   it("renders progressive history controls ahead of the bounded timeline", () => {
     const markup = renderToStaticMarkup(
       <MessagesTimeline
@@ -857,57 +994,6 @@ describe("MessagesTimeline", () => {
     expect(compactMarkup).not.toContain("topbar-scroll-fade");
     expect(fadedMarkup).toContain('class="h-[var(--workspace-titlebar-scroll-fade-height)]"');
     expect(fadedMarkup).toContain("topbar-scroll-fade");
-  });
-
-  it("keeps assistant changed-files headers sticky below the thread header", () => {
-    const assistantMessageId = MessageId.make("message-assistant-with-files");
-    const runId = RunId.make("run-with-files");
-    const markup = renderToStaticMarkup(
-      <MessagesTimeline
-        {...buildProps()}
-        latestRun={{
-          runId,
-          status: "completed",
-          startedAt: MESSAGE_CREATED_AT,
-          completedAt: MESSAGE_CREATED_AT,
-        }}
-        timelineEntries={[
-          {
-            id: "entry-assistant-with-files",
-            kind: "message",
-            createdAt: MESSAGE_CREATED_AT,
-            message: {
-              id: assistantMessageId,
-              role: "assistant",
-              text: "Updated the fixture.",
-              runId,
-              createdAt: MESSAGE_CREATED_AT,
-              updatedAt: MESSAGE_CREATED_AT,
-              streaming: false,
-            },
-          },
-        ]}
-        turnDiffSummaries={[
-          {
-            runId,
-            checkpointTurnCount: 1,
-            checkpointRef: CheckpointRef.make("checkpoint-with-files"),
-            status: "ready",
-            files: [{ path: "README.md", kind: "modified", additions: 2, deletions: 1 }],
-            assistantMessageId,
-            completedAt: MESSAGE_CREATED_AT,
-          },
-        ]}
-      />,
-    );
-
-    expect(markup).toContain("sticky top-2 z-10");
-    expect(markup).not.toContain("self-start");
-    expect(markup).toContain("whitespace-nowrap");
-    expect(markup).toContain("size-3");
-    expect(markup).not.toContain('aria-label="Collapse all folders"');
-    expect(markup).toContain('aria-label="Open diff"');
-    expect(markup).toContain("1 changed file");
   });
 
   it("treats the follow re-arm band above the content bottom as the live edge", async () => {
@@ -1058,7 +1144,6 @@ describe("MessagesTimeline", () => {
     expect(markup).not.toContain("data-anchor-max-size=");
     expect(markup).toContain('data-content-inset-end="144"');
     expect(markup).toContain("[overflow-anchor:none]");
-    expect(markup).not.toContain('data-maintain-scroll-at-end="enabled"');
     expect(markup).toContain('data-maintain-visible-content-position="object"');
     expect(markup).toContain('data-maintain-visible-content-position-data="true"');
     expect(markup).toContain('data-maintain-visible-content-position-size="true"');
@@ -1121,7 +1206,9 @@ describe("MessagesTimeline", () => {
     );
 
     expect(markup).not.toContain("data-anchor-index=");
-    expect(markup).toContain('data-maintain-scroll-at-end="enabled"');
+    // Following the end: the end pin owns the offset, so the list keeps
+    // nothing in place.
+    expect(markup).toContain('data-maintain-visible-content-position="false"');
     expect(onAnchorReady).not.toHaveBeenCalled();
   });
 
@@ -1271,10 +1358,111 @@ describe("MessagesTimeline", () => {
     );
 
     expect(markup).toContain('data-anchor-index="0"');
-    expect(markup).not.toContain('data-maintain-scroll-at-end="enabled"');
+    expect(markup).toContain('data-maintain-visible-content-position="object"');
+  });
+  it("keeps the root work duration frozen after native execution ends", async () => {
+    const queuedRunId = RunId.make("run-queued-after-native-end");
+    const startedAt = "2026-10-13T12:00:00.000Z";
+    const workCompletedAt = "2026-10-13T12:00:15.000Z";
+    vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+    vi.stubGlobal("requestAnimationFrame", () => 0);
+    vi.stubGlobal("cancelAnimationFrame", () => {});
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-10-13T12:00:20.000Z"));
+    let renderer: ReactTestRenderer | undefined;
+    const renderTimeline = () => (
+      <MessagesTimeline
+        {...buildProps()}
+        isWorking
+        activeTurnInProgress
+        activeTurnStartedAt={startedAt}
+        activityStatus="finishing"
+        activityRunWorkCompletedAt={workCompletedAt}
+        latestRun={{
+          runId: queuedRunId,
+          status: "queued",
+          startedAt: null,
+          completedAt: null,
+          workCompletedAt: null,
+        }}
+        runningRunId={null}
+        timelineEntries={[]}
+      />
+    );
+    const elapsedText = () => {
+      const statusRow = renderer!.root.findByProps({ "data-t3-part": "timeline-status" });
+      return statusRow
+        .findAll(
+          (node) =>
+            node.type === "span" &&
+            typeof node.props.className === "string" &&
+            node.props.className.includes("tabular-nums"),
+        )[0]
+        ?.children.join("");
+    };
+
+    try {
+      await act(async () => {
+        renderer = create(renderTimeline());
+      });
+      expect(elapsedText()).toBe("15s");
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(30_000);
+      });
+      expect(elapsedText()).toBe("15s");
+    } finally {
+      if (renderer) await act(async () => renderer!.unmount());
+      vi.useRealTimers();
+      vi.unstubAllGlobals();
+    }
   });
 
-  it("hands end-following back to the list once the send anchor is released", () => {
+  it("treats history mounted by scrolling back as seen, not as arriving rows", async () => {
+    const reply = (n: number) => {
+      const base = buildAssistantTimelineEntry(`Reply ${n}.`);
+      return {
+        ...base,
+        id: `entry-${n}`,
+        message: { ...base.message, id: MessageId.make(`message-${n}`) },
+      };
+    };
+    const history = [reply(1), reply(2), reply(3)];
+    // An arriving frame opens from zero height, so it is the only reply frame gliding.
+    const glidingReplies = (container: HTMLElement) =>
+      Array.from(
+        container.querySelectorAll(".messages-timeline-row-frame[data-glide]"),
+        (frame) => frame.textContent?.match(/Reply \d/)?.[0],
+      ).filter((reply) => reply !== undefined);
+    const renderTimeline = (timelineEntries: typeof history) => (
+      <MessagesTimeline
+        {...buildProps()}
+        isWorking
+        activeTurnInProgress
+        timelineEntries={timelineEntries}
+      />
+    );
+
+    // Live, with only the newest reply mounted.
+    legendListWindow.from = 2;
+    const mounted = await mountTimeline(renderTimeline(history));
+    try {
+      // Scrolling back mounts the older replies for the first time.
+      legendListWindow.from = 0;
+      await act(async () => mounted.root.render(renderTimeline(history)));
+      expect(
+        mounted.container.querySelectorAll(".messages-timeline-row-frame").length,
+      ).toBeGreaterThan(2);
+      expect(glidingReplies(mounted.container)).toEqual([]);
+
+      await act(async () => mounted.root.render(renderTimeline([...history, reply(4)])));
+      expect(glidingReplies(mounted.container)).toEqual(["Reply 4"]);
+    } finally {
+      await unmountTimeline(mounted);
+    }
+  });
+
+  it("hands end-following back to the end pin once the send anchor is released", () => {
     const firstEntry = buildUserTimelineEntry("First prompt.");
     const secondEntry = {
       ...buildUserTimelineEntry("Newest prompt."),
@@ -1287,7 +1475,7 @@ describe("MessagesTimeline", () => {
     const timelineEntries = [firstEntry, secondEntry];
 
     // While the send anchor holds the end space open, ChatView owns streaming
-    // scrolls and LegendList must not re-pin behind it.
+    // scrolls: the end pin stands down and the list keeps content in place.
     expect(
       renderToStaticMarkup(
         <MessagesTimeline
@@ -1296,7 +1484,7 @@ describe("MessagesTimeline", () => {
           timelineEntries={timelineEntries}
         />,
       ),
-    ).not.toContain('data-maintain-scroll-at-end="enabled"');
+    ).toContain('data-maintain-visible-content-position="object"');
 
     // Dropping the anchor is what actually gives end-following back, so
     // returning to the live edge has to release it — re-enabling live follow
@@ -1309,7 +1497,7 @@ describe("MessagesTimeline", () => {
           timelineEntries={timelineEntries}
         />,
       ),
-    ).toContain('data-maintain-scroll-at-end="enabled"');
+    ).toContain('data-maintain-visible-content-position="false"');
 
     // Reading history still wins over both.
     expect(
@@ -1321,7 +1509,7 @@ describe("MessagesTimeline", () => {
           timelineEntries={timelineEntries}
         />,
       ),
-    ).not.toContain('data-maintain-scroll-at-end="enabled"');
+    ).toContain('data-maintain-visible-content-position="object"');
   });
 
   it("renders collapse controls for long user messages", () => {
@@ -1333,13 +1521,6 @@ describe("MessagesTimeline", () => {
     );
 
     expect(markup).toContain("Show full message");
-    // LegendList owns ordinary end-follow (#5449): with live follow on and no
-    // anchored end space, its maintainScrollAtEnd is enabled.
-    expect(markup).toContain('data-maintain-scroll-at-end="enabled"');
-    expect(markup).toContain('data-maintain-scroll-at-end-animated="false"');
-    expect(markup).toContain('data-maintain-scroll-at-end-data-change="true"');
-    expect(markup).toContain('data-maintain-scroll-at-end-item-layout="true"');
-    expect(markup).toContain('data-maintain-scroll-at-end-layout="true"');
     expect(markup).toContain('data-user-message-collapsed="true"');
     expect(markup).toContain('data-user-message-fade="true"');
     expect(markup).toContain('data-user-message-footer="true"');
@@ -1358,46 +1539,24 @@ describe("MessagesTimeline", () => {
     expect(markup).toContain("rounded-2xl bg-message p-3");
   });
 
-  it("identifies user-role messages sent by another agent", async () => {
+  it("leaves server-authored agent messages unfolded", async () => {
+    // Load after the vi.mock declarations above so the timeline uses the test fixtures.
     const { MessagesTimeline } = await import("./MessagesTimeline");
-    const entry = buildUserTimelineEntry("Review this area");
-    const agentMarkup = renderToStaticMarkup(
+    const entry = buildUserTimelineEntry("Server-authored update");
+    const markup = renderToStaticMarkup(
       <MessagesTimeline
         {...buildProps()}
         timelineEntries={[
           {
             ...entry,
-            message: { ...entry.message, createdBy: "agent", creationSource: "provider" },
+            message: { ...entry.message, createdBy: "agent", creationSource: "server" },
           },
         ]}
       />,
     );
-    const userMarkup = renderToStaticMarkup(
-      <MessagesTimeline {...buildProps()} timelineEntries={[entry]} />,
-    );
 
-    expect(agentMarkup).toContain('data-user-message-attribution="agent"');
-    expect(agentMarkup).toContain("Sent by another agent");
-    expect(userMarkup).not.toContain("Sent by another agent");
-  });
-
-  it("keeps a subagent parent-thread link at the top of an empty timeline", async () => {
-    const { MessagesTimeline } = await import("./MessagesTimeline");
-    const markup = renderToStaticMarkup(
-      <MessagesTimeline
-        {...buildProps()}
-        timelineEntries={[]}
-        parentThreadLink={{
-          threadId: ThreadId.make("thread-parent"),
-          title: "Architecture audit",
-        }}
-      />,
-    );
-
-    expect(markup).toContain('aria-label="Open parent thread"');
-    expect(markup).toContain("Subagent of");
-    expect(markup).toContain("Architecture audit");
-    expect(markup).not.toContain("Send a message to start the conversation");
+    expect(markup).toContain("Server-authored update");
+    expect(markup).not.toContain('data-user-message-folded="agent"');
   });
 
   it("keeps steer intent visible on committed user messages", async () => {
@@ -1420,49 +1579,6 @@ describe("MessagesTimeline", () => {
     expect(markup.indexOf("Steer")).toBeLessThan(markup.indexOf("Adjust the current turn"));
   });
 
-  it("keeps compact spacing below a collapsed turn divider", () => {
-    const runId = RunId.make("run-collapsed-spacing");
-    const markup = renderToStaticMarkup(
-      <MessagesTimeline
-        {...buildProps()}
-        timelineEntries={[
-          buildUserTimelineEntry("Investigate spacing"),
-          {
-            id: "assistant-commentary-spacing",
-            kind: "message",
-            createdAt: "2026-03-17T19:12:30.000Z",
-            message: {
-              id: MessageId.make("assistant-commentary-spacing"),
-              role: "assistant",
-              text: "Checking the layout.",
-              runId,
-              createdAt: "2026-03-17T19:12:30.000Z",
-              updatedAt: "2026-03-17T19:12:31.000Z",
-              streaming: false,
-            },
-          },
-          {
-            id: "assistant-final-spacing",
-            kind: "message",
-            createdAt: "2026-03-17T19:12:32.000Z",
-            message: {
-              id: MessageId.make("assistant-final-spacing"),
-              role: "assistant",
-              text: "Spacing fixed.",
-              runId,
-              createdAt: "2026-03-17T19:12:32.000Z",
-              updatedAt: "2026-03-17T19:12:33.000Z",
-              streaming: false,
-            },
-          },
-        ]}
-      />,
-    );
-
-    expect(markup).toContain('pb-1.5" data-timeline-row-id="turn-fold:');
-    expect(markup).toContain('data-timeline-row-kind="turn-fold"');
-  });
-
   it("shows a collapsed disclosure for superseded attempt output", async () => {
     const { MessagesTimeline } = await import("./MessagesTimeline");
     const runId = RunId.make("run-steered");
@@ -1480,7 +1596,7 @@ describe("MessagesTimeline", () => {
       rootNodeId: "node-attempt-2" as never,
       status: "running" as const,
     };
-    const markup = renderToStaticMarkup(
+    const markup = await renderTimelineToMarkupAfterMarkdown(
       <MessagesTimeline
         {...buildProps()}
         latestRun={{
@@ -1522,15 +1638,17 @@ describe("MessagesTimeline", () => {
           },
         ]}
       />,
+      (container) => container.textContent?.includes("Current response remains visible") === true,
     );
 
     expect(markup).toContain('data-superseded-attempt-id="attempt-1"');
     expect(markup).toContain('aria-expanded="false"');
     expect(markup).toContain("Superseded attempt");
     expect(markup).toContain("Partial output retained");
-    expect(markup).toContain("Current response remains visible");
+    // Streaming text arrives word by word in its own spans; read it as text.
+    expect(markup.replace(/<[^>]+>/g, "")).toContain("Current response remains visible");
     expect(markup).not.toContain("Partial response from the old attempt");
-  });
+  }, 20_000);
 
   it("exposes a per-response fork action for completed assistant items", async () => {
     const { MessagesTimeline } = await import("./MessagesTimeline");
@@ -1588,7 +1706,7 @@ describe("MessagesTimeline", () => {
 
   it("renders inline terminal labels with the composer chip UI", async () => {
     const { MessagesTimeline } = await import("./MessagesTimeline");
-    const markup = renderToStaticMarkup(
+    const markup = await renderTimelineToMarkupAfterMarkdown(
       <MessagesTimeline
         {...buildProps()}
         timelineEntries={[
@@ -1605,13 +1723,14 @@ describe("MessagesTimeline", () => {
           ),
         ]}
       />,
+      (container) => container.textContent?.includes("Terminal 1 lines 1-5") === true,
     );
 
-    expect(markup).toContain("Terminal 1 lines 1-5");
-    expect(markup).toContain("lucide-terminal");
-    expect(markup).toContain("yoo what&#x27;s");
-    expect(markup).not.toContain("terminal_context");
-    expect(markup).toContain("Show full message");
+    const document = new DOMParser().parseFromString(markup, "text/html");
+    expect(document.body.textContent).toContain("Terminal 1 lines 1-5");
+    expect(document.body.textContent).toContain("yoo what's");
+    expect(document.body.textContent).not.toContain("terminal_context");
+    expect(document.body.textContent).toContain("Show full message");
   }, 20_000);
 
   it("renders chips for standalone element-pick context messages", () => {
@@ -1944,6 +2063,302 @@ describe("MessagesTimeline", () => {
     expect(markup).not.toContain("Work Log");
   });
 
+  it("opens a retained V2 subagent group when its live lifecycle restarts", async () => {
+    vi.unstubAllGlobals();
+    vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+    vi.stubGlobal("requestAnimationFrame", () => 0);
+    vi.stubGlobal("cancelAnimationFrame", () => {});
+    vi.stubGlobal(
+      "ResizeObserver",
+      class {
+        observe() {}
+        disconnect() {}
+        unobserve() {}
+      },
+    );
+    // The group header verb rolls: RollingText measures a Range and reads the
+    // reduced-motion query, neither of which jsdom has.
+    vi.stubGlobal(
+      "matchMedia",
+      vi.fn(() => ({ matches: false, addEventListener() {}, removeEventListener() {} })),
+    );
+    Object.defineProperty(Range.prototype, "getBoundingClientRect", {
+      configurable: true,
+      value: () => ({ left: 0, right: 0, width: 0 }),
+    });
+
+    const makeLiveThread = (status: "completed" | "running") => ({
+      environmentId: ACTIVE_THREAD_ENVIRONMENT_ID,
+      projection: {
+        subagents: [
+          {
+            id: "child-agent-1",
+            status,
+            startedAt: null,
+            completedAt: null,
+            currentTool: status === "running" ? { name: "Read", intent: "Read the task" } : null,
+          },
+          {
+            id: "child-agent-2",
+            status,
+            startedAt: null,
+            completedAt: null,
+            currentTool: null,
+          },
+        ],
+      },
+    });
+    const liveThreadAtom = Atom.make(makeLiveThread("completed"));
+    const threadAtomSpy = vi
+      .spyOn(environmentThreadDetails, "threadAtom")
+      .mockReturnValue(liveThreadAtom as never);
+    const registry = AtomRegistry.make();
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+    const makeSubagentEntry = (itemId: string, subagentId: string, ordinal: number) => ({
+      id: itemId,
+      kind: "event" as const,
+      createdAt: MESSAGE_CREATED_AT,
+      projectedItem: {
+        position: ordinal,
+        visibility: "local" as const,
+        sourceThreadId: "thread-1",
+        sourceItemId: itemId,
+        item: {
+          id: itemId,
+          threadId: "thread-1",
+          runId: "run-1",
+          nodeId: subagentId,
+          providerThreadId: null,
+          providerTurnId: "turn-1",
+          nativeItemRef: null,
+          parentItemId: "task-call-1",
+          ordinal,
+          status: "completed",
+          title: `Agent ${subagentId}`,
+          startedAt: null,
+          completedAt: null,
+          updatedAt: {},
+          type: "subagent",
+          subagentId,
+          origin: "provider_native",
+          driver: "omp",
+          providerInstanceId: "omp",
+          childThreadId: null,
+          prompt: "Inspect the task",
+          result: "Completed.",
+          currentTool: null,
+        },
+      } as never,
+    });
+    const timelineEntries = [
+      makeSubagentEntry("subagent-item-1", "child-agent-1", 1),
+      makeSubagentEntry("subagent-item-2", "child-agent-2", 2),
+    ];
+
+    try {
+      await act(async () => {
+        root.render(
+          <RegistryContext.Provider value={registry}>
+            <MessagesTimeline {...buildProps()} timelineEntries={timelineEntries as never} />
+          </RegistryContext.Provider>,
+        );
+      });
+
+      await act(async () => {
+        registry.set(liveThreadAtom, makeLiveThread("running"));
+      });
+      const disclosure = container.querySelector<HTMLButtonElement>(
+        "[data-subagent-task-tracker] > button",
+      );
+      expect(disclosure).not.toBeNull();
+      expect(disclosure?.getAttribute("aria-expanded")).toBe("true");
+      expect(container.querySelector(".minimal-agent-activity")?.textContent).toBe("Read the task");
+
+      await act(async () => {
+        container
+          .querySelector<HTMLButtonElement>("[data-subagent-task-tracker] > button")
+          ?.click();
+      });
+      expect(
+        container
+          .querySelector("[data-subagent-task-tracker] > button")
+          ?.getAttribute("aria-expanded"),
+      ).toBe("false");
+      await act(async () => {
+        registry.set(liveThreadAtom, makeLiveThread("completed"));
+      });
+      await act(async () => {
+        registry.set(liveThreadAtom, makeLiveThread("running"));
+      });
+      expect(
+        container
+          .querySelector("[data-subagent-task-tracker] > button")
+          ?.getAttribute("aria-expanded"),
+      ).toBe("false");
+      expect(container.querySelector(".minimal-agent-activity")).toBeNull();
+    } finally {
+      await act(async () => root.unmount());
+      threadAtomSpy.mockRestore();
+      registry.dispose();
+      container.remove();
+      vi.unstubAllGlobals();
+      Reflect.deleteProperty(Range.prototype, "getBoundingClientRect");
+    }
+  });
+
+  it("uses native activity until a matching live lifecycle overrides it", async () => {
+    vi.unstubAllGlobals();
+    vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+    vi.stubGlobal("requestAnimationFrame", () => 0);
+    vi.stubGlobal("cancelAnimationFrame", () => {});
+    vi.stubGlobal(
+      "ResizeObserver",
+      class {
+        observe() {}
+        disconnect() {}
+        unobserve() {}
+      },
+    );
+    vi.stubGlobal(
+      "matchMedia",
+      vi.fn(() => ({ matches: false, addEventListener() {}, removeEventListener() {} })),
+    );
+    Object.defineProperty(Range.prototype, "getBoundingClientRect", {
+      configurable: true,
+      value: () => ({ left: 0, right: 0, width: 0 }),
+    });
+    // The group holds open a beat after its last agent settles.
+    vi.useFakeTimers();
+
+    type LiveSubagent = {
+      readonly id: string;
+      readonly status: "completed" | "running";
+      readonly startedAt: null;
+      readonly completedAt: null;
+      readonly currentTool: { readonly name: string; readonly intent: string } | null;
+    };
+    const makeLiveThread = (subagents: ReadonlyArray<LiveSubagent>) => ({
+      environmentId: ACTIVE_THREAD_ENVIRONMENT_ID,
+      projection: { subagents },
+    });
+    const liveThreadAtom = Atom.make(makeLiveThread([]));
+    const threadAtomSpy = vi
+      .spyOn(environmentThreadDetails, "threadAtom")
+      .mockReturnValue(liveThreadAtom as never);
+    const registry = AtomRegistry.make();
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+    const makeSubagentEntry = (
+      itemId: string,
+      subagentId: string,
+      ordinal: number,
+      status: "completed" | "running",
+      currentTool: { readonly name: string; readonly intent: string } | null,
+    ) => ({
+      id: itemId,
+      kind: "event" as const,
+      createdAt: MESSAGE_CREATED_AT,
+      projectedItem: {
+        position: ordinal,
+        visibility: "local" as const,
+        sourceThreadId: "thread-1",
+        sourceItemId: itemId,
+        item: {
+          id: itemId,
+          threadId: "thread-1",
+          runId: "run-1",
+          nodeId: subagentId,
+          providerThreadId: null,
+          providerTurnId: "turn-1",
+          nativeItemRef: null,
+          parentItemId: "task-call-1",
+          ordinal,
+          status,
+          title: `Agent ${subagentId}`,
+          startedAt: null,
+          completedAt: null,
+          updatedAt: {},
+          type: "subagent",
+          subagentId,
+          origin: "provider_native",
+          driver: "omp",
+          providerInstanceId: "omp",
+          childThreadId: null,
+          prompt: "Inspect the task",
+          result: status === "completed" ? "Completed." : null,
+          currentTool,
+        },
+      } as never,
+    });
+    const timelineEntries = [
+      makeSubagentEntry("subagent-item-1", "child-agent-1", 1, "running", {
+        name: "Snapshot Read",
+        intent: "Read the snapshot task",
+      }),
+      makeSubagentEntry("subagent-item-2", "child-agent-2", 2, "completed", null),
+    ];
+
+    try {
+      await act(async () => {
+        root.render(
+          <RegistryContext.Provider value={registry}>
+            <MessagesTimeline
+              {...buildProps()}
+              latestRun={{
+                runId: RunId.make("run-1"),
+                status: "running",
+                startedAt: MESSAGE_CREATED_AT,
+                completedAt: null,
+              }}
+              timelineEntries={timelineEntries as never}
+            />
+          </RegistryContext.Provider>,
+        );
+      });
+      expect(
+        container
+          .querySelector("[data-subagent-task-tracker] > button")
+          ?.getAttribute("aria-expanded"),
+      ).toBe("true");
+      expect(container.querySelector(".minimal-agent-activity")?.textContent).toBe(
+        "Read the snapshot task",
+      );
+
+      await act(async () => {
+        registry.set(
+          liveThreadAtom,
+          makeLiveThread([
+            {
+              id: "child-agent-1",
+              status: "completed",
+              startedAt: null,
+              completedAt: null,
+              currentTool: null,
+            },
+          ]),
+        );
+      });
+      await act(async () => vi.advanceTimersByTime(700));
+      expect(
+        container
+          .querySelector("[data-subagent-task-tracker] > button")
+          ?.getAttribute("aria-expanded"),
+      ).toBe("false");
+      expect(container.querySelector(".minimal-agent-activity")).toBeNull();
+    } finally {
+      await act(async () => root.unmount());
+      threadAtomSpy.mockRestore();
+      registry.dispose();
+      container.remove();
+      vi.unstubAllGlobals();
+      vi.useRealTimers();
+      Reflect.deleteProperty(Range.prototype, "getBoundingClientRect");
+    }
+  });
+
   it("keeps the collapsed summary icon neutral when the group ends in a failure", () => {
     const markup = renderToStaticMarkup(
       <MessagesTimeline
@@ -1958,7 +2373,7 @@ describe("MessagesTimeline", () => {
               createdAt: "2026-03-17T19:12:28.000Z",
               label: "Run tests",
               tone: "tool",
-              itemType: "command_execution",
+              itemType: "dynamic_tool",
               toolLifecycleStatus: "completed",
             },
           },
@@ -1971,7 +2386,7 @@ describe("MessagesTimeline", () => {
               createdAt: "2026-03-17T19:12:29.000Z",
               label: "Run lint",
               tone: "tool",
-              itemType: "command_execution",
+              itemType: "dynamic_tool",
               toolLifecycleStatus: "failed",
             },
           },
@@ -1979,8 +2394,7 @@ describe("MessagesTimeline", () => {
       />,
     );
 
-    expect(markup).toContain("Ran 2 commands");
-    expect(markup).toContain("lucide-terminal");
+    expect(markup).toContain("Used 2 tools");
     expect(markup).not.toContain("lucide-x");
     expect(markup).not.toContain("text-destructive");
     // The failure stays discoverable for screen readers.
@@ -2001,7 +2415,7 @@ describe("MessagesTimeline", () => {
               createdAt: "2026-03-17T19:12:28.000Z",
               label: "Run search",
               tone: "tool",
-              itemType: "command_execution",
+              itemType: "dynamic_tool",
               toolLifecycleStatus: "failed",
             },
           },
@@ -2025,7 +2439,7 @@ describe("MessagesTimeline", () => {
               createdAt: "2026-03-17T19:12:30.000Z",
               label: "Run tests",
               tone: "tool",
-              itemType: "command_execution",
+              itemType: "dynamic_tool",
               toolLifecycleStatus: "completed",
             },
           },
@@ -2033,144 +2447,9 @@ describe("MessagesTimeline", () => {
       />,
     );
 
-    expect(markup).toContain("Ran 2 commands and received 1 update");
+    expect(markup).toContain("Used 2 tools and received 1 update");
     expect(markup).not.toContain('aria-label="Hidden work includes a failure"');
   });
-
-  it.each(
-    (
-      [
-        {
-          status: "running",
-          progress: "Reading src/index.ts",
-          result: null,
-          preview: "Reading src/index.ts",
-        },
-        {
-          status: "completed",
-          progress: "Reading src/index.ts",
-          result: "Tests should be isolated.",
-          preview: "Tests should be isolated.",
-        },
-        {
-          status: "running",
-          progress: "Reading src/index.ts",
-          result: "Partial streamed answer",
-          preview: "Reading src/index.ts",
-        },
-        {
-          status: "running",
-          progress: undefined,
-          result: "Streaming answer so far",
-          preview: "Streaming answer so far",
-        },
-        {
-          status: "cancelled",
-          progress: "Reading src/index.ts",
-          result: "Partial output before cancel",
-          preview: "Partial output before cancel",
-        },
-        {
-          status: "completed",
-          progress: "Audited 12 packages",
-          result: "  \n\t  ",
-          preview: "Audited 12 packages",
-        },
-      ] as const
-    ).flatMap((scenario) => [1, 2].map((count) => ({ ...scenario, count }))),
-  )(
-    "shows $count $status subagents with '$preview', grouping only multiple agents",
-    async ({ status, progress, result, preview, count }) => {
-      activityTestState.expandedRuns = true;
-      activityTestState.subagentTooltips = true;
-      vi.stubGlobal("HTMLElement", ElementStub);
-      window.HTMLElement = ElementStub as typeof HTMLElement;
-      vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
-      vi.stubGlobal("requestAnimationFrame", () => 0);
-      vi.stubGlobal("cancelAnimationFrame", () => {});
-      const onOpenThread = vi.fn();
-      let renderer: ReactTestRenderer | undefined;
-      try {
-        await act(() => {
-          renderer = create(
-            <MessagesTimeline
-              {...buildProps()}
-              onOpenThread={onOpenThread}
-              timelineEntries={Array.from({ length: count }, (_, index) => ({
-                id: `subagent-progress-${index}`,
-                kind: "event",
-                createdAt: MESSAGE_CREATED_AT,
-                projectedItem: {
-                  position: 0,
-                  visibility: "local",
-                  sourceThreadId: "thread-1",
-                  sourceItemId: "subagent-progress",
-                  item: {
-                    id: `subagent-progress-${index}`,
-                    threadId: "thread-1",
-                    runId: "run-1",
-                    nodeId: `node-subagent-${index}`,
-                    providerThreadId: "provider-thread-1",
-                    providerTurnId: "provider-turn-1",
-                    nativeItemRef: null,
-                    parentItemId: null,
-                    ordinal: 1,
-                    status,
-                    title: "Package audit",
-                    startedAt: null,
-                    completedAt: null,
-                    updatedAt: {},
-                    type: "subagent",
-                    subagentId: `node-subagent-${index}`,
-                    origin: "provider_native",
-                    driver: "claudeAgent",
-                    providerInstanceId: "claudeAgent",
-                    childThreadId: "thread-subagent-1",
-                    prompt: "Inspect the package",
-                    progress,
-                    result,
-                  },
-                } as never,
-              }))}
-            />,
-          );
-        });
-        const groupLabel = `${count} subagents`;
-        const group = () =>
-          renderer!.root.findAll(
-            (node) => node.type === "button" && node.props["aria-label"] === groupLabel,
-          )[0]!;
-        const child = () =>
-          renderer!.root.findAll(
-            (node) => node.type === "button" && node.props["aria-label"] === "Open Package audit",
-          );
-        if (count > 1) {
-          expect(child()).toHaveLength(0);
-          await act(() => group().props.onClick({ nativeEvent: new Event("click") }));
-        } else {
-          expect(group()).toBeUndefined();
-        }
-        expect(child()).toHaveLength(count);
-        const content = renderer!.root
-          .findAll((node) => typeof node.type === "string")
-          .flatMap((node) => node.children.filter((child) => typeof child === "string"))
-          .join("");
-        expect(content).toContain(preview);
-        expect(content).not.toContain("Inspect the package");
-        if (result?.trim() && result !== preview) expect(content).not.toContain(result);
-        if (progress && progress !== preview) expect(content).not.toContain(progress);
-        await act(() => child()[0]!.props.onClick());
-        expect(onOpenThread).toHaveBeenCalledWith("thread-subagent-1");
-        if (count > 1) {
-          await act(() => group().props.onClick({ nativeEvent: new Event("click") }));
-          expect(child()).toHaveLength(0);
-        }
-      } finally {
-        await act(() => renderer?.unmount());
-        vi.stubGlobal("HTMLElement", undefined);
-      }
-    },
-  );
 
   it("renders V2 provider retries in the normal work log", () => {
     activityTestState.expanded = true;
@@ -2321,7 +2600,6 @@ describe("MessagesTimeline", () => {
 
     expect(markup).toContain('data-v2-item-type="command_execution"');
     expect(markup).toContain('data-v2-item-visibility="inherited"');
-    expect(markup).toContain("Received 1 update and ran 1 command");
   });
 
   it("renders T3 MCP dynamic tools with the product logo and pretty name", async () => {
@@ -2440,8 +2718,8 @@ describe("MessagesTimeline", () => {
     expect(markup).not.toContain("C:/Users/mike/dev-stuff/t3code/apps/web/src/session-logic.ts");
   });
 
-  it("renders review comment contexts as structured cards instead of raw tags", () => {
-    const markup = renderToStaticMarkup(
+  it("renders review comment contexts as structured cards instead of raw tags", async () => {
+    const markup = await renderTimelineToMarkupAfterMarkdown(
       <MessagesTimeline
         {...buildProps()}
         timelineEntries={[
@@ -2470,14 +2748,19 @@ describe("MessagesTimeline", () => {
           },
         ]}
       />,
+      (container) =>
+        Array.from(container.querySelectorAll("button")).some((button) =>
+          button.textContent?.includes("contextWindow.test.ts"),
+        ),
     );
 
-    expect(markup).toContain("contextWindow.test.ts +47 to +58");
-    expect(markup).toContain("lucide-message-circle");
-    expect(markup).not.toContain(">Review comment<");
-    expect(markup).not.toContain("&lt;review_comment");
-    expect(markup).not.toContain("&lt;/review_comment&gt;");
-  });
+    const document = new DOMParser().parseFromString(markup, "text/html");
+    const contextChip = Array.from(document.querySelectorAll("button")).find((button) =>
+      button.textContent?.includes("contextWindow.test.ts"),
+    );
+    expect(contextChip?.textContent).toContain("contextWindow.test.ts L47 to L58");
+    expect(document.body.textContent).not.toContain("<review_comment");
+  }, 20_000);
 
   it("renders file review comments as source code instead of diffs", () => {
     const markup = renderToStaticMarkup(
@@ -2527,10 +2810,10 @@ describe("MessagesTimeline", () => {
             entry: {
               id: "work-1",
               createdAt: "2026-03-17T19:12:28.000Z",
-              label: "Ran command",
-              command: "vp lint",
+              label: "Called tool",
+              detail: "vp lint",
               tone: "tool",
-              itemType: "command_execution",
+              itemType: "dynamic_tool",
               toolLifecycleStatus: "completed",
             },
           },
@@ -2541,10 +2824,10 @@ describe("MessagesTimeline", () => {
             entry: {
               id: "work-2",
               createdAt: "2026-03-17T19:12:29.000Z",
-              label: "Ran command",
-              command: "vp test run",
+              label: "Called tool",
+              detail: "vp test run",
               tone: "tool",
-              itemType: "command_execution",
+              itemType: "dynamic_tool",
               toolLifecycleStatus: "completed",
             },
           },
@@ -2552,7 +2835,7 @@ describe("MessagesTimeline", () => {
       />,
     );
 
-    expect(markup).toContain("Ran 2 commands");
+    expect(markup).toContain("Used 2 tools");
     expect(markup).toContain('aria-expanded="false"');
     // Entries stay hidden until the toggle expands the group.
     expect(markup).not.toContain("vp lint");
@@ -2636,77 +2919,89 @@ describe("MessagesTimeline", () => {
   });
 
   it.each([
-    [
-      "**Viewing image first** with *care*, ~~old~~ `code` and [context](https://example.com)",
-      "Viewing image first with care, old code and context",
-      1,
-    ],
-    ["first paragraph\n\nsecond paragraph", "first paragraph second paragraph", 0],
-    ["- first\n- second", "first second", 0],
-    ["first  \nsecond", "first second", 0],
-    ["![image description](image.png)", "image description", 0],
-    ["![](image.png)", "Thought", 0],
-    ["---", "Thought", 0],
+    ["without timing", null, "Thought"],
+    ["under two seconds", 800, "Thought briefly"],
+    ["with timing", 12_000, `Thought for ${formatDuration(12_000)}`],
   ] as const)(
-    "shows plain text for a V2 reasoning preview: %s",
-    async (markdown, expected, strongCount) => {
-      vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
-      vi.stubGlobal("requestAnimationFrame", () => 0);
-      vi.stubGlobal("cancelAnimationFrame", () => {});
+    "heads a settled thought with its verb %s and keeps the thought for the body",
+    async (_case, durationMs, verb) => {
       activityTestState.expanded = true;
-      let renderer: ReactTestRenderer | undefined;
+      const markdown = "**Viewing image first** with care";
+      const startedAt = DateTime.makeUnsafe(MESSAGE_CREATED_AT);
+      const mounted = await mountTimeline(
+        <MessagesTimeline
+          {...buildProps()}
+          timelineEntries={[
+            {
+              id: "reasoning-preview",
+              kind: "work",
+              createdAt: MESSAGE_CREATED_AT,
+              entry: {
+                id: "reasoning-preview",
+                createdAt: MESSAGE_CREATED_AT,
+                label: markdown,
+                detail: markdown,
+                tone: "thinking",
+                itemType: "reasoning",
+                toolLifecycleStatus: "completed",
+                ...(durationMs === null
+                  ? {}
+                  : {
+                      projectedItem: {
+                        visibility: "visible",
+                        item: {
+                          id: "reasoning-preview",
+                          type: "reasoning",
+                          status: "completed",
+                          startedAt,
+                          completedAt: DateTime.add(startedAt, { milliseconds: durationMs }),
+                        },
+                      } as never,
+                    }),
+              },
+            },
+            {
+              id: "assistant-successor",
+              kind: "message",
+              createdAt: MESSAGE_CREATED_AT,
+              message: {
+                id: MessageId.make("asst-1"),
+                role: "assistant",
+                text: "Done.",
+                streaming: false,
+                createdAt: MESSAGE_CREATED_AT,
+                updatedAt: MESSAGE_CREATED_AT,
+                runId: RunId.make("run-1"),
+              },
+            },
+          ]}
+        />,
+      );
       try {
-        await act(() => {
-          renderer = create(
-            <MessagesTimeline
-              {...buildProps()}
-              timelineEntries={[
-                {
-                  id: "reasoning-preview",
-                  kind: "work",
-                  createdAt: MESSAGE_CREATED_AT,
-                  entry: {
-                    id: "reasoning-preview",
-                    createdAt: MESSAGE_CREATED_AT,
-                    label: markdown,
-                    detail: markdown,
-                    tone: "thinking",
-                    itemType: "reasoning",
-                    toolLifecycleStatus: "completed",
-                  },
-                },
-              ]}
-            />,
-          );
-        });
-        const previewText = () =>
-          renderer!.root
-            .findAllByType("span")
-            .flatMap((node) => node.findAll(() => true))
-            .flatMap((node) => node.children)
-            .filter((child) => typeof child === "string")
-            .join(" ");
-        expect(previewText()).toContain(expected);
-        expect(renderer!.root.findAllByType("strong")).toHaveLength(0);
-        const row = () =>
-          renderer!.root.findAll(
-            (node) =>
-              node.type === "div" &&
-              node.props.role === "button" &&
-              typeof node.props["aria-expanded"] === "boolean",
-          )[0]!;
-        await act(() => row().props.onClick());
-        expect(renderer!.root.findAllByType("strong")).toHaveLength(strongCount);
-        await act(() => row().props.onClick());
-        expect(previewText()).toContain(expected);
-        expect(renderer!.root.findAllByType("strong")).toHaveLength(0);
+        await waitForTimelineMarkdown(
+          mounted.container,
+          (container) => container.textContent?.includes("Done.") === true,
+        );
+        const closed = findWorkEntryDisclosure(mounted.container, false);
+        expect(closed.getAttribute("aria-label")).toBe(verb);
+        expect(mounted.container.querySelectorAll("strong")).toHaveLength(0);
+        await act(async () => closed.click());
+        await waitForTimelineMarkdown(
+          mounted.container,
+          (container) =>
+            Array.from(container.querySelectorAll("strong")).some(
+              (node) => node.textContent === "Viewing image first",
+            ),
+        );
+        expect(mounted.container.querySelectorAll("strong")).toHaveLength(1);
       } finally {
-        await act(() => renderer?.unmount());
+        await unmountTimeline(mounted);
       }
     },
+    20_000,
   );
-
-  it("expands and collapses a tool call through its header", async () => {
+  it("auto-expands completed latest activity without successor and renders details", async () => {
+    activityTestState.expanded = false;
     vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
     vi.stubGlobal("requestAnimationFrame", () => 0);
     vi.stubGlobal("cancelAnimationFrame", () => {});
@@ -2718,37 +3013,662 @@ describe("MessagesTimeline", () => {
             {...buildProps()}
             timelineEntries={[
               {
-                id: "entry-standalone",
+                id: "tool-terminal-result",
                 kind: "work",
                 createdAt: MESSAGE_CREATED_AT,
                 entry: {
-                  id: "work-standalone",
+                  id: "tool-terminal-result",
                   createdAt: MESSAGE_CREATED_AT,
-                  toolCallId: "call-standalone",
-                  label: "Run lint",
+                  label: "Example terminal tool",
+                  toolTitle: "Example terminal tool",
                   tone: "tool",
-                  itemType: "command_execution",
-                  command: "pnpm lint",
+                  itemType: "dynamic_tool",
                   toolLifecycleStatus: "completed",
+                  toolData: {
+                    input: { query: "KEEP_TOOL_INPUT" },
+                    output: { text: "RAW_CACHED_TOOL_OUTPUT" },
+                  },
                 },
               },
             ]}
           />,
         );
       });
-      await act(() => renderer!.root.findByProps({ "aria-expanded": false }).props.onClick());
-      const expanded = renderer!.root.findAll(
-        (node) => node.type === "div" && node.props["aria-expanded"] === true,
-      )[0]!;
-      expect(expanded).toBeDefined();
-      await act(() => expanded.props.onClick());
-      expect(
-        renderer!.root.findAll(
-          (node) => node.type === "div" && node.props["aria-expanded"] === true,
-        ),
-      ).toHaveLength(0);
+      const json = JSON.stringify(renderer!.toJSON());
+      expect(json).toContain("Example terminal tool");
     } finally {
       await act(() => renderer?.unmount());
     }
   });
+
+  it("keeps a live reasoning body visible as its tool group grows", async () => {
+    const runId = RunId.make("live-row-run");
+    const liveThought =
+      "The first live thought line remains visible.\nA second streamed line grows the row.";
+    const reasoning = (
+      entryId: string,
+      itemId: string,
+      status: "idle" | "inProgress" | "completed",
+      detail: string,
+    ) => ({
+      id: entryId,
+      kind: "work" as const,
+      createdAt: MESSAGE_CREATED_AT,
+      entry: {
+        id: itemId,
+        createdAt: MESSAGE_CREATED_AT,
+        runId,
+        label: "Thinking",
+        detail,
+        tone: "thinking" as const,
+        itemType: "reasoning" as const,
+        toolLifecycleStatus: status,
+      },
+    });
+    const command = (status: "inProgress" | "completed") => ({
+      id: "command-entry",
+      kind: "work" as const,
+      createdAt: MESSAGE_CREATED_AT,
+      entry: {
+        id: "command-item",
+        createdAt: MESSAGE_CREATED_AT,
+        runId,
+        label: status === "inProgress" ? "Running pnpm" : "Ran pnpm",
+        command: "pnpm test",
+        requestKind: "command" as const,
+        tone: "tool" as const,
+        toolLifecycleStatus: status,
+      },
+    });
+    type LiveEntry = Extract<TimelineEntry, { kind: "work" }>;
+    const props = buildProps();
+    const renderTimeline = (timelineEntries: ReadonlyArray<LiveEntry>) => (
+      <MessagesTimeline
+        {...props}
+        isWorking
+        activeTurnInProgress
+        runningRunId={runId}
+        latestRun={{
+          runId,
+          status: "running",
+          startedAt: MESSAGE_CREATED_AT,
+          completedAt: null,
+        }}
+        timelineEntries={timelineEntries}
+      />
+    );
+    const mounted = await mountTimeline(
+      renderTimeline([
+        reasoning("reasoning-entry", "reasoning-item", "idle", "First thought."),
+      ]),
+    );
+    const workRow = () =>
+      mounted.container.querySelector<HTMLElement>('[data-timeline-row-kind="work-live"]');
+    const liveButton = () =>
+      mounted.container.querySelector<HTMLButtonElement>(
+        'button[data-t3-part="timeline-tool-call"]',
+      );
+    try {
+      const firstRow = workRow();
+      const firstButton = liveButton();
+      const rowFrame = firstRow?.closest<HTMLElement>(".messages-timeline-row-frame");
+      if (!firstRow || !firstButton || !rowFrame) {
+        throw new Error("Missing live reasoning row");
+      }
+      expect(firstRow.getAttribute("data-timeline-row-id")).toBe("work-live:reasoning-entry");
+
+      await act(async () => {
+        mounted.root.render(
+          renderTimeline([
+            reasoning("reasoning-entry", "reasoning-item", "inProgress", liveThought),
+          ]),
+        );
+      });
+      expect(workRow()).toBe(firstRow);
+      expect(firstRow.getAttribute("data-timeline-row-id")).toBe("live-activity-row");
+      expect(liveButton()).toBe(firstButton);
+      expect(firstRow.textContent).toContain("The first live thought line remains visible.");
+      expect(rowFrame.style.height).toBe("");
+
+      await act(async () => {
+        mounted.root.render(
+          renderTimeline([
+            reasoning("reasoning-entry", "reasoning-item", "inProgress", liveThought),
+            command("completed"),
+          ]),
+        );
+      });
+      expect(workRow()).toBe(firstRow);
+      expect(liveButton()).toBe(firstButton);
+
+      await act(async () => {
+        mounted.root.render(
+          renderTimeline([
+            reasoning("reasoning-entry", "reasoning-item", "inProgress", liveThought),
+            command("completed"),
+          ]),
+        );
+      });
+      expect(workRow()).toBe(firstRow);
+      expect(liveButton()).toBe(firstButton);
+      expect(firstButton.textContent).toContain("Ran 1 command");
+      const summaryIcon = firstButton.querySelector("div.relative.min-h-6 svg");
+      expect(summaryIcon?.classList.contains("lucide-terminal")).toBe(true);
+      expect(summaryIcon?.classList.contains("lucide-brain")).toBe(false);
+      expect(rowFrame.style.height).toBe("");
+    } finally {
+      await unmountTimeline(mounted);
+    }
+  });
+  it("keeps native wait rows mounted when one settles and the next starts", async () => {
+    const runId = RunId.make("native-wait-run");
+    const threadId = ThreadId.make("native-wait-thread");
+    const projectedWait = (
+      id: string,
+      status: "pending" | "running" | "completed",
+      ordinal: number,
+    ): OrchestrationV2ProjectedTurnItem => {
+      const item: Extract<OrchestrationV2TurnItem, { type: "dynamic_tool" }> = {
+        id: TurnItemId.make(id),
+        type: "dynamic_tool",
+        toolName: "wait",
+        title: "wait",
+        status,
+        input: { op: "wait" },
+        runId,
+        threadId,
+        nodeId: null,
+        providerThreadId: null,
+        providerTurnId: null,
+        nativeItemRef: null,
+        parentItemId: null,
+        ordinal,
+        startedAt: DateTime.makeUnsafe(MESSAGE_CREATED_AT),
+        completedAt: status === "completed" ? DateTime.makeUnsafe(MESSAGE_CREATED_AT) : null,
+        updatedAt: DateTime.makeUnsafe(MESSAGE_CREATED_AT),
+      };
+      return {
+        position: ordinal,
+        visibility: "local",
+        sourceThreadId: threadId,
+        sourceItemId: item.id,
+        item,
+      };
+    };
+    const eventEntry = (
+      id: string,
+      status: "pending" | "running" | "completed",
+      ordinal: number,
+    ): TimelineEntry => ({
+      id: `native-item:${id}`,
+      kind: "event",
+      createdAt: MESSAGE_CREATED_AT,
+      projectedItem: projectedWait(id, status, ordinal),
+    });
+    const runningWorkEntry = (id: string): TimelineEntry => ({
+      id: `native-item:${id}`,
+      kind: "work",
+      createdAt: MESSAGE_CREATED_AT,
+      entry: {
+        id: `native-item:${id}`,
+        createdAt: MESSAGE_CREATED_AT,
+        runId,
+        label: "Waiting for background jobs",
+        tone: "tool",
+        itemType: "dynamic_tool",
+        toolLifecycleStatus: "inProgress",
+        projectedItem: projectedWait(id, "running", 1),
+      },
+    });
+    const props = buildProps();
+    const renderTimeline = (timelineEntries: ReadonlyArray<TimelineEntry>) => (
+      <MessagesTimeline
+        {...props}
+        isWorking
+        activeTurnInProgress
+        runningRunId={runId}
+        transcriptStyle="terminal"
+        latestRun={{
+          runId,
+          status: "running",
+          startedAt: MESSAGE_CREATED_AT,
+          completedAt: null,
+        }}
+        timelineEntries={timelineEntries}
+      />
+    );
+    const firstId = "native-item:toolu_wait_first";
+    const nextId = "native-item:toolu_wait_next";
+    // jsdom lacks the Web Animations API used by the wait clock glyph.
+    const getAnimationsDescriptor = Object.getOwnPropertyDescriptor(
+      SVGElement.prototype,
+      "getAnimations",
+    );
+    Object.defineProperty(SVGElement.prototype, "getAnimations", {
+      configurable: true,
+      value: () => [],
+    });
+    const mounted = await mountTimeline(
+      renderTimeline([
+        runningWorkEntry("toolu_wait_first"),
+        eventEntry("toolu_wait_next", "pending", 2),
+      ]),
+    );
+    try {
+      const firstWaitRow = mounted.container.querySelector<HTMLElement>(
+        `[data-timeline-row-id="${firstId}"]`,
+      );
+      const nextWaitRow = mounted.container.querySelector<HTMLElement>(
+        `[data-timeline-row-id="${nextId}"]`,
+      );
+      if (!firstWaitRow || !nextWaitRow) throw new Error("Missing initial native wait rows");
+
+      await act(async () => {
+        mounted.root.render(
+          renderTimeline([
+            eventEntry("toolu_wait_first", "completed", 1),
+            eventEntry("toolu_wait_next", "running", 2),
+          ]),
+        );
+      });
+      expect(
+        mounted.container.querySelector(`[data-timeline-row-id="${firstId}"]`),
+      ).toBe(firstWaitRow);
+      expect(mounted.container.querySelector(`[data-timeline-row-id="${nextId}"]`)).toBe(
+        nextWaitRow,
+      );
+      expect(firstWaitRow.getAttribute("data-timeline-row-kind")).toBe("event");
+    } finally {
+      await unmountTimeline(mounted);
+      if (getAnimationsDescriptor === undefined) {
+        Reflect.deleteProperty(SVGElement.prototype, "getAnimations");
+      } else {
+        Object.defineProperty(SVGElement.prototype, "getAnimations", getAnimationsDescriptor);
+      }
+    }
+  });
+});
+
+describe("Thought body continuity", () => {
+  const thoughtContinuityCases = (
+    ["minimal", "km", "minimal-plus", "terminal"] as const
+  ).flatMap((transcriptStyle) =>
+    [true, false].map((expanded) => ({ transcriptStyle, expanded })),
+  );
+
+  it.each(thoughtContinuityCases)(
+    "keeps the Thought row and body stable through streaming and settling in $transcriptStyle style (expanded: $expanded)",
+    async ({ transcriptStyle, expanded }) => {
+      const runId = RunId.make("thought-body-continuity");
+      const firstDetail = "The first reasoning body stays mounted.";
+      const latestDetail = "The latest reasoning body stays mounted.";
+      const work = (
+        id: string,
+        itemType: "dynamic_tool" | "file_search" | "reasoning",
+        toolLifecycleStatus: "inProgress" | "completed",
+        detail?: string,
+      ): TimelineEntry => ({
+        id,
+        kind: "work",
+        createdAt: MESSAGE_CREATED_AT,
+        entry: {
+          id,
+          createdAt: MESSAGE_CREATED_AT,
+          runId,
+          label: itemType === "reasoning" ? "Thinking" : id,
+          ...(detail !== undefined ? { detail } : {}),
+          tone: itemType === "reasoning" ? "thinking" : "tool",
+          itemType,
+          toolLifecycleStatus,
+        },
+      });
+      const renderTimeline = ({
+        firstThoughtStatus,
+        latestThoughtStatus,
+        siblingStatus,
+        isWorking,
+      }: {
+        firstThoughtStatus: "inProgress" | "completed";
+        latestThoughtStatus: "inProgress" | "completed" | null;
+        siblingStatus: "inProgress" | "completed" | null;
+        isWorking: boolean;
+      }) => (
+        <MessagesTimeline
+          {...buildProps()}
+          isWorking={isWorking}
+          activeTurnInProgress={isWorking}
+          runningRunId={isWorking ? runId : null}
+          latestRun={{
+            runId,
+            status: isWorking ? "running" : "completed",
+            startedAt: MESSAGE_CREATED_AT,
+            completedAt: isWorking ? null : MESSAGE_CREATED_AT,
+          }}
+          transcriptStyle={transcriptStyle}
+          timelineEntries={[
+            {
+              id: "thought-prompt",
+              kind: "message",
+              createdAt: MESSAGE_CREATED_AT,
+              message: {
+                id: MessageId.make("thought-prompt"),
+                role: "user",
+                text: "Explain this.",
+                runId: null,
+                createdAt: MESSAGE_CREATED_AT,
+                updatedAt: MESSAGE_CREATED_AT,
+                streaming: false,
+              },
+            },
+            work("thought-prefix", "file_search", "completed"),
+            work("thought-entry", "reasoning", firstThoughtStatus, firstDetail),
+            ...(latestThoughtStatus === null
+              ? []
+              : [
+                  work(
+                    "thought-latest",
+                    "reasoning",
+                    latestThoughtStatus,
+                    latestDetail,
+                  ),
+                ]),
+            ...(siblingStatus === null
+              ? []
+              : [work("thought-sibling", "dynamic_tool", siblingStatus)]),
+          ]}
+        />
+      );
+      const findThoughtBody = (container: HTMLElement, detail: string) =>
+        Array.from(
+          container.querySelectorAll<HTMLElement>('[data-t3-part="markdown"]'),
+        ).find((node) => node.textContent?.includes(detail)) ?? null;
+      const findThoughtDisclosure = (body: HTMLElement) =>
+        body.closest<HTMLElement>('[role="button"][aria-controls]');
+
+      activityTestState.expanded = true;
+      vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+      vi.stubGlobal(
+        "matchMedia",
+        vi.fn(() => ({ matches: false, addEventListener() {}, removeEventListener() {} })),
+      );
+      const previousRangeRect = Object.getOwnPropertyDescriptor(
+        Range.prototype,
+        "getBoundingClientRect",
+      );
+      Object.defineProperty(Range.prototype, "getBoundingClientRect", {
+        configurable: true,
+        value: () => ({ left: 0, right: 0, width: 0 }),
+      });
+      const mounted = await mountTimeline(
+        renderTimeline({
+          firstThoughtStatus: "inProgress",
+          latestThoughtStatus: null,
+          siblingStatus: null,
+          isWorking: true,
+        }),
+      );
+      try {
+        await waitForTimelineMarkdown(mounted.container, (container) =>
+          findThoughtBody(container, firstDetail) !== null,
+        );
+        let firstBody = findThoughtBody(mounted.container, firstDetail);
+        if (!firstBody) throw new Error("Missing first reasoning body");
+        let firstDisclosure = findThoughtDisclosure(firstBody);
+        if (transcriptStyle !== "terminal") {
+          if (!firstDisclosure) throw new Error("Missing first Thought disclosure");
+          if (firstDisclosure.getAttribute("aria-expanded") === "true") {
+            await act(async () => firstDisclosure?.click());
+          }
+          if (expanded) {
+            await act(async () => firstDisclosure?.click());
+            await waitForTimelineMarkdown(mounted.container, (container) =>
+              findThoughtBody(container, firstDetail) !== null,
+            );
+            firstBody = findThoughtBody(mounted.container, firstDetail);
+          } else {
+            firstBody = findThoughtBody(mounted.container, firstDetail);
+          }
+          if (firstDisclosure.getAttribute("aria-expanded") !== String(expanded)) {
+            throw new Error("Could not set first Thought disclosure");
+          }
+        }
+        if ((expanded || transcriptStyle === "terminal") && !firstBody) {
+          throw new Error("Missing expanded first reasoning body");
+        }
+        const firstIdentity = firstDisclosure ?? firstBody;
+        if (!firstIdentity) throw new Error("Missing first Thought identity");
+        const firstRow = firstIdentity.closest<HTMLElement>("[data-timeline-row-id]");
+        if (!firstRow) throw new Error("Missing first Thought timeline row");
+
+        await act(async () => {
+          mounted.root.render(
+            renderTimeline({
+              firstThoughtStatus: "completed",
+              latestThoughtStatus: null,
+              siblingStatus: null,
+              isWorking: true,
+            }),
+          );
+        });
+        const completedFirstBody = findThoughtBody(mounted.container, firstDetail);
+        if (expanded || transcriptStyle === "terminal") {
+          expect(completedFirstBody).toBe(firstBody);
+          expect(completedFirstBody?.querySelector("[data-markdown-pending]")).toBeNull();
+        } else if (firstBody !== null) {
+          expect(completedFirstBody).toBe(firstBody);
+        } else {
+          expect(completedFirstBody).toBeNull();
+        }
+        expect(firstIdentity).toBe(firstDisclosure ?? completedFirstBody);
+        expect(firstIdentity.closest("[data-timeline-row-id]")).toBe(firstRow);
+
+        await act(async () => {
+          mounted.root.render(
+            renderTimeline({
+              firstThoughtStatus: "completed",
+              latestThoughtStatus: "inProgress",
+              siblingStatus: null,
+              isWorking: true,
+            }),
+          );
+        });
+        await waitForTimelineMarkdown(mounted.container, (container) =>
+          findThoughtBody(container, latestDetail) !== null,
+        );
+        if (firstBody !== null) {
+          expect(findThoughtBody(mounted.container, firstDetail)).toBe(firstBody);
+        }
+        let latestBody = findThoughtBody(mounted.container, latestDetail);
+        if (!latestBody) throw new Error("Missing latest reasoning body");
+        let latestDisclosure = findThoughtDisclosure(latestBody);
+        if (transcriptStyle !== "terminal") {
+          if (!latestDisclosure) throw new Error("Missing latest Thought disclosure");
+          if (latestDisclosure.getAttribute("aria-expanded") === "true") {
+            await act(async () => latestDisclosure?.click());
+          }
+          if (expanded) {
+            await act(async () => latestDisclosure?.click());
+            await waitForTimelineMarkdown(mounted.container, (container) =>
+              findThoughtBody(container, latestDetail) !== null,
+            );
+            latestBody = findThoughtBody(mounted.container, latestDetail);
+          } else {
+            latestBody = findThoughtBody(mounted.container, latestDetail);
+          }
+          if (latestDisclosure.getAttribute("aria-expanded") !== String(expanded)) {
+            throw new Error("Could not set latest Thought disclosure");
+          }
+        }
+        if ((expanded || transcriptStyle === "terminal") && !latestBody) {
+          throw new Error("Missing expanded latest reasoning body");
+        }
+        const latestIdentity = latestDisclosure ?? latestBody;
+        if (!latestIdentity) throw new Error("Missing latest Thought identity");
+        const latestRow = latestIdentity.closest<HTMLElement>("[data-timeline-row-id]");
+        if (!latestRow) throw new Error("Missing latest Thought timeline row");
+
+        await act(async () => {
+          mounted.root.render(
+            renderTimeline({
+              firstThoughtStatus: "completed",
+              latestThoughtStatus: "inProgress",
+              siblingStatus: "inProgress",
+              isWorking: true,
+            }),
+          );
+        });
+        const supersededBody = findThoughtBody(mounted.container, latestDetail);
+        if (latestBody !== null) {
+          expect(supersededBody).toBe(latestBody);
+          expect(supersededBody?.querySelector("[data-markdown-pending]")).toBeNull();
+        } else {
+          expect(supersededBody).toBeNull();
+        }
+        expect(latestDisclosure ?? supersededBody).toBe(latestIdentity);
+        expect(latestIdentity.closest("[data-timeline-row-id]")).toBe(latestRow);
+        if (latestDisclosure) {
+          expect(latestDisclosure.getAttribute("aria-label")).toBe("Thought");
+          expect(latestDisclosure.getAttribute("aria-expanded")).toBe(String(expanded));
+        }
+
+        await act(async () => {
+          mounted.root.render(
+            renderTimeline({
+              firstThoughtStatus: "completed",
+              latestThoughtStatus: "inProgress",
+              siblingStatus: "completed",
+              isWorking: false,
+            }),
+          );
+        });
+        const finishedBody = findThoughtBody(mounted.container, latestDetail);
+        if (transcriptStyle !== "terminal") {
+          expect(mounted.container.textContent).toContain("Worked");
+        }
+        if (latestBody !== null) {
+          expect(finishedBody).toBe(latestBody);
+          expect(finishedBody?.querySelector("[data-markdown-pending]")).toBeNull();
+        } else {
+          expect(finishedBody).toBeNull();
+        }
+      } finally {
+        await unmountTimeline(mounted);
+        vi.unstubAllGlobals();
+        if (previousRangeRect) {
+          Object.defineProperty(Range.prototype, "getBoundingClientRect", previousRangeRect);
+        } else {
+          Reflect.deleteProperty(Range.prototype, "getBoundingClientRect");
+        }
+      }
+    },
+    20_000,
+  );
+  it.each(["minimal", "km", "minimal-plus"] as const)(
+    "keeps an all-reasoning trace mounted when a tool joins in %s style",
+    async (transcriptStyle) => {
+      const runId = RunId.make("thought-body-group-transition");
+      const firstDetail = "First reasoning detail remains mounted.";
+      const secondDetail = "Second reasoning detail remains mounted.";
+      const work = (
+        id: string,
+        itemType: "dynamic_tool" | "reasoning",
+        detail?: string,
+      ): TimelineEntry => ({
+        id,
+        kind: "work",
+        createdAt: MESSAGE_CREATED_AT,
+        entry: {
+          id,
+          createdAt: MESSAGE_CREATED_AT,
+          runId,
+          label: itemType === "reasoning" ? "Thinking" : id,
+          ...(detail !== undefined ? { detail } : {}),
+          tone: itemType === "reasoning" ? "thinking" : "tool",
+          itemType,
+          toolLifecycleStatus: "inProgress",
+        },
+      });
+      const renderTimeline = (includeTool: boolean) => (
+        <MessagesTimeline
+          {...buildProps()}
+          isWorking={true}
+          activeTurnInProgress={true}
+          runningRunId={runId}
+          latestRun={{
+            runId,
+            status: "running",
+            startedAt: MESSAGE_CREATED_AT,
+            completedAt: null,
+          }}
+          transcriptStyle={transcriptStyle}
+          timelineEntries={[
+            {
+              id: "thought-group-prompt",
+              kind: "message",
+              createdAt: MESSAGE_CREATED_AT,
+              message: {
+                id: MessageId.make("thought-group-prompt"),
+                role: "user",
+                text: "Explain this.",
+                runId: null,
+                createdAt: MESSAGE_CREATED_AT,
+                updatedAt: MESSAGE_CREATED_AT,
+                streaming: false,
+              },
+            },
+            work("thought-group-first", "reasoning", firstDetail),
+            work("thought-group-second", "reasoning", secondDetail),
+            ...(includeTool ? [work("thought-group-tool", "dynamic_tool")] : []),
+          ]}
+        />
+      );
+      const findThoughtBody = (container: HTMLElement, detail: string) =>
+        Array.from(
+          container.querySelectorAll<HTMLElement>('[data-t3-part="markdown"]'),
+        ).find((node) => node.textContent?.includes(detail)) ?? null;
+
+      activityTestState.expanded = true;
+      vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+      vi.stubGlobal(
+        "matchMedia",
+        vi.fn(() => ({ matches: false, addEventListener() {}, removeEventListener() {} })),
+      );
+      const previousRangeRect = Object.getOwnPropertyDescriptor(
+        Range.prototype,
+        "getBoundingClientRect",
+      );
+      Object.defineProperty(Range.prototype, "getBoundingClientRect", {
+        configurable: true,
+        value: () => ({ left: 0, right: 0, width: 0 }),
+      });
+      const mounted = await mountTimeline(renderTimeline(false));
+      try {
+        await waitForTimelineMarkdown(mounted.container, (container) =>
+          findThoughtBody(container, firstDetail) !== null,
+        );
+        const bodyBeforeTool = findThoughtBody(mounted.container, firstDetail);
+        if (!bodyBeforeTool) throw new Error("Missing first reasoning body");
+        const rowBeforeTool = bodyBeforeTool.closest<HTMLElement>("[data-timeline-row-id]");
+        if (!rowBeforeTool) throw new Error("Missing first Thought timeline row");
+
+        await act(async () => {
+          mounted.root.render(renderTimeline(true));
+        });
+
+        const bodyAfterTool = findThoughtBody(mounted.container, firstDetail);
+        expect(bodyAfterTool).toBe(bodyBeforeTool);
+        expect(bodyAfterTool?.querySelector("[data-markdown-pending]")).toBeNull();
+        expect(bodyAfterTool?.closest("[data-timeline-row-id]")).toBe(rowBeforeTool);
+      } finally {
+        await unmountTimeline(mounted);
+        vi.unstubAllGlobals();
+        if (previousRangeRect) {
+          Object.defineProperty(Range.prototype, "getBoundingClientRect", previousRangeRect);
+        } else {
+          Reflect.deleteProperty(Range.prototype, "getBoundingClientRect");
+        }
+      }
+    },
+    20_000,
+  );
 });

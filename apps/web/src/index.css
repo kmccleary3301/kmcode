@@ -1,4 +1,9 @@
 @import "./transcript.css";
+@import "./cursor-elements.css";
+@import "./omp-pane.css";
+@import "./transcript-terminal.css";
+@import "./transcript-minimal.css";
+@import "./motion.css";
 @import "tailwindcss";
 
 @custom-variant dark (&:is(.dark, .dark *));
@@ -250,6 +255,11 @@ html[data-mobile-composer-route-transition="true"]::view-transition-old(t3-mobil
   --inset-shadow-control-highlight: 0 1px rgb(255 255 255 / 16%);
   --inset-shadow-control-pressed: 0 1px rgb(0 0 0 / 8%);
   --ease-drawer: cubic-bezier(0.32, 0.72, 0, 1);
+  /* Transcript disclosures: a fast settle that reads as responsive, not springy. */
+  --ease-disclosure: cubic-bezier(0.23, 1, 0.32, 1);
+  /* One length for transcript motion, opening and closing alike; MOTION_MS in
+     lib/motion.ts mirrors it for motion JS drives. */
+  --motion-duration: 250ms;
   /* The composer's elevation: a soft drop pulled in under the surface, shared
      by the composer, its context strip and attached banners. */
   --shadow-composer: 0 12px 28px -18px rgb(0 0 0 / 40%);
@@ -1904,6 +1914,10 @@ body {
   font-variation-settings: var(--font-variation-settings-markdown, normal);
 }
 
+.chat-markdown {
+  --font-size-heading: calc(var(--font-size-text, 14px) * 1.428571);
+}
+
 [data-t3-part="label"] {
   font-family: var(--font-label, var(--font-interface, var(--font-sans)));
   font-size: var(--font-size-label, 0.75rem);
@@ -2233,7 +2247,7 @@ form[data-t3-surface="composer"] {
 [data-t3-surface="popover"],
 [data-t3-surface="menu"],
 [data-t3-surface="tooltip"],
-[data-t3-surface="toast"] {
+[data-t3-surface="toast"] [data-t3-part="toast"] {
   border-radius: var(--t3-radius-lg, 12px);
   border-width: var(--t3-border-regular, 1px);
   border-style: var(--t3-border-style, solid);
@@ -2241,7 +2255,7 @@ form[data-t3-surface="composer"] {
 }
 
 [data-t3-surface="dialog"],
-[data-t3-surface="toast"] {
+[data-t3-surface="toast"] [data-t3-part="toast"] {
   box-shadow: var(--t3-shadow-high, 0 12px 32px rgb(0 0 0 / 18%));
 }
 
@@ -2279,14 +2293,21 @@ form[data-t3-surface="composer"] {
 }
 
 @media (prefers-reduced-motion: reduce) {
-  body,
-  body *,
-  body *::before,
-  body *::after,
-  [data-t3-app],
-  [data-t3-app] *,
-  [data-t3-app] *::before,
-  [data-t3-app] *::after {
+  /* The one reduced-motion blanket. Zero specificity, so the fades motion.css
+     and the transcript styles keep under reduced motion still play. 0s, not a
+     token 0.01ms: with the default `transition-property: all`, any nonzero
+     duration turns every style write (a list row's `top`) into a transition
+     that paints the old value for a frame. */
+  :where(
+    body,
+    body *,
+    body *::before,
+    body *::after,
+    [data-t3-app],
+    [data-t3-app] *,
+    [data-t3-app] *::before,
+    [data-t3-app] *::after
+  ) {
     animation-duration: 0s !important;
     animation-iteration-count: 1 !important;
     transition-duration: 0s !important;
@@ -2474,6 +2495,43 @@ form[data-t3-surface="composer"] {
   background: transparent;
 }
 
+/* stream-mdx draws its own code card ([data-code-block] > .markdown-code-block >
+   pre.shiki) inside the frame; the frame is the only surface, and its
+   data-t3-part="code" role sets the code font. */
+.chat-markdown .chat-markdown-codeblock :is([data-code-block], .markdown-code-block) {
+  margin: 0;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+  font-family: inherit;
+  font-size: inherit;
+}
+
+.chat-markdown .chat-markdown-codeblock pre:is(.shiki, .chat-markdown-code-source) {
+  overflow-x: auto;
+  padding: 0.25rem 0.875rem 0.75rem;
+  font-family: inherit;
+  font-size: inherit;
+  line-height: 1.6;
+}
+
+/* Shiki emits both themes as variables; pick the half for the active scheme. */
+.chat-markdown .chat-markdown-codeblock .shiki span {
+  color: var(--shiki-light);
+  font-style: var(--shiki-light-font-style);
+  font-weight: var(--shiki-light-font-weight);
+  text-decoration: var(--shiki-light-text-decoration);
+}
+
+.dark .chat-markdown .chat-markdown-codeblock .shiki span {
+  color: var(--shiki-dark);
+  font-style: var(--shiki-dark-font-style);
+  font-weight: var(--shiki-dark-font-weight);
+  text-decoration: var(--shiki-dark-text-decoration);
+}
+
 :is(.chat-markdown, .composer-tiptap) .chat-markdown-codeblock[data-wrap="true"] pre {
   white-space: pre-wrap;
   overflow-wrap: anywhere;
@@ -2544,6 +2602,7 @@ form[data-t3-surface="composer"] {
   max-width: 24rem;
   overflow-wrap: anywhere;
 }
+
 
 :root {
   --diff-addition: var(--success);

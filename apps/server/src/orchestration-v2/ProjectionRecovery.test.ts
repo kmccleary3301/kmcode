@@ -224,7 +224,7 @@ it.effect("selects unfinished recovery work without reading settled thread histo
   }).pipe(Effect.provide(layerTest)),
 );
 
-it.effect("recovers terminal subagent results until their cross-thread transfer exists", () =>
+it.effect("recovers each terminal subagent run until its run-specific transfer exists", () =>
   Effect.gen(function* () {
     const projections = yield* ProjectionStore.ProjectionStoreV2;
     const sql = yield* SqlClient.SqlClient;
@@ -238,7 +238,15 @@ it.effect("recovers terminal subagent results until their cross-thread transfer 
         archivedAt: name === "archived" ? now : null,
         deletedAt: name === "deleted" ? now : null,
       });
-      yield* createRun(child, name === "running" ? "running" : "completed");
+      yield* createRun(child, name === "running" ? "running" : "completed", {
+        delegatedTaskId: NodeId.make(`node:${name}`),
+      });
+      if (name === "terminal") {
+        yield* createRun(child, "completed", {
+          ordinal: 2,
+          delegatedTaskId: NodeId.make("node:terminal-followup"),
+        });
+      }
       children.push(child);
     }
     assert.deepEqual(
@@ -257,7 +265,10 @@ it.effect("recovers terminal subagent results until their cross-thread transfer 
         type: "subagent_result",
         sourceThreadId: completed,
         targetThreadId: parent,
-        sourcePoint: { threadId: completed },
+        sourcePoint: {
+          threadId: completed,
+          runId: RunId.make(`run:${completed}:1`),
+        },
         basePoint: null,
         sourceProviderInstanceId: providerInstanceId,
         targetProviderInstanceId: providerInstanceId,
@@ -273,6 +284,38 @@ it.effect("recovers terminal subagent results until their cross-thread transfer 
     });
     const archivedChild = children[1];
     assert.isDefined(archivedChild);
+    assert.deepEqual(
+      new Set(yield* projections.getRecoveryThreadIds("subagent-results")),
+      new Set([completed, archivedChild]),
+    );
+    const followupTransferId = ContextTransferId.make("transfer:recovery:followup-result");
+    yield* projections.apply({
+      id: EventId.make("event:recovery:followup-result"),
+      type: "context-transfer.created",
+      threadId: parent,
+      occurredAt: now,
+      payload: {
+        id: followupTransferId,
+        type: "subagent_result",
+        sourceThreadId: completed,
+        targetThreadId: parent,
+        sourcePoint: {
+          threadId: completed,
+          runId: RunId.make(`run:${completed}:2`),
+        },
+        basePoint: null,
+        sourceProviderInstanceId: providerInstanceId,
+        targetProviderInstanceId: providerInstanceId,
+        targetRunId: null,
+        status: "pending",
+        resolution: null,
+        createdBy: "system",
+        error: null,
+        createdAt: now,
+        updatedAt: now,
+        consumedAt: null,
+      },
+    });
     assert.deepEqual(yield* projections.getRecoveryThreadIds("subagent-results"), [archivedChild]);
     assert.deepEqual(yield* projections.getUnreadableThreadIds(), []);
     yield* sql`

@@ -16,6 +16,8 @@ import { Argument, Command, Flag } from "effect/cli";
 
 import * as NodeSqliteClient from "@t3tools/shared/nodeSqliteClient";
 
+import * as StateDirectoryLock from "../src/persistence/StateDirectoryLock.ts";
+
 export const SqliteStateOperation = Schema.Literals(["query", "exec"]);
 export type SqliteStateOperation = typeof SqliteStateOperation.Type;
 
@@ -226,8 +228,7 @@ export const runSqliteState = Effect.fn("runSqliteState")(function* (
       backup: backupPath,
     } as const;
   });
-
-  return yield* program.pipe(
+  const databaseEffect = program.pipe(
     Effect.provide(
       NodeSqliteClient.layer({
         filename: databasePath,
@@ -243,6 +244,10 @@ export const runSqliteState = Effect.fn("runSqliteState")(function* (
         }),
     ),
   );
+
+  return yield* (input.operation === "query"
+    ? databaseEffect
+    : StateDirectoryLock.withStateDirectoryLock(path.dirname(databasePath), databaseEffect));
 });
 
 const t3SqliteStateCommand = Command.make(

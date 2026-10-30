@@ -42,6 +42,7 @@ import { Command, Flag } from "effect/cli";
 import * as ProjectionStore from "../src/orchestration-v2/ProjectionStore.ts";
 import { migrationManifest, runMigrations } from "../src/persistence/Migrations.ts";
 import * as NodeSqliteClient from "@t3tools/shared/nodeSqliteClient";
+import * as StateDirectoryLock from "../src/persistence/StateDirectoryLock.ts";
 
 export class MigrateDevDbNotInWorktreeError extends Schema.TaggedError<MigrateDevDbNotInWorktreeError>()(
   "MigrateDevDbNotInWorktreeError",
@@ -391,7 +392,7 @@ const verifyMigrationSlots = Effect.fn("verifyMigrationSlots")(function* () {
   }
 });
 
-export const runMigrateDevDb = Effect.fn("runMigrateDevDb")(function* (
+const runMigrateDevDbScoped = Effect.fn("runMigrateDevDb")(function* (
   input: RunMigrateDevDbInput,
   options: RunMigrateDevDbOptions = {},
 ) {
@@ -445,6 +446,7 @@ export const runMigrateDevDb = Effect.fn("runMigrateDevDb")(function* (
   }
 
   yield* fs.makeDirectory(stateDir, { recursive: true });
+  yield* StateDirectoryLock.acquireStateDirectoryLock(stateDir);
   yield* ensureNotInUse(databasePath);
 
   const wrapPhase =
@@ -544,6 +546,10 @@ export const runMigrateDevDb = Effect.fn("runMigrateDevDb")(function* (
     executedMigrations: executedMigrations.map(([id, name]) => `${id}_${name}`),
   };
 });
+export const runMigrateDevDb = (
+  input: RunMigrateDevDbInput,
+  options: RunMigrateDevDbOptions = {},
+) => Effect.scoped(runMigrateDevDbScoped(input, options));
 
 const formatSize = (bytes: number): string =>
   bytes >= 1024 * 1024

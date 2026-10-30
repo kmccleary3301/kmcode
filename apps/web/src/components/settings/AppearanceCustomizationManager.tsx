@@ -16,7 +16,9 @@ import {
 
 import { APP_VERSION } from "../../branding";
 import {
+  allocateAppearanceGeneration,
   executeAppearanceRecoveryCommand,
+  finishAppearanceIntent,
   getAppearanceRecoveryInventory,
   getAppearanceRuntime,
   getQuarantinedAppearanceState,
@@ -219,6 +221,11 @@ export function AppearanceCustomizationManager() {
 
   const execute = useCallback(
     async (command: AppearanceCommand): Promise<boolean> => {
+      const generation =
+        command.generation ??
+        allocateAppearanceGeneration(
+          command.type === "preference" ? command.preference : undefined,
+        );
       setError(null);
       try {
         if (
@@ -243,9 +250,14 @@ export function AppearanceCustomizationManager() {
         }
         const runtime = await getAppearanceRuntime();
         if (command.type === "preview") skipNextRuntimeUpdateRef.current = true;
-        const result = await runtime.execute(command).finally(() => {
-          skipNextRuntimeUpdateRef.current = false;
-        });
+        const result = await runtime
+          .execute({
+            ...command,
+            generation,
+          })
+          .finally(() => {
+            skipNextRuntimeUpdateRef.current = false;
+          });
         if (result.status === "rejected") {
           setError(result.diagnostics.map((diagnostic) => diagnostic.message).join(" — "));
         } else if (result.status === "cancelled") {
@@ -256,11 +268,14 @@ export function AppearanceCustomizationManager() {
         skipNextRuntimeUpdateRef.current = false;
         setError(cause instanceof Error ? cause.message : String(cause));
         return false;
+      } finally {
+        finishAppearanceIntent(generation);
       }
     },
     [snapshot],
   );
   const disableAll = useCallback(async () => {
+    const generation = allocateAppearanceGeneration();
     setError(null);
     try {
       if (snapshot?.safeMode === true) {
@@ -289,7 +304,10 @@ export function AppearanceCustomizationManager() {
       let latest = runtime.getSnapshot();
       for (const id of latest.order) {
         if (latest.packages[id]?.enabled !== true) continue;
-        const result = await runtime.execute({ type: "disable", id });
+        const result = await runtime.execute({ type: "disable", id, generation });
+        if (result.status === "cancelled") {
+          return;
+        }
         if (result.status !== "applied") {
           setError("Could not disable every appearance package.");
           return;
@@ -302,7 +320,11 @@ export function AppearanceCustomizationManager() {
           type: "snippet-enable",
           id: snippet.id,
           enabled: false,
+          generation,
         });
+        if (result.status === "cancelled") {
+          return;
+        }
         if (result.status !== "applied") {
           setError("Could not disable every CSS snippet.");
           return;

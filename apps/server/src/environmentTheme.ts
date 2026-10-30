@@ -14,7 +14,9 @@
  *
  * @module EnvironmentTheme
  */
+import type { FileHandle } from "node:fs/promises";
 import * as NodeFS from "node:fs";
+import * as NodeFSPromises from "node:fs/promises";
 
 import {
   EnvironmentTheme,
@@ -101,13 +103,19 @@ export class EnvironmentThemeService extends Context.Service<
  * leaves a window a swap could slip through, which the descriptor-bound
  * checks below then narrow to "a regular file at that path".
  */
-export const readThemeFileGuarded = (filePath: string, maxBytes: number): string | null => {
-  let fd: number;
+export const readThemeFileGuarded = async (
+  filePath: string,
+  maxBytes: number,
+): Promise<string | null> => {
+  let fileHandle: FileHandle;
   try {
-    if (NodeFS.constants.O_NOFOLLOW === undefined && NodeFS.lstatSync(filePath).isSymbolicLink()) {
+    if (
+      NodeFS.constants.O_NOFOLLOW === undefined &&
+      (await NodeFSPromises.lstat(filePath)).isSymbolicLink()
+    ) {
       return null;
     }
-    fd = NodeFS.openSync(
+    fileHandle = await NodeFSPromises.open(
       filePath,
       NodeFS.constants.O_RDONLY |
         (NodeFS.constants.O_NOFOLLOW ?? 0) |
@@ -117,20 +125,20 @@ export const readThemeFileGuarded = (filePath: string, maxBytes: number): string
     return null;
   }
   try {
-    const info = NodeFS.fstatSync(fd);
+    const info = await fileHandle.stat();
     if (!info.isFile() || info.size > maxBytes) return null;
     const contents = Buffer.alloc(info.size);
     let offset = 0;
     while (offset < contents.length) {
-      const read = NodeFS.readSync(fd, contents, offset, contents.length - offset, offset);
-      if (read <= 0) break;
-      offset += read;
+      const { bytesRead } = await fileHandle.read(contents, offset, contents.length - offset, offset);
+      if (bytesRead <= 0) break;
+      offset += bytesRead;
     }
     return contents.subarray(0, offset).toString("utf8");
   } catch {
     return null;
   } finally {
-    NodeFS.closeSync(fd);
+    await fileHandle.close();
   }
 };
 
@@ -169,7 +177,7 @@ export const readPublishedThemes = Effect.fn(function* (themesDir: string) {
     }
 
     const filePath = `${themesDir}/${entry}`;
-    const raw = readThemeFileGuarded(filePath, MAX_THEME_FILE_BYTES);
+    const raw = yield* Effect.promise(() => readThemeFileGuarded(filePath, MAX_THEME_FILE_BYTES));
     if (raw === null) {
       yield* Effect.logWarning("ignoring unusable environment theme file", {
         path: filePath,

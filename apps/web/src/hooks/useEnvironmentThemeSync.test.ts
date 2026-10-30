@@ -1,5 +1,6 @@
 import type { EnvironmentTheme } from "@t3tools/contracts";
 import { afterEach, describe, expect, it, vi } from "vite-plus/test";
+import type * as AppearanceRuntimeModule from "../appearanceRuntime";
 
 const NIGHTFALL_THEME = {
   id: "nightfall",
@@ -65,7 +66,13 @@ async function setupThemeSync(mode: "dark" | "system" = "dark") {
   }));
   vi.doMock("@effect/atom-react", () => ({ useAtomValue: () => published }));
   vi.doMock("../state/server", () => ({ primaryServerEnvironmentThemesAtom: {} }));
-  vi.doMock("../appearanceRuntime", () => ({ applyAppearanceTheme: async () => undefined }));
+  vi.doMock("../appearanceRuntime", async (importOriginal) => {
+    const actual = await importOriginal<typeof AppearanceRuntimeModule>();
+    return {
+      ...actual,
+      applyAppearanceTheme: async () => undefined,
+    };
+  });
 
   const palette = await import("../themePalette");
   storage.set(palette.THEME_APPEARANCE_MODE_STORAGE_KEY, mode);

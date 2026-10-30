@@ -580,6 +580,55 @@ describe("DesktopAppearanceStorage", () => {
     expect(updates).toEqual([]);
   });
 
+  it("keeps legacy theme migration provenance when watching its own package transaction", async () => {
+    const root = await makeRoot();
+    const storage = new DesktopAppearanceStorage(root, undefined, "darwin");
+    const runtime = await createAppearanceRuntime({
+      storage: new DesktopBridgeAppearanceStorage({
+        readAppearanceState: async () => {
+          const current = await storage.load();
+          return { stateJson: JSON.stringify(current), checksum: appearanceSha256(current) };
+        },
+        commitAppearanceState: async (input: DesktopAppearanceCommitInput) => {
+          const next = decodeAppearancePersistedState(JSON.parse(input.stateJson));
+          if (next === null || appearanceSha256(next) !== input.checksum)
+            throw new Error("invalid bridge state");
+          await storage.commit(input.expectedRevision, next);
+          return { revision: next.revision, safeMode: next.safeMode, checksum: input.checksum };
+        },
+        onAppearanceWatchEvent: () => () => undefined,
+      }),
+      compiler: {
+        normalize: (input, options) => normalizeAppearance(input, options),
+        compile: async (input) => ({ input, artifact: input.resolved.css }),
+      },
+      apply: { apply: async () => undefined },
+    });
+    const updates: AppearancePersistedState[] = [];
+    const stop = storage.watch((next) => updates.push(next));
+    const installed = await runtime.execute({
+      type: "install",
+      package: {
+        input: T3_CHAT_THEME,
+        sourceId: T3_CHAT_THEME.id,
+        trust: {
+          class: "builtin",
+          allowSharedCss: false,
+          allowDesktopCss: false,
+          allowAdvancedSnippet: false,
+        },
+      },
+      activate: true,
+    });
+    expect(installed.status).toBe("applied");
+    const committed = await storage.load();
+    expect(committed.packages[T3_CHAT_THEME.id]?.profile.migration.sourceVersion).toBe(1);
+    await waitForFilesystem(220);
+    stop();
+    expect(await storage.load()).toEqual(committed);
+    expect(updates).toEqual([]);
+  });
+
   it("debounces stable external revisions and suppresses duplicates", async () => {
     const root = await makeRoot();
     const first = new DesktopAppearanceStorage(root, undefined, "darwin");

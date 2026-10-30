@@ -17,6 +17,7 @@ import { useEffect, useEffectEvent, useMemo, useRef, useState } from "react";
 import { APP_BASE_NAME, APP_DISPLAY_NAME, APP_STAGE_LABEL, APP_VERSION } from "../branding";
 import { resolveServerBackedAppDisplayName } from "../branding.logic";
 import { AppSidebarLayout } from "../components/AppSidebarLayout";
+import { HostHealthSubscriptionKeeper } from "../components/HostHealthSubscriptionKeeper";
 import { CommandPalette } from "../components/CommandPalette";
 import { CustomSnoozeDialogHost } from "../components/CustomSnoozeDialog";
 import { ConfirmDialogHost } from "../components/ConfirmDialogHost";
@@ -229,6 +230,7 @@ function RootRouteView() {
           >
             {primaryEnvironmentAuthenticated ? <AuthenticatedTracingBootstrap /> : null}
             {primaryEnvironmentAuthenticated ? <DesktopAppActivationCoordinator /> : null}
+            <HostHealthSubscriptionKeeper />
             {isElectron ? <RunningThreadKeepAlive /> : null}
             <RelayClientInstallDialog />
             <ConnectOnboardingDialog />
@@ -311,6 +313,7 @@ function FontAppearanceSync() {
   const fontFamilyCode = useClientSettings((settings) => settings.fontFamilyCode);
   const fontFamilyComposer = useClientSettings((settings) => settings.fontFamilyComposer);
   const fontSizeInterface = useClientSettings((settings) => settings.fontSizeInterface);
+  const fontSizeText = useClientSettings((settings) => settings.fontSizeText);
   const fontSizePrompt = useClientSettings((settings) => settings.fontSizePrompt);
   const fontSizeCode = useClientSettings((settings) => settings.fontSizeCode);
   const fontSmoothing = useClientSettings((settings) => settings.fontSmoothing);
@@ -322,6 +325,7 @@ function FontAppearanceSync() {
       code: fontFamilyCode,
       composer: fontFamilyComposer,
       sizeInterface: fontSizeInterface,
+      sizeText: fontSizeText,
       sizePrompt: fontSizePrompt,
       sizeCode: fontSizeCode,
       smoothing: fontSmoothing,
@@ -333,6 +337,7 @@ function FontAppearanceSync() {
     fontFamilyText,
     fontSizeCode,
     fontSizeInterface,
+    fontSizeText,
     fontSizePrompt,
     fontSmoothing,
   ]);

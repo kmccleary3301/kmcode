@@ -143,7 +143,7 @@ export type AppearancePackageInput = Readonly<{
   readonly assets?: ReadonlyArray<AppearanceStoredAsset>;
 }>;
 
-export type AppearanceCommand =
+export type AppearanceCommand = (
   | Readonly<{
       readonly type: "install";
       readonly package: AppearancePackageInput;
@@ -187,7 +187,12 @@ export type AppearanceCommand =
   | Readonly<{
       readonly type: "external-reconcile";
       readonly state: AppearancePersistedState;
-    }>;
+    }>
+) &
+  Readonly<{
+    readonly generation?: number;
+    readonly apply?: boolean;
+  }>;
 
 export type AppearanceCommandResult =
   | Readonly<{
@@ -227,6 +232,7 @@ export interface AppearanceStorageAdapter {
 export interface AppearanceCompilationInput {
   readonly state: AppearanceSnapshot;
   readonly resolved: AppearanceResolved;
+  readonly generation?: number;
 }
 
 export interface AppearanceCompiledOutput {
@@ -234,6 +240,7 @@ export interface AppearanceCompiledOutput {
   readonly artifact: string;
   readonly dispose?: () => void;
   readonly diagnostics?: ReadonlyArray<AppearanceDiagnostic>;
+  readonly generation?: number;
 }
 
 export interface AppearanceCompilerAdapter {
@@ -286,6 +293,7 @@ export interface AppearanceRuntimeOptions {
   readonly defaultState?: AppearancePersistedState;
   readonly legacy?: AppearanceLegacyInputAdapter;
   readonly systemAppearance?: () => "light" | "dark";
+  readonly allocateGeneration?: () => number;
 }
 
 export const APPEARANCE_COMMAND_TYPES = [

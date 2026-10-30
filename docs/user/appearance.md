@@ -11,6 +11,10 @@ Use **Change appearance** in the command palette to choose System, Light, or Dar
 the theme. **Cmd+Option+Shift+A** on macOS or **Ctrl+Alt+Shift+A** on Windows/Linux cycles through
 those modes. Customize these shortcuts under **Settings → Keybindings**.
 
+Theme and appearance-mode changes paint together. Rapid selections keep the last choice;
+an earlier save or theme import cannot switch the palette back. Changing Light, Dark, or
+System preserves the selected custom theme and uses its matching variant when available.
+
 On mobile, open **Settings → Appearance**. Mobile has its own themes and text,
 code, and terminal preferences. It does not follow environment themes or defaults.
 
@@ -41,8 +45,15 @@ without replaying its transitions.
 Web and desktop typeset math written between `$$` delimiters: inline in a sentence, or as a
 display block on its own lines. A single `$` stays literal, so prices and `$skill` mentions are
 unaffected. Put diagrams in `mermaid` or `svg` fences. Graphics render once the message finishes
-streaming; use the source toggle to inspect their markup. A graphic that does not parse keeps its
-source. Model-authored SVG renders as an isolated image, never inside the application page.
+streaming; use the source toggle to inspect their markup. Mermaid diagrams follow the light or dark
+theme unless the diagram sets its own. A graphic that does not parse keeps its source.
+Model-authored SVG renders as an isolated image, never inside the application page. A table whose
+cells are cut off shows an expand control that wraps the full text.
+
+In the Minimal and KM styles, a turn's subagents appear as one **Delegating to** step with a card
+listing each agent; agents that KM Code launched on another harness show that harness's icon. A row
+expands to the agent's task, live output, and result, rendered as Markdown. KM opens running agents'
+rows and folds them shortly after they finish.
 
 Streaming replies reveal text at a steady pace. With reduced motion enabled in your operating
 system, text appears as soon as it arrives.
@@ -129,6 +140,12 @@ The default Typography settings show three font families:
 - **Interface font** controls app navigation, settings, buttons, and other UI text.
 - **Text font** controls assistant replies and other rendered Markdown, including headings. Unset, it uses the active theme's Markdown and heading fonts. Inline and fenced code keep the monospace font.
 - **Monospace font** controls code blocks, inline code, diffs, file previews, and terminal output. Advanced settings can override the prompt composer and terminal separately.
+
+Each font row has a size dropdown and a slider. Drag the slider to update the live preview
+immediately; the selected size is saved on this device. **Text font** supports 12–24 px and
+resizes Markdown independently of interface, prompt, code, and terminal sizes. Use the reset
+button beside a font row to restore both its family and size, or **General → Restore device
+defaults** to reset all font preferences. The same controls work in the phone web app.
 
 KM Code bundles Inter on web and desktop. It is the default Markdown font and the first choice in the built-in sans-serif stack.
 

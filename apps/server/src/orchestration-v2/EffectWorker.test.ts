@@ -1,6 +1,8 @@
 import { assert, it } from "@effect/vitest";
 import {
   CommandId,
+  MessageId,
+  type OrchestrationV2ServerCommand,
   ProviderSessionId,
   ProviderThreadId,
   ProviderTurnId,
@@ -83,6 +85,7 @@ function layerExecutorFor(input: {
   readonly threads?: Partial<ThreadManagementService.ThreadManagementService["Service"]>;
   readonly continueAfterRestart?: boolean;
   readonly interrupt?: ProviderTurnControlService.ProviderTurnControlServiceV2Shape["interrupt"];
+  readonly steer?: ProviderTurnControlService.ProviderTurnControlServiceV2Shape["steer"];
 }) {
   const record = (event: string) => Ref.update(input.events, (events) => [...events, event]);
   const layerDependencies = Layer.mergeAll(
@@ -90,7 +93,7 @@ function layerExecutorFor(input: {
       ProviderTurnControlService.ProviderTurnControlServiceV2,
       ProviderTurnControlService.ProviderTurnControlServiceV2.of({
         interrupt: input.interrupt ?? (() => Effect.void),
-        steer: () => Effect.void,
+        steer: input.steer ?? (() => Effect.void),
         interruptAndAwaitTerminal: (request) =>
           record(
             request.replacementProviderSessionId === undefined
@@ -243,6 +246,67 @@ it.effect.each([
       });
     }).pipe(Effect.provide(layer));
     assert.deepEqual(yield* Ref.get(events), dispatched);
+  }),
+);
+
+it.effect("restores a promoted queue item when the provider rejects steering", () =>
+  Effect.gen(function* () {
+    const now = yield* DateTime.now;
+    const dispatched = yield* Ref.make<ReadonlyArray<OrchestrationV2ServerCommand>>([]);
+    const queuedRunId = RunId.make("run:effect-worker-promoted-queued");
+    const targetRunId = RunId.make("run:effect-worker-promoted-target");
+    const messageId = MessageId.make("message:effect-worker-promoted");
+    const queuePosition = 3;
+    const layer = layerExecutorFor({
+      events: yield* Ref.make<ReadonlyArray<string>>([]),
+      steer: () =>
+        Effect.fail(
+          new ProviderTurnControlService.ProviderTurnControlError({
+            threadId,
+            operation: "steer",
+            providerTurnId,
+            turnCompleted: false,
+            cause: "provider rejected the message",
+          }),
+        ),
+      threads: {
+        dispatch: (command) =>
+          Ref.update(dispatched, (commands) => [...commands, command]).pipe(
+            Effect.as({ sequence: 1, storedEvents: [] }),
+          ),
+      },
+    });
+    const executor = yield* EffectWorker.OrchestrationEffectExecutorV2.pipe(Effect.provide(layer));
+
+    yield* executor.execute({
+      ...restartEffect(now, { type: "detach" }),
+      request: {
+        type: "provider-turn.steer",
+        providerSessionId: oldSessionId,
+        providerThreadId,
+        providerTurnId,
+        messageId,
+        queuedMessagePromotion: {
+          queuedRunId,
+          targetRunId,
+          queuePosition,
+          queueHeld: true,
+        },
+      },
+    });
+
+    assert.deepEqual(yield* Ref.get(dispatched), [
+      {
+        type: "queued-message.restore-after-steer-rejection",
+        commandId: CommandId.make("command:steer-restore:effect:restart:detach"),
+        threadId,
+        queuedRunId,
+        targetRunId,
+        messageId,
+        queuePosition,
+        queueHeld: true,
+      },
+    ]);
   }),
 );
 it.effect("requeues a claim when a pre-execution worker check fails", () =>

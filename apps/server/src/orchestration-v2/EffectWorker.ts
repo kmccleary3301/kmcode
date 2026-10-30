@@ -243,12 +243,23 @@ export const layerExecutor: Layer.Layer<
                 ),
                 Effect.catch((error) =>
                   Effect.gen(function* () {
-                    if (
-                      !("turnCompleted" in error) ||
-                      !error.turnCompleted ||
-                      effect.request.type !== "provider-turn.steer"
-                    ) {
-                      return yield* error;
+                    if (effect.request.type !== "provider-turn.steer") return yield* error;
+                    if (!("turnCompleted" in error) || error.turnCompleted !== true) {
+                      const promotion = effect.request.queuedMessagePromotion;
+                      if (promotion === undefined) return yield* error;
+                      yield* threads.dispatch({
+                        type: "queued-message.restore-after-steer-rejection",
+                        commandId: CommandId.make(`command:steer-restore:${effect.id}`),
+                        threadId: effect.threadId,
+                        queuedRunId: promotion.queuedRunId,
+                        targetRunId: promotion.targetRunId,
+                        messageId: effect.request.messageId,
+                        queuePosition: promotion.queuePosition,
+                        ...(promotion.queueHeld === undefined
+                          ? {}
+                          : { queueHeld: promotion.queueHeld }),
+                      });
+                      return;
                     }
                     const projection = yield* threads.getThreadRecords(
                       effect.threadId,

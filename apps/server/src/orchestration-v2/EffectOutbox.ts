@@ -55,6 +55,14 @@ export const OrchestrationEffectRequestV2 = Schema.Union([
     providerThreadId: ProviderThreadId,
     providerTurnId: ProviderTurnId,
     messageId: MessageId,
+    queuedMessagePromotion: Schema.optional(
+      Schema.Struct({
+        queuedRunId: RunId,
+        targetRunId: RunId,
+        queuePosition: Schema.Number,
+        queueHeld: Schema.optional(Schema.Boolean),
+      }),
+    ),
   }),
   Schema.Struct({
     type: Schema.Literal("provider-turn.restart"),

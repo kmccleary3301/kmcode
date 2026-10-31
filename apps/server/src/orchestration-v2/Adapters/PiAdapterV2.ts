@@ -95,6 +95,7 @@ import { makeProviderFailure, makeProviderRetryTurnItem } from "../ProviderFailu
 import { turnScopedSelectionTransition } from "../ProviderSelectionTransition.ts";
 import {
   makePiRpcConnection,
+  PiRpcError,
   parsePiModelSlug,
   piRecordField as recordField,
   piRecordNumber as recordNumber,
@@ -3330,6 +3331,31 @@ export function makePiAdapterV2(
         yield* completeStreamItem(turn, item, text);
       });
 
+      // A goal change is bookkeeping, not an answer: show it as a collapsed tool
+      // row instead of repeating the objective, which the user just wrote.
+      const emitOmpGoalUpdate = Effect.fnUntraced(function* (
+        turn: ActivePiTurn,
+        title: string,
+        objective: string | undefined,
+      ) {
+        const emittedAt = yield* DateTime.now;
+        const nativeItemId = `goal:${turn.nextItemOrdinal}`;
+        yield* emitItemNode(turn, nativeItemId, "system", "completed", emittedAt, emittedAt);
+        yield* emit({
+          type: "turn_item.updated",
+          driver,
+          turnItem: {
+            ...baseItemFields(turn, nativeItemId, emittedAt, emittedAt),
+            status: "completed",
+            completedAt: emittedAt,
+            title,
+            type: "dynamic_tool",
+            toolName: "goal",
+            input: objective === undefined ? {} : { objective },
+          },
+        });
+      });
+
       const failOmpGoalTurn = Effect.fnUntraced(function* (
         state: PiThreadState,
         turn: ActivePiTurn,
@@ -3413,7 +3439,7 @@ export function makePiAdapterV2(
           }
           const createdGoal = providerGoalFromOmpCommandResult(created.data);
           if (createdGoal !== undefined) yield* syncOmpGoal(state, createdGoal);
-          yield* emitOmpGoalReply(turn, `Goal active: ${command.objective}`);
+          yield* emitOmpGoalUpdate(turn, "Set goal", command.objective);
           yield* startOmpGoalTurn(turn, "create");
           return;
         }
@@ -3432,20 +3458,17 @@ export function makePiAdapterV2(
           return;
         }
         if (command.type === "pause") {
-          yield* emitOmpGoalReply(turn, "Goal paused. Send /goal resume to continue.");
+          yield* emitOmpGoalUpdate(turn, "Paused goal", resultGoal?.objective);
           yield* finalizeTurn(state);
           return;
         }
         if (command.type === "drop") {
-          yield* emitOmpGoalReply(turn, "Goal dropped.");
+          yield* emitOmpGoalUpdate(turn, "Dropped goal", resultGoal?.objective);
           yield* finalizeTurn(state);
           return;
         }
         const goal = resultGoal ?? state.providerThread.goal ?? null;
-        yield* emitOmpGoalReply(
-          turn,
-          goal === null ? "Goal resumed." : `Goal active: ${goal.objective}`,
-        );
+        yield* emitOmpGoalUpdate(turn, "Resumed goal", goal?.objective);
         yield* startOmpGoalTurn(turn, "resume");
       });
       const handleSessionEvent = Effect.fnUntraced(function* (event: PiRpcRecord) {
@@ -4394,6 +4417,15 @@ export function makePiAdapterV2(
                 if (generation !== connectionGeneration) return;
                 // Transport death finalizes any live turn. Stop-with-restart
                 // is surfaced as an event-stream failure.
+                const transportError = Cause.findErrorOption(cause);
+                const crashSignature =
+                  Option.isSome(transportError) && transportError.value._tag === "PiRpcError"
+                    ? transportError.value.crashSignature
+                    : undefined;
+                const unexpectedExitMessage =
+                  crashSignature === undefined
+                    ? "Pi process exited unexpectedly."
+                    : `Pi process exited unexpectedly (${crashSignature}).`;
                 const state = threadState;
                 const interrupted = state?.activeTurn?.interrupted === true;
                 if (state?.activeTurn != null) {
@@ -4401,7 +4433,7 @@ export function makePiAdapterV2(
                     ? null
                     : makeProviderFailure({
                         cause,
-                        message: "Pi process exited unexpectedly.",
+                        message: unexpectedExitMessage,
                         class: "transport_error",
                       });
                   yield* finalizeTurn(state, false);
@@ -4415,7 +4447,7 @@ export function makePiAdapterV2(
                 } else {
                   yield* updateProviderSession(
                     "error",
-                    interrupted ? "Pi process was stopped." : "Pi process exited unexpectedly.",
+                    interrupted ? "Pi process was stopped." : unexpectedExitMessage,
                   );
                   yield* Queue.fail(
                     events,

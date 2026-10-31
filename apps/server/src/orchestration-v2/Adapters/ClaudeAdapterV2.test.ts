@@ -478,10 +478,13 @@ describe("ClaudeAdapterV2 MCP query overrides", () => {
       type: "http",
       url: "http://127.0.0.1:43123/mcp",
       headers: {
-        Authorization: "Bearer secret-claude-token",
+        Authorization: "${T3_CODE_MCP_AUTHORIZATION}",
       },
       timeout: ClaudeAdapterV2.CLAUDE_T3_MCP_TOOL_TIMEOUT_MS,
     },
+  } as const;
+  const T3_MCP_ENVIRONMENT = {
+    T3_CODE_MCP_AUTHORIZATION: "Bearer secret-claude-token",
   } as const;
 
   const withMcpSession = (threadId: ThreadId, run: () => void) => {
@@ -531,6 +534,7 @@ describe("ClaudeAdapterV2 MCP query overrides", () => {
       assert.deepEqual(overrides, {
         allowedTools: [ClaudeAdapterV2.CLAUDE_T3_MCP_TOOL_WILDCARD],
         mcpServers: T3_MCP_SERVERS,
+        mcpEnvironment: T3_MCP_ENVIRONMENT,
       });
     });
   });
@@ -547,6 +551,7 @@ describe("ClaudeAdapterV2 MCP query overrides", () => {
       assert.deepEqual(overrides, {
         allowedTools: ["Read", "mcp__t3-code__*"],
         mcpServers: T3_MCP_SERVERS,
+        mcpEnvironment: T3_MCP_ENVIRONMENT,
       });
     });
   });
@@ -566,6 +571,7 @@ describe("ClaudeAdapterV2 MCP query overrides", () => {
           ...ClaudeAdapterV2.CLAUDE_READ_ONLY_T3_MCP_ALLOWED_TOOLS,
         ],
         mcpServers: T3_MCP_SERVERS,
+        mcpEnvironment: T3_MCP_ENVIRONMENT,
       });
       assert.isFalse(overrides.allowedTools?.includes(ClaudeAdapterV2.CLAUDE_T3_MCP_TOOL_WILDCARD));
     });
@@ -697,11 +703,12 @@ describe("ClaudeAdapterV2 native protocol logging", () => {
             type: "http",
             url: "http://127.0.0.1:43123/mcp",
             headers: {
-              Authorization: "Bearer secret-claude-token",
+              Authorization: "${T3_CODE_MCP_AUTHORIZATION}",
             },
             timeout: ClaudeAdapterV2.CLAUDE_T3_MCP_TOOL_TIMEOUT_MS,
           },
         },
+        mcpEnvironment: { T3_CODE_MCP_AUTHORIZATION: "Bearer secret-claude-token" },
       });
 
       const options = ClaudeAdapterV2.makeClaudeQueryOptions({
@@ -712,8 +719,12 @@ describe("ClaudeAdapterV2 native protocol logging", () => {
         nativeThreadId: "native-thread-claude-mcp",
         resume: false,
         cwd: "/workspace",
-        ...overrides,
+        allowedTools: overrides.allowedTools ?? [],
+        mcpServers: overrides.mcpServers ?? {},
+        environment: { ...overrides.mcpEnvironment },
       });
+      assert.notInclude(JSON.stringify(options.mcpServers), "secret-claude-token");
+      assert.equal(options.env?.T3_CODE_MCP_AUTHORIZATION, "Bearer secret-claude-token");
       assert.isObject(options.systemPrompt);
       const systemPrompt = options.systemPrompt as {
         readonly type: string;
@@ -2107,6 +2118,7 @@ describe("ClaudeAdapterV2 background wake turns", () => {
       });
       const offeredMessages: Array<SDKUserMessage> = [];
       const permissionModeChanges: Array<string> = [];
+      const stoppedTaskIds: Array<string> = [];
       const continuationRequests: Array<ProviderContinuationRequest> = [];
       const terminalReceipts =
         yield* Queue.unbounded<Extract<ProviderAdapterV2Event, { type: "turn.terminal" }>>();
@@ -2144,6 +2156,10 @@ describe("ClaudeAdapterV2 background wake turns", () => {
                     }),
                   setModel: () => Effect.void,
                   setPermissionMode: () => Effect.void,
+                  stopTask: (taskId) =>
+                    Effect.sync(() => {
+                      stoppedTaskIds.push(taskId);
+                    }),
                   interrupt: Effect.void,
                   close: Queue.shutdown(processMessages),
                 };
@@ -2175,6 +2191,10 @@ describe("ClaudeAdapterV2 background wake turns", () => {
                 setPermissionMode: (mode) =>
                   Effect.sync(() => {
                     permissionModeChanges.push(mode);
+                  }),
+                stopTask: (taskId) =>
+                  Effect.sync(() => {
+                    stoppedTaskIds.push(taskId);
                   }),
                 interrupt: options?.interrupt ?? Effect.void,
                 close: options?.close?.(sdkMessages) ?? Effect.void,
@@ -2236,6 +2256,7 @@ describe("ClaudeAdapterV2 background wake turns", () => {
           return uuid;
         },
         permissionModeChanges,
+        stoppedTaskIds,
         continuationRequests,
         events,
         terminalReceipts,
@@ -3807,8 +3828,20 @@ describe("ClaudeAdapterV2 background wake turns", () => {
 
         const roster = providerThreadRosterEvents(harness.events).at(-1)?.providerThread
           .pendingBackgroundTasks;
+        // The snapshot names the task only; its command and start come from the
+        // Monitor call that started it, and survive the snapshot.
+        const startedAt = roster?.[0]?.startedAt;
+        assert.isTrue(
+          startedAt !== undefined && Date.parse(startedAt) >= DateTime.toEpochMillis(now),
+        );
         assert.deepEqual(roster, [
-          { taskId: longRunning.taskId, kind: "monitor", description: "Monitor 0" },
+          {
+            taskId: longRunning.taskId,
+            kind: "monitor",
+            description: "Monitor 0",
+            command: "sleep 8 && echo MONITOR_DONE",
+            startedAt,
+          },
         ]);
       }).pipe(Effect.provide(Layer.merge(IdAllocator.layer, NodeServices.layer))),
     ),
@@ -4300,9 +4333,14 @@ describe("ClaudeAdapterV2 background wake turns", () => {
           const rosterAAfterSettle = providerThreadRosterEvents(events).findLast(
             (event) => event.providerThread.id === providerThreadA.id,
           )?.providerThread.pendingBackgroundTasks;
-          assert.deepEqual(rosterAAfterSettle ?? [], [
-            { taskId: taskA, description: "work on A", kind: "command" },
-          ]);
+          assert.deepEqual(
+            (rosterAAfterSettle ?? []).map(({ taskId, description, kind }) => ({
+              taskId,
+              description,
+              kind,
+            })),
+            [{ taskId: taskA, description: "work on A", kind: "command" }],
+          );
           assert.isTrue(yield* hasPendingBackgroundWork);
           assert.isTrue(yield* hasPendingBackgroundWorkForThread(providerThreadA));
           assert.isFalse(yield* hasPendingBackgroundWorkForThread(providerThreadB));
@@ -4630,8 +4668,9 @@ describe("ClaudeAdapterV2 background wake turns", () => {
       ),
   );
 
-  it.effect("stores a Bash result's stdout and stderr as command output", () =>
-    Effect.scoped(
+  it.effect(
+    "keeps Claude Bash descriptions as intent alongside command output",
+    () => Effect.scoped(
       Effect.gen(function* () {
         const harness = yield* makeWakeHarness;
         const now = yield* DateTime.now;
@@ -4662,7 +4701,7 @@ describe("ClaudeAdapterV2 background wake turns", () => {
                   type: "tool_use",
                   id: bashToolUseId,
                   name: "Bash",
-                  input: { command: "git status" },
+                  input: { command: "git status", description: "  Inspect repository status  " },
                 },
               ],
             },
@@ -4708,6 +4747,12 @@ describe("ClaudeAdapterV2 background wake turns", () => {
             ? bash.turnItem.output
             : undefined,
           "On branch main\nwarning: dirty",
+        );
+        assert.equal(
+          bash?.type === "turn_item.updated" && bash.turnItem.type === "command_execution"
+            ? bash.turnItem.intent
+            : undefined,
+          "Inspect repository status",
         );
       }).pipe(Effect.provide(Layer.merge(IdAllocator.layer, NodeServices.layer))),
     ),
@@ -5986,6 +6031,191 @@ describe("ClaudeAdapterV2 background wake turns", () => {
       );
     return { childThreadId, toolThreadIds, assistantTexts };
   };
+
+  it.effect("tracks and stops only a live Claude workflow coordinator task", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        let interrupts = 0;
+        const harness = yield* makeWakeHarnessWithOptions({
+          interrupt: Effect.sync(() => {
+            interrupts++;
+          }),
+        });
+        const now = yield* DateTime.now;
+        const taskId = "task-native-workflow";
+        const toolUseId = "toolu-native-workflow";
+        const subagentEvents = () =>
+          harness.events.filter(
+            (
+              event,
+            ): event is Extract<ProviderAdapterV2Event, { type: "subagent.updated" }> =>
+              event.type === "subagent.updated" &&
+              event.subagent.nativeTaskRef?.nativeId === taskId,
+          );
+
+        yield* harness.runtime.startTurn(
+          makeClaudeTestTurnInput({
+            threadId: harness.threadId,
+            providerThread: harness.providerThread,
+            now,
+            attemptId: RunAttemptId.make("attempt-claude-workflow-stop"),
+            text: "Run deep research.",
+            attachments: [],
+          }),
+        );
+        const fileSystem = yield* FileSystem.FileSystem;
+        const transcriptDir = yield* fileSystem.makeTempDirectoryScoped({
+          prefix: "t3-claude-workflow-stop-",
+        });
+        yield* harness.offerAndWait(
+          claudeSdkFrame({
+            type: "assistant",
+            message: {
+              model: "claude-sonnet-4-6",
+              id: "msg_native_workflow",
+              type: "message",
+              role: "assistant",
+              content: [
+                {
+                  type: "tool_use",
+                  id: toolUseId,
+                  name: "Workflow",
+                  input: { script: "deep-research.js" },
+                },
+              ],
+              stop_reason: "tool_use",
+              stop_sequence: null,
+              usage: {
+                input_tokens: 1,
+                output_tokens: 1,
+                cache_creation_input_tokens: 0,
+                cache_read_input_tokens: 0,
+              },
+            },
+            parent_tool_use_id: null,
+            uuid: "00000000-0000-4000-8000-000000000400",
+            session_id: WAKE_NATIVE_SESSION,
+          }),
+        );
+        yield* harness.offerAndWait(
+          claudeSdkFrame({
+            type: "system",
+            subtype: "task_started",
+            task_id: taskId,
+            tool_use_id: toolUseId,
+            description: "Run deep research",
+            task_type: "local_workflow",
+            workflow_name: "deep-research",
+            uuid: "00000000-0000-4000-8000-000000000401",
+            session_id: WAKE_NATIVE_SESSION,
+          }),
+        );
+        yield* awaitUntil(() => subagentEvents().length > 0, "workflow coordinator start");
+        const started = subagentEvents().at(-1)?.subagent;
+        assert.isDefined(started);
+        assert.equal(started.status, "running");
+        assert.equal(started.workflow?.name, "deep-research");
+
+        yield* harness.offerAndWait(
+          claudeSdkFrame({
+            type: "user",
+            message: {
+              role: "user",
+              content: [
+                {
+                  type: "tool_result",
+                  tool_use_id: toolUseId,
+                  content: [{ type: "text", text: "Workflow launched." }],
+                },
+              ],
+            },
+            parent_tool_use_id: null,
+            uuid: "00000000-0000-4000-8000-000000000402",
+            session_id: WAKE_NATIVE_SESSION,
+            tool_use_result: {
+              taskType: "local_workflow",
+              runId: "wf_native_workflow",
+              transcriptDir,
+            },
+          }),
+        );
+        yield* harness.offerAndWait(
+          claudeSdkFrame({
+            type: "system",
+            subtype: "task_progress",
+            task_id: taskId,
+            tool_use_id: toolUseId,
+            description: "Research: Scout",
+            usage: { total_tokens: 7, tool_uses: 1, duration_ms: 125 },
+            workflow_progress: [
+              { type: "workflow_phase", index: 1, title: "Research" },
+              {
+                type: "workflow_agent",
+                index: 1,
+                label: "Scout",
+                agentId: "a1",
+                state: "start",
+                phaseIndex: 1,
+                phaseTitle: "Research",
+                model: "claude-opus-5[1m]",
+                promptPreview: "Research the topic.",
+                attempt: 1,
+              },
+            ],
+            uuid: "00000000-0000-4000-8000-000000000403",
+            session_id: WAKE_NATIVE_SESSION,
+          }),
+        );
+        yield* awaitUntil(
+          () => subagentEvents().at(-1)?.subagent.workflow?.agents[0]?.state === "running",
+          "workflow member progress",
+        );
+        const progress = subagentEvents().at(-1)?.subagent;
+        assert.isDefined(progress);
+        assert.equal(progress.workflow?.name, "deep-research");
+        assert.deepEqual(progress.workflow?.phases, [{ index: 1, title: "Research" }]);
+        assert.equal(progress.workflow?.agents[0]?.state, "running");
+        assert.isDefined(progress.workflow?.agents[0]?.childThreadId);
+        if (harness.runtime.stopTask === undefined) {
+          throw new Error("Claude adapter runtime must expose native workflow task stopping.");
+        }
+        yield* harness.runtime.stopTask({ providerThread: harness.providerThread, taskId });
+        assert.deepEqual(harness.stoppedTaskIds, [taskId]);
+        assert.equal(interrupts, 0);
+
+        yield* harness.offerAndWait(
+          claudeSdkFrame({
+            type: "system",
+            subtype: "task_notification",
+            task_id: taskId,
+            tool_use_id: toolUseId,
+            status: "stopped",
+            output_file: `${transcriptDir}/${taskId}.output`,
+            summary: "Workflow stopped.",
+            uuid: "00000000-0000-4000-8000-000000000404",
+            session_id: WAKE_NATIVE_SESSION,
+          }),
+        );
+        yield* awaitUntil(
+          () => subagentEvents().at(-1)?.subagent.status === "cancelled",
+          "workflow stopped notification",
+        );
+        assert.equal(subagentEvents().at(-1)?.subagent.status, "cancelled");
+
+        yield* harness.offerAndWait(
+          makeResultFrame({
+            uuid: "00000000-0000-4000-8000-000000000405",
+            result: "Research stopped.",
+          }),
+        );
+        yield* awaitUntil(
+          () => harness.terminalEvents().length === 1,
+          "workflow root turn terminal",
+        );
+        assert.equal(harness.terminalEvents().length, 1);
+      }).pipe(Effect.provide(Layer.merge(IdAllocator.layer, NodeServices.layer))),
+    ),
+  );
 
   it.effect("a subagent re-run in the foreground does not join a later wake", () =>
     Effect.scoped(

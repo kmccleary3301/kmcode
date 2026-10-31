@@ -11,7 +11,7 @@ const SEARCH_PREVIEW_MAX_CHARS = 8_000;
 
 type ToolItemBase = Omit<
   Extract<OrchestrationV2TurnItem, { type: "dynamic_tool" }>,
-  "type" | "toolName" | "input" | "output"
+  "type" | "toolName" | "input" | "output" | "intent"
 >;
 
 export function openCodeToolProjectionKind(
@@ -85,12 +85,18 @@ export function openCodeToolTurnItem(
   },
 ): OrchestrationV2TurnItem {
   const { input, output } = tool;
-  switch (openCodeToolProjectionKind(tool.name)) {
+  const itemType = openCodeToolProjectionKind(tool.name);
+  const intent =
+    itemType === "file_search" || itemType === "web_search"
+      ? undefined
+      : recordString(input, "description")?.trim();
+  switch (itemType) {
     case "command_execution": {
       const exitCode = recordNumber(tool.completedMetadata, "exit", "exitCode");
       return {
         ...base,
         type: "command_execution",
+        ...(intent === undefined ? {} : { intent }),
         input: recordString(input, "command", "cmd") ?? stableJson(input),
         ...(output === undefined ? {} : { output }),
         ...(exitCode === undefined ? {} : { exitCode }),
@@ -106,6 +112,7 @@ export function openCodeToolTurnItem(
       return {
         ...base,
         type: "file_change",
+        ...(intent === undefined ? {} : { intent }),
         fileName: recordString(input, "filePath", "path", "file") ?? tool.name,
         ...(oldStr === undefined ? {} : { oldStr }),
         ...(newStr === undefined ? {} : { newStr }),
@@ -161,6 +168,7 @@ export function openCodeToolTurnItem(
             ? formatReadToolLabel(readPath)
             : base.title,
         type: "dynamic_tool",
+        ...(intent === undefined ? {} : { intent }),
         toolName: tool.name,
         input,
         ...(output === undefined ? {} : { output }),

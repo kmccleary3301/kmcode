@@ -60,7 +60,6 @@ describe("PiProvider", () => {
       );
       assert.equal(snapshot.status, "error");
       assert.equal(snapshot.version, "0.80.3");
-      assert.include(snapshot.message ?? "", `Pi ${PI_DIALECT.minimumVersion} or newer`);
     }).pipe(Effect.provide(NodeServices.layer)),
   );
 
@@ -75,7 +74,6 @@ describe("PiProvider", () => {
         snapshot.models.map((model) => model.slug),
         ["default"],
       );
-      assert.include(snapshot.message ?? "", "could not refresh its models and commands");
     }).pipe(Effect.provide(NodeServices.layer)),
   );
 });

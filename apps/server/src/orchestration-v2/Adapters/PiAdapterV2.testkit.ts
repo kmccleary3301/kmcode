@@ -32,6 +32,7 @@ import { ChildProcess, ChildProcessSpawner } from "effect/process";
 
 import * as ServerConfig from "../../config.ts";
 import * as IdAllocator from "../IdAllocator.ts";
+import * as ThreadLiveOverlay from "../ThreadLiveOverlay.ts";
 import { ProviderAdapterDriverCreateError } from "../ProviderAdapterDriver.ts";
 import * as ProviderAdapterRegistry from "../ProviderAdapterRegistry.ts";
 import {
@@ -430,7 +431,9 @@ export function layer<E, R>(input: {
     },
   }).pipe(
     Layer.provide(input.spawner),
-    Layer.provide(Layer.mergeAll(layerServerConfig, NodeServices.layer, IdAllocator.layer)),
+    Layer.provide(
+      Layer.mergeAll(layerServerConfig, NodeServices.layer, IdAllocator.layer, ThreadLiveOverlay.layer),
+    ),
   );
 }
 

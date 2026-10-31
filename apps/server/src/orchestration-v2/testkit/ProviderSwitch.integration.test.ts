@@ -1,5 +1,6 @@
 import { vi } from "vite-plus/test";
 import { historyResponseItems } from "../ContextHandoffBudget.ts";
+import { contextHandoffDeliveryIds } from "../ContextHandoffDeliveryIds.ts";
 import { assert, describe, it } from "@effect/vitest";
 import {
   CommandId,
@@ -116,6 +117,7 @@ function makeTestAdapter(input: {
   readonly failResumeOnce?: Ref.Ref<boolean>;
   readonly initialContextUsage?: OrchestrationV2ProviderThread["contextUsage"];
   readonly getModelContextWindow?: (selection: ModelSelection) => number | undefined;
+  readonly nativeContextTokens?: number;
   readonly canReuseContextUsage?: ProviderAdapterV2SessionRuntime["canReuseContextUsage"];
   readonly tokenUsageByRunOrdinal?: Readonly<
     Record<number, Omit<OrchestrationV2ProviderTurnTokenUsage, "updatedAt">>
@@ -157,6 +159,9 @@ function makeTestAdapter(input: {
           ...(input.getModelContextWindow === undefined
             ? {}
             : { getModelContextWindow: input.getModelContextWindow }),
+          ...(input.nativeContextTokens === undefined
+            ? {}
+            : { measureNativeContextTokens: () => Effect.succeed(input.nativeContextTokens) }),
           ...(input.canReuseContextUsage === undefined
             ? {}
             : { canReuseContextUsage: input.canReuseContextUsage }),
@@ -819,12 +824,12 @@ describe("orchestration v2 provider switching", () => {
                         ? projection.runs.find((run) => run.ordinal === targetOrdinal)!.id
                         : projection.runs.at(-1)!.id),
                   )
-                  .flatMap((record) => record.delivery?.itemIds ?? []),
+                  .flatMap((record) => contextHandoffDeliveryIds(record.delivery).itemIds),
                 sourceItem.id,
               );
             } else {
               assert.notInclude(context, "q".repeat(9_000));
-              assert.isAbove(handoff.delivery!.omittedItemIds!.length, 0);
+              assert.isAbove(contextHandoffDeliveryIds(handoff.delivery).omittedItemIds.length, 0);
             }
             const latestRun = projection.runs.at(-1)!;
             const latestAttempt = projection.attempts.find(
@@ -1027,8 +1032,10 @@ describe("orchestration v2 provider switching", () => {
                 const missedRequest = retried.turnItems.find(
                   (item) => item.type === "user_message" && item.text === "x".repeat(7_000),
                 )!;
-                const delivery = retried.contextHandoffs.at(-1)!.delivery!;
-                assert.include(delivery.omittedItemIds ?? [], missedRequest.id);
+                const delivery = contextHandoffDeliveryIds(
+                  retried.contextHandoffs.at(-1)!.delivery,
+                );
+                assert.include(delivery.omittedItemIds, missedRequest.id);
                 assert.notInclude(delivery.itemIds, missedRequest.id);
               } else assert.include(delta, "First target request");
               assert.notInclude(delta, "Original request with constraints");
@@ -1298,6 +1305,102 @@ describe("orchestration v2 provider switching", () => {
         );
       }),
     ),
+  );
+
+  it.live.each([
+    ["unmeasured", undefined, "failed"],
+    ["measured", 2_000, "completed"],
+  ] as const)(
+    "budgets a missed request against %s native occupancy when no turn reported usage",
+    ([label, nativeContextTokens, retryStatus]) =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const cwd = yield* checkpointWorkspace(`unreported-usage-${label}`);
+          const capturedTurns = yield* Ref.make<ReadonlyArray<CapturedTurn>>([]);
+          const refuseStarts = yield* Ref.make(0);
+          const registry = ProviderAdapterRegistry.layerFromAdapters([
+            makeTestAdapter({
+              instanceId: CLAUDE_MODEL_SELECTION.instanceId,
+              driver: CLAUDE_DRIVER,
+              capabilities: ClaudeProviderCapabilitiesV2,
+              modelSelection: CLAUDE_MODEL_SELECTION,
+              // Saved text far beyond the window the native thread actually holds.
+              responseByRunOrdinal: { 1: "r".repeat(40_000) },
+              capturedTurns,
+              refuseStarts,
+              getModelContextWindow: () => 32_000,
+              ...(nativeContextTokens === undefined ? {} : { nativeContextTokens }),
+            }),
+          ]);
+          yield* Effect.gen(function* () {
+            const orchestrator = yield* Orchestrator.OrchestratorV2;
+            const worker = yield* EffectWorker.OrchestrationEffectWorkerV2;
+            const run = Effect.fn("run")(function* (ordinal: number) {
+              yield* orchestrator.dispatch({
+                type: "message.dispatch",
+                commandId: CommandId.make(`unreported-usage:${ordinal}`),
+                threadId,
+                messageId: MessageId.make(`unreported-usage:${ordinal}`),
+                createdBy: "user",
+                creationSource: "web",
+                text: `Request ${ordinal}`,
+                attachments: [],
+                modelSelection: CLAUDE_MODEL_SELECTION,
+                dispatchMode: { type: "start_immediately" },
+              });
+              yield* orchestrator.streamStoredEvents.pipe(
+                Stream.filter(
+                  ({ event }) =>
+                    event.type === "run.updated" &&
+                    event.payload.ordinal === ordinal &&
+                    (event.payload.status === "completed" || event.payload.status === "failed"),
+                ),
+                Stream.runHead,
+              );
+              yield* worker.drain();
+              return (yield* orchestrator.getThreadProjection(threadId)).runs.at(-1)?.status;
+            });
+            yield* orchestrator.dispatch({
+              type: "thread.create",
+              commandId: CommandId.make("unreported-usage:create"),
+              threadId,
+              projectId,
+              createdBy: "user",
+              creationSource: "web",
+              title: "Unreported usage",
+              modelSelection: CLAUDE_MODEL_SELECTION,
+              runtimeMode: "full-access",
+              interactionMode: "default",
+              branch: null,
+              worktreePath: null,
+            });
+            assert.equal(yield* run(1), "completed");
+            yield* Ref.set(refuseStarts, 1);
+            assert.equal(yield* run(2), "failed");
+            // Run 3 must carry run 2's missed request as a handoff.
+            assert.equal(yield* run(3), retryStatus);
+            const turns = yield* Ref.get(capturedTurns);
+            if (retryStatus === "completed") {
+              assert.include(turns.at(-1)?.text, "Request 2");
+              assert.include(turns.at(-1)?.text, "Request 3");
+            } else assert.equal(turns.length, 1);
+          }).pipe(
+            Effect.provide(
+              ProviderReplayHarness.layerWithRegistry(
+                {
+                  name: `unreported-usage-${label}`,
+                  runtimePolicyOverride: {
+                    cwd,
+                    approvalPolicy: "never",
+                    sandboxPolicy: { type: "readOnly" },
+                  },
+                },
+                registry,
+              ),
+            ),
+          );
+        }),
+      ),
   );
 
   it.live.each(

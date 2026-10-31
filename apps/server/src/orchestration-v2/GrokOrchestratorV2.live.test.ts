@@ -27,6 +27,7 @@ import * as CodexInstallation from "../provider/CodexInstallation.ts";
 import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
 import * as ModelManifest from "../provider/ModelManifest.ts";
 import * as ProviderInstanceRegistryHydration from "../provider/ProviderInstanceRegistryHydration.ts";
+import * as ThreadLiveOverlay from "./ThreadLiveOverlay.ts";
 import * as ProviderEventLoggers from "../provider/ProviderEventLoggers.ts";
 import * as OpenCodeRuntime from "../provider/opencodeRuntime.ts";
 import * as OpenCodeServerLedger from "../provider/OpenCodeServerLedger.ts";
@@ -101,6 +102,7 @@ const layerProviderInstanceRegistry = ProviderInstanceRegistryHydration.layer.pi
           EnvironmentId.make("00000000-0000-4000-8000-000000000001"),
         ),
       }),
+      ThreadLiveOverlay.layer,
     ),
   ),
 );

@@ -223,6 +223,7 @@ it.effect(
           getRuntimeRecoveryProjection: () => Effect.die("unused getRuntimeRecoveryProjection"),
           getPlan: () => Effect.die("unused"),
           hasUnpairedRunInterruptRequest: () => Effect.die("unused interrupt read"),
+          isNodeStored: () => Effect.die("unused node lookup"),
           getThreadAttachmentIds: () => Effect.die("Unused attachment lookup"),
           getTimelinePage: () => Effect.die("Unused timeline read"),
           getMessageCount: () => Effect.die("unused message count"),
@@ -267,6 +268,7 @@ it.effect(
             Effect.succeed(
               providerSessionId === oldSessionId ? Option.some(runtime) : Option.none(),
             ),
+          inspectSettlement: () => Effect.succeed(null),
           close: () => Effect.void,
           closeInstance: () => Effect.void,
           release: () => Effect.void,

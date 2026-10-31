@@ -309,7 +309,23 @@ it.layer(layerTest)("delegated completion delivery repairs", (it) => {
         deliveryTaskIds: [taskId],
         now,
       });
+      const seeded = yield* orchestrator.getThreadProjection(threadId);
+      const seededParentRun = seeded.runs.find((row) => row.id === runId)!;
+      yield* sink.write({
+        events: [
+          {
+            id: EventId.make("event:mailbox-parent-settled"),
+            type: "run.updated",
+            threadId,
+            runId,
+            providerInstanceId: modelSelection.instanceId,
+            occurredAt: now,
+            payload: { ...seededParentRun, status: "completed", completedAt: now },
+          },
+        ],
+      });
       const projection = yield* orchestrator.getThreadProjection(threadId);
+      const settledParentRun = projection.runs.find((row) => row.id === runId)!;
       const task = projection.subagents[0]!;
       const pendingIds = [NodeId.make("mailbox-second"), NodeId.make("mailbox-third")];
       yield* sink.write({
@@ -358,6 +374,9 @@ it.layer(layerTest)("delegated completion delivery repairs", (it) => {
         messageId,
       });
       const accepted = yield* orchestrator.getThreadProjection(threadId);
+      const acceptedParentRun = accepted.runs.find((row) => row.id === runId);
+      assert.equal(acceptedParentRun?.status, "completed");
+      assert.deepEqual(acceptedParentRun?.completedAt, settledParentRun.completedAt);
       assert.equal(
         accepted.subagents.find((row) => row.id === taskId)?.completionDelivery?.state,
         "delivered",

@@ -39,6 +39,31 @@ describe("WebSocket RPC contracts", () => {
     expect(methods.filter((method) => method.startsWith("orchestrationV1."))).toEqual([]);
   });
 
+  it("registers the thread live subscription input", () => {
+    const subscribeThreadLive = WsRpcGroup.requests.get(
+      ORCHESTRATION_V2_WS_METHODS.subscribeThreadLive,
+    );
+    if (subscribeThreadLive === undefined) {
+      throw new Error("subscribeThreadLive is not registered");
+    }
+
+    expect(
+      Schema.decodeSync(subscribeThreadLive.payloadSchema)({ threadId: "thread-1" }),
+    ).toEqual({ threadId: "thread-1" });
+  });
+
+  it("registers task-scoped workflow stopping", () => {
+    const stopWorkflow = WsRpcGroup.requests.get(ORCHESTRATION_V2_WS_METHODS.stopWorkflow);
+    if (stopWorkflow === undefined) throw new Error("stopWorkflow is not registered");
+
+    expect(
+      Schema.decodeSync(stopWorkflow.payloadSchema)({
+        threadId: "thread-1",
+        subagentId: "node-1",
+      }),
+    ).toEqual({ threadId: "thread-1", subagentId: "node-1" });
+  });
+
   it("rejects server-internal commands sent to dispatchCommand", () => {
     const dispatchCommand = WsRpcGroup.requests.get(ORCHESTRATION_V2_WS_METHODS.dispatchCommand);
     if (dispatchCommand === undefined) throw new Error("dispatchCommand is not registered");

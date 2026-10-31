@@ -834,6 +834,146 @@ it.layer(layerTest)("OrchestrationV2LayerLive", (it) => {
       }
     }).pipe(Effect.provide(Layer.fresh(layerTest))),
   );
+  it.effect("queues and starts fresh work after native execution ends", () =>
+    Effect.gen(function* () {
+      const orchestrator = yield* Orchestrator.OrchestratorV2;
+      const eventSink = yield* EventSink.EventSinkV2;
+      const threadId = ThreadId.make("runtime-native-end-queue");
+      yield* orchestrator.dispatch({
+        type: "thread.create",
+        createdBy: "user",
+        creationSource: "web",
+        commandId: CommandId.make("runtime-native-end-create"),
+        threadId,
+        projectId: ProjectId.make("runtime-native-end-project"),
+        title: "Native end",
+        modelSelection,
+        runtimeMode: "full-access",
+        interactionMode: "default",
+        branch: null,
+        worktreePath: process.cwd(),
+      });
+      yield* orchestrator.dispatch({
+        type: "message.dispatch",
+        createdBy: "user",
+        creationSource: "web",
+        commandId: CommandId.make("runtime-native-end-first"),
+        threadId,
+        messageId: MessageId.make("runtime-native-end-first"),
+        text: "Start work.",
+        attachments: [],
+        modelSelection,
+        dispatchMode: { type: "start_immediately" },
+      });
+      const initial = yield* orchestrator.getThreadProjection(threadId);
+      const run = initial.runs[0]!;
+      const providerThread = initial.providerThreads[0]!;
+      const now = yield* DateTime.now;
+      const workCompletedAt = DateTime.add(now, { seconds: 5 });
+      yield* eventSink.write({
+        events: [
+          {
+            id: EventId.make("runtime-native-end-work"),
+            type: "run.updated",
+            threadId,
+            runId: run.id,
+            ...(run.rootNodeId === null ? {} : { nodeId: run.rootNodeId }),
+            providerInstanceId: run.providerInstanceId,
+            occurredAt: workCompletedAt,
+            payload: {
+              ...run,
+              providerThreadId: providerThread.id,
+              status: "running",
+              startedAt: now,
+              workCompletedAt,
+            },
+          },
+        ],
+      });
+
+      const interrupt = yield* orchestrator
+        .dispatch({
+          type: "run.interrupt",
+          commandId: CommandId.make("runtime-native-end-interrupt"),
+          threadId,
+          runId: run.id,
+        })
+        .pipe(Effect.flip);
+      assert.instanceOf(interrupt, Orchestrator.OrchestratorDispatchError);
+      assert.include(
+        String(interrupt.cause),
+        "has already ended native execution and cannot be interrupted.",
+      );
+
+      const queuedMessageId = MessageId.make("runtime-native-end-next");
+      yield* orchestrator.dispatch({
+        type: "message.dispatch",
+        createdBy: "user",
+        creationSource: "web",
+        commandId: CommandId.make("runtime-native-end-next"),
+        threadId,
+        messageId: queuedMessageId,
+        text: "Continue with new work.",
+        attachments: [],
+        modelSelection,
+        dispatchMode: { type: "start_immediately" },
+        deliveryIntent: "restart",
+      });
+      const queuedProjection = yield* orchestrator.getThreadProjection(threadId);
+      const queuedRun = queuedProjection.runs.find(
+        (candidate) => candidate.userMessageId === queuedMessageId,
+      );
+      assert.isDefined(queuedRun);
+      if (queuedRun === undefined) return;
+      assert.equal(queuedRun.status, "queued");
+      const steer = yield* orchestrator
+        .dispatch({
+          type: "queued-message.promote-to-steer",
+          commandId: CommandId.make("runtime-native-end-steer"),
+          threadId,
+          queuedRunId: queuedRun.id,
+          targetRunId: run.id,
+        })
+        .pipe(Effect.flip);
+      assert.include(
+        String(steer.cause),
+        "has already ended native execution and cannot be steered.",
+      );
+
+      const completedAt = DateTime.add(workCompletedAt, { seconds: 1 });
+      yield* eventSink.write({
+        events: [
+          {
+            id: EventId.make("runtime-native-end-finalized"),
+            type: "run.updated",
+            threadId,
+            runId: run.id,
+            ...(run.rootNodeId === null ? {} : { nodeId: run.rootNodeId }),
+            providerInstanceId: run.providerInstanceId,
+            occurredAt: completedAt,
+            payload: {
+              ...run,
+              providerThreadId: providerThread.id,
+              status: "completed",
+              startedAt: now,
+              completedAt,
+              workCompletedAt,
+            },
+          },
+        ],
+      });
+      yield* orchestrator.resumeQueuedRuns;
+      const resumed = yield* orchestrator.getThreadProjection(threadId);
+      const freshRun = resumed.runs.find((candidate) => candidate.id === queuedRun.id);
+      assert.equal(freshRun?.status, "starting");
+      assert.isUndefined(freshRun?.workCompletedAt);
+      assert.deepEqual(
+        resumed.runs.find((candidate) => candidate.id === run.id)?.workCompletedAt,
+        workCompletedAt,
+      );
+    }),
+  );
+
 
   it.effect("resolves delivery intent against the active run and starts after it completes", () =>
     Effect.gen(function* () {

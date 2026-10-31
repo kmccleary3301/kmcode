@@ -14,6 +14,7 @@ import {
   HostProcessWorkingDirectory,
 } from "@t3tools/shared/hostProcess";
 import * as NetService from "@t3tools/shared/Net";
+import * as ThreadLiveOverlay from "../orchestration-v2/ThreadLiveOverlay.ts";
 import * as ConfigProvider from "effect/ConfigProvider";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
@@ -39,6 +40,7 @@ const runCli = (args: ReadonlyArray<string>, env: Record<string, string> = {}) =
       Layer.mergeAll(
         NodeServices.layer,
         NetService.layer,
+        ThreadLiveOverlay.layer,
         ConfigProvider.layer(ConfigProvider.fromEnv({ env })),
       ),
     ),

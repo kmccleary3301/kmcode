@@ -6,9 +6,11 @@ import {
   type ServerLifecycleStreamReadyEvent,
   type ServerSelfUpdateProgressEvent,
   type ServerSelfUpdateResult,
+  type ServerHostHealthSnapshot,
   WS_METHODS,
 } from "@t3tools/contracts";
 import * as Cause from "effect/Cause";
+import * as Clock from "effect/Clock";
 import * as Duration from "effect/Duration";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
@@ -48,6 +50,7 @@ import {
 } from "../rpc/client.ts";
 import type { RpcSession } from "../rpc/session.ts";
 import { followStreamInEnvironment } from "./runtime.ts";
+import type { EnvironmentHostHealthObservation } from "../connection/presentation.ts";
 import {
   applyServerConfigProjection,
   type ServerConfigProjection,
@@ -987,6 +990,38 @@ export function createServerEnvironmentAtoms<R, E>(
     staleTimeMs: 0,
   });
 
+  const hostHealthObservationFamily = Atom.family((environmentId: EnvironmentId) =>
+    Atom.make<EnvironmentHostHealthObservation | null>(null).pipe(
+      Atom.setIdleTTL(5 * 60_000),
+      Atom.withLabel(`environment-data:server:host-health-latest:${environmentId}`),
+    ),
+  );
+  const hostHealthStateFamily = Atom.family((environmentId: EnvironmentId) => {
+    const latestObservation = hostHealthObservationFamily(environmentId);
+    return runtime
+      .atom((get) => {
+        const registry = get.registry;
+        return followStreamInEnvironment(
+          environmentId,
+          subscribe(WS_METHODS.serverSubscribeHostHealth, {}).pipe(
+            Stream.mapEffect((snapshot) =>
+              Clock.currentTimeMillis.pipe(
+                Effect.map((receivedAt) => {
+                  const previousSnapshot = registry.get(latestObservation)?.snapshot ?? null;
+                  const observation = { snapshot, receivedAt, previousSnapshot };
+                  registry.set(latestObservation, observation);
+                  return observation;
+                }),
+              ),
+            ),
+          ),
+        );
+      })
+      .pipe(
+        Atom.setIdleTTL(5 * 60_000),
+        Atom.withLabel(`environment-data:server:host-health:${environmentId}`),
+      );
+  });
   return {
     configValueAtom,
     updateStateAtom,
@@ -1175,6 +1210,12 @@ export function createServerEnvironmentAtoms<R, E>(
       tag: WS_METHODS.subscribeResourceTelemetry,
       idleTtlMs: 0,
     }),
+    hostHealth: (target: {
+      readonly environmentId: EnvironmentId;
+      readonly input: EnvironmentRpcInput<typeof WS_METHODS.serverSubscribeHostHealth>;
+    }) => hostHealthStateFamily(target.environmentId),
+    hostHealthLatest: (environmentId: EnvironmentId) =>
+      hostHealthObservationFamily(environmentId),
     resourceTelemetryHistory: createEnvironmentRpcQueryAtomFamily(runtime, {
       label: "environment-data:server:resource-telemetry-history",
       tag: WS_METHODS.serverGetResourceTelemetryHistory,

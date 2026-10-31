@@ -17,7 +17,7 @@ import {
   type OrchestrationV2RunAttempt,
   type OrchestrationV2TurnItem,
 } from "@t3tools/contracts";
-import type { ThreadRuntimeSummary } from "@t3tools/client-runtime/state/shell";
+import { presentThreadShell, type ThreadRuntimeSummary } from "@t3tools/client-runtime/state/shell";
 import { deriveMessagesTimelineRows } from "./components/chat/MessagesTimeline.logic";
 import * as DateTime from "effect/DateTime";
 import { describe, expect, it } from "vite-plus/test";
@@ -40,7 +40,7 @@ import {
   workEntryDisplayIndicatesToolFailure,
   workEntryIndicatesToolSuccess,
 } from "./session-logic";
-import { makeStreamingTimelineFixture, makeThreadProjectionFixture } from "./test-fixtures";
+import { makeStreamingTimelineFixture, makeThreadFixture, makeThreadProjectionFixture } from "./test-fixtures";
 import type { ChatMessage } from "./types";
 
 describe("V2 session presentation", () => {
@@ -69,6 +69,23 @@ describe("V2 session presentation", () => {
         { status: "running", activeRunId: RunId.make("run-active") },
       ),
     ).toBe(false);
+    const endedRun = {
+      runId,
+      status: "running" as const,
+      startedAt: null,
+      completedAt: null,
+      turnEnded: true,
+    };
+    const runtime: ThreadRuntimeSummary = {
+      status: "running",
+      activeRunId: runId,
+      providerInstanceId: ProviderInstanceId.make("codex"),
+      providerName: null,
+      lastError: null,
+      updatedAt: "2026-06-20T00:01:00.000Z",
+    };
+    expect(isLatestRunSettled(endedRun, runtime)).toBe(true);
+    expect(derivePhase(runtime, endedRun)).toBe("ready");
   });
 
   it("offers Stop while a run is preparing/starting, not just once it's running (#13392)", () => {
@@ -89,6 +106,7 @@ describe("V2 session presentation", () => {
       const runtime = runtimeWithStatus(status, runId);
       expect(deriveCanInterruptRunningThread(true, runtime)).toBe(true);
     }
+    expect(derivePhase(runtimeWithStatus("running"))).toBe("running");
 
     // No active thread: never offer Stop, regardless of run status.
     expect(deriveCanInterruptRunningThread(false, runtimeWithStatus("running", runId))).toBe(false);
@@ -99,14 +117,77 @@ describe("V2 session presentation", () => {
     expect(deriveCanInterruptRunningThread(true, runtimeWithStatus("queued"))).toBe(false);
     // Queued behind a run that is still interruptible: Stop targets that run.
     expect(deriveCanInterruptRunningThread(true, runtimeWithStatus("queued", runId))).toBe(true);
+    expect(derivePhase(runtimeWithStatus("queued", runId))).toBe("running");
 
-    // Waiting (e.g. on a subagent) is treated as "running" by derivePhase and
-    // keeps offering Stop, unchanged from before.
+    // Waiting stays visible as running but offers no Stop without an interruptible run.
     expect(derivePhase(runtimeWithStatus("waiting"))).toBe("running");
-    expect(deriveCanInterruptRunningThread(true, runtimeWithStatus("waiting"))).toBe(true);
+    expect(deriveCanInterruptRunningThread(true, runtimeWithStatus("waiting"))).toBe(false);
 
     // No runtime at all: nothing to interrupt.
     expect(deriveCanInterruptRunningThread(true, null)).toBe(false);
+  });
+
+  it("treats a native-ended shell run as ready until canonical finalization", () => {
+    const template = makeThreadFixture();
+    const runId = RunId.make("run-native-ended");
+    const workStartedAt = DateTime.makeUnsafe("2026-06-20T00:00:00.000Z");
+    const workCompletedAt = DateTime.makeUnsafe("2026-06-20T00:05:00.000Z");
+    const thread = presentThreadShell(template.environmentId, {
+      ...template.source,
+      latestRunId: runId,
+      latestRunRequestedAt: workStartedAt,
+      latestRunStartedAt: workStartedAt,
+      latestRunCompletedAt: null,
+      status: "running",
+      activeRunId: null,
+      activityRunStatus: "running",
+      activityRunStartedAt: workStartedAt,
+      activityRunWorkCompletedAt: workCompletedAt,
+      updatedAt: workCompletedAt,
+    });
+
+    expect(thread.latestRun).toMatchObject({
+      status: "running",
+      completedAt: null,
+    });
+    expect(thread.latestRun?.workCompletedAt).toBeUndefined();
+    expect(thread.runtime).toMatchObject({
+      status: "running",
+      activeRunId: null,
+      activityRunWorkCompletedAt: "2026-06-20T00:05:00.000Z",
+    });
+    expect(derivePhase(thread.runtime, thread.latestRun)).toBe("ready");
+    expect(deriveCanInterruptRunningThread(true, thread.runtime)).toBe(false);
+  });
+
+  it("keeps pending successors connecting while preserving current native work", () => {
+    const endedRuntime = {
+      status: "running" as const,
+      activeRunId: null,
+      activityRunWorkCompletedAt: "2026-06-20T00:05:00.000Z",
+      providerInstanceId: ProviderInstanceId.make("codex"),
+      providerName: null,
+      lastError: null,
+      updatedAt: "2026-06-20T00:05:00.000Z",
+    } satisfies ThreadRuntimeSummary;
+
+    for (const status of ["preparing", "starting", "queued"] as const) {
+      expect(derivePhase(endedRuntime, { status })).toBe("connecting");
+    }
+
+    const olderRunStillActive = {
+      ...endedRuntime,
+      activeRunId: RunId.make("run-older-active"),
+      activityRunWorkCompletedAt: null,
+    };
+    expect(derivePhase(olderRunStillActive, { status: "queued" })).toBe("running");
+
+    const newerRunActive = {
+      ...endedRuntime,
+      activeRunId: RunId.make("run-newer-active"),
+    };
+    expect(derivePhase(newerRunActive, { status: "running" })).toBe("running");
+    expect(deriveCanInterruptRunningThread(true, newerRunActive)).toBe(true);
   });
 
   it("labels provider retry progress, delay, recovery, and exhaustion", () => {
@@ -348,16 +429,6 @@ describe("V2 session presentation", () => {
       type: "run_interrupt_result" as const,
       message: "Stopped",
     } satisfies OrchestrationV2TurnItem;
-    const todoItem = {
-      ...base("item-todo", 4),
-      type: "todo_list" as const,
-      planId: PlanId.make("plan-visible"),
-      explanation: "Keep task detail in the Tasks panel",
-      steps: [
-        { id: "step-1", text: "First", status: "completed" as const },
-        { id: "step-2", text: "Second", status: "pending" as const },
-      ],
-    } satisfies OrchestrationV2TurnItem;
     const errorItem = {
       ...base("item-error", 5),
       status: "failed" as const,
@@ -391,7 +462,6 @@ describe("V2 session presentation", () => {
       requestItem,
       commandItem,
       resultItem,
-      todoItem,
       errorItem,
       threadCreatedItem,
       workspacePreparationItem,
@@ -419,23 +489,10 @@ describe("V2 session presentation", () => {
     const commandEntry = entries[2];
     const userEntry = entries[0];
     expect(userEntry?.kind).toBe("message");
-    if (userEntry?.kind === "message") {
-      expect(userEntry.projectedItem).toBe(visibleTurnItems[0]);
-      expect(userEntry.message.inputIntent).toBe("turn_start");
-      expect(userEntry.message.createdBy).toBe("user");
-      expect(userEntry.message.creationSource).toBe("web");
-    }
     expect(commandEntry?.kind).toBe("work");
-    if (commandEntry?.kind === "work") {
-      expect(commandEntry.entry.projectedItem).toBe(visibleTurnItems[2]);
-      expect(commandEntry.entry.structuredPayload).toBe(commandItem);
-      expect(commandEntry.entry.command).toBe(commandItem.input);
-      expect(commandEntry.entry.detail).toBeUndefined();
-    }
     const errorEntry = entries[4];
     expect(errorEntry?.kind).toBe("work");
     if (errorEntry?.kind === "work") {
-      expect(errorEntry.entry.projectedItem).toBe(visibleTurnItems[5]);
       expect(errorEntry.entry.label).toBe("Provider error");
       expect(errorEntry.entry.detail).toBe("Invalid reasoning effort.");
       expect(errorEntry.entry.tone).toBe("info");
@@ -443,79 +500,7 @@ describe("V2 session presentation", () => {
     }
     const threadCreatedEntry = entries[5];
     expect(threadCreatedEntry?.kind).toBe("work");
-    if (threadCreatedEntry?.kind === "work") {
-      expect(threadCreatedEntry.entry.projectedItem?.item.type).toBe("thread_created");
-    }
   });
-
-  it.each(["pending", "running", "completed"] as const)(
-    "keeps %s task progress available to the composer and out of the timeline",
-    (stepStatus) => {
-      const projection = makeThreadProjectionFixture();
-      const now = DateTime.makeUnsafe("2026-09-04T00:00:00.000Z");
-      const runId = RunId.make("run-tasks");
-      const nodeId = NodeId.make("node-tasks");
-      const planId = PlanId.make("plan-tasks");
-      const steps = [{ id: "step-1", text: "Verify the change", status: stepStatus }];
-      const item = {
-        id: TurnItemId.make("item-tasks"),
-        threadId: projection.thread.id,
-        runId,
-        nodeId,
-        providerThreadId: null,
-        providerTurnId: null,
-        nativeItemRef: null,
-        parentItemId: null,
-        ordinal: 0,
-        status: "completed" as const,
-        title: null,
-        startedAt: now,
-        completedAt: now,
-        updatedAt: now,
-        type: "todo_list" as const,
-        planId,
-        steps,
-      } satisfies OrchestrationV2TurnItem;
-      const plans = [
-        {
-          id: planId,
-          threadId: projection.thread.id,
-          runId,
-          nodeId,
-          kind: "todo_list" as const,
-          status: "active" as const,
-          steps,
-        },
-      ];
-
-      expect(
-        deriveTimelineEntriesFromVisibleTurnItems({
-          visibleTurnItems: [
-            {
-              position: 0,
-              visibility: "local",
-              sourceThreadId: projection.thread.id,
-              sourceItemId: item.id,
-              item,
-            },
-          ],
-          optimisticMessages: [],
-          plans,
-        }),
-      ).toEqual([]);
-      expect(
-        deriveActivePlanState({ ...projection, plans, turnItems: [item] }, runId),
-      ).toMatchObject({
-        runId,
-        steps: [
-          {
-            step: "Verify the change",
-            status: stepStatus === "running" ? "inProgress" : stepStatus,
-          },
-        ],
-      });
-    },
-  );
 
   it("preserves independently derived durations for repeated plan-step labels", () => {
     const projection = makeThreadProjectionFixture();

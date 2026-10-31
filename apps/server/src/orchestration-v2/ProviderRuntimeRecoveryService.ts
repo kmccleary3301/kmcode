@@ -13,6 +13,7 @@ import * as Cause from "effect/Cause";
 import * as Context from "effect/Context";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
+import * as Option from "effect/Option";
 import * as Layer from "effect/Layer";
 import * as Schema from "effect/Schema";
 
@@ -27,6 +28,8 @@ import {
   cancelledTurnItemWork,
   mergeRestartCancelledBackgroundWork,
 } from "./RestartBackgroundNote.ts";
+import * as ProviderSessionManager from "./ProviderSessionManager.ts";
+import type { ProviderAdapterV2SettlementResult } from "./ProviderAdapter.ts";
 
 export class ProviderRuntimeRecoveryError extends Schema.TaggedError<ProviderRuntimeRecoveryError>()(
   "ProviderRuntimeRecoveryError",
@@ -185,6 +188,9 @@ export const make = Effect.gen(function* () {
   const eventSink = yield* EventSink.EventSinkV2;
   const ids = yield* IdAllocator.IdAllocatorV2;
   const outbox = yield* EffectOutbox.EffectOutboxV2;
+  const providerSessions = yield* Effect.serviceOption(
+    ProviderSessionManager.ProviderSessionManagerV2,
+  );
   const reconcileProjection = Effect.fn("ProviderRuntimeRecoveryService.reconcileProjection")(
     function* (
       projection: ProjectionStore.ProjectionRuntimeRecoveryState,
@@ -216,6 +222,37 @@ export const make = Effect.gen(function* () {
           if (hasReplayableCheckpoint) continue;
         }
         runs.push(run);
+      }
+      // On shutdown, inspect whether the original bound runtime confirms
+      // native settlement before blind cancellation. Startup cannot
+      // reconstruct lost native work and must NOT infer past completion there.
+      const nativeSettlementByRunId = new Map<string, ProviderAdapterV2SettlementResult>();
+      const nativeHeadRefByThreadId = new Map<
+        ProviderThreadId,
+        ProviderAdapterV2SettlementResult["nativeConversationHeadRef"]
+      >();
+      if (trigger === "shutdown" && Option.isSome(providerSessions)) {
+        const sessionManager = providerSessions.value;
+        for (const run of runs) {
+          if (run.providerThreadId === null) continue;
+          const providerThread = projection.providerThreads.find(
+            (candidate) => candidate.id === run.providerThreadId,
+          );
+          if (providerThread === undefined || providerThread.providerSessionId === null) {
+            continue;
+          }
+          const settlement = yield* sessionManager
+            .inspectSettlement({
+              providerSessionId: providerThread.providerSessionId,
+              providerThread,
+              runId: run.id,
+            })
+            .pipe(Effect.orElseSucceed(() => null));
+          if (settlement !== null) {
+            nativeSettlementByRunId.set(run.id, settlement);
+            nativeHeadRefByThreadId.set(providerThread.id, settlement.nativeConversationHeadRef);
+          }
+        }
       }
       const messageRequestNodeIds = new Set(
         projection.runtimeRequests
@@ -317,6 +354,10 @@ export const make = Effect.gen(function* () {
         });
       }
       for (const run of runs) {
+        const settlement = nativeSettlementByRunId.get(run.id);
+        const isNativeSettled = settlement !== undefined;
+        const runStatus = isNativeSettled ? "completed" : "cancelled";
+        const runCompletedAt = settlement?.settledAt ?? now;
         events.push({
           id: yield* allocateEventId(),
           type: "run.updated",
@@ -324,7 +365,7 @@ export const make = Effect.gen(function* () {
           runId: run.id,
           providerInstanceId: run.providerInstanceId,
           occurredAt: now,
-          payload: { ...run, status: "cancelled", queuePosition: null, completedAt: now },
+          payload: { ...run, status: runStatus, queuePosition: null, completedAt: runCompletedAt },
         });
         for (const attempt of projection.attempts.filter(
           (candidate) =>
@@ -339,7 +380,7 @@ export const make = Effect.gen(function* () {
             nodeId: attempt.rootNodeId,
             providerInstanceId: run.providerInstanceId,
             occurredAt: now,
-            payload: { ...attempt, status: "cancelled", completedAt: now },
+            payload: { ...attempt, status: runStatus, completedAt: runCompletedAt },
           });
         }
         for (const node of projection.nodes.filter(
@@ -359,7 +400,7 @@ export const make = Effect.gen(function* () {
             nodeId: node.id,
             providerInstanceId: run.providerInstanceId,
             occurredAt: now,
-            payload: { ...node, status: "cancelled", completedAt: now },
+            payload: { ...node, status: runStatus, completedAt: runCompletedAt },
           });
         }
         for (const subagent of projection.subagents.filter(
@@ -398,7 +439,14 @@ export const make = Effect.gen(function* () {
             nodeId: providerTurn.nodeId,
             providerInstanceId: run.providerInstanceId,
             occurredAt: now,
-            payload: { ...providerTurn, status: "cancelled", completedAt: now },
+            payload: {
+              ...providerTurn,
+              ...(settlement?.providerTurnId === providerTurn.id
+                ? { nativeTurnRef: settlement.nativeTurnRef }
+                : {}),
+              status: runStatus,
+              completedAt: runCompletedAt,
+            },
           });
         }
         for (const message of projection.messages.filter(
@@ -412,7 +460,7 @@ export const make = Effect.gen(function* () {
             ...(message.nodeId === null ? {} : { nodeId: message.nodeId }),
             providerInstanceId: run.providerInstanceId,
             occurredAt: now,
-            payload: { ...message, streaming: false, updatedAt: now },
+            payload: { ...message, streaming: false, updatedAt: runCompletedAt },
           });
         }
         for (const item of projection.turnItems.filter(
@@ -426,7 +474,7 @@ export const make = Effect.gen(function* () {
         )) {
           // A waiting run's provider turn already settled; its open items are
           // background work. A running run's items die with its turn.
-          if (run.status === "waiting") recordCancelledBackgroundItem(item);
+          if (run.status === "waiting" || isNativeSettled) recordCancelledBackgroundItem(item);
           events.push({
             id: yield* allocateEventId(),
             type: "turn-item.updated",
@@ -589,7 +637,7 @@ export const make = Effect.gen(function* () {
       for (const providerThread of projection.providerThreads ?? []) {
         const needsIdle = providerThread.status === "active";
         const needsRosterClear = providerThreadHasPendingBackgroundTasks(providerThread);
-        if (!needsIdle && !needsRosterClear) {
+        if (!needsIdle && !needsRosterClear && !nativeHeadRefByThreadId.has(providerThread.id)) {
           continue;
         }
         if (providerThread.ownerNodeId === null) {
@@ -608,6 +656,9 @@ export const make = Effect.gen(function* () {
           occurredAt: now,
           payload: {
             ...providerThread,
+            ...(nativeHeadRefByThreadId.has(providerThread.id)
+              ? { nativeConversationHeadRef: nativeHeadRefByThreadId.get(providerThread.id) ?? null }
+              : {}),
             status: needsIdle ? "idle" : providerThread.status,
             pendingBackgroundTasks: [],
             updatedAt: now,
@@ -788,6 +839,23 @@ export const make = Effect.gen(function* () {
           return;
         const run = restartContinuationRun(projection);
         if (!run) return;
+        if (run.providerThreadId !== null && Option.isSome(providerSessions)) {
+          const providerThread = projection.providerThreads.find(
+            (candidate) => candidate.id === run.providerThreadId,
+          );
+          if (providerThread?.providerSessionId != null) {
+            const settlement = yield* providerSessions.value
+              .inspectSettlement({
+                providerSessionId: providerThread.providerSessionId,
+                providerThread,
+                runId: run.id,
+              })
+              .pipe(Effect.orElseSucceed(() => null));
+            if (settlement !== null && settlement.settledAt !== undefined) {
+              return;
+            }
+          }
+        }
         const commandId = CommandId.make(`command:restart-prepare:${run.id}`);
         yield* eventSink.writeWithEffects({
           commandId,

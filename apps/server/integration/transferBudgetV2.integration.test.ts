@@ -144,7 +144,12 @@ const group = RpcGroup.make(
 );
 const layerHandlers = group.toLayer({
   [ORCHESTRATION_V2_WS_METHODS.subscribeThread]: (input) =>
-    Stream.unwrap(subscribeOrchestrationV2Thread(input)),
+    Stream.unwrap(
+      subscribeOrchestrationV2Thread({
+        ...input,
+        requestCompletionMarker: true,
+      }),
+    ),
   [ORCHESTRATION_V2_WS_METHODS.subscribeShell]: (input) =>
     Stream.unwrap(subscribeOrchestrationV2Shell(input)),
 });
@@ -193,7 +198,6 @@ const subscribe = Effect.fn("transfer.subscribe")(function* (
       ? client.client[ORCHESTRATION_V2_WS_METHODS.subscribeThread]({
           threadId: THREAD_ID,
           afterSequence,
-          requestCompletionMarker: true,
           acceptBoundedSnapshot: true,
         })
       : client.client[ORCHESTRATION_V2_WS_METHODS.subscribeShell]({

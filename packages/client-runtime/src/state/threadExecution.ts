@@ -7,6 +7,7 @@ import {
 import {
   isOrchestrationV2WorkActive,
   isProviderNativeSubagentThread,
+  latestProviderTurnForAttempt,
   type ModelSelection,
   type OrchestrationV2NotificationSource,
   type OrchestrationV2PendingBackgroundTask,
@@ -14,6 +15,7 @@ import {
   type ServerProviderModel,
   type OrchestrationV2ExecutionNode,
   type OrchestrationV2ThreadProjection,
+  orchestrationV2RunWorkCompletedAt,
   orchestrationV2RunWorkStartedAt,
   type ThreadId,
 } from "@t3tools/contracts";
@@ -26,6 +28,7 @@ import { formatDuration } from "@t3tools/shared/orchestrationTiming";
 import * as DateTime from "effect/DateTime";
 
 import {
+  hasBackgroundJobWaitSignal,
   threadRuntimeIsActive,
   type ThreadRunSummary,
   type ThreadRuntimeSummary,
@@ -52,16 +55,24 @@ function summarizeThreadRun(
   projection: OrchestrationV2ThreadProjection,
   run: OrchestrationV2ThreadProjection["runs"][number],
 ): ThreadRunSummary {
+  const turnStatus = ACTIVITY_RUN_STATUSES.has(run.status)
+    ? latestProviderTurnForAttempt(projection.providerTurns, run.activeAttemptId)?.status
+    : undefined;
+  const workCompletedAt = orchestrationV2RunWorkCompletedAt(run);
   return {
     runId: run.id,
     status: run.status,
     requestedAt: DateTime.formatIso(run.requestedAt),
-    startedAt: run.startedAt === null ? null : DateTime.formatIso(run.startedAt),
+    startedAt: DateTime.formatIso(orchestrationV2RunWorkStartedAt(run)),
     completedAt: run.completedAt === null ? null : DateTime.formatIso(run.completedAt),
+    workCompletedAt: workCompletedAt === null ? null : DateTime.formatIso(workCompletedAt),
     assistantMessageId:
       projection.messages.findLast(
         (message) => message.runId === run.id && message.role === "assistant",
       )?.id ?? null,
+    ...(turnStatus === undefined || turnStatus === "pending" || turnStatus === "running"
+      ? {}
+      : { turnEnded: true }),
     ...(run.sourcePlanRef === undefined ? {} : { sourcePlanRef: run.sourcePlanRef }),
   };
 }
@@ -225,6 +236,9 @@ export function deriveThreadRuntime(
   projection: OrchestrationV2ThreadProjection,
 ): ThreadRuntimeSummary | null {
   const latestRun = deriveLatestThreadRun(projection);
+  const activeProviderThread = projection.providerThreads.find(
+    (candidate) => candidate.id === projection.thread.activeProviderThreadId,
+  );
   const providerSession = projection.providerSessions.findLast(
     (session) => session.providerInstanceId === projection.thread.providerInstanceId,
   );
@@ -254,8 +268,17 @@ export function deriveThreadRuntime(
   ) {
     return null;
   }
+  const activityRunWorkCompletedAt = activityRun?.workCompletedAt ?? null;
   const activeRunId =
-    latestMatchingRun(projection, (run) => INTERRUPTIBLE_RUN_STATUSES.has(run.status))?.id ?? null;
+    latestMatchingRun(
+      projection,
+      (run) =>
+        INTERRUPTIBLE_RUN_STATUSES.has(run.status) &&
+        orchestrationV2RunWorkCompletedAt(run) === null,
+    )?.id ?? null;
+  const waitingOnBackgroundJob =
+    activeRunId !== null &&
+    hasBackgroundJobWaitSignal(activeProviderThread?.pendingBackgroundTasks);
   return {
     status: usageLimitedRun
       ? "failed"
@@ -263,10 +286,12 @@ export function deriveThreadRuntime(
         ? "idle"
         : (activityRun?.status ?? "idle"),
     activeRunId,
+    waitingOnBackgroundJob,
     activityStartedAt:
       liveActivityRun === null
         ? null
         : DateTime.formatIso(orchestrationV2RunWorkStartedAt(liveActivityRun)),
+    activityRunWorkCompletedAt,
     providerInstanceId: projection.thread.providerInstanceId,
     providerName: providerSession?.driver ?? null,
     ...threadErrorSummary(
@@ -287,6 +312,40 @@ export function threadRuntimeHasInterruptibleRun(
   );
 }
 
+/**
+ * Whether native thread work remains active, without conflating it with run
+ * finalization. A queued/preparing/starting successor is work even after its
+ * predecessor's activity ended; a running/waiting activity with a known native
+ * end is not active unless an interruptible run now owns the runtime.
+ */
+export function threadRuntimeHasActiveWork(
+  runtime: Pick<
+    ThreadRuntimeSummary,
+    "status" | "activeRunId" | "activityRunWorkCompletedAt"
+  > | null | undefined,
+  latestRun?: Pick<ThreadRunSummary, "status"> | null,
+): boolean {
+  if (
+    latestRun?.status === "preparing" ||
+    latestRun?.status === "starting" ||
+    latestRun?.status === "queued"
+  ) {
+    return true;
+  }
+  if (runtime == null) return false;
+  switch (runtime.status) {
+    case "preparing":
+    case "starting":
+    case "queued":
+      return true;
+    case "running":
+    case "waiting":
+      return runtime.activityRunWorkCompletedAt == null || runtime.activeRunId != null;
+    default:
+      return false;
+  }
+}
+
 type BackgroundWorkKind = OrchestrationV2PendingBackgroundTask["kind"];
 
 // `order` groups work the way a reader thinks about it: agents first, loose tasks last.
@@ -305,6 +364,10 @@ export interface PendingBackgroundWorkItem {
   readonly kind: BackgroundWorkKind;
   /** The work's name, or its noun when the provider gave none. */
   readonly label: string;
+  /** The command line it runs, when that says more than the label. */
+  readonly command: string | undefined;
+  /** When it started (ISO), when the provider reported that. */
+  readonly startedAt: string | undefined;
   /** A subagent's own thread, when it has one. */
   readonly childThreadId: ThreadId | undefined;
 }
@@ -341,13 +404,17 @@ export function presentPendingBackgroundWork(
         task.kind === "subagent" && description !== undefined
           ? formatSubagentDisplayTitle(description).trim()
           : description;
+      const resolvedLabel =
+        label === undefined || label.length === 0
+          ? BACKGROUND_WORK_KINDS[task.kind].singular
+          : label;
+      const command = task.command?.trim();
       return {
         taskId: task.taskId,
         kind: task.kind,
-        label:
-          label === undefined || label.length === 0
-            ? BACKGROUND_WORK_KINDS[task.kind].singular
-            : label,
+        label: resolvedLabel,
+        command: command === undefined || command === resolvedLabel ? undefined : command,
+        startedAt: task.startedAt,
         childThreadId: task.kind === "subagent" ? task.childThreadId : undefined,
       };
     })

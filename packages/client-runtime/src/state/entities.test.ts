@@ -384,7 +384,7 @@ describe("V2 client presentation", () => {
     ]);
   });
 
-  it("derives execution summaries without wrapping or copying the projection", () => {
+  it("resolves work clocks from native execution end and newer active work", () => {
     const runId = RunId.make("run-1");
     const now = DateTime.makeUnsafe("2026-06-20T01:00:00.000Z");
     const projection = {
@@ -438,6 +438,31 @@ describe("V2 client presentation", () => {
       activeRunId: runId,
       providerInstanceId: projection.thread.providerInstanceId,
     });
+    const workCompletedAt = DateTime.add(now, { seconds: 10 });
+    const endedProjection = {
+      ...projection,
+      runs: [{ ...projection.runs[0]!, workCompletedAt }],
+    };
+    expect(
+      resolveThreadWorkingStartedAt({
+        latestRun: deriveLatestThreadRun(endedProjection),
+        runtime: deriveThreadRuntime(endedProjection),
+      }),
+    ).toBeNull();
+    const endedShell = presentThreadShell(environmentId, {
+      ...v2ThreadShell,
+      latestRunId: runId,
+      latestRunRequestedAt: now,
+      latestRunStartedAt: now,
+      latestRunCompletedAt: null,
+      latestRunWorkCompletedAt: workCompletedAt,
+      status: "running",
+      activeRunId: null,
+      activityRunStatus: "running",
+      activityRunStartedAt: now,
+      updatedAt: workCompletedAt,
+    });
+    expect(resolveThreadWorkingStartedAt(endedShell)).toBeNull();
     for (const status of ["queued", "cancelled"] as const) {
       const later = DateTime.add(now, { hours: 1 });
       const latest = {
@@ -484,6 +509,28 @@ describe("V2 client presentation", () => {
         }),
       ).toBeNull();
     }
+    const later = DateTime.add(workCompletedAt, { seconds: 1 });
+    const queuedAfterWorkEnd = presentThreadShell(
+      environmentId,
+      Object.assign(
+        {
+          ...v2ThreadShell,
+          latestRunId: RunId.make("queued-after-work-end"),
+          latestRunRequestedAt: later,
+          latestRunStartedAt: null,
+          latestRunCompletedAt: null,
+          latestRunWorkCompletedAt: null,
+          status: "queued" as const,
+          activeRunId: runId,
+          activityRunStatus: "running" as const,
+          activityRunStartedAt: now,
+          updatedAt: later,
+        },
+        { activityRunWorkCompletedAt: workCompletedAt },
+      ),
+    );
+    expect(resolveThreadWorkingStartedAt(queuedAfterWorkEnd)).toBeNull();
+    expect(queuedAfterWorkEnd.latestRun?.status).toBe("queued");
   });
 
   it("parks waiting runtime for a post-settlement roster without hiding active running work", () => {

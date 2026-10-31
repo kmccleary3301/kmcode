@@ -1,4 +1,5 @@
 import { makeAssistantStreamingFilter } from "./assistantStreaming.ts";
+import { pendingBackgroundTurnItems } from "@t3tools/shared/orchestrationV2PendingBackgroundWork";
 import { resolveProjectSettings } from "@t3tools/shared/projectSettings";
 import {
   isOrchestrationV2WorkActive,
@@ -16,6 +17,7 @@ import {
   type OrchestrationV2Run,
   type OrchestrationV2RunAttempt,
   type OrchestrationV2Subagent,
+  type OrchestrationV2ThreadProjection,
   type OrchestrationV2TurnItem,
   type ProviderSessionId,
   type ProviderThreadId,
@@ -46,6 +48,7 @@ import type {
   ProviderAdapterV2RuntimePolicy,
   ProviderAdapterV2SessionRuntime,
   ProviderAdapterV2TurnMessage,
+  ProviderAdapterV2TurnInput,
 } from "./ProviderAdapter.ts";
 import { ProviderAdapterTurnStartError } from "./ProviderAdapter.ts";
 import * as ProviderEventIngestor from "./ProviderEventIngestor.ts";
@@ -103,6 +106,79 @@ const backgroundCapableTurnItemTypes: ReadonlySet<OrchestrationV2TurnItem["type"
 
 function isSettledTurnItemStatus(status: OrchestrationV2TurnItem["status"]): boolean {
   return !isOrchestrationV2WorkActive(status);
+}
+
+export function interruptLeftoverTurnItemsOnRunCompletion(input: {
+  readonly run: OrchestrationV2Run;
+  readonly projection: Pick<
+    OrchestrationV2ThreadProjection,
+    "turnItems" | "runtimeRequests" | "subagents" | "providerThreads"
+  >;
+  readonly completedAt: DateTime.Utc;
+}): ReadonlyArray<OrchestrationV2TurnItem> {
+  const messageRequestNodeIds = new Set(
+    input.projection.runtimeRequests
+      .filter(
+        (request) => request.status === "pending" && request.responseCapability.type === "message",
+      )
+      .map((request) => request.nodeId),
+  );
+  const liveSubagentIds = new Set(
+    input.projection.subagents
+      .filter((subagent) => !isSettledSubagentStatus(subagent.status))
+      .map((subagent) => subagent.id),
+  );
+  const backgroundTaskIdsByProviderThread = new Map(
+    input.projection.providerThreads.map((providerThread) => [
+      providerThread.id,
+      new Set((providerThread.pendingBackgroundTasks ?? []).map((task) => task.taskId)),
+    ]),
+  );
+  const pendingBackgroundItems = new Set(
+    pendingBackgroundTurnItems({
+      turnItems: input.projection.turnItems,
+      runs: [input.run],
+    }).map((item) => item.id),
+  );
+
+  return input.projection.turnItems.flatMap((item) => {
+    if (item.runId !== input.run.id || isSettledTurnItemStatus(item.status)) return [];
+    if (item.nodeId !== null && messageRequestNodeIds.has(item.nodeId)) return [];
+    if (item.type === "subagent" && item.origin === "app_owned" && item.childThreadId !== null) {
+      return [];
+    }
+    if (item.type === "subagent" && liveSubagentIds.has(item.subagentId)) return [];
+
+    const persistentMonitor =
+      item.type === "dynamic_tool" &&
+      item.input !== null &&
+      typeof item.input === "object" &&
+      !Array.isArray(item.input) &&
+      Reflect.get(item.input, "persistent") === true;
+    const providerThreadId = item.providerThreadId ?? input.run.providerThreadId;
+    const nativeItemId = item.nativeItemRef?.nativeId;
+    const taskId =
+      nativeItemId === null || nativeItemId === undefined || nativeItemId.length === 0
+        ? String(item.id)
+        : nativeItemId;
+    const trackedBackgroundTask =
+      providerThreadId !== null &&
+      (backgroundTaskIdsByProviderThread.get(providerThreadId)?.has(taskId) ?? false);
+    const liveBackgroundItem =
+      backgroundCapableTurnItemTypes.has(item.type) &&
+      pendingBackgroundItems.has(item.id) &&
+      (item.startedAt !== null || trackedBackgroundTask);
+    if (persistentMonitor || liveBackgroundItem) return [];
+
+    return [
+      {
+        ...item,
+        status: "interrupted",
+        completedAt: input.completedAt,
+        updatedAt: input.completedAt,
+      },
+    ];
+  });
 }
 
 function isSettledRunEligibleForInheritedBackground(status: OrchestrationV2Run["status"]): boolean {
@@ -169,6 +245,10 @@ function isRunOwnedSubagentTerminalStatus(
   status: ProviderTerminalEvent["status"],
 ): status is RunOwnedSubagentTerminalStatus {
   return status === "interrupted" || status === "failed" || status === "cancelled";
+}
+
+function childTurnsContinue(terminal: ProviderTerminalEvent): boolean {
+  return terminal.status === "failed" && terminal.childTurnsContinue === true;
 }
 
 /**
@@ -452,6 +532,15 @@ export function routeProviderEvent(
             state.ownedProviderTurnIds.has(event.runtimeRequest.providerTurnId)),
         state,
       ];
+    case "run.execution-ended":
+      return !state.rootTurnEnded &&
+        event.threadId === input.threadId &&
+        event.runId === input.runId &&
+        event.attemptId === input.attemptId &&
+        event.providerThreadId === input.providerThreadId &&
+        event.providerTurnId === state.rootProviderTurnId
+        ? [true, state]
+        : [false, state];
     case "turn.terminal":
       return event.providerTurnId === state.rootProviderTurnId
         ? [true, { ...state, rootTurnEnded: true }]
@@ -518,6 +607,7 @@ export interface RunExecutionServiceV2StartRootRunInput {
   readonly shouldStartProviderTurn?: () => Effect.Effect<boolean, ProjectionStoreV2Error>;
   readonly shouldFinalizeRun?: () => Effect.Effect<boolean, ProjectionStoreV2Error>;
   readonly hasUnpairedRunInterruptRequest?: () => Effect.Effect<boolean, never>;
+  readonly isRunAttemptActive?: ProviderAdapterV2TurnInput["isRunAttemptActive"];
   readonly message: ProviderAdapterV2TurnMessage;
   readonly modelSelection: ModelSelection;
   readonly runtimePolicy: ProviderAdapterV2RuntimePolicy;
@@ -569,6 +659,8 @@ export const layer: Layer.Layer<
       readonly terminal: ProviderTerminalEvent;
       readonly failureItemPersisted: boolean;
       readonly refreshAfterTurn: Effect.Effect<void>;
+      readonly workCompletedAt?: DateTime.Utc;
+      readonly nativeTerminalObserved?: boolean;
       readonly writeIfRunCurrent?: {
         readonly activeAttemptId: RunAttemptId;
         readonly expectedStatus: OrchestrationV2Run["status"];
@@ -576,6 +668,10 @@ export const layer: Layer.Layer<
     }) =>
       Effect.gen(function* () {
         const completedAt = yield* DateTime.now;
+        const workCompletedAt =
+          input.run.workCompletedAt ??
+          input.workCompletedAt ??
+          (input.nativeTerminalObserved === true ? completedAt : undefined);
         const finalizedAttempt: OrchestrationV2RunAttempt | null = {
           ...input.attempt,
           status: input.terminal.status,
@@ -627,7 +723,9 @@ export const layer: Layer.Layer<
           open.childTurnItems.size > 0 ||
           open.nodes.size > 0;
         const cascadedSubagentEvents =
-          isRunOwnedSubagentTerminalStatus(input.terminal.status) && hasOpenSubagentProjection
+          isRunOwnedSubagentTerminalStatus(input.terminal.status) &&
+          !childTurnsContinue(input.terminal) &&
+          hasOpenSubagentProjection
             ? yield* cascadeTerminalizeRunOwnedSubagents({
                 run: input.run,
                 open,
@@ -647,6 +745,7 @@ export const layer: Layer.Layer<
           ...runWithoutDelegatedCompletion,
           status: persistedStatus,
           completedAt: input.terminal.status === "completed" ? null : completedAt,
+          ...(workCompletedAt === undefined ? {} : { workCompletedAt }),
         };
         const finalizedRootNode: OrchestrationV2ExecutionNode = {
           ...input.rootNode,
@@ -951,6 +1050,42 @@ export const layer: Layer.Layer<
                 : { relatedProviderThreadIds: input.relatedProviderThreadIds }),
             }),
           );
+          const rootWorkCompletedAt = yield* Ref.make<DateTime.Utc | null>(
+            input.run.workCompletedAt ?? null,
+          );
+          const persistRootExecutionEnd = (
+            event: Extract<ProviderAdapterV2Event, { readonly type: "run.execution-ended" }>,
+          ) =>
+            Effect.gen(function* () {
+              if ((yield* Ref.get(rootWorkCompletedAt)) !== null) return;
+              const { delegatedCompletion: _delegatedCompletion, ...runWithoutDelegatedCompletion } =
+                input.run;
+              const run: OrchestrationV2Run = {
+                ...runWithoutDelegatedCompletion,
+                workCompletedAt: event.workCompletedAt,
+              };
+              const result = yield* eventSink.writeIfRunCurrent({
+                threadId: input.run.threadId,
+                runId: input.run.id,
+                activeAttemptId: input.attemptId,
+                expectedStatus: "running",
+                events: [
+                  {
+                    id: yield* idAllocator.allocate.event({ threadId: input.run.threadId }),
+                    type: "run.updated",
+                    threadId: input.run.threadId,
+                    runId: input.run.id,
+                    nodeId: input.rootNode.id,
+                    providerInstanceId: input.run.providerInstanceId,
+                    occurredAt: event.workCompletedAt,
+                    payload: run,
+                  },
+                ],
+              });
+              if (result.committed) {
+                yield* Ref.set(rootWorkCompletedAt, event.workCompletedAt);
+              }
+            });
           const rootTerminalSeen = yield* Ref.make(false);
           const rootRunFinalized = yield* Ref.make(false);
           const providerThreadOwnerLost = yield* Ref.make(false);
@@ -967,6 +1102,7 @@ export const layer: Layer.Layer<
               }
               const providerThread = yield* Ref.get(latestProviderThread);
               const openSubagents = yield* Ref.get(openRunOwnedSubagents);
+              const workCompletedAt = yield* Ref.get(rootWorkCompletedAt);
               yield* writeFinalRunEvents({
                 run: input.run,
                 rootNode: input.rootNode,
@@ -993,12 +1129,17 @@ export const layer: Layer.Layer<
                 terminal,
                 failureItemPersisted: terminal.status === "failed",
                 refreshAfterTurn,
+                nativeTerminalObserved: true,
+                ...(workCompletedAt === null ? {} : { workCompletedAt }),
               }).pipe(
                 Effect.mapError(
                   (cause) => new RunExecutionIngestError({ runId: input.run.id, cause }),
                 ),
               );
-              if (isRunOwnedSubagentTerminalStatus(terminal.status)) {
+              if (
+                isRunOwnedSubagentTerminalStatus(terminal.status) &&
+                !childTurnsContinue(terminal)
+              ) {
                 yield* Ref.set(openRunOwnedSubagents, emptyOpenRunOwnedSubagentProjection());
               }
               yield* Ref.set(rootRunFinalized, true);
@@ -1131,7 +1272,11 @@ export const layer: Layer.Layer<
             }
             const terminal = yield* Ref.get(terminalEvent);
             // Non-completed terminals drop background tracking immediately.
-            if (terminal !== null && terminal.status !== "completed") {
+            if (
+              terminal !== null &&
+              terminal.status !== "completed" &&
+              !childTurnsContinue(terminal)
+            ) {
               return true;
             }
             const childProviderTurns = yield* Ref.get(activeChildProviderTurns);
@@ -1189,6 +1334,10 @@ export const layer: Layer.Layer<
             Stream.tap((event) =>
               Effect.gen(function* () {
                 let storedEventCount = 0;
+                if (event.type === "run.execution-ended") {
+                  yield* persistRootExecutionEnd(event);
+                  return;
+                }
                 const deliveredEvent = filterAssistantEvent(
                   event,
                   DateTime.toEpochMillis(yield* DateTime.now),
@@ -1295,29 +1444,36 @@ export const layer: Layer.Layer<
                                 Effect.flatMap((latestItemOrdinal) =>
                                   Ref.get(openRunOwnedSubagents).pipe(
                                     Effect.flatMap((openSubagents) =>
-                                      writeFinalRunEvents({
-                                        run: input.run,
-                                        rootNode: input.rootNode,
-                                        checkpointScope: input.checkpointScope,
-                                        providerThread,
-                                        attempt: input.attempt,
-                                        // The failure may be the ownership
-                                        // read itself, so check in the write.
-                                        writeIfRunCurrent: {
-                                          activeAttemptId: input.attempt.id,
-                                          expectedStatus: "running",
-                                        },
-                                        openRunOwnedSubagents: openSubagents,
-                                        terminal: makeFailedTerminalEvent(
-                                          makeProviderFailure({
-                                            cause: Cause.squash(cause),
-                                            class: "unknown",
+                                      Ref.get(rootWorkCompletedAt).pipe(
+                                        Effect.flatMap((workCompletedAt) =>
+                                          writeFinalRunEvents({
+                                            run: input.run,
+                                            rootNode: input.rootNode,
+                                            checkpointScope: input.checkpointScope,
+                                            providerThread,
+                                            attempt: input.attempt,
+                                            // The failure may be the ownership
+                                            // read itself, so check in the write.
+                                            writeIfRunCurrent: {
+                                              activeAttemptId: input.attempt.id,
+                                              expectedStatus: "running",
+                                            },
+                                            openRunOwnedSubagents: openSubagents,
+                                            terminal: makeFailedTerminalEvent(
+                                              makeProviderFailure({
+                                                cause: Cause.squash(cause),
+                                                class: "unknown",
+                                              }),
+                                              latestItemOrdinal + 1,
+                                            ),
+                                            failureItemPersisted: false,
+                                            refreshAfterTurn,
+                                            ...(workCompletedAt === null
+                                              ? {}
+                                              : { workCompletedAt }),
                                           }),
-                                          latestItemOrdinal + 1,
                                         ),
-                                        failureItemPersisted: false,
-                                        refreshAfterTurn,
-                                      }),
+                                      ),
                                     ),
                                   ),
                                 ),
@@ -1392,6 +1548,9 @@ export const layer: Layer.Layer<
             message: input.message,
             modelSelection: input.modelSelection,
             runtimePolicy: input.runtimePolicy,
+            ...(input.isRunAttemptActive === undefined
+              ? {}
+              : { isRunAttemptActive: input.isRunAttemptActive }),
             ...(appContext.length === 0 ? {} : { appContext }),
           };
           const compact =
@@ -1422,30 +1581,35 @@ export const layer: Layer.Layer<
                     Effect.flatMap((latestItemOrdinal) =>
                       Ref.get(openRunOwnedSubagents).pipe(
                         Effect.flatMap((openSubagents) =>
-                          writeFinalRunEvents({
-                            run: input.run,
-                            rootNode: input.rootNode,
-                            checkpointScope: input.checkpointScope,
-                            providerThread,
-                            attempt: input.attempt,
-                            // Checked in the write transaction, not by another
-                            // read that can fail like the one before the start.
-                            writeIfRunCurrent: {
-                              activeAttemptId: input.attempt.id,
-                              expectedStatus: "running",
-                            },
-                            openRunOwnedSubagents: openSubagents,
-                            terminal: makeFailedTerminalEvent(
-                              makeProviderFailure({
-                                cause: Cause.squash(cause),
-                                // A failed ownership read is not the provider's fault.
-                                class: Exit.isFailure(shouldStart) ? "unknown" : "provider_error",
+                          Ref.get(rootWorkCompletedAt).pipe(
+                            Effect.flatMap((workCompletedAt) =>
+                              writeFinalRunEvents({
+                                run: input.run,
+                                rootNode: input.rootNode,
+                                checkpointScope: input.checkpointScope,
+                                providerThread,
+                                attempt: input.attempt,
+                                // Checked in the write transaction, not by another
+                                // read that can fail like the one before the start.
+                                writeIfRunCurrent: {
+                                  activeAttemptId: input.attempt.id,
+                                  expectedStatus: "running",
+                                },
+                                openRunOwnedSubagents: openSubagents,
+                                terminal: makeFailedTerminalEvent(
+                                  makeProviderFailure({
+                                    cause: Cause.squash(cause),
+                                    // A failed ownership read is not the provider's fault.
+                                    class: Exit.isFailure(shouldStart) ? "unknown" : "provider_error",
+                                  }),
+                                  latestItemOrdinal + 1,
+                                ),
+                                failureItemPersisted: false,
+                                refreshAfterTurn,
+                                ...(workCompletedAt === null ? {} : { workCompletedAt }),
                               }),
-                              latestItemOrdinal + 1,
                             ),
-                            failureItemPersisted: false,
-                            refreshAfterTurn,
-                          }),
+                          ),
                         ),
                       ),
                     ),

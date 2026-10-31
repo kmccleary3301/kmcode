@@ -160,6 +160,7 @@ it.effect("Stop ends watches, holds queues, and stops the delegated tasks under 
     assert.isTrue(Exit.isFailure(yield* Effect.exit(watch(childThreadId, 2))));
     const grandchildThreadId = yield* delegate(childThreadId, "grandchild task");
     yield* send(childThreadId, "child follow-up", "queue_after_active");
+    yield* send(childThreadId, "another child follow-up", "queue_after_active");
 
     // The run that delegated the child ends before the run the user stops, so
     // only a Stop that covers earlier runs keeps the stopped child from waking it.
@@ -202,14 +203,32 @@ it.effect("Stop ends watches, holds queues, and stops the delegated tasks under 
     // What the delegated-tasks.stop effect runs once the Stop commits.
     yield* threads.stopDelegatedTasks({ threadId: parentThreadId, commandId: stopCommandId });
     assert.deepEqual(yield* threadState(childThreadId), {
-      runs: ["interrupted", "queued:held"],
+      runs: ["interrupted", "queued:held", "queued:held"],
+      watched: [],
+    });
+    const childRuns = (yield* orchestrator.getThreadProjection(childThreadId)).runs;
+    yield* orchestrator.dispatch({
+      type: "queued-run.cancel",
+      commandId: CommandId.make("cancel-held-child-follow-up"),
+      threadId: childThreadId,
+      runId: childRuns[1]!.id,
+    });
+    assert.deepEqual(yield* threadState(childThreadId), {
+      runs: ["interrupted", "cancelled:held", "queued:held"],
       watched: [],
     });
     assert.deepEqual((yield* threadState(grandchildThreadId)).runs, ["interrupted"]);
 
+    assert.deepEqual(yield* threadState(childThreadId), {
+      runs: ["interrupted", "cancelled:held", "queued:held"],
+      watched: [],
+    });
     // A retried effect stops nothing twice.
     yield* threads.stopDelegatedTasks({ threadId: parentThreadId, commandId: stopCommandId });
-    assert.deepEqual((yield* threadState(childThreadId)).runs, ["interrupted", "queued:held"]);
+    assert.deepEqual(yield* threadState(childThreadId), {
+      runs: ["interrupted", "cancelled:held", "queued:held"],
+      watched: [],
+    });
   }).pipe(Effect.provide(layerTest)),
 );
 

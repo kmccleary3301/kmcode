@@ -37,6 +37,7 @@ import {
   latestNativeContextUsage,
 } from "./ContextHandoffBudget.ts";
 import { deliverContextHandoffs } from "./ContextHandoffDelivery.ts";
+import { contextHandoffDeliveryIds } from "./ContextHandoffDeliveryIds.ts";
 import {
   ProviderAdapterTurnStartError,
   type ProviderAdapterV2Error,
@@ -141,6 +142,21 @@ export const layer: Layer.Layer<
           }),
         );
       return {
+        // A failed projection read must keep the active-turn guard closed.
+        isRunAttemptActive: (runId: RunId, attemptId: OrchestrationV2RunAttempt["id"]) =>
+          projectionStore.getRuntimeRecoveryProjection(input.threadId).pipe(
+            Effect.map((current) => {
+              const run = current.runs.find((candidate) => candidate.id === runId);
+              return (
+                run?.activeAttemptId === attemptId &&
+                (run.status === "preparing" ||
+                  run.status === "starting" ||
+                  run.status === "running" ||
+                  run.status === "waiting")
+              );
+            }),
+            Effect.orElseSucceed(() => true),
+          ),
         isCurrentAttemptInStatus,
         loadInheritedBackgroundTurnItems: () =>
           projectionStore.getRuntimeRecoveryProjection(input.threadId).pipe(
@@ -311,6 +327,25 @@ export const layer: Layer.Layer<
         }) {
           const { now, status } = input;
           const started = input.startedAt === undefined ? {} : { startedAt: input.startedAt };
+          const completionProjection =
+            status === "completed"
+              ? yield* projectionStore.getThreadRecords(
+                  projection.thread.id,
+                  ["turnItems", "runtimeRequests", "subagents", "providerThreads"],
+                  {
+                    turnItemRunIds: [run.id],
+                    turnItemStatuses: ["pending", "running", "waiting"],
+                  },
+                )
+              : undefined;
+          const interruptedItems =
+            completionProjection === undefined
+              ? []
+              : RunExecutionService.interruptLeftoverTurnItemsOnRunCompletion({
+                  run,
+                  projection: completionProjection,
+                  completedAt: now,
+                });
           const item: OrchestrationV2TurnItem = {
             id: idAllocator.derive.runSignalTurnItem({ runId, signal: input.signal }),
             threadId: projection.thread.id,
@@ -335,6 +370,10 @@ export const layer: Layer.Layer<
           };
           const eventPayloads = [
             { type: "turn-item.updated", payload: item },
+            ...interruptedItems.map((interruptedItem) => ({
+              type: "turn-item.updated" as const,
+              payload: interruptedItem,
+            })),
             { type: "run.updated", payload: { ...run, status, ...started, completedAt: now } },
             {
               type: "run-attempt.updated",
@@ -360,7 +399,10 @@ export const layer: Layer.Layer<
                 id: yield* idAllocator.allocate.event({ threadId: projection.thread.id }),
                 threadId: projection.thread.id,
                 runId,
-                nodeId: rootNode.id,
+                nodeId:
+                  event.type === "turn-item.updated" && event.payload.nodeId !== null
+                    ? event.payload.nodeId
+                    : rootNode.id,
                 providerInstanceId: input.providerInstanceId,
                 occurredAt: now,
               } satisfies OrchestrationV2DomainEvent;
@@ -990,12 +1032,13 @@ export const layer: Layer.Layer<
           handoff.delivery?.nativeThreadId === runningProviderThread.nativeThreadRef?.nativeId &&
           handoff.delivery?.status !== "pending",
       );
-      const deliveredItemIds = new Set(
-        settledHandoffs.flatMap((handoff) => handoff.delivery?.itemIds ?? []),
+      const settledHandoffIds = settledHandoffs.map((handoff) =>
+        contextHandoffDeliveryIds(handoff.delivery),
       );
+      const deliveredItemIds = new Set(settledHandoffIds.flatMap((ids) => ids.itemIds));
       const coveredItemIds = new Set([
         ...deliveredItemIds,
-        ...settledHandoffs.flatMap((handoff) => handoff.delivery?.omittedItemIds ?? []),
+        ...settledHandoffIds.flatMap((ids) => ids.omittedItemIds),
       ]);
       const deliveredAttemptIds = new Set(
         projection.providerTurns.map((turn) => turn.runAttemptId),
@@ -1033,12 +1076,19 @@ export const layer: Layer.Layer<
           )
           .map((source) => source.id),
       );
-      // Use saved text and actual native attachments when telemetry is absent.
+      // Without telemetry, ask the provider for the loaded transcript's size;
+      // otherwise use saved text and actual native attachments.
       // Legacy attempts lack native identity; exclude their explicitly recovered
       // history, whose attachments were not replayed into the replacement thread.
       const nativeContextEstimate = Effect.gen(function* () {
-        return sameNativeThread
-          ? (yield* projectionStore.getTurnStartHistory(input.threadId)).reduce((sum, item) => {
+        if (!sameNativeThread) return 0;
+        const measured =
+          session.measureNativeContextTokens === undefined
+            ? undefined
+            : yield* session.measureNativeContextTokens();
+        return measured !== undefined
+          ? measured
+          : (yield* projectionStore.getTurnStartHistory(input.threadId)).reduce((sum, item) => {
               if (
                 item.runId === run.id ||
                 (item.runId !== null &&
@@ -1063,8 +1113,7 @@ export const layer: Layer.Layer<
                 (historical === null ? 0 : Buffer.byteLength(historical.text)) +
                 nativeAttachments
               );
-            }, 0)
-          : 0;
+            }, 0);
       });
       const modelContextWindow =
         knownModelWindow ??
@@ -1261,6 +1310,7 @@ export const layer: Layer.Layer<
             !acceptedAttempts.some((source) => source.nativeThreadId !== undefined)),
         shouldStartProviderTurn: runControls.shouldStartProviderTurn,
         shouldFinalizeRun: runControls.shouldFinalizeRun,
+        isRunAttemptActive: runControls.isRunAttemptActive,
         hasUnpairedRunInterruptRequest: runControls.hasUnpairedRunInterruptRequest,
         message: {
           messageId: message.id,

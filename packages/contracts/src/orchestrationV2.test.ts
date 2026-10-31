@@ -39,9 +39,11 @@ import {
   OrchestrationV2ThreadHistoryPage,
   OrchestrationV2ThreadProjection,
   OrchestrationV2ThreadStreamItem,
+  OrchestrationV2ThreadLiveItem,
   OrchestrationV2ThreadShell,
   OrchestrationV2TurnItem,
   OrchestrationV2TurnItemJson,
+  OrchestrationV2UserInputQuestion,
 } from "./orchestrationV2.ts";
 
 const now = DateTime.makeUnsafe("2026-04-20T00:00:00.000Z");
@@ -75,6 +77,9 @@ const decodeOrchestrationV2ThreadProjection = Schema.decodeUnknownSync(
 );
 const decodeOrchestrationV2ThreadStreamItem = Schema.decodeUnknownSync(
   OrchestrationV2ThreadStreamItem,
+);
+const decodeOrchestrationV2ThreadLiveItem = Schema.decodeUnknownSync(
+  OrchestrationV2ThreadLiveItem,
 );
 const decodeOrchestrationV2ProviderThreadJson = Schema.decodeUnknownSync(
   OrchestrationV2ProviderThreadJson,
@@ -326,6 +331,34 @@ describe("orchestration V2 contracts", () => {
     expect("acceptBoundedSnapshot" in legacyDecoded).toBe(false);
   });
 
+  it("keeps thread live items on their separate stream contract", () => {
+    const liveItem = decodeOrchestrationV2ThreadLiveItem({
+      kind: "subagent-live",
+      turnItemId: "turn-item-live",
+      subagentId: "subagent-live",
+      liveContent: null,
+    });
+    expect(liveItem).toEqual({
+      kind: "subagent-live",
+      turnItemId: "turn-item-live",
+      subagentId: "subagent-live",
+      liveContent: null,
+    });
+    expect(() => decodeOrchestrationV2ThreadStreamItem(liveItem)).toThrow();
+    expect(() =>
+      decodeOrchestrationV2ThreadStreamItem({
+        kind: "live-mode",
+        mode: "events",
+        reason: "viewing",
+      }),
+    ).toThrow();
+    expect(
+      Schema.decodeUnknownSync(OrchestrationV2RpcSchemas.subscribeThreadLive.input)({
+        threadId: "thread-1",
+      }),
+    ).toEqual({ threadId: "thread-1" });
+  });
+
   it("decodes persisted capability snapshots that predate runtimePolicy", () => {
     // Events written before the field existed must replay; absent decodes to
     // the weaker client-boundary guarantee so history never overclaims.
@@ -566,6 +599,11 @@ describe("orchestration V2 contracts", () => {
       },
       runtimeMode: "approval-required",
       interactionMode: "plan",
+      workspaceStrategy: {
+        type: "worktree",
+        baseRef: "commit:parent",
+        startFromOrigin: false,
+      },
     });
 
     expect(command.type).toBe("delegated_task.request");
@@ -574,6 +612,11 @@ describe("orchestration V2 contracts", () => {
     }
     expect(command.parentThreadId).toBe(ThreadId.make("thread-parent-1"));
     expect(command.parentRunId).toBe(RunId.make("run-parent-1"));
+    expect(command.workspaceStrategy).toEqual({
+      type: "worktree",
+      baseRef: "commit:parent",
+      startFromOrigin: false,
+    });
     expect(command.parentNodeId).toBe(NodeId.make("node-parent-1"));
   });
 
@@ -846,6 +889,22 @@ describe("orchestration V2 contracts", () => {
     expect(turnItem.progress).toBe("Inspecting package metadata");
   });
 
+  it("keeps suggested answers optional in user-input questions", () => {
+    const decode = Schema.decodeUnknownSync(OrchestrationV2UserInputQuestion);
+    const legacy = {
+      id: "question-1",
+      header: "Scope",
+      question: "What scope should the delegate inspect?",
+      options: [],
+    };
+
+    expect(decode(legacy).initialAnswer).toBeUndefined();
+    expect(decode({ ...legacy, initialAnswer: "Suggested scope" }).initialAnswer).toBe(
+      "Suggested scope",
+    );
+  });
+
+
   it("decodes app-owned subagent parent-wake policies", () => {
     const appOwnedSubagent = {
       id: "node-subagent-2",
@@ -877,6 +936,30 @@ describe("orchestration V2 contracts", () => {
       "settled_only",
     );
     expect(() => decode({ ...appOwnedSubagent, completionWake: "sometimes" })).toThrow();
+    expect(decode(appOwnedSubagent).modelSelection).toBeUndefined();
+    expect(decode(appOwnedSubagent).workflow).toBeUndefined();
+    const followupMetadata = decode({
+      ...appOwnedSubagent,
+      modelSelection: { instanceId: "codex", model: "gpt-5.4" },
+      workflow: {
+        name: "Review",
+        runHandles: { scriptPath: "/workspace/.t3/workflow.ts" },
+        phases: [{ index: 0, title: "Inspect" }],
+        agents: [
+          {
+            index: 0,
+            label: "reviewer",
+            state: "running",
+            queuedAt: 1,
+            startedAt: 2,
+          },
+        ],
+      },
+    });
+    expect(followupMetadata.modelSelection?.model).toBe("gpt-5.4");
+    expect(followupMetadata.workflow?.runHandles?.scriptPath).toBe(
+      "/workspace/.t3/workflow.ts",
+    );
   });
 
   it("decodes thread projections with an ordered turn item rendering stream", () => {
@@ -1351,21 +1434,45 @@ describe("background work kinds from older or newer servers", () => {
       pendingBackgroundTasks: [
         { taskId: "bg-1", description: "Background sleep", taskType: "local_bash" },
         { taskId: "bg-2" },
-        { taskId: "bg-3", description: "Nightly", kind: "workflow", schedule: "0 3 * * *" },
-        { taskId: "bg-4", description: "npm test", kind: "command" },
+        {
+          taskId: "bg-3",
+          description: "Nightly",
+          kind: "workflow",
+          schedule: "0 3 * * *",
+          command: "nightly.sh",
+        },
+        {
+          taskId: "bg-4",
+          description: "npm test",
+          kind: "command",
+          command: "npm test -- --watch",
+          startedAt: "2026-04-20T00:00:01.000Z",
+        },
         { taskId: "bg-5", kind: "subagent", childThreadId: "thread-child" },
       ],
     });
     expect(providerThread.pendingBackgroundTasks).toEqual([
       { taskId: "bg-1", description: "Background sleep", kind: "background_task" },
       { taskId: "bg-2", kind: "background_task" },
-      { taskId: "bg-3", description: "Nightly", kind: "background_task" },
-      { taskId: "bg-4", description: "npm test", kind: "command" },
+      { taskId: "bg-3", description: "Nightly", command: "nightly.sh", kind: "background_task" },
+      {
+        taskId: "bg-4",
+        description: "npm test",
+        command: "npm test -- --watch",
+        startedAt: "2026-04-20T00:00:01.000Z",
+        kind: "command",
+      },
       { taskId: "bg-5", kind: "subagent", childThreadId: "thread-child" },
     ]);
     // The fallback is decode-only: what was decoded encodes as its known member.
     const encoded = encodeOrchestrationV2ProviderThreadJson(providerThread).pendingBackgroundTasks;
     expect(encoded).toEqual(providerThread.pendingBackgroundTasks);
+    // Rosters persist inside the provider thread's JSON payload as-is.
+    expect(
+      decodeOrchestrationV2ProviderThreadJson(
+        JSON.parse(JSON.stringify(encodeOrchestrationV2ProviderThreadJson(providerThread))),
+      ).pendingBackgroundTasks,
+    ).toEqual(providerThread.pendingBackgroundTasks);
     // Clients from before kinds read a roster entry as this struct and ignore `kind`.
     const decodePreKindsRoster = Schema.decodeUnknownSync(
       Schema.Array(

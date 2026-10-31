@@ -48,22 +48,24 @@ export const layer = Layer.effect(
       cleanupAttachments: (attachmentIds: ReadonlyArray<string>) =>
         Effect.forEach(
           attachmentIds,
-          (attachmentId) => {
-            const path = resolveAttachmentPathById({
-              attachmentsDir: config.attachmentsDir,
-              attachmentId,
-            });
-            return path === null
-              ? Effect.void
-              : fileSystem
-                  .remove(path, { force: true })
-                  .pipe(
-                    Effect.mapError(
-                      (cause) =>
-                        new ResourceCleanupError({ operation: "attachment", attachmentId, cause }),
-                    ),
-                  );
-          },
+          (attachmentId) =>
+            Effect.gen(function* () {
+              const path = yield* Effect.promise(() =>
+                resolveAttachmentPathById({
+                  attachmentsDir: config.attachmentsDir,
+                  attachmentId,
+                }),
+              );
+              if (path === null) return;
+              yield* fileSystem
+                .remove(path, { force: true })
+                .pipe(
+                  Effect.mapError(
+                    (cause) =>
+                      new ResourceCleanupError({ operation: "attachment", attachmentId, cause }),
+                  ),
+                );
+            }),
           { discard: true, concurrency: 4 },
         ),
     };

@@ -264,6 +264,423 @@ it.effect("verifies thread membership using only the thread-created partial inde
   }).pipe(Effect.provide(layerTest)),
 );
 
+it.effect("throttles snapshot writes while retaining status changes and trailing updates", () =>
+  Effect.gen(function* () {
+    const eventSink = yield* EventSink.EventSinkV2;
+    const sql = yield* SqlClient.SqlClient;
+    const now = yield* DateTime.now;
+    const threadId = ThreadId.make("thread:foundation-throttle");
+    const streamItemId = TurnItemId.make("turn-item:foundation-throttle-stream");
+    const terminalItemId = TurnItemId.make("turn-item:foundation-throttle-terminal");
+    const subagentId = NodeId.make("node:foundation-throttle-subagent");
+    const turnItemEvent = (
+      suffix: string,
+      itemId: TurnItemId,
+      text: string,
+      status: "running" | "completed",
+      streaming: boolean,
+    ): OrchestrationV2DomainEvent => ({
+      id: EventId.make(`event:foundation-throttle:${suffix}`),
+      type: "turn-item.updated",
+      threadId,
+      occurredAt: now,
+      payload: {
+        id: itemId,
+        threadId,
+        runId: null,
+        nodeId: null,
+        providerThreadId: null,
+        providerTurnId: null,
+        nativeItemRef: null,
+        parentItemId: null,
+        ordinal: itemId === streamItemId ? 1 : 2,
+        status,
+        title: null,
+        startedAt: now,
+        completedAt: status === "completed" ? now : null,
+        updatedAt: now,
+        type: "reasoning",
+        text,
+        streaming,
+      },
+    });
+    const subagentEvent = (
+      suffix: string,
+      progress: string,
+      status: "running" | "completed",
+    ): OrchestrationV2DomainEvent => ({
+      id: EventId.make(`event:foundation-throttle:${suffix}`),
+      type: "subagent.updated",
+      threadId,
+      nodeId: subagentId,
+      driver: providerDriver,
+      providerInstanceId,
+      occurredAt: now,
+      payload: {
+        id: subagentId,
+        threadId,
+        runId: null,
+        parentNodeId: subagentId,
+        origin: "provider_native",
+        createdBy: "agent",
+        driver: providerDriver,
+        providerInstanceId,
+        providerThreadId: null,
+        childThreadId: null,
+        nativeTaskRef: null,
+        prompt: "Inspect the current state.",
+        title: null,
+        model: null,
+        status,
+        progress,
+        result: null,
+        startedAt: now,
+        completedAt: status === "completed" ? now : null,
+        updatedAt: now,
+      },
+    });
+
+    yield* eventSink.write({
+      events: [
+        threadCreatedEvent({
+          id: "event:foundation-throttle:create",
+          thread: makeThread(threadId, now),
+          now,
+        }),
+      ],
+    });
+    assert.lengthOf(
+      yield* eventSink.write({
+        events: [turnItemEvent("stream-first", streamItemId, "first", "running", true)],
+      }),
+      1,
+    );
+    assert.lengthOf(
+      yield* eventSink.write({
+        events: [turnItemEvent("stream-fast", streamItemId, "fast", "running", true)],
+      }),
+      0,
+    );
+    assert.lengthOf(
+      yield* eventSink.write({
+        events: [
+          turnItemEvent("terminal-start", terminalItemId, "start", "running", true),
+          turnItemEvent("terminal-end", terminalItemId, "final", "completed", false),
+        ],
+      }),
+      2,
+    );
+
+    assert.lengthOf(
+      yield* eventSink.write({
+        events: [subagentEvent("subagent-first", "starting", "running")],
+      }),
+      1,
+    );
+    assert.lengthOf(
+      yield* eventSink.write({
+        events: [subagentEvent("subagent-progress", "working", "running")],
+      }),
+      0,
+    );
+    assert.lengthOf(
+      yield* eventSink.write({
+        events: [subagentEvent("subagent-terminal", "done", "completed")],
+      }),
+      1,
+    );
+
+    yield* TestClock.adjust(Duration.millis(400));
+
+    const streamingRows = yield* sql<{ readonly event_id: string }>`
+      SELECT event_id
+      FROM orchestration_events
+      WHERE event_type = 'turn-item.updated'
+        AND json_extract(payload_json, '$.id') = ${streamItemId}
+      ORDER BY sequence ASC
+    `;
+    assert.deepEqual(
+      streamingRows.map((row) => row.event_id),
+      ["event:foundation-throttle:stream-first", "event:foundation-throttle:stream-fast"],
+    );
+    const terminalRows = yield* sql<{ readonly event_id: string }>`
+      SELECT event_id
+      FROM orchestration_events
+      WHERE event_type = 'turn-item.updated'
+        AND json_extract(payload_json, '$.id') = ${terminalItemId}
+      ORDER BY sequence ASC
+    `;
+    assert.deepEqual(
+      terminalRows.map((row) => row.event_id),
+      ["event:foundation-throttle:terminal-start", "event:foundation-throttle:terminal-end"],
+    );
+    const subagentRows = yield* sql<{ readonly event_id: string }>`
+      SELECT event_id
+      FROM orchestration_events
+      WHERE event_type = 'subagent.updated'
+        AND json_extract(payload_json, '$.id') = ${subagentId}
+      ORDER BY sequence ASC
+    `;
+    assert.deepEqual(
+      subagentRows.map((row) => row.event_id),
+      ["event:foundation-throttle:subagent-first", "event:foundation-throttle:subagent-terminal"],
+    );
+  }).pipe(Effect.provide(layerTest)),
+);
+
+it.effect("stores tool card progress at most once a second, keeping status changes", () =>
+  Effect.gen(function* () {
+    const eventSink = yield* EventSink.EventSinkV2;
+    const sql = yield* SqlClient.SqlClient;
+    const now = yield* DateTime.now;
+    const threadId = ThreadId.make("thread:foundation-tool-throttle");
+    const itemId = TurnItemId.make("turn-item:foundation-tool-throttle");
+    // The card is re-sent while the edit's arguments stream in.
+    const fileChangeEvent = (
+      suffix: string,
+      newStr: string,
+      status: "pending" | "completed",
+    ): OrchestrationV2DomainEvent => ({
+      id: EventId.make(`event:foundation-tool-throttle:${suffix}`),
+      type: "turn-item.updated",
+      threadId,
+      occurredAt: now,
+      payload: {
+        id: itemId,
+        threadId,
+        runId: null,
+        nodeId: null,
+        providerThreadId: null,
+        providerTurnId: null,
+        nativeItemRef: null,
+        parentItemId: null,
+        ordinal: 1,
+        status,
+        title: null,
+        startedAt: now,
+        completedAt: status === "completed" ? now : null,
+        updatedAt: now,
+        type: "file_change",
+        fileName: "src/index.ts",
+        newStr,
+      },
+    });
+    yield* eventSink.write({
+      events: [
+        threadCreatedEvent({
+          id: "event:foundation-tool-throttle:create",
+          thread: makeThread(threadId, now),
+          now,
+        }),
+      ],
+    });
+
+    const written = (suffix: string, newStr: string, status: "pending" | "completed") =>
+      eventSink
+        .write({ events: [fileChangeEvent(suffix, newStr, status)] })
+        .pipe(Effect.map((events) => events.length));
+    assert.strictEqual(yield* written("start", "", "pending"), 1);
+    assert.strictEqual(yield* written("tick-1", "a", "pending"), 0);
+    yield* TestClock.adjust(Duration.millis(400));
+    assert.strictEqual(yield* written("tick-2", "ab", "pending"), 0);
+    // Past the 250 ms streaming cadence but inside the tool interval: nothing is stored yet.
+    yield* TestClock.adjust(Duration.millis(400));
+    // The trailing flush stores the newest withheld card once the interval has passed.
+    yield* TestClock.adjust(Duration.millis(400));
+    assert.strictEqual(yield* written("done", "abc", "completed"), 1);
+
+    const rows = yield* sql<{ readonly event_id: string }>`
+      SELECT event_id
+      FROM orchestration_events
+      WHERE event_type = 'turn-item.updated'
+        AND json_extract(payload_json, '$.id') = ${itemId}
+      ORDER BY sequence ASC
+    `;
+    assert.deepEqual(
+      rows.map((row) => row.event_id),
+      [
+        "event:foundation-tool-throttle:start",
+        "event:foundation-tool-throttle:tick-2",
+        "event:foundation-tool-throttle:done",
+      ],
+    );
+  }).pipe(Effect.provide(layerTest)),
+);
+
+it.effect("withholds provider subagent progress ticks without touching the database", () =>
+  Effect.gen(function* () {
+    const eventSink = yield* EventSink.EventSinkV2;
+    const sql = yield* SqlClient.SqlClient;
+    const now = yield* DateTime.now;
+    const threadId = ThreadId.make("thread:foundation-subagent-flood");
+    const subagentId = NodeId.make("node:foundation-subagent-flood");
+    const itemId = TurnItemId.make("turn-item:foundation-subagent-flood");
+    const appTaskId = NodeId.make("node:foundation-subagent-flood-app");
+    // The OMP adapter re-sends the whole card on every native progress tick,
+    // with titles flapping between the agent name and its description.
+    const card = (
+      suffix: string,
+      tick: { readonly title: string; readonly progress: string; readonly model?: string },
+    ): OrchestrationV2DomainEvent => ({
+      id: EventId.make(`event:foundation-subagent-flood:${suffix}`),
+      type: "turn-item.updated",
+      threadId,
+      occurredAt: now,
+      payload: {
+        id: itemId,
+        threadId,
+        runId: null,
+        nodeId: subagentId,
+        providerThreadId: null,
+        providerTurnId: null,
+        nativeItemRef: null,
+        parentItemId: null,
+        ordinal: 1,
+        type: "subagent",
+        status: "running",
+        title: tick.title,
+        startedAt: now,
+        completedAt: null,
+        updatedAt: now,
+        subagentId,
+        origin: "provider_native",
+        driver: providerDriver,
+        providerInstanceId,
+        childThreadId: null,
+        model: tick.model ?? "model-a",
+        prompt: "Split the examples module",
+        progress: tick.progress,
+        result: null,
+      },
+    });
+    const appTask = (suffix: string, progress: string): OrchestrationV2DomainEvent => ({
+      id: EventId.make(`event:foundation-subagent-flood:${suffix}`),
+      type: "subagent.updated",
+      threadId,
+      nodeId: appTaskId,
+      driver: providerDriver,
+      providerInstanceId,
+      occurredAt: now,
+      payload: {
+        id: appTaskId,
+        threadId,
+        runId: null,
+        parentNodeId: appTaskId,
+        origin: "app_owned",
+        createdBy: "agent",
+        driver: providerDriver,
+        providerInstanceId,
+        providerThreadId: null,
+        childThreadId: null,
+        nativeTaskRef: null,
+        prompt: "Delegated review",
+        title: null,
+        model: null,
+        status: "running",
+        progress,
+        result: null,
+        startedAt: now,
+        completedAt: null,
+        updatedAt: now,
+      },
+    });
+    const storedCardIds = () =>
+      sql<{ readonly event_id: string }>`
+        SELECT event_id FROM orchestration_events
+        WHERE event_type = 'turn-item.updated' AND json_extract(payload_json, '$.id') = ${itemId}
+        ORDER BY sequence ASC
+      `.pipe(Effect.map((rows) => rows.map((row) => row.event_id)));
+
+    yield* eventSink.write({
+      events: [
+        threadCreatedEvent({
+          id: "event:foundation-subagent-flood:create",
+          thread: makeThread(threadId, now),
+          now,
+        }),
+      ],
+    });
+    assert.lengthOf(
+      yield* eventSink.write({ events: [card("first", { title: "DP07Finish", progress: "a" })] }),
+      1,
+    );
+
+    const sqlSpans: Array<string> = [];
+    const tracer = Tracer.make({
+      span: (options) => {
+        if (options.name.startsWith("sql.")) sqlSpans.push(options.name);
+        return new Tracer.NativeSpan(options);
+      },
+    });
+    const ticks = [
+      { title: "task", progress: "Clarifying the worktree" },
+      { title: "Complete and verify the split", progress: "Clarifying the worktree" },
+      { title: "DP07Finish", progress: "a" },
+      { title: "DP07Finish", progress: "a" },
+      { title: "task", progress: "Running tests" },
+    ];
+    for (const [index, tick] of ticks.entries()) {
+      assert.lengthOf(
+        yield* eventSink
+          .write({
+            guardPendingUserInputCancellations: true,
+            events: [card(`tick-${index}`, tick)],
+          })
+          .pipe(Effect.withTracer(tracer)),
+        0,
+      );
+    }
+    assert.deepEqual(sqlSpans, []);
+
+    // A model change persists at once: child-thread model sync keys off stored events.
+    assert.lengthOf(
+      yield* eventSink.write({
+        events: [card("model", { title: "task", progress: "Running tests", model: "model-b" })],
+      }),
+      1,
+    );
+    // Flapping back to the stored payload leaves nothing to flush.
+    assert.lengthOf(
+      yield* eventSink.write({
+        events: [
+          card("model-again", { title: "task", progress: "Running tests", model: "model-b" }),
+        ],
+      }),
+      0,
+    );
+    yield* TestClock.adjust(Duration.seconds(3));
+    assert.deepEqual(yield* storedCardIds(), [
+      "event:foundation-subagent-flood:first",
+      "event:foundation-subagent-flood:model",
+    ]);
+
+    // Past the interval the next tick lands directly; the newest tick withheld
+    // after it lands with the trailing flush.
+    yield* eventSink.write({
+      events: [card("late-1", { title: "task", progress: "Reviewing", model: "model-b" })],
+    });
+    yield* eventSink.write({
+      events: [card("late-2", { title: "DP07Finish", progress: "Reviewing", model: "model-b" })],
+    });
+    yield* TestClock.adjust(Duration.seconds(3));
+    const flushed = yield* storedCardIds();
+    assert.deepEqual(flushed.slice(2), [
+      "event:foundation-subagent-flood:late-1",
+      "event:foundation-subagent-flood:late-2",
+    ]);
+    const projected = yield* sql<{ readonly title: string; readonly progress: string }>`
+      SELECT json_extract(payload_json, '$.title') AS title,
+        json_extract(payload_json, '$.progress') AS progress
+      FROM orchestration_v2_projection_turn_items WHERE turn_item_id = ${itemId}
+    `;
+    assert.deepEqual(projected, [{ title: "DP07Finish", progress: "Reviewing" }]);
+
+    // App-owned task updates are never withheld.
+    assert.lengthOf(yield* eventSink.write({ events: [appTask("app-1", "claimed")] }), 1);
+    assert.lengthOf(yield* eventSink.write({ events: [appTask("app-2", "delivering")] }), 1);
+  }).pipe(Effect.provide(layerTest)),
+);
+
 it.effect("keeps other database work runnable while discovering compaction candidates", () =>
   Effect.scoped(
     Effect.gen(function* () {
@@ -351,6 +768,234 @@ it.effect("keeps other database work runnable while discovering compaction candi
 );
 
 it.layer(layerTest)("orchestration V2 foundation persistence", (it) => {
+  it.effect("replays persisted root work completion after projection recreation", () =>
+    Effect.gen(function* () {
+      const eventStore = yield* EventStore.EventStoreV2;
+      const eventSink = yield* EventSink.EventSinkV2;
+      const projectionStore = yield* ProjectionStore.ProjectionStoreV2;
+      const maintenance = yield* ProjectionMaintenance.ProjectionMaintenanceV2;
+      const now = yield* DateTime.now;
+      const workCompletedAt = DateTime.add(now, { seconds: 5 });
+      const checkpointUpdatedAt = DateTime.add(workCompletedAt, { seconds: 1 });
+      const threadId = ThreadId.make("thread:foundation-work-end-replay");
+      const runId = RunId.make("run:foundation-work-end-replay");
+      const attemptId = RunAttemptId.make("run-attempt:foundation-work-end-replay");
+      const thread = makeThread(threadId, now);
+      const run: OrchestrationV2Run = {
+        id: runId,
+        threadId,
+        ordinal: 1,
+        providerInstanceId,
+        modelSelection,
+        providerThreadId: null,
+        userMessageId: MessageId.make("message:foundation-work-end-replay"),
+        rootNodeId: null,
+        activeAttemptId: attemptId,
+        status: "running",
+        queuePosition: null,
+        requestedAt: now,
+        startedAt: now,
+        completedAt: null,
+        checkpointId: null,
+        contextHandoffId: null,
+      };
+      yield* eventSink.write({
+        events: [
+          threadCreatedEvent({
+            id: "event:foundation-work-end-replay:thread",
+            thread,
+            now,
+          }),
+          {
+            id: EventId.make("event:foundation-work-end-replay:run"),
+            type: "run.created",
+            threadId,
+            runId,
+            providerInstanceId,
+            occurredAt: now,
+            payload: run,
+          },
+        ],
+      });
+      const milestone = yield* eventSink.writeIfRunCurrent({
+        threadId,
+        runId,
+        activeAttemptId: attemptId,
+        expectedStatus: "running",
+        events: [
+          {
+            id: EventId.make("event:foundation-work-end-replay:execution-ended"),
+            type: "run.updated",
+            threadId,
+            runId,
+            providerInstanceId,
+            occurredAt: workCompletedAt,
+            payload: { ...run, workCompletedAt },
+          },
+        ],
+      });
+      assert.isTrue(milestone.committed);
+      yield* eventSink.write({
+        events: [
+          {
+            id: EventId.make("event:foundation-work-end-replay:checkpoint-pending"),
+            type: "run.updated",
+            threadId,
+            runId,
+            providerInstanceId,
+            occurredAt: checkpointUpdatedAt,
+            payload: { ...run, status: "waiting", workCompletedAt },
+          },
+        ],
+      });
+
+      const stored = yield* eventStore.read({ threadId, afterSequence: 0 }).pipe(Stream.runCollect);
+      const replayedMilestone = stored.find(
+        (event) =>
+          event.event.type === "run.updated" &&
+          event.event.payload.id === runId &&
+          event.event.payload.status === "running",
+      );
+      assert.isDefined(replayedMilestone);
+      if (replayedMilestone?.event.type !== "run.updated") return;
+      assert.deepEqual(replayedMilestone.event.payload.workCompletedAt, workCompletedAt);
+
+      assert.isTrue((yield* maintenance.rebuild).valid);
+      const recreatedProjection = yield* projectionStore.getThreadProjection(threadId);
+      const recreatedRun = recreatedProjection.runs.find((candidate) => candidate.id === runId);
+      assert.equal(recreatedRun?.status, "waiting");
+      assert.isNull(recreatedRun?.completedAt);
+      assert.deepEqual(recreatedRun?.workCompletedAt, workCompletedAt);
+      // This layer is shared across foundation tests; do not leave a synthetic
+      // open run for the later process-recovery test to sweep.
+      yield* eventSink.write({
+        events: [
+          {
+            id: EventId.make("event:foundation-work-end-replay:terminal"),
+            type: "run.updated",
+            threadId,
+            runId,
+            providerInstanceId,
+            occurredAt: checkpointUpdatedAt,
+            payload: {
+              ...run,
+              status: "completed",
+              completedAt: checkpointUpdatedAt,
+              workCompletedAt,
+            },
+          },
+        ],
+      });
+    }),
+  );
+  it.effect("preserves a settled parent run while committing a delegated acknowledgement", () =>
+    Effect.gen(function* () {
+      const eventSink = yield* EventSink.EventSinkV2;
+      const projections = yield* ProjectionStore.ProjectionStoreV2;
+      const now = yield* DateTime.now;
+      const threadId = ThreadId.make("thread:foundation-settled-parent-ack");
+      const runId = RunId.make("run:foundation-settled-parent-ack");
+      const attemptId = RunAttemptId.make("attempt:foundation-settled-parent-ack");
+      const thread = makeThread(threadId, now);
+      const createdRun: OrchestrationV2Run = {
+        id: runId,
+        threadId,
+        ordinal: 1,
+        providerInstanceId,
+        modelSelection,
+        providerThreadId: null,
+        userMessageId: MessageId.make("message:foundation-settled-parent-ack"),
+        rootNodeId: null,
+        activeAttemptId: attemptId,
+        status: "running",
+        queuePosition: null,
+        requestedAt: now,
+        startedAt: now,
+        completedAt: null,
+        checkpointId: null,
+        contextHandoffId: null,
+      };
+      const delivery = {
+        disposition: "open",
+        nextGeneration: 2,
+        delivery: {
+          generation: 1,
+          messageId: MessageId.make("message:foundation-settled-parent-delivery"),
+          taskIds: [],
+        },
+      } as const;
+      const acknowledgedDelivery = { ...delivery, delivery: null };
+      const settledRun: OrchestrationV2Run = {
+        ...createdRun,
+        status: "completed",
+        completedAt: now,
+        delegatedCompletion: delivery,
+      };
+      yield* eventSink.write({
+        events: [
+          threadCreatedEvent({
+            id: "event:foundation-settled-parent-ack:thread",
+            thread,
+            now,
+          }),
+          {
+            id: EventId.make("event:foundation-settled-parent-ack:run-created"),
+            type: "run.created",
+            threadId,
+            runId,
+            providerInstanceId,
+            occurredAt: now,
+            payload: createdRun,
+          },
+          {
+            id: EventId.make("event:foundation-settled-parent-ack:run-settled"),
+            type: "run.updated",
+            threadId,
+            runId,
+            providerInstanceId,
+            occurredAt: now,
+            payload: settledRun,
+          },
+        ],
+      });
+
+      const acknowledgement = yield* eventSink.commitCommand({
+        commandId: CommandId.make("command:foundation-settled-parent-ack"),
+        threadId,
+        commandType: "delegated_task.completion-delivery.acknowledge",
+        acceptedAt: now,
+        events: [
+          {
+            id: EventId.make("event:foundation-settled-parent-ack:delivery"),
+            type: "run.updated",
+            threadId,
+            runId,
+            providerInstanceId,
+            occurredAt: now,
+            payload: {
+              ...createdRun,
+              delegatedCompletion: acknowledgedDelivery,
+            },
+          },
+        ],
+        effects: [],
+        updateDelegatedCompletionOnlyRunId: runId,
+      });
+      const acknowledgedEvent = acknowledgement.storedEvents[0]?.event;
+      assert.isDefined(acknowledgedEvent);
+      if (acknowledgedEvent?.type !== "run.updated") return;
+      assert.equal(acknowledgedEvent.payload.status, "completed");
+      assert.deepEqual(acknowledgedEvent.payload.completedAt, now);
+      assert.deepEqual(acknowledgedEvent.payload.delegatedCompletion, acknowledgedDelivery);
+      const projectedRun = (yield* projections.getThreadProjection(threadId)).runs.find(
+        (run) => run.id === runId,
+      );
+      assert.equal(projectedRun?.status, "completed");
+      assert.deepEqual(projectedRun?.completedAt, now);
+      assert.deepEqual(projectedRun?.delegatedCompletion, acknowledgedDelivery);
+    }),
+  );
+
   it.effect("projects oversized tool bodies before both replay and live RPC retention", () =>
     Effect.scoped(
       Effect.gen(function* () {
@@ -3427,6 +4072,8 @@ it.effect("publishes live events in commit order across concurrent writers", () 
   Effect.gen(function* () {
     const firstCommitted = yield* Deferred.make<void>();
     const releaseFirst = yield* Deferred.make<void>();
+    const secondWriterEntered = yield* Deferred.make<void>();
+    const interruptRequested = yield* Deferred.make<void>();
     // The first writer's post-commit wakeup stands in for any scheduler yield
     // between its commit and its publish.
     const layerPausingOutbox = Layer.effect(
@@ -3440,6 +4087,16 @@ it.effect("publishes live events in commit order across concurrent writers", () 
               Effect.andThen(Deferred.await(releaseFirst)),
               Effect.andThen(delegate.notifyAvailable(count)),
             ),
+          enqueue: (effects) =>
+            delegate
+              .enqueue(effects)
+              .pipe(
+                Effect.tap(() =>
+                  effects.length === 0
+                    ? Deferred.succeed(secondWriterEntered, undefined)
+                    : Effect.void,
+                ),
+              ),
         });
       }),
     ).pipe(Layer.provide(layerEffectOutboxProvided));
@@ -3480,8 +4137,6 @@ it.effect("publishes live events in commit order across concurrent writers", () 
         })
         .pipe(Effect.forkScoped);
       yield* Deferred.await(firstCommitted);
-      // The second writer commits after the first. It may run as far as it can
-      // before the first writer resumes.
       const secondWrite = yield* eventSink
         .write({
           events: [
@@ -3496,12 +4151,27 @@ it.effect("publishes live events in commit order across concurrent writers", () 
           Effect.provideService(Scheduler.MaxOpsBeforeYield, Number.POSITIVE_INFINITY),
           Effect.forkScoped,
         );
+      // The second writer reaches the publication lane while the first commit
+      // is paused before publishing.
+      yield* Deferred.await(secondWriterEntered);
+      yield* Effect.yieldNow;
+      const interruptSecond = yield* Deferred.succeed(interruptRequested, undefined).pipe(
+        Effect.andThen(Fiber.interrupt(secondWrite)),
+        Effect.forkScoped,
+      );
+      yield* Deferred.await(interruptRequested);
       yield* Effect.yieldNow;
       yield* Deferred.succeed(releaseFirst, undefined);
       yield* Fiber.join(firstWrite);
-      yield* Fiber.join(secondWrite);
+      yield* Fiber.join(interruptSecond);
 
-      const sequences = Array.from(yield* Fiber.join(published), (stored) => stored.sequence);
+      const collected = yield* Fiber.join(published).pipe(Effect.timeoutOption("2 seconds"));
+      assert.isTrue(Option.isSome(collected), "both committed events should reach the subscriber");
+      const sequences = Array.from(
+        Option.isSome(collected) ? collected.value : [],
+        (stored) => stored.sequence,
+      );
+      assert.lengthOf(sequences, 2);
       assert.deepEqual(
         sequences,
         [...sequences].sort((left, right) => left - right),

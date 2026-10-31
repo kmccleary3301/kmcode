@@ -35,7 +35,12 @@ import { traceCommand } from "./cli/trace.ts";
 import { triageCommand } from "./cli/triage.ts";
 import { bannerCommand } from "./cli/banner.ts";
 
-const layerCliRuntime = Layer.mergeAll(NodeServices.layer, NetService.layer);
+import * as ThreadLiveOverlay from "./orchestration-v2/ThreadLiveOverlay.ts";
+const layerCliRuntime = Layer.mergeAll(
+  NodeServices.layer,
+  NetService.layer,
+  ThreadLiveOverlay.layer,
+);
 
 const selectedProductProfile: ProductProfile = resolveRuntimeProductProfile();
 process.env.T3_PRODUCT_PROFILE = selectedProductProfile;

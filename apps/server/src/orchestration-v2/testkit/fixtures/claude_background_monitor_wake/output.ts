@@ -36,13 +36,16 @@ export function assertClaudeBackgroundMonitorWakeOutput(
     )
     .filter((task) => task.taskId === MONITOR_TASK_ID);
   // Claude's first roster snapshot lands one frame before the task_started
-  // that links the task to its Monitor call, so only that entry reads command.
+  // that links the task to its Monitor call, so only that entry reads command
+  // and lacks the Monitor's command line.
   assert.isAbove(rosterTasks.length, 1);
-  for (const task of rosterTasks.slice(1)) {
+  for (const { startedAt, ...task } of rosterTasks.slice(1)) {
+    assert.isDefined(startedAt);
     assert.deepEqual(task, {
       taskId: MONITOR_TASK_ID,
       description: "Background monitor test",
       kind: "monitor",
+      command: "sleep 8 && echo MONITOR_DONE",
     });
   }
   assert.deepEqual(projection.providerThreads[0]?.pendingBackgroundTasks ?? [], []);

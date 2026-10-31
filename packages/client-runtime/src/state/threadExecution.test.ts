@@ -1,12 +1,15 @@
 import {
+  EnvironmentId,
   TurnItemId,
   NodeId,
   MessageId,
   ProviderInstanceId,
   ProviderThreadId,
+  ProviderTurnId,
   ProviderSessionId,
   ProviderDriverKind,
   RunId,
+  RunAttemptId,
   ThreadId,
   type OrchestrationV2ExecutionNode,
   type OrchestrationV2RunStatus,
@@ -15,7 +18,7 @@ import * as DateTime from "effect/DateTime";
 import { usageLimitBlockedRun } from "@t3tools/shared/orchestrationV2ThreadError";
 import { describe, expect, it } from "vite-plus/test";
 
-import { v2Projection } from "./orchestrationV2TestFixtures.ts";
+import { v2Projection, v2ThreadShell } from "./orchestrationV2TestFixtures.ts";
 import {
   presentPendingBackgroundWork,
   presentProviderGoal,
@@ -27,9 +30,15 @@ import {
   deriveRunlessWorkStartedAt,
   deriveThreadActivityRun,
   deriveThreadRuntime,
+  threadRuntimeHasActiveWork,
   threadRuntimeHasInterruptibleRun,
 } from "./threadExecution.ts";
-import { threadRuntimeCanArchive, type ThreadRuntimeSummary } from "./models.ts";
+import {
+  presentThreadShell,
+  resolveThreadWorkingStartedAt,
+  threadRuntimeCanArchive,
+  type ThreadRuntimeSummary,
+} from "./models.ts";
 
 const now = DateTime.makeUnsafe("2026-07-28T10:00:00.000Z");
 
@@ -189,7 +198,98 @@ describe("thread execution presentation", () => {
       activeRunId: runningRun.id,
     });
     expect(threadRuntimeHasInterruptibleRun(runtime)).toBe(true);
+    expect(threadRuntimeHasActiveWork(runtime, deriveLatestThreadRun(projection))).toBe(true);
   });
+
+  it("marks an open run whose provider turn already ended", () => {
+    const attemptId = RunAttemptId.make("attempt-open");
+    const openRun = { ...run("run-open", 1, "running"), activeAttemptId: attemptId };
+    const providerTurn = {
+      id: ProviderTurnId.make("provider-turn-open"),
+      providerThreadId: ProviderThreadId.make("provider-thread-open"),
+      nodeId: NodeId.make("node-open"),
+      runAttemptId: attemptId,
+      nativeTurnRef: null,
+      ordinal: 1,
+      startedAt: now,
+      completedAt: null,
+    };
+    const runningProjection = {
+      ...v2Projection,
+      runs: [openRun],
+      providerTurns: [{ ...providerTurn, status: "running" as const }],
+      updatedAt: now,
+    };
+    const failedProjection = {
+      ...v2Projection,
+      runs: [openRun],
+      providerTurns: [{ ...providerTurn, status: "failed" as const, completedAt: now }],
+      updatedAt: now,
+    };
+
+    expect(deriveThreadActivityRun(runningProjection)?.turnEnded).toBeUndefined();
+    expect(deriveThreadActivityRun(failedProjection)).toMatchObject({
+      status: "running",
+      turnEnded: true,
+    });
+  });
+
+  it("ends interruptibility at native execution completion before checkpoint finalization", () => {
+    const workCompletedAt = DateTime.makeUnsafe("2026-07-28T10:05:00.000Z");
+    const ended = { ...run("run-ended", 1, "running"), workCompletedAt };
+    const projection = { ...v2Projection, runs: [ended], updatedAt: now };
+
+    expect(deriveThreadActivityRun(projection)).toMatchObject({
+      runId: ended.id,
+      status: "running",
+      workCompletedAt: "2026-07-28T10:05:00.000Z",
+      completedAt: null,
+    });
+    const runtime = deriveThreadRuntime(projection);
+    expect(runtime).toMatchObject({
+      status: "running",
+      activeRunId: null,
+      activityStartedAt: "2026-07-28T10:00:00.000Z",
+    });
+    expect(threadRuntimeHasInterruptibleRun(runtime)).toBe(false);
+    expect(threadRuntimeHasActiveWork(runtime, deriveLatestThreadRun(projection))).toBe(false);
+    expect(threadRuntimeHasActiveWork({ ...runtime!, status: "waiting" })).toBe(false);
+    expect(
+      threadRuntimeHasActiveWork({
+        status: "running",
+        activeRunId: null,
+        activityRunWorkCompletedAt: null,
+      }),
+    ).toBe(true);
+    expect(
+      threadRuntimeHasActiveWork(
+        { ...runtime!, activeRunId: RunId.make("run-newer-active") },
+        deriveLatestThreadRun(projection),
+      ),
+    ).toBe(true);
+    const queuedLatest = {
+      ...run("queued-after-work-end", 2, "queued"),
+      requestedAt: DateTime.add(now, { seconds: 10 }),
+      startedAt: null,
+    };
+    const queuedProjection = {
+      ...projection,
+      runs: [ended, queuedLatest],
+      updatedAt: DateTime.add(now, { seconds: 10 }),
+    };
+    const queuedRuntime = deriveThreadRuntime(queuedProjection);
+    expect(
+      threadRuntimeHasActiveWork(queuedRuntime, deriveLatestThreadRun(queuedProjection)),
+    ).toBe(true);
+    expect(deriveLatestThreadRun(queuedProjection)?.runId).toBe(queuedLatest.id);
+    expect(
+      resolveThreadWorkingStartedAt({
+        latestRun: deriveLatestThreadRun(queuedProjection),
+        runtime: queuedRuntime,
+      }),
+    ).toBeNull();
+  });
+
 
   it("presents a held queue as the stopped run instead of queued work", () => {
     const interrupted = { ...run("run-interrupted", 1, "interrupted"), completedAt: now };
@@ -653,6 +753,60 @@ describe("provider-reported model selection", () => {
         ],
       }),
     ).toBeNull();
+  });
+
+  it("keeps the active run working while identifying its background-job wait", () => {
+    const runningRun = run("run-background-wait", 1, "running");
+    const pendingBackgroundTasks = [
+      {
+        taskId: "omp:async:provider-turn",
+        kind: "background_task" as const,
+        description: "Background job",
+      },
+    ];
+    const activeProviderThread = { ...providerThread, pendingBackgroundTasks };
+    const activeProjection = {
+      ...projection,
+      runs: [runningRun],
+      providerThreads: [activeProviderThread],
+    };
+
+    const activeRuntime = deriveThreadRuntime(activeProjection);
+    expect(activeRuntime).toMatchObject({
+      status: "running",
+      activeRunId: runningRun.id,
+      waitingOnBackgroundJob: true,
+    });
+    expect(threadRuntimeHasInterruptibleRun(activeRuntime)).toBe(true);
+
+    const activeShell = presentThreadShell(EnvironmentId.make("environment"), {
+      ...v2ThreadShell,
+      activeProviderThreadId: providerThread.id,
+      activeRunId: runningRun.id,
+      latestRunId: runningRun.id,
+      status: "running",
+      pendingBackgroundTasks,
+    });
+    expect(activeShell.runtime).toMatchObject({
+      status: "running",
+      activeRunId: runningRun.id,
+      waitingOnBackgroundJob: true,
+    });
+    expect(threadRuntimeHasInterruptibleRun(activeShell.runtime)).toBe(true);
+
+    const settledShell = presentThreadShell(EnvironmentId.make("environment"), {
+      ...v2ThreadShell,
+      activeProviderThreadId: providerThread.id,
+      activeRunId: null,
+      latestRunId: runningRun.id,
+      status: "idle",
+      pendingBackgroundTasks,
+    });
+    expect(settledShell.runtime).toMatchObject({
+      status: "idle",
+      activeRunId: null,
+      waitingOnBackgroundJob: false,
+    });
   });
 
   it("shows the reported default in a subagent's effort label", () => {

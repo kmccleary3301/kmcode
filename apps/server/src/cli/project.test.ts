@@ -17,6 +17,7 @@ import {
   type ProjectId,
 } from "@t3tools/contracts";
 import * as NetService from "@t3tools/shared/Net";
+import * as ThreadLiveOverlay from "../orchestration-v2/ThreadLiveOverlay.ts";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
@@ -44,7 +45,11 @@ import {
   projectCommandErrorFromLiveServerRequest,
 } from "./project.ts";
 
-const layerCliRuntime = Layer.mergeAll(NodeServices.layer, NetService.layer);
+const layerCliRuntime = Layer.mergeAll(
+  NodeServices.layer,
+  NetService.layer,
+  ThreadLiveOverlay.layer,
+);
 const runCli = (args: ReadonlyArray<string>) =>
   Command.runWith(cli, { version: "0.0.0" })(args).pipe(Effect.provide(layerCliRuntime));
 

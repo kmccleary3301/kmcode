@@ -8,6 +8,8 @@ import {
   type OrchestrationV2ThreadProjection,
   type OrchestrationV2ThreadDetailSnapshot,
   type OrchestrationV2ThreadStreamItem,
+  type OrchestrationV2ThreadLiveItem,
+  NodeId,
 } from "@t3tools/contracts";
 import { afterEach, describe, expect, it, vi } from "@effect/vitest";
 import * as Deferred from "effect/Deferred";
@@ -33,12 +35,16 @@ import * as EnvironmentSupervisor from "../connection/supervisor.ts";
 import * as Persistence from "../platform/persistence.ts";
 import type { WsRpcProtocolClient } from "../rpc/protocol.ts";
 import type { RpcSession } from "../rpc/session.ts";
+import * as ThreadSnapshotLoader from "./threadSnapshotHttp.ts";
 import { createEnvironmentThreadDetailAtoms } from "./threadDetail.ts";
 import { THREAD_SNAPSHOT_IDLE_TTL_MS } from "./threadRetention.ts";
 import { v2Projection, v2ThreadId } from "./orchestrationV2TestFixtures.ts";
 import * as ThreadHistoryController from "./threadHistoryController.ts";
-import { createEnvironmentThreadStateAtoms, type EnvironmentThreadState } from "./threads.ts";
-import * as ThreadSnapshotLoader from "./threadSnapshotHttp.ts";
+import {
+  createEnvironmentThreadStateAtoms,
+  environmentThreadLiveOverlayAtom,
+  type EnvironmentThreadState,
+} from "./threads.ts";
 
 const TARGET = new PrimaryConnectionTarget({
   environmentId: EnvironmentId.make("environment-1"),
@@ -62,6 +68,10 @@ const makeHarness = Effect.fn("TestThreadAtoms.makeHarness")(function* (options?
     readonly events: Queue.Queue<OrchestrationV2ThreadStreamItem>;
     readonly closed: Deferred.Deferred<void>;
   }>();
+  const liveSubscriptions = yield* Queue.unbounded<{
+    readonly events: Queue.Queue<OrchestrationV2ThreadLiveItem>;
+    readonly closed: Deferred.Deferred<void>;
+  }>();
   const olderLoads = yield* Queue.unbounded<{
     readonly cursor: string | null;
     readonly response: Deferred.Deferred<OrchestrationV2ThreadHistoryPage>;
@@ -72,8 +82,12 @@ const makeHarness = Effect.fn("TestThreadAtoms.makeHarness")(function* (options?
   let diskLoads = 0;
   let opened = 0;
   let active = 0;
+  let liveOpened = 0;
+  let liveActive = 0;
   const client = {
-    [ORCHESTRATION_V2_WS_METHODS.subscribeThread]: (input: { readonly afterSequence?: number }) =>
+    [ORCHESTRATION_V2_WS_METHODS.subscribeThread]: (input: {
+      readonly afterSequence?: number;
+    }) =>
       Stream.unwrap(
         Effect.gen(function* () {
           const events = yield* Queue.unbounded<OrchestrationV2ThreadStreamItem>();
@@ -88,7 +102,32 @@ const makeHarness = Effect.fn("TestThreadAtoms.makeHarness")(function* (options?
                 active -= 1;
               }).pipe(Effect.andThen(Deferred.succeed(closed, undefined))),
           );
-          yield* Queue.offer(subscriptions, { afterSequence: input.afterSequence, events, closed });
+          yield* Queue.offer(subscriptions, {
+            afterSequence: input.afterSequence,
+            events,
+            closed,
+          });
+          return Stream.fromQueue(events);
+        }),
+      ),
+    [ORCHESTRATION_V2_WS_METHODS.subscribeThreadLive]: (_input: {
+      readonly threadId: string;
+    }) =>
+      Stream.unwrap(
+        Effect.gen(function* () {
+          const events = yield* Queue.unbounded<OrchestrationV2ThreadLiveItem>();
+          const closed = yield* Deferred.make<void>();
+          yield* Effect.acquireRelease(
+            Effect.sync(() => {
+              liveOpened += 1;
+              liveActive += 1;
+            }),
+            () =>
+              Effect.sync(() => {
+                liveActive -= 1;
+              }).pipe(Effect.andThen(Deferred.succeed(closed, undefined))),
+          );
+          yield* Queue.offer(liveSubscriptions, { events, closed });
           return Stream.fromQueue(events);
         }),
       ),
@@ -234,6 +273,8 @@ const makeHarness = Effect.fn("TestThreadAtoms.makeHarness")(function* (options?
     olderLoads,
     loadEarlier: () => historyController.loadEarlier(TARGET.environmentId, THREAD_ID),
     counts: () => ({ httpLoads, diskLoads, opened, active }),
+    liveSubscriptions,
+    liveCounts: () => ({ opened: liveOpened, active: liveActive }),
   };
 });
 
@@ -276,6 +317,55 @@ describe("createEnvironmentThreadStateAtoms", () => {
       unmountStatus();
       yield* Deferred.await(first.closed);
       expect(h.counts().active).toBe(0);
+    }),
+  );
+
+  it.effect("mounting the live overlay stream does not restart thread detail", () =>
+    Effect.gen(function* () {
+      const h = yield* makeHarness();
+      const overlayAtom = environmentThreadLiveOverlayAtom(TARGET.environmentId, THREAD_ID);
+      const unmountThread = h.registry.mount(h.stateAtom);
+      const threadSubscription = yield* Queue.take(h.subscriptions);
+      const unmountOverlay = h.registry.mount(
+        h.rawAtoms.liveOverlaySubscriptionAtom(TARGET.environmentId, THREAD_ID),
+      );
+      const liveSubscription = yield* Queue.take(h.liveSubscriptions);
+      const liveItem: OrchestrationV2ThreadLiveItem = {
+        kind: "subagent-live",
+        turnItemId: TurnItemId.make("thread-live-preview"),
+        subagentId: NodeId.make("not-yet-projected-subagent"),
+        liveContent: {
+          kind: "assistant",
+          text: "A live preview",
+          truncated: false,
+        },
+      };
+
+      expect(
+        currentThread(h.registry, h.stateAtom).subagents.some(
+          (subagent) => subagent.id === liveItem.subagentId,
+        ),
+      ).toBe(false);
+      yield* Queue.offer(liveSubscription.events, liveItem);
+      const overlay = yield* AtomRegistry.toStream(h.registry, overlayAtom).pipe(
+        Stream.filter((current) =>
+          current.subagentContentByTurnItemId.has(liveItem.turnItemId),
+        ),
+        Stream.runHead,
+        Effect.map(Option.getOrThrow),
+      );
+      expect(overlay.subagentContentByTurnItemId.get(liveItem.turnItemId)).toEqual({
+        subagentId: liveItem.subagentId,
+        liveContent: liveItem.liveContent,
+      });
+      expect(h.counts().opened).toBe(1);
+
+      unmountOverlay();
+      yield* Deferred.await(liveSubscription.closed);
+      expect(h.liveCounts()).toEqual({ opened: 1, active: 0 });
+      expect(h.counts().opened).toBe(1);
+      unmountThread();
+      yield* Deferred.await(threadSubscription.closed);
     }),
   );
 

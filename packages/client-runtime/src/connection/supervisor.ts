@@ -155,6 +155,7 @@ function availableState(intent: SupervisorIntent, generation: number): Superviso
     stage: null,
     attempt: 0,
     generation,
+    lastFailureConnection: null,
     lastFailure: null,
     retryAt: null,
   };
@@ -165,6 +166,7 @@ function offlineState(
   generation: number,
   attempt: number,
   lastFailure: ConnectionAttemptError | null,
+  lastFailureConnection: SupervisorConnectionState["lastFailureConnection"] = null,
 ): SupervisorConnectionState {
   return {
     desired: true,
@@ -173,6 +175,7 @@ function offlineState(
     stage: null,
     attempt,
     generation,
+    lastFailureConnection,
     lastFailure,
     retryAt: null,
   };
@@ -184,6 +187,7 @@ function connectingState(
   attempt: number,
   lastFailure: ConnectionAttemptError | null,
   stage: SupervisorConnectionState["stage"] = "preparing",
+  lastFailureConnection: SupervisorConnectionState["lastFailureConnection"] = null,
 ): SupervisorConnectionState {
   return {
     desired: true,
@@ -192,6 +196,7 @@ function connectingState(
     stage,
     attempt,
     generation,
+    lastFailureConnection,
     lastFailure,
     retryAt: null,
   };
@@ -279,6 +284,8 @@ export const make = Effect.fn("EnvironmentSupervisor.make")(function* (
   // closed or failed before answering, so the follow-up reconnect skips the
   // first backoff rung instead of sleeping.
   const probeUnanswered = yield* Ref.make(false);
+  const lastFailureConnectionRef = yield* Ref.make<"before-open" | "open" | null>(null);
+  const attemptSocketOpened = yield* Ref.make(false);
   const state = yield* SubscriptionRef.make<SupervisorConnectionState>(
     !initialIntent.desired
       ? availableState(initialIntent, 0)
@@ -414,8 +421,18 @@ export const make = Effect.fn("EnvironmentSupervisor.make")(function* (
     if ("prepared" in progress) {
       yield* SubscriptionRef.set(prepared, Option.some(progress.prepared));
     }
+    if (progress.stage === "synchronizing") {
+      yield* Ref.set(attemptSocketOpened, true);
+    }
     yield* setState(
-      connectingState(yield* Ref.get(intent), generation, attempt, lastFailure, progress.stage),
+      connectingState(
+        yield* Ref.get(intent),
+        generation,
+        attempt,
+        lastFailure,
+        progress.stage,
+        yield* Ref.get(lastFailureConnectionRef),
+      ),
     );
   });
 
@@ -677,6 +694,7 @@ export const make = Effect.fn("EnvironmentSupervisor.make")(function* (
     pendingRetry: Option.Option<PendingRetryTrace>,
     ignoreOffline: boolean,
   ) {
+    yield* Ref.set(attemptSocketOpened, false);
     const switchingTo = yield* Ref.get(preferredRouteId);
     yield* SubscriptionRef.set(prepared, Option.none());
     const establishment = yield* Effect.raceAllFirst([
@@ -768,6 +786,7 @@ export const make = Effect.fn("EnvironmentSupervisor.make")(function* (
     if (options?.learnRoutes !== undefined) {
       yield* learnRoutesFrom(options.learnRoutes, active.lease).pipe(Effect.forkScoped);
     }
+    yield* Ref.set(lastFailureConnectionRef, null);
     yield* setState({
       desired: true,
       network: currentIntent.network,
@@ -775,6 +794,7 @@ export const make = Effect.fn("EnvironmentSupervisor.make")(function* (
       stage: null,
       attempt,
       generation,
+      lastFailureConnection: null,
       lastFailure: null,
       retryAt: null,
     });
@@ -878,11 +898,13 @@ export const make = Effect.fn("EnvironmentSupervisor.make")(function* (
         failureCount = 0;
         latestFailure = null;
         pendingRetry = Option.none();
+        yield* Ref.set(lastFailureConnectionRef, null);
       }
       const currentIntent = yield* Ref.get(intent);
       if (!currentIntent.desired) {
         resetRetryLadder();
         latestFailure = null;
+        yield* Ref.set(lastFailureConnectionRef, null);
         yield* clearLease;
         yield* setState(availableState(currentIntent, generation));
         yield* waitForSignal;
@@ -890,7 +912,15 @@ export const make = Effect.fn("EnvironmentSupervisor.make")(function* (
       }
       if (currentIntent.network === "offline" && !replacing) {
         yield* clearLease;
-        yield* setState(offlineState(currentIntent, generation, failureCount + 1, latestFailure));
+        yield* setState(
+          offlineState(
+            currentIntent,
+            generation,
+            failureCount + 1,
+            latestFailure,
+            yield* Ref.get(lastFailureConnectionRef),
+          ),
+        );
         const applicationActivated = yield* waitForSignal;
         if (applicationActivated) {
           resetRetryLadder();
@@ -925,6 +955,9 @@ export const make = Effect.fn("EnvironmentSupervisor.make")(function* (
       const attemptSpan: Option.Option<Tracer.Span> = outcome.failure.attemptSpan;
       const error: ConnectionAttemptError = outcome.failure.error;
       latestFailure = error;
+      const failureConnection =
+        outcome.established || (yield* Ref.get(attemptSocketOpened)) ? "open" : "before-open";
+      yield* Ref.set(lastFailureConnectionRef, failureConnection);
       if (error._tag === "ConnectionBlockedError") {
         const blockedIntent = yield* Ref.get(intent);
         yield* setState({
@@ -936,6 +969,7 @@ export const make = Effect.fn("EnvironmentSupervisor.make")(function* (
           generation,
           lastFailure: error,
           retryAt: null,
+          lastFailureConnection: failureConnection,
         });
         const applicationActivated = yield* waitForSignal;
         if (applicationActivated) {
@@ -951,7 +985,16 @@ export const make = Effect.fn("EnvironmentSupervisor.make")(function* (
         // of sleeping the first backoff rung. Only this first attempt skips the
         // ladder; if it fails too, normal backoff resumes.
         resetRetryLadder();
-        yield* setState(connectingState(yield* Ref.get(intent), generation, 1, error));
+        yield* setState(
+          connectingState(
+            yield* Ref.get(intent),
+            generation,
+            1,
+            error,
+            "preparing",
+            failureConnection,
+          ),
+        );
         continue;
       }
 
@@ -971,6 +1014,7 @@ export const make = Effect.fn("EnvironmentSupervisor.make")(function* (
         stage: null,
         attempt,
         generation,
+        lastFailureConnection: failureConnection,
         lastFailure: error,
         retryAt: (yield* Clock.currentTimeMillis) + delayMs,
       });

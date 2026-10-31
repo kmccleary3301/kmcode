@@ -76,6 +76,29 @@ describe("composerContextClipboard", () => {
     ).toBeNull();
     expect(decodeComposerContextClipboardHtml("<p>Ordinary clipboard</p>")).toBeNull();
   });
+  it("round-trips context whose label contains an apostrophe", () => {
+    const fragment = JSON.stringify({
+      version: 1,
+      source: { environmentId: "env-1" },
+      records: [
+        {
+          version: 1,
+          kind: "terminal",
+          contextId: "terminal",
+          label: "Runner's output",
+          terminalId: "main",
+          terminalLabel: "Main",
+          lineStart: 1,
+          lineEnd: 1,
+          text: "Runner's output",
+        },
+      ],
+    });
+    const html = encodeComposerContextClipboardHtml("output", fragment);
+
+    expect(decodeComposerContextClipboardHtml(html)).toEqual(JSON.parse(fragment));
+  });
+
   it("accepts a large non-ASCII fragment through the HTML attribute", () => {
     // `encodeURIComponent` expands each CJK code unit to nine characters, so a fragment well
     // inside the character limit still produces a much longer attribute.

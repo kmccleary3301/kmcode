@@ -511,6 +511,29 @@ it.effect("logs a body's first 64 KiB by bytes, not characters", () =>
     }),
   ),
 );
+it.effect("drops a character split by the delivery log's body limit", () =>
+  withService(({ service }) =>
+    Effect.gen(function* () {
+      const { task } = yield* service.upsert(yield* webhookTaskInput({ enabled: false }));
+      const limit = 64 * 1024;
+      const euro = new TextEncoder().encode("€");
+      const body = new Uint8Array(limit - 1 + euro.length).fill(0x61);
+      body.set(euro, limit - 1);
+      yield* service.triggerWebhook(
+        requestFor(task, { body, bodyText: new TextDecoder().decode(body) }),
+      );
+      const [summary] = (yield* service.listWebhookDeliveries({ id: task.id })).deliveries;
+      const { delivery } = yield* service.getWebhookDelivery({
+        id: task.id,
+        deliveryId: summary!.id,
+      });
+      assert.isTrue(delivery.bodyTruncated);
+      assert.equal(delivery.bodyBytes, body.byteLength);
+      assert.equal(delivery.body.slice(-3), "aaa");
+      assert.equal(delivery.body.length, limit - 1);
+    }),
+  ),
+);
 
 it.effect("counts the prompt as the provider does, without surrounding whitespace", () =>
   withService(({ service, launches }) =>
@@ -549,6 +572,24 @@ it.effect("does not start a run when the filled-in prompt is too long", () =>
       const ok = yield* service.triggerWebhook(requestFor(task));
       assert.equal(ok._tag, "accepted");
       yield* Queue.take(launches);
+    }),
+  ),
+);
+it.effect("caps delivery history for oversized prompt failures", () =>
+  withService(({ service }) =>
+    Effect.gen(function* () {
+      const { task } = yield* service.upsert(yield* webhookTaskInput({ prompt: "{{body}}" }));
+      const text = "x".repeat(200_000);
+      const body = new TextEncoder().encode(text);
+      for (let index = 0; index < 21; index++) {
+        const result = yield* service.triggerWebhook(requestFor(task, { body, bodyText: text }));
+        assert.equal(result._tag, "accepted");
+      }
+      const deliveries = (yield* service.listWebhookDeliveries({ id: task.id })).deliveries;
+      assert.equal(
+        deliveries.filter((delivery) => delivery.outcome === "dispatch_failed").length,
+        20,
+      );
     }),
   ),
 );

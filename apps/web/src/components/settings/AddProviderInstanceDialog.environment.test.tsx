@@ -52,6 +52,7 @@ vi.mock("../../state/session", async (importOriginal) => {
 vi.mock("../ui/toast", () => ({ toastManager: { add: actions.toast } }));
 
 import { AddProviderInstanceDialog } from "./AddProviderInstanceDialog";
+import { ProviderAccentColorPicker } from "./ProviderAccentColorPicker";
 
 const remoteEnvironmentId = EnvironmentId.make("remote-device");
 const preparedAgent: AcpRegistrySearchAgent = {
@@ -247,6 +248,26 @@ describe("AddProviderInstanceDialog environment routing", () => {
     expect(settingsHooks.mutate).toHaveBeenCalledTimes(1);
     (authentication!.props.onFinish as () => void)();
     expect(onOpenChange).toHaveBeenCalledWith(false);
+  });
+
+  it("persists an explicitly added default provider accent color", async () => {
+    await selectPreparedAcp();
+    const identityStep = render();
+    const picker = visitElements(
+      identityStep,
+      (element) => element.type === ProviderAccentColorPicker,
+    );
+    expect(picker).not.toBeNull();
+    (picker!.props.onCommit as (value: string) => void)("#2563eb");
+
+    const identityStepWithColor = render();
+    (findByChildren(identityStepWithColor, "Continue to sign-in").props.onClick as () => void)();
+    await Promise.resolve();
+    expect(settingsHooks.mutate).toHaveBeenCalledWith({
+      operation: "create",
+      instanceId: "acpRegistry_kilo_code",
+      instance: expect.objectContaining({ accentColor: "#2563eb" }),
+    });
   });
 
   it("configures a manually entered registry agent from the first provider screen", async () => {

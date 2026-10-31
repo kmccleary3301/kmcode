@@ -475,6 +475,7 @@ function makeService(input: {
   readonly providers: ReadonlyArray<PullRequestProviderApi>;
   readonly resolveHandle?: SourceControlProviderRegistry.SourceControlProviderRegistry["Service"]["resolveHandle"];
   readonly resolveRepositoryIdentity?: RepositoryIdentityResolver.RepositoryIdentityResolver["Service"]["resolve"];
+  readonly onProjectRead?: () => void;
 }) {
   // Built into the test's own scope rather than provided call by call: the marks store owns a
   // database, and `Effect.provide` would close it the moment the service was handed back.
@@ -495,11 +496,17 @@ function makeService(input: {
         }),
         Layer.mock(ProjectService.ProjectService)({
           listShells: (options) =>
-            Effect.succeed(
-              input.projects.filter((project) => options?.projectIds?.includes(project.id) ?? true),
-            ),
+            Effect.sync(() => {
+              input.onProjectRead?.();
+              return input.projects.filter(
+                (project) => options?.projectIds?.includes(project.id) ?? true,
+              );
+            }),
           getShell: (projectId) =>
-            Effect.succeed(Option.fromNullishOr(input.projects.find((p) => p.id === projectId))),
+            Effect.sync(() => {
+              input.onProjectRead?.();
+              return Option.fromNullishOr(input.projects.find((p) => p.id === projectId));
+            }),
         }),
         Layer.mock(RepositoryIdentityResolver.RepositoryIdentityResolver)({
           resolve: input.resolveRepositoryIdentity ?? (() => Effect.succeed(null)),
@@ -670,6 +677,61 @@ it.effect("reads nothing from a host with no implementation, but reports it", ()
       [
         { kind: "github", configured: true, projectCount: 1 },
         { kind: "gitlab", configured: false, projectCount: 1 },
+      ],
+    );
+  }),
+);
+it.effect("does not call Bitbucket Cloud for a self-hosted Bitbucket host", () =>
+  Effect.gen(function* () {
+    const readHosts = new Set<string>();
+    const service = yield* makeService({
+      projects: [
+        project({
+          id: "cloud",
+          title: "Bitbucket Cloud",
+          workspaceRoot: "/cloud",
+          repository: "acme/web",
+          provider: "bitbucket",
+          host: "bitbucket.org",
+        }),
+        project({
+          id: "server",
+          title: "Bitbucket Server",
+          workspaceRoot: "/server",
+          repository: "acme/api",
+          provider: "bitbucket",
+          host: "bitbucket.example.com",
+        }),
+      ],
+      providers: [
+        fakeProvider("bitbucket", {
+          servesHost: (host) => host === "bitbucket.org",
+          getViewer: ({ host }) =>
+            Effect.sync(() => {
+              readHosts.add(host ?? "");
+              return "bilal";
+            }),
+          listChangeRequests: ({ host }) =>
+            Effect.sync(() => {
+              readHosts.add(host);
+              return { items: [], truncated: false, continues: true };
+            }),
+        }),
+      ],
+    });
+
+    const result = yield* service.list({ state: "open" });
+
+    assert.deepStrictEqual([...readHosts], ["bitbucket.org"]);
+    assert.deepStrictEqual(
+      result.providers.map(({ host, configured, detail }) => ({ host, configured, detail })),
+      [
+        { host: "bitbucket.org", configured: true, detail: null },
+        {
+          host: "bitbucket.example.com",
+          configured: false,
+          detail: "This host cannot be browsed here yet.",
+        },
       ],
     );
   }),
@@ -1834,6 +1896,39 @@ it.effect("reports repositories on a host that could not be read", () =>
   }),
 );
 
+it.effect("shows GitHub credential guidance for an unreadable repository", () =>
+  Effect.gen(function* () {
+    const accessHint = "Your saved GitHub token can't see it. Give it access.";
+    const service = yield* makeService({
+      projects: [project({ id: "p1", title: "web", workspaceRoot: "/a", repository: "acme/web" })],
+      providers: [
+        fakeProvider("github", {
+          listChangeRequests: () =>
+            Effect.fail(
+              new PullRequestProviderError({
+                provider: "github",
+                operation: "listChangeRequests",
+                reason: "not-found",
+                detail: "GitHub could not find the repository.",
+                accessHint,
+              }),
+            ),
+        }),
+      ],
+    });
+
+    const result = yield* service.list({ state: "open" });
+
+    assert.deepStrictEqual(result.errors, [
+      {
+        projectId: "p1" as ProjectId,
+        projectTitle: "web",
+        message: `acme/web could not be read. ${accessHint}`,
+      },
+    ]);
+  }),
+);
+
 it.effect("stops new reads after a rate limit while leaving manual actions available", () =>
   Effect.gen(function* () {
     let listCalls = 0;
@@ -2296,7 +2391,11 @@ it.effect("resolves a project's repository identity when its shell has none cach
 it.effect("routes a hosted reference to another repository through a project on that host", () =>
   Effect.gen(function* () {
     const seen: Array<{ cwd: string; repository: string; host: string }> = [];
+    let projectReads = 0;
     const service = yield* makeService({
+      onProjectRead: () => {
+        projectReads += 1;
+      },
       projects: [
         project({ id: "frontend", title: "web", workspaceRoot: "/web", repository: "acme/web" }),
       ],
@@ -2317,7 +2416,17 @@ it.effect("routes a hosted reference to another repository through a project on 
     );
 
     assert.strictEqual(summary.number, 7);
-    assert.deepStrictEqual(seen, [{ cwd: "/web", repository: "acme/api", host: "github.com" }]);
+    const readsPerReference = projectReads;
+    const read = (number: number) =>
+      service.summary(
+        { projectId: "frontend" as ProjectId, host: "github.com", repository: "acme/api", number },
+        { recoverTransientFailure: false },
+      );
+    assert.isAbove(readsPerReference, 2);
+    yield* service.withSharedProjectReads(Effect.all([read(8), read(9), read(10)]));
+    assert.strictEqual(projectReads, readsPerReference + 2);
+    yield* read(11);
+    assert.strictEqual(projectReads, readsPerReference * 2 + 2);
   }),
 );
 
@@ -3821,6 +3930,98 @@ it.effect("does not revive old summaries when project epochs are evicted", () =>
     for (let index = 0; index < 2048; index++)
       yield* service.refreshAfterTurn(`project-${index}` as ProjectId);
     assert.strictEqual((yield* service.summary(ref))?.title, "new");
+  }),
+);
+
+it.effect("refreshes drop provider-owned change request reads", () =>
+  Effect.gen(function* () {
+    const forgotten: Array<{ readonly repository: string; readonly number?: number } | undefined> =
+      [];
+    const service = yield* makeService({
+      projects: [
+        project({
+          id: "p1",
+          title: "web",
+          workspaceRoot: "/a",
+          repository: "acme/web",
+          provider: "gitlab",
+        }),
+      ],
+      providers: [
+        fakeProvider("gitlab", {
+          forgetChangeRequestReads: (scope) => Effect.sync(() => void forgotten.push(scope)),
+        }),
+      ],
+    });
+    const reference = { projectId: "p1" as ProjectId, repository: "acme/web", number: 1 };
+
+    yield* service.invalidate({ reference });
+    yield* service.refreshAfterTurn(reference.projectId);
+    yield* service.invalidate({});
+
+    assert.deepStrictEqual(forgotten, [
+      { repository: "acme/web", number: 1 },
+      undefined,
+      undefined,
+    ]);
+  }),
+);
+
+it.effect("a read during refresh cannot keep a provider's old change request", () =>
+  Effect.gen(function* () {
+    let hostTitle = "old";
+    let held: string | undefined;
+    let gate:
+      | { readonly entered: Deferred.Deferred<void>; readonly release: Deferred.Deferred<void> }
+      | undefined;
+    const service = yield* makeService({
+      projects: [
+        project({
+          id: "p1",
+          title: "web",
+          workspaceRoot: "/a",
+          repository: "acme/web",
+          provider: "gitlab",
+        }),
+      ],
+      providers: [
+        fakeProvider("gitlab", {
+          getChangeRequest: () =>
+            Effect.sync(() => {
+              held ??= hostTitle;
+              return { ...hostedChangeRequest("body"), title: held };
+            }),
+          forgetChangeRequestReads: () =>
+            Effect.gen(function* () {
+              if (gate !== undefined) {
+                yield* Deferred.succeed(gate.entered, undefined);
+                yield* Deferred.await(gate.release);
+              }
+              held = undefined;
+            }),
+        }),
+      ],
+    });
+    const reference = { projectId: "p1" as ProjectId, repository: "acme/web", number: 1 };
+    const refreshWithReadInBetween = (refresh: Effect.Effect<void>) =>
+      Effect.gen(function* () {
+        gate = { entered: yield* Deferred.make<void>(), release: yield* Deferred.make<void>() };
+        const running = yield* refresh.pipe(Effect.forkChild());
+        yield* Deferred.await(gate.entered);
+        yield* service.detail(reference);
+        yield* Deferred.succeed(gate.release, undefined);
+        yield* Fiber.join(running);
+        gate = undefined;
+      });
+
+    assert.strictEqual((yield* service.detail(reference)).title, "old");
+    hostTitle = "after turn";
+    yield* refreshWithReadInBetween(service.refreshAfterTurn(reference.projectId));
+    assert.strictEqual((yield* service.detail(reference)).title, "after turn");
+
+    hostTitle = "after refresh";
+    yield* refreshWithReadInBetween(service.invalidate({ reference }));
+    assert.strictEqual((yield* service.detail(reference)).title, "after refresh");
   }),
 );
 

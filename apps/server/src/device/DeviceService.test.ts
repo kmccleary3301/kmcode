@@ -19,6 +19,7 @@ import * as Stream from "effect/Stream";
 import { HttpClient, HttpClientResponse } from "effect/http";
 import * as ServerSettings from "../serverSettings.ts";
 import * as DeviceHost from "./DeviceHost.ts";
+import { agentDeviceSession } from "./AgentDeviceTarget.ts";
 import { NodeRuntimeUnavailableError } from "@t3tools/shared/nodeRuntime";
 
 import * as DeviceService from "./DeviceService.ts";
@@ -69,6 +70,8 @@ const fixture = Effect.fn("fixture")(function* (
   runtimeFailure?: NodeRuntimeUnavailableError | DeviceHost.DeviceHostError,
   inspectError = false,
   installTool?: Parameters<typeof DeviceService.makeWithHosts>[3],
+  screenshotFailure = false,
+  releaseAgentSession?: NonNullable<DeviceHost.DeviceHostReady["releaseAgentSession"]>,
 ) {
   const settings = yield* Ref.make(DEFAULT_SERVER_SETTINGS);
   const starts: string[] = [];
@@ -122,7 +125,10 @@ const fixture = Effect.fn("fixture")(function* (
           agentDevice: { baseUrl: "http://agent.test", token: "test", entryPath: "/agent" },
         };
       }),
-    current: Effect.succeed(null),
+    current: Effect.succeed({
+      ...ready,
+      ...(releaseAgentSession ? { releaseAgentSession } : {}),
+    }),
     stopAgent: Effect.sync(() => {
       agentStops.push("stop");
     }),
@@ -165,6 +171,12 @@ const fixture = Effect.fn("fixture")(function* (
         Effect.gen(function* () {
           requests.push(request.url);
           if (request.url.includes("/api/screenshot")) {
+            if (screenshotFailure) {
+              return HttpClientResponse.fromWeb(
+                request,
+                new Response("private hub output", { status: 503 }),
+              );
+            }
             return HttpClientResponse.fromWeb(
               request,
               new Response(new Uint8Array([137, 80, 78, 71])),
@@ -359,6 +371,131 @@ describe("device discovery after server restart", () => {
       expect(capture.device.id).toBe("Pixel_API_35");
       expect(Array.from(capture.png)).toEqual([137, 80, 78, 71]);
       expect(requests.some((url) => url.endsWith("/api/devices"))).toBe(true);
+    }).pipe(Effect.scoped),
+  );
+});
+
+it.effect("classifies rejected screenshot responses as hub rejections", () =>
+  Effect.gen(function* () {
+    const { service, settings } = yield* fixture(
+      Effect.void,
+      undefined,
+      false,
+      undefined,
+      false,
+      undefined,
+      true,
+    );
+    yield* Ref.update(settings, (current) => ({ ...current, enableDeviceSupport: true }));
+    const error = yield* service
+      .screenshot({ deviceId: DeviceId.make("Pixel_API_35") })
+      .pipe(Effect.flip);
+    expect(error).toMatchObject({
+      operation: "screenshot",
+      reason: "hub_rejected",
+    });
+  }).pipe(Effect.scoped),
+);
+
+describe("agent session release on close", () => {
+  it.effect("releases only the closing thread's claim and remains idempotent", () =>
+    Effect.gen(function* () {
+      const released: Array<{ readonly session: string; readonly deviceId: string }> = [];
+      const { service, requests } = yield* fixture(
+        Effect.void,
+        undefined,
+        false,
+        undefined,
+        false,
+        undefined,
+        false,
+        (session, deviceId) =>
+          Effect.sync(() => {
+            released.push({ session, deviceId });
+          }),
+      );
+      yield* service.configure({ enabled: true, agentAccessEnabled: true });
+      const threadId = ThreadId.make("first");
+      const otherThreadId = ThreadId.make("other");
+      const session = yield* service.open({
+        threadId,
+        deviceId: "Pixel_API_35",
+        platform: "android",
+      });
+      yield* service.open({
+        threadId: otherThreadId,
+        deviceId: session.deviceId,
+        platform: "android",
+      });
+      const name = yield* agentDeviceSession(threadId, LOCAL_DEVICE_HOST_ID, session.deviceId).pipe(
+        Effect.provide(NodeCrypto.layer),
+      );
+
+      yield* service.close({ threadId, deviceId: session.deviceId });
+      yield* service.close({ threadId, deviceId: session.deviceId });
+
+      expect(released).toEqual([{ session: name, deviceId: session.deviceId }]);
+      expect((yield* service.state).sessions.map((entry) => entry.threadId)).toEqual([
+        otherThreadId,
+      ]);
+      expect(
+        (yield* service.state).devices.find((device) => device.id === session.deviceId)?.booted,
+      ).toBe(true);
+      expect(requests.some((url) => url.endsWith("/shutdown"))).toBe(false);
+    }).pipe(Effect.scoped),
+  );
+
+  it.effect("retains the claim after a failed release and retries before shutdown", () =>
+    Effect.gen(function* () {
+      let fail = true;
+      const released: string[] = [];
+      const { service, requests } = yield* fixture(
+        Effect.void,
+        undefined,
+        false,
+        undefined,
+        false,
+        undefined,
+        false,
+        (session) =>
+          Effect.sync(() => {
+            released.push(session);
+          }).pipe(
+            Effect.flatMap(() =>
+              fail
+                ? Effect.fail(
+                    new DeviceOperationError({
+                      operation: "close",
+                      reason: "request_failed",
+                      cause: new Error("offline"),
+                    }),
+                  )
+                : Effect.void,
+            ),
+          ),
+      );
+      yield* service.configure({ enabled: true, agentAccessEnabled: true });
+      const threadId = ThreadId.make("retry");
+      const session = yield* service.open({
+        threadId,
+        deviceId: "Pixel_API_35",
+        platform: "android",
+      });
+      const name = yield* agentDeviceSession(threadId, LOCAL_DEVICE_HOST_ID, session.deviceId).pipe(
+        Effect.provide(NodeCrypto.layer),
+      );
+
+      const failed = yield* Effect.exit(service.close({ threadId, shutdown: true }));
+      expect(Exit.isFailure(failed)).toBe(true);
+      expect((yield* service.state).sessions).toHaveLength(1);
+      expect(requests.some((url) => url.endsWith("/shutdown"))).toBe(false);
+
+      fail = false;
+      yield* service.close({ threadId, shutdown: true });
+
+      expect(released).toEqual([name, name]);
+      expect((yield* service.state).sessions).toEqual([]);
+      expect(requests.some((url) => url.endsWith("/shutdown"))).toBe(true);
     }).pipe(Effect.scoped),
   );
 });

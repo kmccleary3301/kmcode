@@ -21,6 +21,7 @@ import { describe, expect, it } from "vite-plus/test";
 import { v2Projection, v2ThreadShell } from "./orchestrationV2TestFixtures.ts";
 import {
   presentPendingBackgroundWork,
+  presentRunStop,
   presentProviderGoal,
   deriveReportedModelSelection,
   deriveLatestThreadRun,
@@ -63,6 +64,52 @@ function run(id: string, ordinal: number, status: OrchestrationV2RunStatus) {
 }
 
 describe("thread execution presentation", () => {
+  it("presents an outstanding stop and exposes Force stop after the provider times out", () => {
+    const activeRun = run("stop", 1, "running");
+    const request = {
+      id: TurnItemId.make("stop-request"),
+      threadId: v2Projection.thread.id,
+      runId: activeRun.id,
+      nodeId: null,
+      providerThreadId: null,
+      providerTurnId: null,
+      nativeItemRef: null,
+      parentItemId: null,
+      ordinal: 1,
+      type: "run_interrupt_request" as const,
+      status: "completed" as const,
+      title: "Stop requested",
+      startedAt: now,
+      completedAt: now,
+      updatedAt: now,
+      message: "Stop requested",
+    };
+    const unresponsiveRequest = { ...request, unresponsiveAt: now };
+    expect(
+      presentRunStop({
+        ...v2Projection,
+        runs: [activeRun],
+        turnItems: [request],
+      }),
+    ).toMatchObject({
+      state: "stopping",
+      runId: activeRun.id,
+      requestedAt: DateTime.formatIso(now),
+      background: false,
+    });
+    expect(
+      presentRunStop({
+        ...v2Projection,
+        runs: [{ ...activeRun, status: "completed" }],
+        turnItems: [unresponsiveRequest],
+      }),
+    ).toMatchObject({
+      state: "unresponsive",
+      runId: activeRun.id,
+      background: true,
+    });
+  });
+
   it("derives the current root failure without inheriting errors from children or previous runs", () => {
     const failed = { ...run("limited", 1, "failed"), rootNodeId: NodeId.make("root") };
     const item = {
@@ -278,9 +325,9 @@ describe("thread execution presentation", () => {
       updatedAt: DateTime.add(now, { seconds: 10 }),
     };
     const queuedRuntime = deriveThreadRuntime(queuedProjection);
-    expect(
-      threadRuntimeHasActiveWork(queuedRuntime, deriveLatestThreadRun(queuedProjection)),
-    ).toBe(true);
+    expect(threadRuntimeHasActiveWork(queuedRuntime, deriveLatestThreadRun(queuedProjection))).toBe(
+      true,
+    );
     expect(deriveLatestThreadRun(queuedProjection)?.runId).toBe(queuedLatest.id);
     expect(
       resolveThreadWorkingStartedAt({
@@ -289,7 +336,6 @@ describe("thread execution presentation", () => {
       }),
     ).toBeNull();
   });
-
 
   it("presents a held queue as the stopped run instead of queued work", () => {
     const interrupted = { ...run("run-interrupted", 1, "interrupted"), completedAt: now };
@@ -870,5 +916,13 @@ describe("presentProviderGoal", () => {
     expect(
       presentProviderGoal({ objective: "All tests pass", status: "active" }, false).title,
     ).toBe("Goal set");
+  });
+  it("rounds token counts that reach one million to 1m", () => {
+    expect(
+      presentProviderGoal(
+        { objective: "Ship the feature", status: "active", tokensUsed: 999_500 },
+        true,
+      ).usage,
+    ).toBe("1m tokens");
   });
 });

@@ -23,6 +23,7 @@ it.effect("preserves installed status after probes and cleans failed agent activ
     let forwards = 0;
     let failForward = true;
     let rejectConfig = true;
+    let releases = 0;
     const spawner = ChildProcessSpawner.make((command) =>
       Effect.gen(function* () {
         if (command._tag !== "StandardCommand") return yield* Effect.die("Unexpected command");
@@ -106,7 +107,13 @@ it.effect("preserves installed status after probes and cleans failed agent activ
       Effect.provideService(
         HttpClient.HttpClient,
         HttpClient.make((request) =>
-          Effect.succeed(HttpClientResponse.fromWeb(request, new Response("ok"))),
+          Effect.sync(() => {
+            if (request.url.endsWith("/rpc")) {
+              releases++;
+              return HttpClientResponse.fromWeb(request, Response.json({ result: { ok: true } }));
+            }
+            return HttpClientResponse.fromWeb(request, new Response("ok"));
+          }),
         ),
       ),
     );
@@ -130,6 +137,11 @@ it.effect("preserves installed status after probes and cleans failed agent activ
     yield* host.ensureAgentReady(() => Effect.void);
     yield* host.platformAvailability("ios");
     expect((yield* host.summary).agentDeviceInstalled).toBe(true);
+    const agentReady = yield* host.current;
+    if (!agentReady?.releaseAgentSession)
+      return yield* Effect.die("Agent session release is unavailable");
+    yield* agentReady.releaseAgentSession("fixture-session", "fixture-device");
+    expect(releases).toBe(1);
     yield* host.stopAgent;
     expect(forwards).toBe(1);
     yield* host.stop;

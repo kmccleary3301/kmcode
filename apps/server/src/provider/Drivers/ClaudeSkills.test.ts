@@ -89,6 +89,50 @@ it.layer(NodeServices.layer)("discoverClaudeSkills", (it) => {
     }),
   );
 
+  it.effect("discovers skills from every --add-dir launch directory", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const tempDir = yield* fs.makeTempDirectoryScoped({ prefix: "t3-claude-skills-" });
+      const configDir = path.join(tempDir, "claude-home");
+      const workspace = path.join(tempDir, "workspace");
+      const sharedDirectory = path.join(tempDir, "shared skills");
+
+      yield* writeSkill(
+        path.join(workspace, "external-apps", ".claude", "skills"),
+        "app-skill",
+        "---\nname: app-skill\n---",
+      );
+      yield* writeSkill(
+        path.join(workspace, "external-libs", ".claude", "skills"),
+        "lib-skill",
+        "---\nname: lib-skill\n---",
+      );
+      yield* writeSkill(
+        path.join(sharedDirectory, ".claude", "skills"),
+        "shared-skill",
+        "---\nname: shared-skill\n---",
+      );
+
+      const skills = yield* discoverClaudeSkills(
+        {
+          homePath: configDir,
+          launchArgs: `--add-dir external-apps external-libs --verbose --add-dir="${sharedDirectory}"`,
+        },
+        workspace,
+      );
+
+      assert.deepEqual(
+        skills.map(({ name, scope }) => [name, scope]),
+        [
+          ["app-skill", "project"],
+          ["lib-skill", "project"],
+          ["shared-skill", "project"],
+        ],
+      );
+    }),
+  );
+
   it.effect("prefers user skills on name collisions even with a stray .agents copy", () =>
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;

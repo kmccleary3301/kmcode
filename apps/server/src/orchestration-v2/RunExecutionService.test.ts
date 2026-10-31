@@ -36,8 +36,10 @@ import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Ref from "effect/Ref";
 import * as Stream from "effect/Stream";
+import { SqlError, classifySqliteError } from "effect/sql/SqlError";
 
 import * as McpSessionRegistry from "../mcp/McpSessionRegistry.ts";
+import { toPersistenceSqlError } from "../persistence/Errors.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import * as CheckpointService from "./CheckpointService.ts";
 import type { PendingOrchestrationEffectV2 } from "./EffectOutbox.ts";
@@ -1470,14 +1472,16 @@ it.effect("persists root work completion before checkpoint finalization", () =>
 
     const persisted = yield* Ref.get(updates);
     const executionEnded = persisted.find((update) => update.phase === "guarded");
-    if (executionEnded === undefined) throw new Error("root work-completion update was not persisted");
+    if (executionEnded === undefined)
+      throw new Error("root work-completion update was not persisted");
     assert.equal(executionEnded.run.status, "running");
     assert.isNull(executionEnded.run.completedAt);
     assert.deepEqual(executionEnded.run.workCompletedAt, workCompletedAt);
     assert.isEmpty(executionEnded.effects);
 
     const checkpointPending = persisted.find((update) => update.phase === "terminal");
-    if (checkpointPending === undefined) throw new Error("terminal checkpoint update was not persisted");
+    if (checkpointPending === undefined)
+      throw new Error("terminal checkpoint update was not persisted");
     assert.equal(checkpointPending.run.status, "waiting");
     assert.isNull(checkpointPending.run.completedAt);
     assert.deepEqual(checkpointPending.run.workCompletedAt, workCompletedAt);
@@ -1533,6 +1537,37 @@ it.effect("keeps ingesting a child thread's late background item completion", ()
       "root-finalized",
       "subagent:completed",
       "turn_item:completed",
+    ]);
+  }),
+);
+
+it.effect("keeps ingesting queued background work after the provider probe goes idle", () =>
+  Effect.gen(function* () {
+    const observed = yield* runBackgroundItemScenario(
+      "queued-background-work",
+      (ids) => [
+        {
+          type: "background_work.updated",
+          driver,
+          providerTurnId: ids.rootProviderTurnId,
+          pending: true,
+        },
+        rootTerminalEvent(ids, "completed"),
+        {
+          type: "background_work.updated",
+          driver,
+          providerTurnId: ids.rootProviderTurnId,
+          pending: false,
+        },
+      ],
+      {
+        hasPendingBackgroundWorkForThread: () => Effect.succeed(false),
+      },
+    );
+    assert.deepEqual(observed, [
+      "background_work:pending",
+      "root-finalized",
+      "background_work:idle",
     ]);
   }),
 );
@@ -3505,6 +3540,35 @@ it.effect("refreshes pull requests after a provider stream exits with an error",
   }),
 );
 
+it.effect("surfaces SQLite errors from provider event ingestion", () =>
+  Effect.gen(function* () {
+    const databaseError = toPersistenceSqlError("OrchestrationEventStore.appendAgentEvents:insert")(
+      new SqlError({
+        reason: classifySqliteError(
+          Object.assign(new Error("unable to open database file"), { errcode: 14 }),
+        ),
+      }),
+    );
+    const { written, observed } = yield* captureRootRunTermination({
+      key: "ingestion:sqlite-error",
+      shouldFinalizeRun: () => Effect.succeed(true),
+      events: (ids) => Stream.make(rootTerminalEvent(ids, "completed")),
+      ingestNormalized: () =>
+        Effect.fail(
+          new ProviderEventIngestor.ProviderEventPublishError({
+            providerSessionId: ProviderSessionId.make("session:sqlite-error"),
+            eventCount: 1,
+            cause: databaseError,
+          }),
+        ),
+    });
+    assert.deepEqual(observed, ["run:failed", "pull-requests-refreshed"]);
+    const error = written.find((item) => item.type === "error");
+    assert.include(error?.failure.message ?? "", "(SQLITE_CANTOPEN)");
+    assert.include(error?.failure.message ?? "", "KM Code server");
+  }),
+);
+
 it.effect("refreshes pull requests only once when startup failure closes its event stream", () =>
   Effect.gen(function* () {
     const ingestionStarted = yield* Deferred.make<void>();
@@ -3557,6 +3621,7 @@ function captureRootRunTermination(input: {
     ids: BackgroundScenarioIds,
   ) => Stream.Stream<ProviderAdapterV2Event, ProviderAdapterV2Error>;
   readonly startTurn?: ProviderAdapterV2SessionRuntime["startTurn"];
+  readonly ingestNormalized?: ProviderEventIngestor.ProviderEventIngestorV2Shape["ingestNormalized"];
   readonly refreshAfterTurn?: Effect.Effect<void>;
 }) {
   return Effect.gen(function* () {
@@ -3623,7 +3688,7 @@ function captureRootRunTermination(input: {
           }),
           IdAllocator.layer,
           Layer.mock(ProviderEventIngestor.ProviderEventIngestorV2)({
-            ingestNormalized: () => Effect.succeed([]),
+            ingestNormalized: input.ingestNormalized ?? (() => Effect.succeed([])),
           }),
           ServerSettings.layerTest(),
           Layer.succeed(RunFinalizationService.RunFinalizationObserver, {
@@ -4055,6 +4120,9 @@ function runBackgroundItemScenario(
   makeEvents: (ids: BackgroundScenarioIds) => ReadonlyArray<ProviderAdapterV2Event>,
   options?: {
     readonly keepEventStreamOpen?: boolean;
+    readonly hasPendingBackgroundWorkForThread?: (
+      providerThread: OrchestrationV2ProviderThread,
+    ) => Effect.Effect<boolean>;
     readonly loadInheritedBackgroundTurnItems?: () => Effect.Effect<
       ReadonlyArray<{ readonly id: TurnItemId; readonly runId: RunId }>
     >;
@@ -4072,19 +4140,19 @@ function runBackgroundItemScenario(
   return Effect.gen(function* () {
     const ids = backgroundScenarioIds(key);
     const now = yield* DateTime.now;
-  const observeRunUpdates = (
-    phase: "guarded" | "terminal",
-    events: ReadonlyArray<OrchestrationV2DomainEvent>,
-    effects: ReadonlyArray<PendingOrchestrationEffectV2>,
-  ) =>
-    Effect.gen(function* () {
-      if (options?.onRunUpdate === undefined) return;
-      for (const event of events) {
-        if (event.type === "run.updated" && event.runId === ids.runId) {
-          yield* options.onRunUpdate({ phase, run: event.payload, effects });
+    const observeRunUpdates = (
+      phase: "guarded" | "terminal",
+      events: ReadonlyArray<OrchestrationV2DomainEvent>,
+      effects: ReadonlyArray<PendingOrchestrationEffectV2>,
+    ) =>
+      Effect.gen(function* () {
+        if (options?.onRunUpdate === undefined) return;
+        for (const event of events) {
+          if (event.type === "run.updated" && event.runId === ids.runId) {
+            yield* options.onRunUpdate({ phase, run: event.payload, effects });
+          }
         }
-      }
-    });
+      });
     const providerInstanceId = ProviderInstanceId.make("codex");
     const observed = yield* Ref.make<ReadonlyArray<string>>([]);
     const ingestionDone = yield* Deferred.make<void>();
@@ -4133,6 +4201,12 @@ function runBackgroundItemScenario(
                     `subagent:${event.subagent.status}`,
                   ]);
                 }
+                if (event.type === "background_work.updated") {
+                  yield* Ref.update(observed, (current) => [
+                    ...current,
+                    `background_work:${event.pending ? "pending" : "idle"}`,
+                  ]);
+                }
                 return [];
               }),
           }),
@@ -4149,6 +4223,11 @@ function runBackgroundItemScenario(
         providerSessionId: ProviderSessionId.make(`session:${key}`),
         session: {
           events: Stream.empty,
+          ...(options?.hasPendingBackgroundWorkForThread === undefined
+            ? {}
+            : {
+                hasPendingBackgroundWorkForThread: options.hasPendingBackgroundWorkForThread,
+              }),
           subscribeEvents: Effect.gen(function* () {
             yield* options?.onSubscribe ?? Effect.void;
             const events = Stream.fromIterable(makeEvents(ids));
@@ -4273,7 +4352,6 @@ it.effect("keeps a failed root's still-running native children live while the ru
     );
   }),
 );
-
 
 it.effect("releases ingestion after idle subagent rows and items settle", () =>
   Effect.gen(function* () {

@@ -6,6 +6,7 @@ import { useAtomCommand } from "~/state/use-atom-command";
  * repeated here. The popover around it belongs to PullRequestComposer.
  */
 import type { EnvironmentId, PullRequestRef, PullRequestReviewVerdict } from "@t3tools/contracts";
+import { squashAtomCommandFailure } from "@t3tools/client-runtime/state/runtime";
 import { CheckIcon, MessageSquareIcon, XCircleIcon } from "lucide-react";
 import { useState, type ReactNode, type RefObject } from "react";
 
@@ -15,6 +16,7 @@ import { Button } from "../ui/button";
 import { Select, SelectItem, SelectPopup, SelectTrigger } from "../ui/select";
 import { Textarea } from "../ui/textarea";
 import { toastManager } from "../ui/toast";
+import { readableFailure } from "./pullRequestDetail.logic";
 import {
   pullRequestReviewKey,
   usePendingReviewComments,
@@ -101,7 +103,14 @@ export function PullRequestReviewForm({
     onPendingChange(false);
     if (result._tag === "Failure") {
       // The draft is kept: whatever went wrong, retyping the review is not the answer.
-      toastManager.add({ type: "error", title: "The review could not be submitted" });
+      toastManager.add({
+        type: "error",
+        title: "The review could not be submitted",
+        description: readableFailure(
+          squashAtomCommandFailure(result),
+          "The host refused the review. Your draft is still here to try again.",
+        ),
+      });
       return;
     }
     // More remarks may have been added while the host was accepting this snapshot. Leave those,

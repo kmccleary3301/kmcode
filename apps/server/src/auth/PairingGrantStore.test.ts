@@ -1,6 +1,7 @@
 import { AuthAdministrativeScopes, AuthStandardClientScopes } from "@t3tools/contracts";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { expect, it } from "@effect/vitest";
+import * as Crypto from "effect/Crypto";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
@@ -76,11 +77,11 @@ it.layer(NodeServices.layer)("PairingGrantStore.layer", (it) => {
     }).pipe(Effect.provide(layerPairingGrantStore())),
   );
 
-  it.effect("issues one-time bootstrap tokens that can only be consumed once", () =>
+  it.effect("accepts lowercase one-time tokens exactly once", () =>
     Effect.gen(function* () {
       const bootstrapCredentials = yield* PairingGrantStore.PairingGrantStore;
       const issued = yield* bootstrapCredentials.issueOneTimeToken({ label: "Julius iPhone" });
-      const first = yield* bootstrapCredentials.consume(issued.credential);
+      const first = yield* bootstrapCredentials.consume(issued.credential.toLowerCase());
       const second = yield* Effect.flip(bootstrapCredentials.consume(issued.credential));
 
       expect(first.method).toBe("one-time-token");
@@ -90,7 +91,19 @@ it.layer(NodeServices.layer)("PairingGrantStore.layer", (it) => {
       expect(issued.label).toBe("Julius iPhone");
       expect(second._tag).toBe("UnknownBootstrapCredentialError");
       expect(second.message).toContain("Unknown bootstrap credential");
-    }).pipe(Effect.provide(layerPairingGrantStore())),
+    }).pipe(
+      Effect.provide(layerPairingGrantStore()),
+      Effect.provideServiceEffect(
+        Crypto.Crypto,
+        Effect.gen(function* () {
+          const crypto = yield* Crypto.Crypto;
+          return {
+            ...crypto,
+            randomBytes: (size) => Effect.succeed(new Uint8Array(size).fill(8)),
+          };
+        }),
+      ),
+    ),
   );
 
   it.effect("atomically consumes a one-time token when multiple requests race", () =>
@@ -153,6 +166,24 @@ it.layer(NodeServices.layer)("PairingGrantStore.layer", (it) => {
       expect(forbiddenScope._tag).toBe("BootstrapCredentialScopeNotGrantedError");
       expect(consumed.proofKeyThumbprint).toBe("client-proof-key-thumbprint");
     }).pipe(Effect.provide(layerPairingGrantStore())),
+  );
+
+  it.effect("keeps seeded desktop bootstrap credentials case-sensitive", () =>
+    Effect.gen(function* () {
+      const bootstrapCredentials = yield* PairingGrantStore.PairingGrantStore;
+      const token = "23456789ABCD";
+      const wrongCase = yield* Effect.flip(bootstrapCredentials.consume(token.toLowerCase()));
+      const grant = yield* bootstrapCredentials.consume(token);
+
+      expect(wrongCase._tag).toBe("UnknownBootstrapCredentialError");
+      expect(grant.method).toBe("desktop-bootstrap");
+    }).pipe(
+      Effect.provide(
+        layerPairingGrantStore({
+          desktopBootstrapToken: "23456789ABCD",
+        }),
+      ),
+    ),
   );
 
   it.effect("seeds the desktop bootstrap credential as a reusable grant", () =>

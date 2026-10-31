@@ -3,7 +3,9 @@ import { isMacPlatform } from "../../lib/utils";
 import { SELECTION_MULTI_CLICK_INTERVAL_MS } from "../../lib/selectionActions";
 import { collectWrappedTerminalLinkLine, extractTerminalLinks } from "../../terminal-links";
 import {
+  GHOSTTY_CELL_WIDE,
   GhosttyTerminalCore,
+  type GhosttyCell,
   type GhosttyScrollbar,
   type GhosttySnapshot,
   type GhosttyTheme,
@@ -234,16 +236,23 @@ export function terminalGridCellAt(options: {
     y: Math.floor(gridY / metrics.height),
   };
 }
+function terminalCellText(cell: GhosttyCell): string {
+  if (cell.wide === GHOSTTY_CELL_WIDE.spacerTail || cell.wide === GHOSTTY_CELL_WIDE.spacerHead) {
+    return "";
+  }
+  return cell.text || " ";
+}
 
 function terminalRowText(row: GhosttySnapshot["rowData"][number], trimRight: boolean): string {
-  const text = row.cells.map((cell) => cell.text || " ").join("");
+  const text = row.cells.map(terminalCellText).join("");
   return trimRight ? text.trimEnd() : text;
 }
 
 function terminalColumnOffset(row: GhosttySnapshot["rowData"][number], column: number): number {
   let offset = 0;
   for (let cellIndex = 0; cellIndex < column; cellIndex += 1) {
-    offset += row.cells[cellIndex]?.text.length || 1;
+    const cell = row.cells[cellIndex];
+    offset += cell ? terminalCellText(cell).length : 1;
   }
   return offset;
 }
@@ -302,7 +311,8 @@ export function terminalLinkAtPositionWithRange(
   // Ghostty's soft-wrap flag is authoritative: when the last collected row
   // still wraps onward, its continuation is outside the viewport.
   const continuesBelowViewport = lastRow !== undefined && lastRow.wrapsToNext;
-  const offset = segment.startIndex + terminalColumnOffset(row, column);
+  const hitColumn = row.cells[column]?.wide === GHOSTTY_CELL_WIDE.spacerTail ? column - 1 : column;
+  const offset = segment.startIndex + terminalColumnOffset(row, hitColumn);
   for (const match of extractTerminalLinks(wrappedLine.text)) {
     if (offset >= match.start && offset < match.end) {
       // A truncated tail must not activate as a complete link.
@@ -316,6 +326,8 @@ export function terminalLinkAtPositionWithRange(
       const startRow = startSegment ? rows[startSegment.bufferLineNumber - 1] : undefined;
       const endRow = endSegment ? rows[endSegment.bufferLineNumber - 1] : undefined;
       if (!startSegment || !endSegment || !startRow || !endRow) return null;
+      const endColumn = terminalColumnAtOffset(endRow, match.end - 1 - endSegment.startIndex);
+      if (!startSegment || !endSegment || !startRow || !endRow) return null;
       return {
         text: match.text,
         range: {
@@ -324,7 +336,10 @@ export function terminalLinkAtPositionWithRange(
             y: startSegment.bufferLineNumber - 1,
           },
           end: {
-            x: terminalColumnAtOffset(endRow, match.end - 1 - endSegment.startIndex),
+            x:
+              endRow.cells[endColumn + 1]?.wide === GHOSTTY_CELL_WIDE.spacerTail
+                ? endColumn + 1
+                : endColumn,
             y: endSegment.bufferLineNumber - 1,
           },
         },
@@ -564,10 +579,14 @@ export class GhosttyTerminalSurface {
   readonly canvas: HTMLCanvasElement;
   readonly input: HTMLTextAreaElement;
   readonly scrollbar: HTMLDivElement;
+  /** The drawn grid: the shared PTY grid, clamped per axis to the measured one. */
   cols = 1;
   rows = 1;
 
   private readonly mount: HTMLElement;
+  private measuredCols = 1;
+  private measuredRows = 1;
+  private sharedGrid: { readonly cols: number; readonly rows: number } | null = null;
   private readonly context: CanvasRenderingContext2D;
   private readonly core: GhosttyTerminalCore;
   private readonly options: GhosttyTerminalSurfaceOptions;
@@ -602,7 +621,6 @@ export class GhosttyTerminalSurface {
   private mountHeight = 0;
   private selectionEnd: { x: number; y: number } | null = null;
   private selectionAnchorScreen: { x: number; y: number } | null = null;
-  private selectionEndScreen: { x: number; y: number } | null = null;
   private selectionMode: "cell" | "word" | "line" = "cell";
   // Word/line selection base in screen coordinates so streaming output cannot
   // shift the origin of a drag selection.
@@ -923,19 +941,45 @@ export class GhosttyTerminalSurface {
     this.mountHeight = height;
     // onResize is the only PTY resize channel, so the first successful fit must
     // notify even when the measured grid equals the 1x1 construction sentinel.
-    if (grid.cols !== this.cols || grid.rows !== this.rows || !this.resizeNotified) {
-      this.cols = grid.cols;
-      this.rows = grid.rows;
-      this.core.resize(grid.cols, grid.rows, this.metrics.width, this.metrics.height);
+    if (
+      grid.cols !== this.measuredCols ||
+      grid.rows !== this.measuredRows ||
+      !this.resizeNotified
+    ) {
+      this.measuredCols = grid.cols;
+      this.measuredRows = grid.rows;
       this.notifyResize();
-      this.forceFullRender = true;
-      this.scrollbarDirty = true;
-      shouldRender = true;
     }
+    if (this.applyGrid()) shouldRender = true;
     // Rendering synchronously keeps the repaint inside the same frame as the
     // layout change: ResizeObserver fires before paint, so the browser never
     // composites the old backing store stretched into the new element box.
     if (shouldRender || this.forceFullRender) this.renderFrame();
+    return true;
+  }
+
+  /**
+   * Other clients can share this PTY, so the server owns its grid. Drawing that grid
+   * keeps wrapping and cursor positions in step with the PTY. Each axis is clamped to
+   * this surface's own fit: the server's grid lags a local resize, and read-only
+   * observers never constrain it.
+   */
+  setSharedGrid(grid: { readonly cols: number; readonly rows: number } | null): void {
+    if (this.disposed) return;
+    if (this.sharedGrid?.cols === grid?.cols && this.sharedGrid?.rows === grid?.rows) return;
+    this.sharedGrid = grid;
+    if (this.hasSize && this.applyGrid()) this.requestRender();
+  }
+
+  private applyGrid(): boolean {
+    const cols = Math.min(this.sharedGrid?.cols ?? this.measuredCols, this.measuredCols);
+    const rows = Math.min(this.sharedGrid?.rows ?? this.measuredRows, this.measuredRows);
+    if (cols === this.cols && rows === this.rows) return false;
+    this.cols = cols;
+    this.rows = rows;
+    this.core.resize(cols, rows, this.metrics.width, this.metrics.height);
+    this.forceFullRender = true;
+    this.scrollbarDirty = true;
     return true;
   }
 
@@ -949,7 +993,7 @@ export class GhosttyTerminalSurface {
     if (this.resizeNotifyTimer !== null) window.clearTimeout(this.resizeNotifyTimer);
     this.resizeNotifyTimer = window.setTimeout(() => {
       this.resizeNotifyTimer = null;
-      if (!this.disposed) this.options.onResize(this.cols, this.rows);
+      if (!this.disposed) this.options.onResize(this.measuredCols, this.measuredRows);
     }, 150);
   }
 
@@ -1002,16 +1046,20 @@ export class GhosttyTerminalSurface {
     return this.core.selectionText();
   }
 
+  /** An upper bound on the selection's size, read without formatting its text. */
+  getSelectionCellCount(): number {
+    const range = this.core.selectionRange();
+    return range ? (Math.abs(range.end.y - range.start.y) + 1) * this.cols : 0;
+  }
+
   getSelectionPosition(): GhosttySelectionPosition | null {
-    if (!this.selectionAnchorScreen || !this.selectionEndScreen || !this.hasSelection())
-      return null;
-    const before =
-      this.selectionAnchorScreen.y < this.selectionEndScreen.y ||
-      (this.selectionAnchorScreen.y === this.selectionEndScreen.y &&
-        this.selectionAnchorScreen.x <= this.selectionEndScreen.x);
-    return before
-      ? { start: this.selectionAnchorScreen, end: this.selectionEndScreen }
-      : { start: this.selectionEndScreen, end: this.selectionAnchorScreen };
+    // Ask Ghostty rather than the gesture's coordinates, which go stale once
+    // output scrolls the selected rows (alternate screen, scrollback pruning).
+    const range = this.hasSelection() ? this.core.selectionRange() : null;
+    if (!range) return null;
+    const { start, end } = range;
+    const before = start.y < end.y || (start.y === end.y && start.x <= end.x);
+    return before ? { start, end } : { start: end, end: start };
   }
 
   getSelectionEndClientRect(): { readonly right: number; readonly bottom: number } | null {
@@ -1031,7 +1079,6 @@ export class GhosttyTerminalSurface {
     this.core.clearSelection();
     this.selectionEnd = null;
     this.selectionAnchorScreen = null;
-    this.selectionEndScreen = null;
     this.selectionMode = "cell";
     this.selectionBase = null;
     this.setSelectionAutoscroll(0);
@@ -1066,7 +1113,7 @@ export class GhosttyTerminalSurface {
       this.resizeNotifyTimer = null;
       // Flush the settled dimensions so the PTY keeps the final size even when
       // the surface unmounts inside the debounce window.
-      this.options.onResize(this.cols, this.rows);
+      this.options.onResize(this.measuredCols, this.measuredRows);
     }
     this.cancelRender();
     if (this.compositionSuppressionTimer !== null) {
@@ -1379,7 +1426,6 @@ export class GhosttyTerminalSurface {
       this.selectionBase = range.screen;
       this.selectionEnd = range.viewport.end;
       this.selectionAnchorScreen = range.screen.start;
-      this.selectionEndScreen = range.screen.end;
       this.options.onSelectionChange();
     } else {
       this.selectionMode = "cell";
@@ -1387,7 +1433,6 @@ export class GhosttyTerminalSurface {
       this.selectionEnd = cell;
       const screen = this.core.viewportPointToScreen(cell.x, cell.y);
       this.selectionAnchorScreen = screen;
-      this.selectionEndScreen = screen;
       if (screen) {
         this.core.setSelection({ ...screen, tag: 2 }, { ...screen, tag: 2 });
       } else {
@@ -1453,8 +1498,19 @@ export class GhosttyTerminalSurface {
   };
 
   private extendSelectionTo(clientX: number, clientY: number): void {
-    const anchorScreen = this.selectionAnchorScreen;
-    if (anchorScreen === null) return;
+    if (this.selectionAnchorScreen === null) return;
+    // Ghostty moves its selection with output; keep the drag on those rows too.
+    const anchorScreen = this.core.selectionRange()?.start;
+    if (!anchorScreen) return;
+    const rowDelta = anchorScreen.y - this.selectionAnchorScreen.y;
+    if (this.selectionBase && rowDelta !== 0) {
+      const { start, end } = this.selectionBase;
+      this.selectionBase = {
+        start: { x: start.x, y: start.y + rowDelta },
+        end: { x: end.x, y: end.y + rowDelta },
+      };
+    }
+
     const cell = this.cellAt(clientX, clientY);
     this.selectionMoved = true;
     this.selectionEnd = cell;
@@ -1474,7 +1530,6 @@ export class GhosttyTerminalSurface {
     const anchor = base === null ? anchorScreen : beforeBase ? base.end : base.start;
     const end = range === null ? cellScreen : beforeBase ? range.screen.start : range.screen.end;
     this.selectionAnchorScreen = anchor;
-    this.selectionEndScreen = end;
     this.core.setSelection({ ...anchor, tag: 2 }, { ...end, tag: 2 });
     this.options.onSelectionChange();
     this.forceFullRender = true;

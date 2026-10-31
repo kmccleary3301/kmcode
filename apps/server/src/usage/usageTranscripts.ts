@@ -95,40 +95,40 @@ function grokCostTicksToUsd(ticks: unknown): number | null {
 /**
  * Parses one line of a Claude Code transcript.
  *
- * T3 Code writes one record per assistant *content block*, and every one of
- * those records repeats the same complete `usage` object for the parent
- * message. Summing them overcounts by roughly 2.4x on a real workload, so the
- * caller must drop repeats by `dedupeKey` and keep the first.
+ * T3 Code writes one record per assistant content block, and each repeats the
+ * parent message's complete executor usage. Advisor calls are separate records
+ * under their own models from `usage.iterations`; callers drop repeated records
+ * by `dedupeKey` and keep the first.
  */
-export function parseClaudeLine(line: string): UsageRecord | null {
+export function parseClaudeLine(line: string): readonly UsageRecord[] {
   let parsed: unknown;
   try {
     parsed = JSON.parse(line);
   } catch {
-    return null;
+    return [];
   }
   return parseClaudeRecord(parsed);
 }
 
-export function parseClaudeRecord(parsed: unknown): UsageRecord | null {
-  if (typeof parsed !== "object" || parsed === null) return null;
+export function parseClaudeRecord(parsed: unknown): readonly UsageRecord[] {
+  if (typeof parsed !== "object" || parsed === null) return [];
 
   const record = parsed as Record<string, unknown>;
-  if (record["type"] !== "assistant") return null;
+  if (record["type"] !== "assistant") return [];
 
   const message = record["message"];
-  if (typeof message !== "object" || message === null) return null;
+  if (typeof message !== "object" || message === null) return [];
   const messageRecord = message as Record<string, unknown>;
 
   const usage = messageRecord["usage"];
-  if (typeof usage !== "object" || usage === null) return null;
+  if (typeof usage !== "object" || usage === null) return [];
   const usageRecord = usage as Record<string, unknown>;
 
   const timestampMs = parseTimestampMs(record["timestamp"]);
-  if (timestampMs === null) return null;
+  if (timestampMs === null) return [];
 
   const model = typeof messageRecord["model"] === "string" ? messageRecord["model"] : "";
-  if (model.length === 0) return null;
+  if (model.length === 0 || model === "<synthetic>") return [];
 
   const messageId = typeof messageRecord["id"] === "string" ? messageRecord["id"] : null;
   const requestId = typeof record["requestId"] === "string" ? record["requestId"] : null;
@@ -138,8 +138,7 @@ export function parseClaudeRecord(parsed: unknown): UsageRecord | null {
     messageId === null && requestId === null ? null : `${messageId ?? ""}:${requestId ?? ""}`;
 
   const cost = record["costUSD"];
-
-  return {
+  const executor: UsageRecord = {
     provider: "claude",
     timestampMs,
     model,
@@ -156,6 +155,38 @@ export function parseClaudeRecord(parsed: unknown): UsageRecord | null {
     speed: usageRecord["speed"] === "fast" ? "fast" : "standard",
     dedupeKey,
   };
+
+  // Top-level usage belongs to the executor. Advisor iterations use their own model and rates.
+  const records = [executor];
+  const iterations: readonly unknown[] = Array.isArray(usageRecord["iterations"])
+    ? usageRecord["iterations"]
+    : [];
+  for (const [index, iteration] of iterations.entries()) {
+    if (typeof iteration !== "object" || iteration === null) continue;
+    const advisor = iteration as Record<string, unknown>;
+    if (advisor["type"] !== "advisor_message") continue;
+
+    const advisorModel = typeof advisor["model"] === "string" ? advisor["model"] : "";
+    if (advisorModel.length === 0 || advisorModel === "<synthetic>") continue;
+
+    records.push({
+      provider: "claude",
+      timestampMs,
+      model: advisorModel,
+      sessionId: executor.sessionId,
+      totals: {
+        uncachedInputTokens: int(advisor["input_tokens"]),
+        cachedInputTokens: int(advisor["cache_read_input_tokens"]),
+        cacheCreationTokens: int(advisor["cache_creation_input_tokens"]),
+        outputTokens: int(advisor["output_tokens"]),
+        reasoningTokens: 0,
+      },
+      reportedCostUsd: null,
+      speed: executor.speed,
+      dedupeKey: dedupeKey === null ? null : `${dedupeKey}:advisor:${index}`,
+    });
+  }
+  return records;
 }
 
 /* -------------------------------------------------------------------------- */
@@ -175,6 +206,8 @@ export interface CodexScanState {
   speed: UsageSpeed;
   sessionId: string;
   lastUsageSignature: string | null;
+  /** Signature of the current cumulative sequence's first request, for replay deduplication. */
+  sequenceStartSignature?: string;
   sawSessionMeta: boolean;
   /** While true, leading usage events are re-stamped copies of parent history. */
   suppressingForkCopies: boolean;
@@ -274,9 +307,17 @@ export function parseCodexRecord(parsed: unknown, state: CodexScanState): UsageR
 
   const info = payloadRecord["info"];
   if (typeof info !== "object" || info === null) return null;
-  const last = (info as Record<string, unknown>)["last_token_usage"];
-  if (typeof last !== "object" || last === null) return null;
+  const infoRecord = info as Record<string, unknown>;
+  const last = infoRecord["last_token_usage"];
+  if (typeof last !== "object" || last === null || Array.isArray(last)) return null;
   const lastRecord = last as Record<string, unknown>;
+  const cumulativeValue = infoRecord["total_token_usage"];
+  const cumulativeRecord =
+    typeof cumulativeValue === "object" &&
+    cumulativeValue !== null &&
+    !Array.isArray(cumulativeValue)
+      ? (cumulativeValue as Record<string, unknown>)
+      : null;
 
   // Only an event that is otherwise eligible may consume the duplicate
   // signature. A token_count arriving before its turn_context (no model yet)
@@ -289,8 +330,15 @@ export function parseCodexRecord(parsed: unknown, state: CodexScanState): UsageR
   // Codex re-emits an unchanged token_count on some stream boundaries. Summing
   // those would double count, so identical consecutive payloads are skipped.
   const signature = JSON.stringify(lastRecord);
-  if (signature === state.lastUsageSignature) return null;
-  state.lastUsageSignature = signature;
+  if (
+    cumulativeRecord !== null &&
+    typeof cumulativeRecord["input_tokens"] === "number" &&
+    typeof cumulativeRecord["output_tokens"] === "number" &&
+    cumulativeRecord["input_tokens"] === 0 &&
+    cumulativeRecord["output_tokens"] === 0
+  ) {
+    delete state.sequenceStartSignature;
+  }
 
   // In a forked rollout the copied parent history was already counted from the
   // parent's own file. Drop the leading burst; the first usage event separated
@@ -298,10 +346,36 @@ export function parseCodexRecord(parsed: unknown, state: CodexScanState): UsageR
   if (state.suppressingForkCopies) {
     if (timestampMs - state.forkCopyAnchorMs < FORK_COPY_MAX_GAP_MS) {
       state.forkCopyAnchorMs = timestampMs;
+      state.lastUsageSignature = signature;
       return null;
     }
     state.suppressingForkCopies = false;
+    state.lastUsageSignature = null;
   }
+
+  const sequenceStart =
+    cumulativeRecord !== null &&
+    typeof cumulativeRecord["input_tokens"] === "number" &&
+    typeof cumulativeRecord["output_tokens"] === "number" &&
+    typeof lastRecord["input_tokens"] === "number" &&
+    typeof lastRecord["output_tokens"] === "number" &&
+    [
+      "input_tokens",
+      "cached_input_tokens",
+      "cache_write_input_tokens",
+      "output_tokens",
+      "reasoning_output_tokens",
+    ].every((field) => int(cumulativeRecord[field]) === int(lastRecord[field])) &&
+    int(lastRecord["input_tokens"]) + int(lastRecord["output_tokens"]) > 0
+      ? JSON.stringify([timestampMs, signature])
+      : undefined;
+  if (sequenceStart !== undefined) {
+    if (sequenceStart === state.sequenceStartSignature) return null;
+    state.sequenceStartSignature = sequenceStart;
+  }
+
+  if (signature === state.lastUsageSignature) return null;
+  state.lastUsageSignature = signature;
 
   const inputTokens = int(lastRecord["input_tokens"]);
   const cachedInputTokens = int(lastRecord["cached_input_tokens"]);

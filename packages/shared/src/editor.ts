@@ -33,11 +33,14 @@ export const resolveEditorCommand = Effect.fn("editor.resolveEditorCommand")(fun
 ) {
   if (editor.commands === null) return Option.none();
   const baseArgs = "baseArgs" in editor ? editor.baseArgs : [];
-  for (const command of editor.commands) {
-    if (yield* isCommandAvailable(command, { env })) return Option.some({ command, baseArgs });
+  const platform = yield* HostProcess.HostProcessPlatform;
+  const preferZeditor = platform === "linux" && editor.id === "zed";
+  if (!preferZeditor) {
+    for (const command of editor.commands) {
+      if (yield* isCommandAvailable(command, { env })) return Option.some({ command, baseArgs });
+    }
   }
 
-  const platform = yield* HostProcess.HostProcessPlatform;
   const path = yield* Path.Path;
   const fs = yield* FileSystem.FileSystem;
   const home = env.HOME;
@@ -129,8 +132,15 @@ export const resolveEditorCommand = Effect.fn("editor.resolveEditorCommand")(fun
       const dataHome = env.XDG_DATA_HOME || (home ? path.join(home, ".local/share") : undefined);
       if (dataHome) dirs.push(path.join(dataHome, "JetBrains/Toolbox/scripts"));
     }
-    for (const dir of dirs) {
-      for (const name of editor.commands) candidates.push(path.join(dir, name));
+    if (preferZeditor) {
+      // Linux packages use zeditor because OpenZFS owns the zed command.
+      for (const name of ["zeditor", "zed"]) {
+        candidates.push(name, ...dirs.map((dir) => path.join(dir, name)));
+      }
+    } else {
+      for (const dir of dirs) {
+        for (const name of editor.commands) candidates.push(path.join(dir, name));
+      }
     }
   }
 

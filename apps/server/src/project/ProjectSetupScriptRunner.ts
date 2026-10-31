@@ -1,5 +1,4 @@
-import { ProjectId, type ProjectScript } from "@t3tools/contracts";
-import { HostProcessEnvironment, HostProcessPlatform } from "@t3tools/shared/hostProcess";
+import { ProjectId, TerminalNotRunningError, type ProjectScript } from "@t3tools/contracts";
 import {
   projectScriptRuntimeEnv,
   resolveProjectScripts,
@@ -108,9 +107,19 @@ export class ProjectSetupScriptProjectNotFoundError extends Schema.TaggedError<P
   }
 }
 
+export class ProjectSetupScriptUnsupportedShellError extends Schema.TaggedError<ProjectSetupScriptUnsupportedShellError>()(
+  "ProjectSetupScriptUnsupportedShellError",
+  { shell: Schema.String },
+) {
+  override get message(): string {
+    return "Project script completion is not supported in cmd.exe. Install PowerShell and retry.";
+  }
+}
+
 export const ProjectSetupScriptRunnerError = Schema.Union([
   ProjectSetupScriptOperationError,
   ProjectSetupScriptProjectNotFoundError,
+  ProjectSetupScriptUnsupportedShellError,
 ]);
 export type ProjectSetupScriptRunnerError = typeof ProjectSetupScriptRunnerError.Type;
 
@@ -158,18 +167,10 @@ function stripTerminalControl(text: string): string {
 
 type CompletionShell = "posix" | "fish" | "powershell";
 
-/**
- * Predicts the shell TerminalManager will spawn for the setup terminal. The
- * manager takes `$SHELL` on POSIX and PowerShell on Windows, falling back to
- * other shells only when that one fails to spawn.
- */
-function resolveCompletionShell(
-  platform: NodeJS.Platform,
-  env: NodeJS.ProcessEnv,
-): CompletionShell {
-  if (platform === "win32") return "powershell";
-  const shell = env.SHELL ?? "";
-  const name = shell.split("/").at(-1) ?? shell;
+/** Select completion syntax from the shell that actually started. */
+function resolveCompletionShell(shell: string): CompletionShell | null {
+  const name = (shell.split(/[/\\]/).at(-1) ?? shell).toLowerCase().replace(/\.exe$/, "");
+  if (name === "cmd") return null;
   if (name === "fish") return "fish";
   if (name === "pwsh" || name === "powershell") return "powershell";
   return "posix";
@@ -205,10 +206,6 @@ export const make = Effect.gen(function* () {
   const terminalManager = yield* TerminalManager.TerminalManager;
   const serverSettings = yield* ServerSettings.ServerSettingsService;
   const crypto = yield* Crypto.Crypto;
-  const completionShell = resolveCompletionShell(
-    yield* HostProcessPlatform,
-    yield* HostProcessEnvironment,
-  );
 
   /**
    * Watches the setup terminal for the completion sentinel. Terminal output is
@@ -300,13 +297,16 @@ export const make = Effect.gen(function* () {
         }
         return Effect.void;
       });
-
+      const abandon = settle(null).pipe(
+        Effect.andThen(Deferred.succeed(promptReturned, undefined)),
+        Effect.andThen(Effect.sync(unsubscribe)),
+      );
       const completion = Deferred.await(done).pipe(
         // A shell with an empty prompt never prints one; do not wait forever.
         Effect.tap(() => Deferred.await(promptReturned).pipe(Effect.timeoutOption("1 second"))),
         Effect.ensuring(Effect.sync(() => unsubscribe())),
       );
-      return { completion, unsubscribe };
+      return { completion, unsubscribe, abandon };
     });
 
   const runForThread: ProjectSetupScriptRunner["Service"]["runForThread"] = Effect.fn(
@@ -397,16 +397,21 @@ export const make = Effect.gen(function* () {
     const completionToken = observe
       ? (yield* crypto.randomUUIDv4.pipe(Effect.orDie)).replaceAll("-", "")
       : null;
-    const commandLine =
+    const echoedWrapperLines: string[] = [];
+    // Subscribe before opening so startup output and early exits cannot race the listener.
+    const observed =
       observe && completionToken
-        ? wrapCommandForCompletion(
-            script.command,
-            completionShell,
-            completionSentinel(completionToken),
-          )
-        : script.command;
+        ? yield* observeTerminalCompletion({
+            threadId: input.threadId,
+            terminalId,
+            sentinel: completionSentinel(completionToken),
+            sentinelPattern: completionSentinelPattern(completionToken),
+            echoedWrapperLines,
+            onOutputLine: observe.onOutputLine,
+          })
+        : undefined;
 
-    yield* terminalManager
+    const shell = yield* terminalManager
       .open({
         threadId: input.threadId,
         terminalId,
@@ -416,6 +421,13 @@ export const make = Effect.gen(function* () {
         env: { ...env, NO_COLOR: "1", FORCE_COLOR: "0" },
       })
       .pipe(
+        Effect.andThen(() =>
+          terminalManager.getShell({ threadId: input.threadId, terminalId }).pipe(
+            Effect.catchTags({
+              TerminalNotRunningError: () => Effect.succeed(null),
+            }),
+          ),
+        ),
         Effect.mapError(
           (cause) =>
             new ProjectSetupScriptOperationError({
@@ -424,38 +436,50 @@ export const make = Effect.gen(function* () {
               cause,
             }),
         ),
+        Effect.onError(() => Effect.sync(() => observed?.unsubscribe())),
       );
-    // Subscribe before writing so the sentinel cannot race past the listener.
-    const observed =
-      observe && completionToken
-        ? yield* observeTerminalCompletion({
-            threadId: input.threadId,
-            terminalId,
-            sentinel: completionSentinel(completionToken),
-            sentinelPattern: completionSentinelPattern(completionToken),
-            echoedWrapperLines: commandLine.split("\r").filter((line) => line.length > 0),
-            onOutputLine: observe.onOutputLine,
-          })
-        : undefined;
+    let completionShell: CompletionShell | null = null;
+    let commandLine: string | null = null;
+    if (shell === null) {
+      yield* observed?.abandon ?? Effect.void;
+    } else {
+      completionShell = resolveCompletionShell(shell);
+      commandLine = script.command;
+      if (observe && completionToken) {
+        if (completionShell === null) {
+          yield* observed?.abandon ?? Effect.void;
+          yield* terminalManager.closeIdle({ threadId: input.threadId, terminalId });
+          return yield* new ProjectSetupScriptUnsupportedShellError({ shell });
+        }
+        commandLine = wrapCommandForCompletion(
+          script.command,
+          completionShell,
+          completionSentinel(completionToken),
+        );
+      }
+      echoedWrapperLines.push(...commandLine.split("\r").filter((line) => line.length > 0));
+    }
 
-    yield* terminalManager
-      .write({
-        threadId: input.threadId,
-        terminalId,
-        data: `${commandLine}\r`,
-      })
-      .pipe(
-        Effect.mapError(
-          (cause) =>
-            new ProjectSetupScriptOperationError({
-              ...errorContext,
-              operation: "writeCommand",
-              cause,
-            }),
-        ),
-        // Nothing will ever settle the completion if the command never ran.
-        Effect.tapError(() => Effect.sync(() => observed?.unsubscribe())),
-      );
+    if (commandLine !== null) {
+      yield* terminalManager
+        .write({
+          threadId: input.threadId,
+          terminalId,
+          data: `${commandLine}\r`,
+        })
+        .pipe(
+          Effect.mapError(
+            (cause) =>
+              new ProjectSetupScriptOperationError({
+                ...errorContext,
+                operation: "writeCommand",
+                cause,
+              }),
+          ),
+          // Nothing will ever settle the completion if the command never ran.
+          Effect.tapError(() => Effect.sync(() => observed?.unsubscribe())),
+        );
+    }
 
     // A clean run leaves only an idle prompt behind; its output stays in the
     // terminal history. A failed run keeps its shell open for a look.

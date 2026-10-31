@@ -85,9 +85,7 @@ const makeHarness = Effect.fn("TestThreadAtoms.makeHarness")(function* (options?
   let liveOpened = 0;
   let liveActive = 0;
   const client = {
-    [ORCHESTRATION_V2_WS_METHODS.subscribeThread]: (input: {
-      readonly afterSequence?: number;
-    }) =>
+    [ORCHESTRATION_V2_WS_METHODS.subscribeThread]: (input: { readonly afterSequence?: number }) =>
       Stream.unwrap(
         Effect.gen(function* () {
           const events = yield* Queue.unbounded<OrchestrationV2ThreadStreamItem>();
@@ -110,9 +108,7 @@ const makeHarness = Effect.fn("TestThreadAtoms.makeHarness")(function* (options?
           return Stream.fromQueue(events);
         }),
       ),
-    [ORCHESTRATION_V2_WS_METHODS.subscribeThreadLive]: (_input: {
-      readonly threadId: string;
-    }) =>
+    [ORCHESTRATION_V2_WS_METHODS.subscribeThreadLive]: (_input: { readonly threadId: string }) =>
       Stream.unwrap(
         Effect.gen(function* () {
           const events = yield* Queue.unbounded<OrchestrationV2ThreadLiveItem>();
@@ -168,6 +164,7 @@ const makeHarness = Effect.fn("TestThreadAtoms.makeHarness")(function* (options?
     networkStatus: yield* SubscriptionRef.make<NetworkStatus>("online"),
     start: Effect.void,
     register: () => Effect.die("Unexpected environment registration"),
+    assertKnownAddress: () => Effect.void,
     registerPlatform: () => Effect.die("Unexpected environment registration"),
     reconcilePlatform: () => Effect.die("Unexpected environment reconciliation"),
     remove: () => Effect.die("Unexpected environment removal"),
@@ -348,9 +345,7 @@ describe("createEnvironmentThreadStateAtoms", () => {
       ).toBe(false);
       yield* Queue.offer(liveSubscription.events, liveItem);
       const overlay = yield* AtomRegistry.toStream(h.registry, overlayAtom).pipe(
-        Stream.filter((current) =>
-          current.subagentContentByTurnItemId.has(liveItem.turnItemId),
-        ),
+        Stream.filter((current) => current.subagentContentByTurnItemId.has(liveItem.turnItemId)),
         Stream.runHead,
         Effect.map(Option.getOrThrow),
       );

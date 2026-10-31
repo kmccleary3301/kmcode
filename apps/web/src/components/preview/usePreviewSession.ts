@@ -2,12 +2,13 @@
 
 import { useAtomValue } from "@effect/atom-react";
 import { parseScopedThreadKey, scopedThreadKey } from "@t3tools/client-runtime/environment";
-import type { ScopedThreadRef } from "@t3tools/contracts";
+import { EnvironmentId, ThreadId, type ScopedThreadRef } from "@t3tools/contracts";
 import * as Schema from "effect/Schema";
 import { AsyncResult, Atom } from "effect/reactivity";
 
 import {
   applyPreviewServerEvent,
+  previewStateAtom,
   readThreadPreviewState,
   reconcilePreviewServerSessions,
 } from "~/previewStateStore";
@@ -89,4 +90,55 @@ const previewSessionSyncAtom = Atom.family((threadKey: string) => {
 
 export function usePreviewSession(threadRef: ScopedThreadRef): void {
   useAtomValue(previewSessionSyncAtom(scopedThreadKey(threadRef)));
+}
+
+// Discover background tabs without listing every thread at startup. Keep each
+// sync while the thread has tabs so later events still arrive while chat is
+// absent, then release it so closed previews stop costing a list and a fan-out.
+const desktopHostedPreviewSyncAtom = Atom.family((environmentId: EnvironmentId) => {
+  const eventsAtom = previewEnvironment.events({ environmentId, input: {} });
+  return Atom.make((get) => {
+    const releaseByThreadId = new Map<string, () => void>();
+    get.addFinalizer(() => {
+      for (const release of releaseByThreadId.values()) release();
+    });
+    get.subscribe(
+      eventsAtom,
+      (result) => {
+        if (!AsyncResult.isSuccess(result) || result.value.type === "closed") return;
+        const threadId = result.value.threadId;
+        if (releaseByThreadId.has(threadId)) return;
+        const threadRef: ScopedThreadRef = {
+          environmentId,
+          threadId: ThreadId.make(threadId),
+        };
+        const threadKey = scopedThreadKey(threadRef);
+        const unmount = get.registry.mount(previewSessionSyncAtom(threadKey));
+        let hadSessions = false;
+        let unwatch: () => void = () => undefined;
+        const release = () => {
+          unwatch();
+          unmount();
+          releaseByThreadId.delete(threadId);
+        };
+        unwatch = get.registry.subscribe(
+          previewStateAtom(threadKey),
+          (state) => {
+            if (Object.keys(state.sessions).length > 0) hadSessions = true;
+            else if (hadSessions && state.suppressedTabIds.size === 0) release();
+          },
+          { immediate: true },
+        );
+        releaseByThreadId.set(threadId, release);
+      },
+      { immediate: true },
+    );
+  }).pipe(
+    Atom.setIdleTTL(1_000),
+    Atom.withLabel(`preview:desktop-hosted-session-sync:${environmentId}`),
+  );
+});
+
+export function useDesktopHostedPreviewSessions(environmentId: EnvironmentId): void {
+  useAtomValue(desktopHostedPreviewSyncAtom(environmentId));
 }

@@ -32,8 +32,10 @@ export interface WrappedTerminalLinkLine {
 }
 
 const URL_PATTERN = /https?:\/\/[^\s"'`<>]+/giu;
+// The default PowerShell prompt delimits its unquoted path with `PS ` and `>`.
+const POWERSHELL_PROMPT_PATH_PATTERN = /^PS ((?:[A-Za-z]:[\\/]|\\\\|\/)[^>\r\n]*)>/u;
 const FILE_PATH_PATTERN =
-  /(?:~\/|\.{1,2}\/|\/|[A-Za-z]:[\\/]|\\\\)[^\s"'`<>]+|[A-Za-z0-9._-]+(?:\/[A-Za-z0-9._-]+)+(?::\d+){0,2}/g;
+  /(?:~[\\/]|\.{1,2}[\\/]|\/|[A-Za-z]:[\\/]|\\\\)[^\s"'`<>]+|(?<![\p{L}\p{M}\p{N}._-])[\p{L}\p{M}\p{N}._-]+(?:[\\/][\p{L}\p{M}\p{N}._-]+)+(?::\d+){0,2}/gu;
 const TRAILING_PUNCTUATION_PATTERN = /[.,;!?]+$/;
 // Paths also drop a trailing colon: compilers end `file:line:col:` with one.
 const TRAILING_PATH_PUNCTUATION_PATTERN = /[.,;:!?]+$/;
@@ -138,9 +140,16 @@ function inferHomeFromCwd(cwd: string): string | undefined {
 }
 
 export function extractTerminalLinks(line: string): TerminalLinkMatch[] {
-  const urlMatches = collectMatches(line, "url", URL_PATTERN, []);
-  const pathMatches = collectMatches(line, "path", FILE_PATH_PATTERN, urlMatches);
-  return [...urlMatches, ...pathMatches].toSorted((a, b) => a.start - b.start);
+  const promptPath = POWERSHELL_PROMPT_PATH_PATTERN.exec(line)?.[1];
+  const promptMatches: TerminalLinkMatch[] = promptPath
+    ? [{ kind: "path", text: promptPath, start: 3, end: 3 + promptPath.length }]
+    : [];
+  const urlMatches = collectMatches(line, "url", URL_PATTERN, promptMatches);
+  const pathMatches = collectMatches(line, "path", FILE_PATH_PATTERN, [
+    ...promptMatches,
+    ...urlMatches,
+  ]);
+  return [...promptMatches, ...urlMatches, ...pathMatches].toSorted((a, b) => a.start - b.start);
 }
 
 export function isTerminalUrl(value: string): boolean {

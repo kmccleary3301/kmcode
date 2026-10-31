@@ -7,7 +7,7 @@
  * gets the command instead, and only the operator's explicit
  * `T3CODE_SERVER_BROWSER_SANDBOX=0` launches without it.
  */
-import { HostProcessPlatform } from "@t3tools/shared/hostProcess";
+import { HostProcessPlatform, HostProcessUserId } from "@t3tools/shared/hostProcess";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Schema from "effect/Schema";
@@ -74,7 +74,16 @@ export class PreviewBrowserSandboxError extends Schema.TaggedError<PreviewBrowse
   { setupCommand: Schema.String },
 ) {
   override get message(): string {
-    return `This host blocks the sandbox T3's browser runs in (AppArmor on Ubuntu 23.10+). Run \`${this.setupCommand}\` on the host once to allow it, then try again.`;
+    return `This host blocks the sandbox KM Code's browser runs in (AppArmor on Ubuntu 23.10+). Run \`${this.setupCommand}\` on the host once to allow it, then try again.`;
+  }
+}
+
+export class PreviewBrowserRootError extends Schema.TaggedError<PreviewBrowserRootError>()(
+  "PreviewBrowserRootError",
+  {},
+) {
+  override get message(): string {
+    return "KM Code server is running as root; Chrome's sandbox cannot start. Run KM Code as a nonroot user. Otherwise set `T3CODE_SERVER_BROWSER_SANDBOX=0` in the KM Code server's environment and restart the server; this disables Chrome's sandbox. Manual: `T3CODE_SERVER_BROWSER_SANDBOX=0 t3 serve`. Systemd: add `Environment=T3CODE_SERVER_BROWSER_SANDBOX=0` under `[Service]`, reload systemd, then restart the service. `t3 browser setup` cannot fix root sandboxing.";
   }
 }
 
@@ -83,11 +92,14 @@ export class PreviewBrowserLibrariesError extends Schema.TaggedError<PreviewBrow
   { setupCommand: Schema.String, libraries: Schema.Array(Schema.String) },
 ) {
   override get message(): string {
-    return `This host is missing libraries T3's browser needs (${this.libraries.join(", ")}). Run \`${this.setupCommand}\` on the host to install them, then try again.`;
+    return `This host is missing libraries KM Code's browser needs (${this.libraries.join(", ")}). Run \`${this.setupCommand}\` on the host to install them, then try again.`;
   }
 }
 
-export type PreviewBrowserHostError = PreviewBrowserSandboxError | PreviewBrowserLibrariesError;
+export type PreviewBrowserHostError =
+  | PreviewBrowserSandboxError
+  | PreviewBrowserRootError
+  | PreviewBrowserLibrariesError;
 
 const MISSING_LIBRARY = /^\s*(\S+) => not found$/gm;
 
@@ -104,7 +116,9 @@ export const diagnoseLaunchFailure = Effect.fn("PreviewBrowserHost.diagnoseLaunc
   }) {
     const { setupCommand } = input;
     if (input.output.includes(NO_SANDBOX_SIGNATURE)) {
-      return new PreviewBrowserSandboxError({ setupCommand });
+      return (yield* HostProcessUserId) === 0
+        ? new PreviewBrowserRootError()
+        : new PreviewBrowserSandboxError({ setupCommand });
     }
     if ((yield* HostProcessPlatform) !== "linux") return undefined;
     const libraries = yield* missingLibraries(input.executable);

@@ -39,31 +39,27 @@ const resolveClientFilePath = Effect.fn("AntigravityClientFiles.resolveClientFil
     const outside = EffectAcpErrors.AcpRequestError.invalidParams(
       `Path '${input.requestPath}' is outside the session workspace.`,
     );
-    const real = yield* input.fileSystem.realPath(resolved).pipe(
-      Effect.catch(() =>
-        Effect.gen(function* () {
-          // Only missing entries (a new write, possibly into new directories)
-          // fall back to an ancestor; a dangling or unreadable link must not
-          // be followed on write.
-          const missing: Array<string> = [];
-          let current = resolved;
-          for (;;) {
-            const entryExists = yield* input.fileSystem.readLink(current).pipe(
-              Effect.as(true),
-              Effect.catch(() => input.fileSystem.exists(current)),
-              Effect.orElseSucceed(() => true),
-            );
-            if (entryExists) return yield* outside;
-            missing.unshift(path.basename(current));
-            const parent = path.dirname(current);
-            if (parent === current) return yield* outside;
-            const realParent = yield* input.fileSystem.realPath(parent).pipe(Effect.option);
-            if (Option.isSome(realParent)) return path.join(realParent.value, ...missing);
-            current = parent;
-          }
-        }),
-      ),
-    );
+    // Canonicalize the deepest existing ancestor, so a link above missing directories cannot escape.
+    let candidate = resolved;
+    const missingSuffix: Array<string> = [];
+    let real: string;
+    while (true) {
+      const canonical = yield* input.fileSystem.realPath(candidate).pipe(Effect.option);
+      if (Option.isSome(canonical)) {
+        real = path.join(canonical.value, ...missingSuffix);
+        break;
+      }
+      // Walk up only past missing entries, never dangling or unreadable links.
+      const entryExists = yield* input.fileSystem.readLink(candidate).pipe(
+        Effect.as(true),
+        Effect.catch(() => input.fileSystem.exists(candidate)),
+        Effect.orElseSucceed(() => true),
+      );
+      const parent = path.dirname(candidate);
+      if (entryExists || parent === candidate) return yield* outside;
+      missingSuffix.unshift(path.basename(candidate));
+      candidate = parent;
+    }
     const roots = yield* Effect.forEach(input.allowedRoots, (root) =>
       input.fileSystem.realPath(root).pipe(Effect.orElseSucceed(() => root)),
     );
@@ -96,13 +92,25 @@ export const readAntigravityClientTextFile = Effect.fn("AntigravityClientFiles.r
         `File '${input.request.path}' is not a readable text file under ${CLIENT_FILE_MAX_BYTES} bytes.`,
       );
     }
-    const text = yield* input.fileSystem
-      .readFileString(filePath)
+    const bytes = yield* input.fileSystem
+      .readFile(filePath)
       .pipe(
         Effect.mapError(() =>
           EffectAcpErrors.AcpRequestError.internalError(`Could not read '${input.request.path}'.`),
         ),
       );
+    const text = yield* Effect.try({
+      try: () => new TextDecoder("utf-8", { fatal: true }).decode(bytes),
+      catch: () =>
+        EffectAcpErrors.AcpRequestError.invalidParams(
+          `File '${input.request.path}' is not a UTF-8 text file.`,
+        ),
+    });
+    if (text.includes("\0")) {
+      return yield* EffectAcpErrors.AcpRequestError.invalidParams(
+        `File '${input.request.path}' contains binary data.`,
+      );
+    }
     const line = input.request.line ?? undefined;
     const limit = input.request.limit ?? undefined;
     if (line === undefined && limit === undefined) {

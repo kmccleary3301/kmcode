@@ -1,6 +1,6 @@
 import {
   AuthMcpApprovalError,
-  type AuthMcpAuthorizationRequest,
+  AuthMcpAuthorizationRequest,
   AuthMcpClientAccess,
   EnvironmentHttpApi,
 } from "@t3tools/contracts";
@@ -9,6 +9,7 @@ import * as Result from "effect/Result";
 import { HttpServerRequest, HttpServerResponse } from "effect/http";
 import * as HttpEffect from "effect/http/HttpEffect";
 import * as HttpApiBuilder from "effect/http-api/HttpApiBuilder";
+import * as Schema from "effect/Schema";
 
 import * as EnvironmentAuth from "./EnvironmentAuth.ts";
 import * as McpOAuth from "./McpOAuth.ts";
@@ -32,6 +33,8 @@ const noStore = HttpEffect.appendPreResponseHandler((_request, response) =>
     HttpServerResponse.setHeaders(response, { "cache-control": "no-store", pragma: "no-cache" }),
   ),
 );
+
+const decodeAuthorizationRequest = Schema.decodeEffect(AuthMcpAuthorizationRequest);
 
 /** Issuer and resource for the origin this request reached. */
 const requestUrls = Effect.map(HttpServerRequest.HttpServerRequest, McpOAuth.requestUrls);
@@ -91,8 +94,11 @@ export const layer = HttpApiBuilder.group(
           Effect.gen(function* () {
             const urls = yield* requestUrls;
             const url = new URL(request.url, urls.issuer);
+            const authorizationRequest = yield* decodeAuthorizationRequest(
+              Object.fromEntries(url.searchParams),
+            ).pipe(Effect.orDie);
             const authorization = yield* oauth
-              .validateAuthorization({ urls, request: Object.fromEntries(url.searchParams) })
+              .validateAuthorization({ urls, request: authorizationRequest })
               .pipe(Effect.result);
             const headers = { "cache-control": "no-store", "referrer-policy": "no-referrer" };
             if (Result.isSuccess(authorization)) {

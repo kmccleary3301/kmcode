@@ -6,7 +6,11 @@ import { usePrimaryEnvironmentId } from "../../state/environments";
 import { useRightPanelStore } from "~/rightPanelStore";
 import { AttachmentFilePreview } from "../files/AttachmentFilePreview";
 import { Dialog, DialogPopup, DialogTitle } from "../ui/dialog";
-import { filterComposerPullRequestMatches } from "@t3tools/shared/composerPullRequestMatches";
+import {
+  composerPullRequestsFromLinks,
+  filterComposerPullRequestMatches,
+  withLinkedComposerPullRequestsFirst,
+} from "@t3tools/shared/composerPullRequestMatches";
 import { importPastedComposerText, readPastedComposerContext } from "../composerInlineTokenPaste";
 import { elementContextToPreviewAnnotation } from "../../lib/elementContext";
 import { RefreshIcon } from "~/components/ui/refresh-icon";
@@ -95,7 +99,6 @@ import { listContinuationForEnter, listIndentForTab } from "../../composer-list-
 import {
   deriveComposerSendState,
   getAntigravitySendBlockReason,
-  readFileAsDataUrl,
   resolveComposerInteractionMode,
   resolveComposerProviderSelection,
   threadShellHasStarted,
@@ -104,6 +107,7 @@ import {
   dataTransferHasComposerMention,
   makeComposerMentionDragHandlers,
 } from "./composerMentionDrag";
+import { serializeComposerImages } from "./composerImagePersistence";
 import {
   composerFloatingLayerProps,
   useComposerMenuProps,
@@ -139,7 +143,11 @@ import { useComposerTriggerState } from "./useComposerTriggerState";
 import { useComposerFocusState } from "./useComposerFocusState";
 import { useComposerMultilinePrompt } from "./useComposerMultilinePrompt";
 import { ComposerStatusBumps } from "./ComposerStatusBumps";
-import type { ComposerBackgroundWorkStatus, ComposerGoalStatus } from "./ComposerStatusBumps";
+import type {
+  ComposerBackgroundWorkStatus,
+  ComposerForceStopStatus,
+  ComposerGoalStatus,
+} from "./ComposerStatusBumps";
 import type { NativeTodoPlan } from "./todoPlan";
 import { ComposerActivityRow } from "./ComposerActivityStatus";
 import {
@@ -295,6 +303,7 @@ import {
 import {
   getComposerPromptInjectionState,
   getComposerProviderState,
+  getComposerReasoningStep,
   renderProviderTraitsMenuContent,
   renderProviderTraitsPicker,
 } from "./composerProviderState";
@@ -1134,6 +1143,7 @@ import {
   getProviderSkillsForSlashMenu,
   hasCompleteProviderWorkspaceSnapshot,
   hasCurrentProviderWorkspaceSnapshot,
+  hasProviderWorkspaceSnapshotRefreshProgressed,
   resolveProviderSkillsForCwd,
   resolveProviderSlashCommandsForCwd,
 } from "@t3tools/client-runtime/providerSkills";
@@ -1146,6 +1156,8 @@ import { readEnvironmentScope } from "../../state/session";
 import type { ReviewCommentContext } from "../../reviewCommentContext";
 
 const WORKSPACE_SNAPSHOT_RETRY_COOLDOWN_MS = 10_000;
+
+const WORKSPACE_SNAPSHOT_MAX_ATTEMPTS = 3;
 
 const extendReplacementRangeForTrailingSpace = (
   text: string,
@@ -1376,6 +1388,8 @@ const ComposerFooterPrimaryActions = memo(function ComposerFooterPrimaryActions(
   } | null;
   isRunning: boolean;
   canInterrupt: boolean;
+  forceStopAvailable?: boolean;
+  forceStopping?: boolean;
   followUpBehavior: "queue" | "steer";
   alternateShortcutLabel: string | null;
   showPlanFollowUpPrompt: boolean;
@@ -1392,6 +1406,7 @@ const ComposerFooterPrimaryActions = memo(function ComposerFooterPrimaryActions(
   onResume: () => void;
   onPreviousPendingQuestion: () => void;
   onInterrupt: () => void;
+  onForceStop?: () => void;
   onImplementPlanInNewThread: () => void;
   onCompactContext?: (() => void) | undefined;
   compactDisabled: boolean;
@@ -1420,6 +1435,8 @@ const ComposerFooterPrimaryActions = memo(function ComposerFooterPrimaryActions(
         pendingAction={props.pendingAction}
         isRunning={props.isRunning}
         canInterrupt={props.canInterrupt}
+        forceStopAvailable={props.forceStopAvailable === true}
+        forceStopping={props.forceStopping === true}
         followUpBehavior={props.followUpBehavior}
         alternateShortcutLabel={props.alternateShortcutLabel}
         showPlanFollowUpPrompt={props.showPlanFollowUpPrompt}
@@ -1437,6 +1454,7 @@ const ComposerFooterPrimaryActions = memo(function ComposerFooterPrimaryActions(
         onResume={props.onResume}
         onPreviousPendingQuestion={props.onPreviousPendingQuestion}
         onInterrupt={props.onInterrupt}
+        {...(props.onForceStop ? { onForceStop: props.onForceStop } : {})}
         onImplementPlanInNewThread={props.onImplementPlanInNewThread}
         compactBeforeSendTokens={props.compactBeforeSendTokens}
         goalCommandLabel={props.goalCommandLabel}
@@ -1471,6 +1489,7 @@ export interface ChatComposerHandle {
     sourceAnchor: AssistantCitationSourceAnchor,
   ) => boolean;
   openModelPicker: () => void;
+  stepReasoningEffort: (direction: 1 | -1) => void;
   toggleModelPicker: () => void;
   openControl: (command: KeybindingCommand) => void;
   isModelPickerOpen: () => boolean;
@@ -1555,6 +1574,8 @@ export interface ChatComposerProps {
   phase: SessionPhase;
   /** Stop is offered: a run is preparing, starting, or running. */
   canInterrupt: boolean;
+  forceStopAvailable?: boolean;
+  forceStopping?: boolean;
   isConnecting: boolean;
   isSendBusy: boolean;
   canResume: boolean;
@@ -1602,6 +1623,7 @@ export interface ChatComposerProps {
   activeTodoPlan: NativeTodoPlan | null;
   goalBump: ComposerGoalStatus | null;
   backgroundWorkBump: ComposerBackgroundWorkStatus | null;
+  forceStopBump: ComposerForceStopStatus | null;
   threadSyncPhase: ThreadSyncPhase | null;
 
   // Mode
@@ -1616,6 +1638,8 @@ export interface ChatComposerProps {
   activeProjectDefaultModelSelection: ModelSelection | null | undefined;
   activeThreadModelSelection: ModelSelection | null | undefined;
   reportedModelSelection?: ModelSelection | null;
+  /** Project scope for provider enablement in the model picker. */
+  activeProjectId: ProjectId | null;
 
   // Context window
   activeContextWindow: ContextWindowSnapshot | null;
@@ -1675,6 +1699,7 @@ export interface ChatComposerProps {
   ) => void;
   onResume: () => void;
   onInterrupt: () => void;
+  onForceStop?: () => void;
   onImplementPlanInNewThread: () => void;
   onRespondToApproval: (
     requestId: RuntimeRequestId,
@@ -1766,6 +1791,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     activeThreadModelSelection,
     reportedModelSelection,
     activeContextWindow,
+    activeProjectId,
     compactThreadUnavailable,
     compactDisabled,
     compactDisabledReason,
@@ -2108,9 +2134,13 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
   const providerInstanceEntries = useMemo<ReadonlyArray<ProviderInstanceEntry>>(
     () =>
       sortProviderInstanceEntries(
-        applyProviderInstanceSettings(deriveProviderInstanceEntries(providerStatuses), settings),
+        applyProviderInstanceSettings(
+          deriveProviderInstanceEntries(providerStatuses),
+          settings,
+          activeProjectId,
+        ),
       ),
-    [providerStatuses, settings],
+    [providerStatuses, settings, activeProjectId],
   );
   const selectedProviderByThreadId = composerDraft.activeProvider ?? null;
   const {
@@ -2222,9 +2252,13 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
   const refreshProviders = useAtomCommand(serverEnvironment.refreshProviders, {
     reportFailure: false,
   });
-  // The last scan this composer asked for. A request inside the TTL is not
-  // repeated, so a client clock ahead of the server's cannot loop rescans.
+  // Keep the TTL anchored to the first request in a retry window.
   const workspaceRefreshKeyRef = useRef<{ key: string; requestedAt: number } | null>(null);
+  const workspaceRefreshWindowRef = useRef<{
+    key: string;
+    requestedAt: number;
+    failedAttempts: number;
+  } | null>(null);
   const [workspaceRefreshRetry, setWorkspaceRefreshRetry] = useState<{
     key: string;
     notBefore: number;
@@ -2260,6 +2294,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     );
     if (hadWorkspaceSnapshotRef.current && !hasWorkspaceSnapshot) {
       workspaceRefreshKeyRef.current = null;
+      workspaceRefreshWindowRef.current = null;
       setWorkspaceRefreshRetry(null);
     }
     hadWorkspaceSnapshotRef.current = hasWorkspaceSnapshot;
@@ -2275,15 +2310,37 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     )
       return;
     if (hasCurrentProviderWorkspaceSnapshot(selectedProviderStatus, gitCwd, now)) {
+      workspaceRefreshWindowRef.current = null;
+      setWorkspaceRefreshRetry(null);
+      return;
+    }
+    const previousWindow = workspaceRefreshWindowRef.current;
+    const window =
+      previousWindow?.key === key &&
+      now - previousWindow.requestedAt < PROVIDER_WORKSPACE_SNAPSHOT_TTL_MS
+        ? previousWindow
+        : { key, requestedAt: now, failedAttempts: 0 };
+    workspaceRefreshWindowRef.current = window;
+    if (window.failedAttempts >= WORKSPACE_SNAPSHOT_MAX_ATTEMPTS) {
+      workspaceRefreshKeyRef.current = { key, requestedAt: window.requestedAt };
       setWorkspaceRefreshRetry(null);
       return;
     }
     const retry = workspaceRefreshRetry;
     if (retry?.key === key && now < retry.notBefore) return;
-    const request = { key, requestedAt: now };
+    const request = { key, requestedAt: window.requestedAt };
     workspaceRefreshKeyRef.current = request;
     const retryLater = () => {
       if (workspaceRefreshKeyRef.current !== request) return;
+      const currentWindow = workspaceRefreshWindowRef.current;
+      if (currentWindow?.key !== key || currentWindow.requestedAt !== request.requestedAt) return;
+      const failedAttempts = currentWindow.failedAttempts + 1;
+      workspaceRefreshWindowRef.current = { ...currentWindow, failedAttempts };
+      if (failedAttempts >= WORKSPACE_SNAPSHOT_MAX_ATTEMPTS) {
+        workspaceRefreshKeyRef.current = request;
+        setWorkspaceRefreshRetry(null);
+        return;
+      }
       workspaceRefreshKeyRef.current = null;
       setWorkspaceRefreshRetry({
         key,
@@ -2294,15 +2351,30 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
       environmentId,
       input: { instanceId: selectedProviderEntry.instanceId, cwd: gitCwd },
     }).then((result) => {
-      const hasWorkspaceSnapshot =
-        result._tag === "Success" &&
-        hasCompleteProviderWorkspaceSnapshot(
-          result.value.providers.find(
-            (provider) => provider.instanceId === selectedProviderEntry.instanceId,
-          ),
+      const refreshedProvider =
+        result._tag === "Success"
+          ? result.value.providers.find(
+              (provider) => provider.instanceId === selectedProviderEntry.instanceId,
+            )
+          : undefined;
+      const completedAt = Date.now();
+      if (workspaceRefreshKeyRef.current !== request) return;
+      if (
+        !hasProviderWorkspaceSnapshotRefreshProgressed(
+          selectedProviderStatus,
+          refreshedProvider,
           gitCwd,
-        );
-      if (!hasWorkspaceSnapshot) retryLater();
+          completedAt,
+        )
+      ) {
+        retryLater();
+        return;
+      }
+      const currentWindow = workspaceRefreshWindowRef.current;
+      if (currentWindow?.key === key && currentWindow.requestedAt === request.requestedAt) {
+        workspaceRefreshWindowRef.current = { ...currentWindow, failedAttempts: 0 };
+      }
+      setWorkspaceRefreshRetry(null);
     }, retryLater);
   }, [
     environmentId,
@@ -2310,6 +2382,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     prompt,
     refreshProviders,
     selectedProviderEntry,
+    selectedProviderStatus,
     workspaceRefreshRetry,
   ]);
   const selectedProviderModels = useMemo<ReadonlyArray<ServerProvider["models"][number]>>(
@@ -2541,6 +2614,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
       deriveComposerSendState({
         prompt,
         imageCount: composerImages.length + composerFiles.length,
+        existingAttachmentCount: editingQueuedAttachments?.length ?? 0,
         terminalContexts: composerTerminalContexts,
         elementContextCount: composerPreviewAnnotations.length + composerReviewComments.length,
       }),
@@ -2550,6 +2624,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
       composerPreviewAnnotations.length,
       composerReviewComments.length,
       composerTerminalContexts,
+      editingQueuedAttachments?.length,
       prompt,
     ],
   );
@@ -2649,6 +2724,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
           },
         }),
   );
+  const exactPullRequest = exactPullRequestLookup.data;
 
   const composerMenuItems = useMemo<ComposerCommandItem[]>(() => {
     if (!composerTrigger) return [];
@@ -2771,36 +2847,44 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
       pullRequestProjectId !== null &&
       pullRequestRepository !== null
     ) {
-      const exactPullRequest =
-        exactPullRequestLookup.data?.number === pullRequestTriggerNumber
-          ? [exactPullRequestLookup.data]
-          : [];
       const matches = /^\d*$/u.test(composerTrigger.query)
         ? filterComposerPullRequestMatches({
-            entries: [...exactPullRequest, ...(pullRequestLookup.data?.entries ?? [])],
+            entries: [
+              ...(exactPullRequest === null ? [] : [exactPullRequest]),
+              ...(pullRequestLookup.data?.entries ?? []),
+            ],
             projectId: pullRequestProjectId,
             repository: pullRequestRepository,
             query: composerTrigger.query,
             limit: COMPOSER_PULL_REQUEST_RESULT_LIMIT,
           })
-        : rankPullRequestMatches(
-            (pullRequestLookup.data?.entries ?? []).filter((entry) => {
-              if (
-                entry.projectId !== pullRequestProjectId ||
-                entry.repository.trim().toLowerCase() !== pullRequestRepository.trim().toLowerCase()
-              ) {
-                return false;
-              }
-              const provider = pullRequestLookup.data?.providers.find(
-                (candidate) => candidate.host === entry.host,
-              );
-              return (
-                provider?.searchesOnHost === true ||
-                matchesPullRequestQuery(entry, composerTrigger.query)
-              );
-            }),
-            composerTrigger.query,
-          ).slice(0, COMPOSER_PULL_REQUEST_RESULT_LIMIT);
+        : withLinkedComposerPullRequestsFirst({
+            matches: rankPullRequestMatches(
+              (pullRequestLookup.data?.entries ?? []).filter((entry) => {
+                if (
+                  entry.projectId !== pullRequestProjectId ||
+                  entry.repository.trim().toLowerCase() !==
+                    pullRequestRepository.trim().toLowerCase()
+                ) {
+                  return false;
+                }
+                const provider = pullRequestLookup.data?.providers.find(
+                  (candidate) => candidate.host === entry.host,
+                );
+                return (
+                  provider?.searchesOnHost === true ||
+                  matchesPullRequestQuery(entry, composerTrigger.query)
+                );
+              }),
+              composerTrigger.query,
+            ),
+            linked: composerPullRequestsFromLinks(
+              activeThread?.pullRequests ?? [],
+              pullRequestProjectId,
+            ),
+            query: composerTrigger.query,
+            limit: COMPOSER_PULL_REQUEST_RESULT_LIMIT,
+          });
       return matches.map((pullRequest) => ({
         id: `pull-request:${pullRequest.projectId}:${pullRequest.repository}:${pullRequest.number}`,
         type: "pull-request",
@@ -2819,12 +2903,13 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     }
     return [];
   }, [
+    activeThread,
     activeThreadId,
     compactSlashCommandAvailable,
     composerTrigger,
     environmentId,
     environmentThreadShells,
-    exactPullRequestLookup.data,
+    exactPullRequest,
     planModeUiEnabled,
     pullRequestLookup.data,
     pullRequestProjectId,
@@ -2870,8 +2955,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
   );
 
   const isComposerApprovalState = activePendingApproval !== null;
-  const followUpBehavior =
-    pendingApprovals.length > 0 ? "steer" : settings.followUpBehavior;
+  const followUpBehavior = pendingApprovals.length > 0 ? "steer" : settings.followUpBehavior;
   const composerSuggestionsVisible = composerMenuOpen;
   const composerSuggestionListVisible = composerSuggestionsVisible && composerMenuItems.length > 0;
   const activePendingUserInput = pendingUserInputs[0] ?? null;
@@ -2881,8 +2965,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     isComposerApprovalState ||
     pendingUserInputs.length > 0 ||
     (!isComposerCollapsedMobile && showPlanFollowUpPrompt && activeProposedPlan !== null);
-  const showCollapsedMobilePromptRow =
-    isComposerCollapsedMobile;
+  const showCollapsedMobilePromptRow = isComposerCollapsedMobile;
   const showComposerAttachAction =
     fileStagingLimit !== null &&
     (!activePendingProgress ||
@@ -3639,31 +3722,10 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
         getComposerDraft(attachmentDraftTarget)?.persistedAttachments ?? [];
       try {
         const currentPersistedAttachments = getPersistedAttachmentsForThread();
-        const existingPersistedById = new Map(
-          currentPersistedAttachments.map((attachment) => [attachment.id, attachment]),
+        const serialized = await serializeComposerImages(
+          composerImages,
+          currentPersistedAttachments,
         );
-        const stagedAttachmentById = new Map<string, PersistedComposerImageAttachment>();
-        await Promise.all(
-          composerImages.map(async (image) => {
-            try {
-              const dataUrl = await readFileAsDataUrl(image.file);
-              stagedAttachmentById.set(image.id, {
-                id: image.id,
-                name: image.name,
-                mimeType: image.mimeType,
-                sizeBytes: image.sizeBytes,
-                dataUrl,
-                ...(image.source ? { source: image.source } : {}),
-              });
-            } catch {
-              const existingPersisted = existingPersistedById.get(image.id);
-              if (existingPersisted) {
-                stagedAttachmentById.set(image.id, existingPersisted);
-              }
-            }
-          }),
-        );
-        const serialized = Array.from(stagedAttachmentById.values());
         if (cancelled) return;
         syncComposerDraftPersistedAttachments(attachmentDraftTarget, serialized);
       } catch {
@@ -4599,14 +4661,9 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
             : listIndentForTab(snapshot.value, selection.start, selection.end);
         if (
           edit &&
-          applyPromptReplacement(
-            edit.start,
-            edit.end,
-            edit.replacement,
-            key === "Tab"
-              ? { expandedCursorAfterReplace: selection.start + edit.replacement.length }
-              : undefined,
-          )
+          applyPromptReplacement(edit.start, edit.end, edit.replacement, {
+            expandedCursorAfterReplace: edit.cursorAfter,
+          })
         ) {
           return true;
         }
@@ -6456,6 +6513,43 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
           { ensureLeadingBoundary: true, citationCommentAnchor: sourceAnchor },
         ),
       openModelPicker,
+      stepReasoningEffort: (direction) => {
+        if (
+          noProviderAvailable ||
+          isComposerApprovalState ||
+          pendingUserInputs.length > 0 ||
+          isEditingQueuedMessage
+        ) {
+          return;
+        }
+        const change = getComposerReasoningStep({
+          provider: selectedProvider,
+          instanceId: selectedInstanceId,
+          model: selectedModel,
+          models: selectedProviderModels,
+          modelOptions: composerModelOptions?.[selectedInstanceId],
+          reportedModelSelection,
+          prompt: promptRef.current,
+          cursor: readComposerSnapshot().expandedCursor,
+          planModeEnabled: settings.planModeEnabled,
+          direction,
+        });
+        if (!change) return;
+        if (change.modelOptions) {
+          useComposerDraftStore
+            .getState()
+            .setProviderModelOptions(composerDraftTarget, selectedProvider, change.modelOptions, {
+              instanceId: selectedInstanceId,
+              model: selectedModel,
+              persistSticky: true,
+            });
+        }
+        if (change.prompt !== promptRef.current) {
+          applyPromptReplacement(0, promptRef.current.length, change.prompt, {
+            expandedCursorAfterReplace: change.cursor,
+          });
+        }
+      },
       toggleModelPicker: () => {
         if (isComposerModelPickerOpen) {
           setIsComposerModelPickerOpen(false);
@@ -6591,6 +6685,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
       addComposerAttachments,
       foldPastedText,
       composerDraftTarget,
+      composerModelOptions,
       composerCursor,
       composerTerminalContexts,
       insertComposerDraftTerminalContext,
@@ -6609,6 +6704,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
       isChoiceOnlyPendingQuestion,
       pendingApprovals,
       pendingUserInputs.length,
+      isEditingQueuedMessage,
       projectSelectionRequired,
       applyPromptReplacement,
       isComposerModelPickerOpen,
@@ -6617,7 +6713,9 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
       resetComposerTrigger,
       setComposerTrigger,
       selectedModel,
+      reportedModelSelection,
       selectedModelOptionsForDispatch,
+      selectedInstanceId,
       selectedModelSelection,
       multipleModelSelections,
       setMultipleModelSelections,
@@ -6629,6 +6727,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
       selectedProviderModels,
       interactionMode,
       planModeUiEnabled,
+      settings.planModeEnabled,
       compactThreadContext,
       restoreAfterTimelineReachedEnd,
       getTimelineScrollableNode,
@@ -6730,12 +6829,13 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
             restingControlsHost,
           )
         : null}
-      {/* To-do, working, background, and goal status bumps stay above the composer; popovers portal without reflowing it. */}
+      {/* To-do, working, force-stop, background, and goal status bumps stay above the composer; popovers portal without reflowing it. */}
       <ComposerStatusBumps
         environmentId={props.activeThreadEnvironmentId}
         threadId={props.activeThreadId}
         todoPlan={props.activeTodoPlan}
         backgroundWork={props.backgroundWorkBump}
+        forceStopBump={props.forceStopBump}
         goal={props.goalBump}
       />
       <ComposerBanner.Dock>
@@ -6955,10 +7055,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                     event.stopPropagation();
                     if (showResumeAction) onResume();
                     // Compacting first only sends from the expanded composer, where the chip shows it.
-                    else if (
-                      props.resumeCompactionTokens !== null &&
-                      !props.keepFullHistory
-                    )
+                    else if (props.resumeCompactionTokens !== null && !props.keepFullHistory)
                       expandMobileComposer();
                     else submitComposer();
                   }}
@@ -7318,82 +7415,77 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                   </div>
                 )}
 
-              {!isComposerCollapsedMobile &&
-                composerOtherFiles.length > 0 && (
-                  <div className="mb-3 flex flex-col gap-1">
-                    {composerOtherFiles.map((file) => {
-                      const fileCanUpload =
-                        supportsAttachmentUploads &&
-                        maxFileAttachmentBytes !== null &&
-                        file.sizeBytes <= maxFileAttachmentBytes;
-                      const upload = fileCanUpload ? uploadsByImageId[file.id] : undefined;
-                      const needsReattach = composerFileNeedsReattach(file);
-                      const canReattachFile =
-                        fileStagingLimit !== null && file.sizeBytes <= fileStagingLimit;
-                      return (
-                        <div
-                          key={file.id}
-                          className="flex min-w-0 items-center gap-2 py-1 text-sm text-foreground"
+              {!isComposerCollapsedMobile && composerOtherFiles.length > 0 && (
+                <div className="mb-3 flex flex-col gap-1">
+                  {composerOtherFiles.map((file) => {
+                    const fileCanUpload =
+                      supportsAttachmentUploads &&
+                      maxFileAttachmentBytes !== null &&
+                      file.sizeBytes <= maxFileAttachmentBytes;
+                    const upload = fileCanUpload ? uploadsByImageId[file.id] : undefined;
+                    const needsReattach = composerFileNeedsReattach(file);
+                    const canReattachFile =
+                      fileStagingLimit !== null && file.sizeBytes <= fileStagingLimit;
+                    return (
+                      <div
+                        key={file.id}
+                        className="flex min-w-0 items-center gap-2 py-1 text-sm text-foreground"
+                      >
+                        <PierreEntryIcon pathValue={file.name} kind="file" theme={resolvedTheme} />
+                        <button
+                          type="button"
+                          disabled={needsReattach}
+                          className="min-w-0 flex-1 truncate text-left hover:underline focus-visible:outline-2"
+                          onClick={() => setPreviewFileId(file.id)}
                         >
-                          <PierreEntryIcon
-                            pathValue={file.name}
-                            kind="file"
-                            theme={resolvedTheme}
-                          />
-                          <button
-                            type="button"
-                            disabled={needsReattach}
-                            className="min-w-0 flex-1 truncate text-left hover:underline focus-visible:outline-2"
-                            onClick={() => setPreviewFileId(file.id)}
-                          >
-                            {file.name}
-                          </button>
-                          <span className="shrink-0 text-xs text-secondary-label">
-                            {needsReattach
-                              ? canReattachFile
-                                ? "Attach again"
-                                : "Remove to send"
-                              : upload?.status === "uploading"
-                                ? formatAttachmentUploadProgress(upload.progress)
-                                : formatAttachmentSize(file.sizeBytes)}
-                          </span>
-                          {!needsReattach && upload?.status === "failed" ? (
-                            <Tooltip>
-                              <TooltipTrigger
-                                render={
-                                  <Button
-                                    variant="ghost"
-                                    size="icon-xs"
-                                    onClick={() =>
-                                      retryAttachmentUpload({
-                                        environmentId,
-                                        image: file,
-                                        draftTarget: attachmentDraftTarget,
-                                      })
-                                    }
-                                    disabled={!canOperateThread}
-                                    aria-label={`Retry upload for ${file.name}`}
-                                  />
-                                }
-                              >
-                                <RefreshIcon />
-                              </TooltipTrigger>
-                              <TooltipPopup side="top">{upload.reason}</TooltipPopup>
-                            </Tooltip>
-                          ) : null}
-                          <Button
-                            variant="ghost"
-                            size="icon-xs"
-                            onClick={() => removeComposerFileFromDraft(file.id)}
-                            aria-label={`Remove ${file.name}`}
-                          >
-                            <XIcon />
-                          </Button>
-                        </div>
-                      );
-                    })}
-                  </div>
-                )}
+                          {file.name}
+                        </button>
+                        <span className="shrink-0 text-xs text-secondary-label">
+                          {needsReattach
+                            ? canReattachFile
+                              ? "Attach again"
+                              : "Remove to send"
+                            : upload?.status === "uploading"
+                              ? formatAttachmentUploadProgress(upload.progress)
+                              : formatAttachmentSize(file.sizeBytes)}
+                        </span>
+                        {!needsReattach && upload?.status === "failed" ? (
+                          <Tooltip>
+                            <TooltipTrigger
+                              render={
+                                <Button
+                                  variant="ghost"
+                                  size="icon-xs"
+                                  onClick={() =>
+                                    retryAttachmentUpload({
+                                      environmentId,
+                                      image: file,
+                                      draftTarget: attachmentDraftTarget,
+                                    })
+                                  }
+                                  disabled={!canOperateThread}
+                                  aria-label={`Retry upload for ${file.name}`}
+                                />
+                              }
+                            >
+                              <RefreshIcon />
+                            </TooltipTrigger>
+                            <TooltipPopup side="top">{upload.reason}</TooltipPopup>
+                          </Tooltip>
+                        ) : null}
+                        <Button
+                          variant="ghost"
+                          size="icon-xs"
+                          onClick={() => removeComposerFileFromDraft(file.id)}
+                          aria-label={`Remove ${file.name}`}
+                        >
+                          <XIcon />
+                        </Button>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
               {goalCommand?.kind === "set" && !isComposerResting ? (
                 // Sending this starts autonomous work, so the composer says so before it goes.
                 <div
@@ -7504,7 +7596,9 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                       props.threadSyncPhase !== null
                         ? threadSyncLabel(props.threadSyncPhase)
                         : isComposerApprovalState
-                          ? "Send a message to decline and redirect the agent"
+                          ? activePendingApproval?.supportsFeedback
+                            ? "Send feedback to decline this request"
+                            : "Send a message to decline and redirect the agent"
                           : activePendingProgress
                             ? isChoiceOnlyPendingQuestion
                               ? "Choose an option above"
@@ -7652,6 +7746,8 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                     pendingAction={pendingPrimaryAction}
                     isRunning={phase === "running"}
                     canInterrupt={canInterrupt}
+                    forceStopAvailable={props.forceStopAvailable === true}
+                    forceStopping={props.forceStopping === true}
                     followUpBehavior={followUpBehavior}
                     alternateShortcutLabel={shortcutLabelForCommand(
                       keybindings,
@@ -7685,6 +7781,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                     onResume={onResume}
                     onPreviousPendingQuestion={onPreviousActivePendingUserInputQuestion}
                     onInterrupt={handleInterruptPrimaryAction}
+                    {...(props.onForceStop ? { onForceStop: props.onForceStop } : {})}
                     onImplementPlanInNewThread={handleImplementPlanInNewThreadPrimaryAction}
                     compactBeforeSendTokens={props.resumeCompactionTokens}
                     goalCommandLabel={goalCommandLabel}

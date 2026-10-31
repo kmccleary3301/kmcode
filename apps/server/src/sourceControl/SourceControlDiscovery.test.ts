@@ -9,6 +9,7 @@ import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
 import { ChildProcessSpawner } from "effect/process";
 import { FetchHttpClient, HttpClient, HttpClientResponse } from "effect/http";
+import * as NodeOS from "node:os";
 import { VcsProcessSpawnError } from "@t3tools/contracts";
 
 import * as ServerSettings from "../serverSettings.ts";
@@ -38,7 +39,10 @@ const layerSourceControlProviderRegistryTest = (input: {
           prefix: "t3-source-control-registry-test-",
         }).pipe(Layer.provide(NodeServices.layer)),
         Layer.mock(AzureDevOpsCli.AzureDevOpsCli)({}),
-        Layer.mock(BitbucketApi.BitbucketApi)(input.bitbucket),
+        Layer.mock(BitbucketApi.BitbucketApi)({
+          ...input.bitbucket,
+          servesHost: input.bitbucket.servesHost ?? ((host) => host === "bitbucket.org"),
+        }),
         ServerSettings.ServerSettingsService.layerTest(),
         Layer.mock(GitHubApi.GitHubApi)({}),
         Layer.mock(GitVcsDriver.GitVcsDriver)({}),
@@ -153,6 +157,7 @@ it.effect("submits a Forgejo review without sending its summary in the prelimina
             );
           }
           assert.strictEqual(input.command, "fj");
+          assert.strictEqual(input.cwd, NodeOS.homedir());
           assert.deepStrictEqual(input.args, ["--host", "https://forgejo.test", "whoami"]);
           return Effect.succeed(processOutput(""));
         },
@@ -1048,6 +1053,7 @@ it.effect("routes mounted Forgejo repositories without repeating the mount in AP
 it.effect("prefers fj for HTTP and ported SSH aliases on root servers", () => {
   const commands: string[] = [];
   const requests: string[] = [];
+  let repositoryCwd = "";
   return Effect.gen(function* () {
     const cli = yield* ForgejoCli.make;
     for (const remoteUrl of [
@@ -1148,7 +1154,8 @@ it.effect("prefers fj for HTTP and ported SSH aliases on root servers", () => {
       Layer.mock(VcsProcess.VcsProcess)({
         run: (input) => {
           commands.push(input.command);
-          if (input.command === "git")
+          if (input.command === "git") {
+            repositoryCwd = input.cwd;
             return Effect.succeed(
               input.cwd === "/no-remotes"
                 ? processOutput("", { exitCode: ChildProcessSpawner.ExitCode(2) })
@@ -1156,10 +1163,12 @@ it.effect("prefers fj for HTTP and ported SSH aliases on root servers", () => {
                     `${input.cwd === "/upstream-only" ? "upstream" : "origin"}\thttp://forgejo.local:3000/maria/project.git (fetch)\nother\thttp://forgejo.local:3000/maria/other.git (fetch)\nunrelated\thttp://other.local:3000/maria/project.git (fetch)`,
                   ),
             );
+          }
           assert.strictEqual(input.command, "fj");
+          assert.strictEqual(input.cwd, NodeOS.homedir());
           assert.deepStrictEqual(input.args, [
             "--host",
-            input.cwd === "/no-remotes"
+            repositoryCwd === "/no-remotes"
               ? "https://forgejo.local:3000"
               : "http://forgejo.local:3000",
             "whoami",
@@ -1518,6 +1527,7 @@ it.effect(
                       processOutput("http://forgejo.local:3000/maria/project.git\n"),
                     );
                   if (input.command === "fj") {
+                    assert.strictEqual(input.cwd, NodeOS.homedir());
                     if (scenario === "missing")
                       return Effect.fail(
                         new VcsProcessSpawnError({

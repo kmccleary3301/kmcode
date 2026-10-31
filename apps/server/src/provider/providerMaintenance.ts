@@ -11,20 +11,23 @@ import * as Cache from "effect/Cache";
 import * as Config from "effect/Config";
 import * as Context from "effect/Context";
 import * as DateTime from "effect/DateTime";
+import * as Deferred from "effect/Deferred";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
+import * as Exit from "effect/Exit";
 import * as FileSystem from "effect/FileSystem";
 import * as Option from "effect/Option";
 import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
-import { HttpClient, HttpClientRequest } from "effect/http";
+import { HttpClient, HttpClientRequest, HttpClientResponse } from "effect/http";
 import { ChildProcess, ChildProcessSpawner } from "effect/process";
 
 import { collectUint8StreamText } from "../stream/collectUint8StreamText.ts";
 
 const LATEST_VERSION_CACHE_TTL_MS = 60 * 60 * 1_000;
 const LATEST_VERSION_TIMEOUT_MS = 4_000;
+const NPM_LATEST_VERSION_MAX_BYTES = 16 * 1_024;
 const HOMEBREW_INFO_TIMEOUT_MS = 10_000;
 const HOMEBREW_INFO_MAX_BYTES = 256 * 1_024;
 const MISE_WRAPPER_MAX_BYTES = 16 * 1_024;
@@ -116,15 +119,25 @@ export interface PackageManagedProviderMaintenanceDefinition {
     readonly args: ReadonlyArray<string>;
     /** Paths the provider's own installer owns; omit when it has none. */
     readonly isCommandPath?: (commandPath: string) => boolean;
+    /** The updater cannot detect installs outside `isCommandPath`. */
+    readonly requiresCommandPath?: boolean;
     /** Environment the native updater needs to target this instance's install. */
-    readonly env?: NodeJS.ProcessEnv;
+    readonly env?:
+      | NodeJS.ProcessEnv
+      | ((context: ProviderMaintenanceResolutionContext) => NodeJS.ProcessEnv);
   } | null;
 }
 
 export interface ProviderVersionCacheEntry {
   readonly expiresAt: number;
   readonly version: string | null;
+  readonly inFlight?: Deferred.Deferred<Option.Option<string | null>>;
 }
+type ProviderVersionLookupServices =
+  | FileSystem.FileSystem
+  | Path.Path
+  | ChildProcessSpawner.ChildProcessSpawner
+  | HttpClient.HttpClient;
 
 export const ProviderVersionCache = Context.Reference<Map<string, ProviderVersionCacheEntry>>(
   "@t3tools/server/providerMaintenance/ProviderVersionCache",
@@ -135,6 +148,9 @@ export const ProviderVersionCache = Context.Reference<Map<string, ProviderVersio
 const NpmLatestVersionResponse = Schema.Struct({
   version: Schema.optional(Schema.String),
 });
+const decodeNpmViewVersion = Schema.decodeUnknownOption(
+  Schema.fromJsonString(Schema.Union([Schema.String, Schema.Tuple([Schema.String])])),
+);
 
 function nonEmptyString(value: unknown): string | null {
   return typeof value === "string" && value.trim().length > 0 ? value.trim() : null;
@@ -416,6 +432,7 @@ export const resolvePackageManagedProviderMaintenance = Effect.fn(
   const packageName = definition.npmPackageName;
 
   const nativeUpdate = definition.nativeUpdate;
+  const nativeEnv = nativeUpdate?.env;
   const native = nativeUpdate
     ? makeProviderMaintenanceCapabilities({
         provider: definition.provider,
@@ -424,7 +441,9 @@ export const resolvePackageManagedProviderMaintenance = Effect.fn(
         updateArgs: nativeUpdate.args,
         updateLockKey: `${definition.provider}-native`,
         platform: context.platform,
-        ...(nativeUpdate.env ? { env: nativeUpdate.env } : {}),
+        ...(nativeEnv
+          ? { env: typeof nativeEnv === "function" ? nativeEnv(context) : nativeEnv }
+          : {}),
       })
     : manual;
   if (nativeUpdate?.isCommandPath && commandPaths.some(nativeUpdate.isCommandPath)) {
@@ -432,11 +451,11 @@ export const resolvePackageManagedProviderMaintenance = Effect.fn(
   }
   // A `node_modules` path not proven below belongs to another package or a
   // project, so the provider's own updater could act on the wrong install.
-  const fallback = commandPaths.some((commandPath) =>
-    normalizeCommandPath(commandPath).includes("/node_modules/"),
-  )
-    ? manual
-    : native;
+  const fallback =
+    nativeUpdate?.requiresCommandPath ||
+    commandPaths.some((commandPath) => normalizeCommandPath(commandPath).includes("/node_modules/"))
+      ? manual
+      : native;
   if (commandPaths.some(isVitePlusGlobalCommandPath)) {
     return makeProviderMaintenanceCapabilities({
       provider: definition.provider,
@@ -770,27 +789,62 @@ const fetchNpmLatestVersion = Effect.fn("fetchNpmLatestVersion")(function* (pack
   const request = HttpClientRequest.get(
     `https://registry.npmjs.org/${encodeURIComponent(packageName)}/latest`,
   ).pipe(HttpClientRequest.setHeader("accept", "application/json"));
-  const response = yield* client.execute(request).pipe(
+  const payload = yield* client.execute(request).pipe(
+    Effect.flatMap(HttpClientResponse.filterStatusOk),
+    Effect.flatMap(HttpClientResponse.schemaBodyJson(NpmLatestVersionResponse)),
     Effect.timeoutOption(LATEST_VERSION_TIMEOUT_MS),
     Effect.orElseSucceed(() => Option.none()),
   );
-  if (Option.isNone(response)) {
-    return null;
-  }
-  const httpResponse = response.value;
-  if (httpResponse.status < 200 || httpResponse.status >= 300) {
-    return null;
-  }
-  const payload = yield* httpResponse.json.pipe(
-    Effect.flatMap(Schema.decodeUnknownEffect(NpmLatestVersionResponse)),
+  return Option.isSome(payload) ? nonEmptyString(payload.value.version) : null;
+});
+const fetchConfiguredNpmLatestVersion = Effect.fn("fetchConfiguredNpmLatestVersion")(function* (
+  packageName: string,
+  capabilities: ProviderMaintenanceCapabilities,
+) {
+  const npmPath = yield* resolveCommandPath("npm").pipe(
+    Effect.catchTags({ CommandResolutionError: () => Effect.succeed(null) }),
+  );
+  if (npmPath === null) return yield* fetchNpmLatestVersion(packageName);
+
+  const update = capabilities.update;
+  const prefixIndex = update?.lockKey.startsWith("npm-global:")
+    ? update.args.indexOf("--prefix")
+    : -1;
+  const prefix = prefixIndex >= 0 ? update?.args[prefixIndex + 1] : undefined;
+  const args = [
+    "view",
+    "--global",
+    ...(prefix ? ["--prefix", prefix] : []),
+    "--json",
+    `${packageName}@latest`,
+    "version",
+  ];
+  const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
+  return yield* Effect.gen(function* () {
+    const child = yield* spawner.spawn(ChildProcess.make(npmPath, args, { extendEnv: true }));
+    yield* Effect.addFinalizer(() => child.kill().pipe(Effect.ignore));
+    const [stdout, exitCode] = yield* Effect.all(
+      [
+        collectUint8StreamText({ stream: child.stdout, maxBytes: NPM_LATEST_VERSION_MAX_BYTES }),
+        child.exitCode,
+        Stream.runDrain(child.stderr),
+      ],
+      { concurrency: "unbounded" },
+    );
+    if (Number(exitCode) !== 0 || stdout.truncated) return null;
+    const value = Option.getOrNull(decodeNpmViewVersion(stdout.text.trim()));
+    return nonEmptyString(typeof value === "string" ? value : value?.[0]);
+  }).pipe(
+    Effect.scoped,
+    Effect.timeoutOption(Duration.millis(LATEST_VERSION_TIMEOUT_MS)),
+    Effect.map(Option.getOrNull),
     Effect.orElseSucceed(() => null),
   );
-  return payload ? nonEmptyString(payload.version) : null;
 });
 
 export const resolveLatestProviderVersion = Effect.fn("resolveLatestProviderVersion")(function* (
   maintenanceCapabilities: ProviderMaintenanceCapabilities,
-) {
+): Effect.fn.Return<string | null, never, ProviderVersionLookupServices> {
   if (maintenanceCapabilities.latestVersion !== undefined) {
     return maintenanceCapabilities.latestVersion;
   }
@@ -800,18 +854,53 @@ export const resolveLatestProviderVersion = Effect.fn("resolveLatestProviderVers
   }
 
   const latestVersionCache = yield* ProviderVersionCache;
-  const cached = latestVersionCache.get(packageName);
   const now = DateTime.toEpochMillis(yield* DateTime.now);
-  if (cached && cached.expiresAt > now) {
+  const cached = latestVersionCache.get(packageName);
+  if (cached && cached.expiresAt > now && !cached.inFlight) {
     return cached.version;
   }
-
-  const version = yield* fetchNpmLatestVersion(packageName);
-  latestVersionCache.set(packageName, {
-    expiresAt: now + LATEST_VERSION_CACHE_TTL_MS,
-    version,
-  });
-  return version;
+  const inFlight = yield* Deferred.make<Option.Option<string | null>>();
+  const pending: ProviderVersionCacheEntry = { version: null, expiresAt: 0, inFlight };
+  return yield* Effect.acquireUseRelease(
+    Effect.sync(() => {
+      const entry = latestVersionCache.get(packageName);
+      if (entry && (entry.expiresAt > now || entry.inFlight)) return entry;
+      latestVersionCache.set(packageName, pending);
+      return undefined;
+    }),
+    (existing) => {
+      if (existing === undefined)
+        return fetchConfiguredNpmLatestVersion(packageName, maintenanceCapabilities);
+      if (existing.inFlight === undefined) return Effect.succeed(existing.version);
+      return Deferred.await(existing.inFlight).pipe(
+        Effect.flatMap((shared) =>
+          Option.match(shared, {
+            onNone: () => resolveLatestProviderVersion(maintenanceCapabilities),
+            onSome: Effect.succeed,
+          }),
+        ),
+      );
+    },
+    (existing, exit) => {
+      if (existing !== undefined) return Effect.void;
+      const version = Exit.isSuccess(exit) ? Option.some(exit.value) : Option.none();
+      if (latestVersionCache.get(packageName) === pending) {
+        if (Option.isNone(version)) {
+          latestVersionCache.delete(packageName);
+        } else {
+          const ttl =
+            version.value === null
+              ? Duration.minutes(1)
+              : Duration.millis(LATEST_VERSION_CACHE_TTL_MS);
+          latestVersionCache.set(packageName, {
+            version: version.value,
+            expiresAt: now + Duration.toMillis(ttl),
+          });
+        }
+      }
+      return Deferred.succeed(inFlight, version).pipe(Effect.asVoid);
+    },
+  );
 });
 
 export const enrichProviderSnapshotWithVersionAdvisory = Effect.fn(
@@ -822,7 +911,7 @@ export const enrichProviderSnapshotWithVersionAdvisory = Effect.fn(
   options?: {
     readonly enableProviderUpdateChecks: boolean | undefined;
   },
-) {
+): Effect.fn.Return<ServerProvider, never, ProviderVersionLookupServices> {
   const capabilities =
     maintenanceCapabilities ?? makeManualProviderMaintenanceCapabilities(snapshot.driver);
   const shouldResolveLatestVersion =

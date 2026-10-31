@@ -3,7 +3,11 @@ import {
   AuthProvidersManageScope,
   type AuthSessionState,
   type EnvironmentId,
+  type ProjectId,
+  type ProjectSettingsOverrides,
+  type ProviderInstanceId,
   sessionGrantsScope,
+  type ServerSettings,
   type SessionGrantInput,
 } from "@t3tools/contracts";
 
@@ -126,4 +130,33 @@ export function classifyProviderEnvironmentAccess(input: {
     return { kind: "read-only" };
   }
   return { kind: "editable" };
+}
+
+/**
+ * Build an atomic project-settings patch for one provider instance. Each
+ * entry replaces the project's full override set, so preserve unrelated
+ * settings and sibling instance overrides while changing this one.
+ */
+export function buildProviderInstanceOverridePatch(
+  settings: Pick<ServerSettings, "projectSettingsOverrides">,
+  projectIds: readonly ProjectId[],
+  instanceId: ProviderInstanceId,
+  value: boolean | undefined,
+): Record<ProjectId, ProjectSettingsOverrides | null> {
+  const patch: Record<ProjectId, ProjectSettingsOverrides | null> = {};
+  for (const projectId of projectIds) {
+    const current = settings.projectSettingsOverrides[projectId];
+    const instances = { ...current?.providerInstances };
+    const instance = { ...instances[instanceId] };
+    if (value === undefined) delete instance.enabled;
+    else instance.enabled = value;
+    if (Object.keys(instance).length > 0) instances[instanceId] = instance;
+    else delete instances[instanceId];
+
+    const { providerInstances: _omit, ...rest } = current ?? {};
+    const nextEntry: ProjectSettingsOverrides = { ...rest, providerInstances: instances };
+    patch[projectId] =
+      Object.keys(rest).length === 0 && Object.keys(instances).length === 0 ? null : nextEntry;
+  }
+  return patch;
 }

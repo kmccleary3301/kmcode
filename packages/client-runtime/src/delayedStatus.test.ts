@@ -62,4 +62,12 @@ describe("createDelayedStatus", () => {
     vi.advanceTimersByTime(STATUS_SHOW_DELAY_MS);
     expect(changes.at(-1)).toEqual({ key: "b", value: "syncing" });
   });
+  it("uses an explicit delay before showing a transient status", () => {
+    const { changes, status } = track();
+    status.update("a", "failed", 5_000);
+    vi.advanceTimersByTime(5_000 - 1);
+    expect(changes).toEqual([]);
+    vi.advanceTimersByTime(1);
+    expect(changes).toEqual([{ key: "a", value: "failed" }]);
+  });
 });

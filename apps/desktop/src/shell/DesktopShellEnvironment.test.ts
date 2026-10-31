@@ -87,7 +87,7 @@ function runShellEnvironment(input: {
 
   const program = Effect.gen(function* () {
     const shellEnvironment = yield* DesktopShellEnvironment.DesktopShellEnvironment;
-    yield* shellEnvironment.installIntoProcess;
+    return yield* shellEnvironment.installIntoProcess;
   }).pipe(
     Effect.provide(
       DesktopShellEnvironment.layer.pipe(
@@ -108,7 +108,7 @@ describe("DesktopShellEnvironment", () => {
       };
       const commands: ChildProcess.Command[] = [];
 
-      yield* runShellEnvironment({
+      const prepared = yield* runShellEnvironment({
         env,
         platform: "darwin",
         handler: (command) => {
@@ -126,6 +126,7 @@ describe("DesktopShellEnvironment", () => {
       assert.equal(env.PATH, "/opt/homebrew/bin:/usr/bin:/Users/test/.local/bin");
       assert.equal(env.SSH_AUTH_SOCK, "/tmp/secretive.sock");
       assert.equal(env.HOMEBREW_PREFIX, "/opt/homebrew");
+      assert.isTrue(prepared);
     }),
   );
 
@@ -286,7 +287,7 @@ describe("DesktopShellEnvironment", () => {
       };
       const commands: string[] = [];
 
-      yield* runShellEnvironment({
+      const prepared = yield* runShellEnvironment({
         env,
         platform: "darwin",
         handler: (command) => {
@@ -298,9 +299,26 @@ describe("DesktopShellEnvironment", () => {
 
       assert.deepEqual(commands, ["/opt/homebrew/bin/nu", "/bin/zsh", "/bin/launchctl"]);
       assert.equal(env.PATH, "/opt/homebrew/bin:/usr/bin");
+      assert.isFalse(prepared);
     }),
   );
 
+  it.effect("preserves inherited PATH when the Linux login-shell probe returns no PATH", () =>
+    Effect.gen(function* () {
+      const env: NodeJS.ProcessEnv = {
+        SHELL: "/bin/bash",
+        PATH: "/home/test/.local/bin:/usr/bin",
+      };
+      const prepared = yield* runShellEnvironment({
+        env,
+        platform: "linux",
+        handler: () => "",
+      });
+
+      assert.isFalse(prepared);
+      assert.equal(env.PATH, "/home/test/.local/bin:/usr/bin");
+    }),
+  );
   it.effect("loads PowerShell profile environment on Windows", () =>
     Effect.gen(function* () {
       const env: NodeJS.ProcessEnv = {

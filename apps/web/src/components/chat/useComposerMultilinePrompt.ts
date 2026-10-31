@@ -25,9 +25,15 @@ export function useComposerMultilinePrompt(body: HTMLElement | null): boolean {
 
   useLayoutEffect(() => {
     if (!body) return;
+    // Layout reads are batched per frame so mutation bursts do not force repeated reflows.
+    let frame: number | null = null;
     const measure = () => {
-      const next = measureComposerMultilinePrompt(body);
-      if (next !== null) setIsMultiline(next);
+      if (frame !== null) return;
+      frame = window.requestAnimationFrame(() => {
+        frame = null;
+        const next = measureComposerMultilinePrompt(body);
+        if (next !== null) setIsMultiline(next);
+      });
     };
     measure();
     const resizeObserver = new ResizeObserver(measure);
@@ -37,6 +43,7 @@ export function useComposerMultilinePrompt(body: HTMLElement | null): boolean {
     const mutationObserver = new MutationObserver(measure);
     mutationObserver.observe(body, { childList: true, characterData: true, subtree: true });
     return () => {
+      if (frame !== null) window.cancelAnimationFrame(frame);
       resizeObserver.disconnect();
       mutationObserver.disconnect();
     };

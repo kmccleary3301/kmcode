@@ -353,6 +353,35 @@ it.layer(NodeServices.layer)("dev-runner", (it) => {
       }),
     );
 
+    it.effect("expands home-relative T3 homes without changing other paths", () =>
+      Effect.gen(function* () {
+        const path = yield* Path.Path;
+        const homeFor = (t3Home: string) =>
+          createDevRunnerEnv({
+            mode: "dev",
+            baseEnv: {},
+            serverOffset: 0,
+            webOffset: 0,
+            t3Home,
+            browser: undefined,
+            autoBootstrapProjectFromCwd: undefined,
+            logWebSocketEvents: undefined,
+            host: undefined,
+            port: undefined,
+            devUrl: undefined,
+          }).pipe(Effect.map((env) => env.T3CODE_HOME));
+        const home = NodeOS.homedir();
+
+        assert.equal(yield* homeFor("~/t3-dev"), path.join(home, "t3-dev"));
+        assert.equal(yield* homeFor("~"), home);
+        assert.equal(yield* homeFor("~\\t3-dev"), path.join(home, "t3-dev"));
+        assert.equal(yield* homeFor("  ~/t3-dev  "), path.join(home, "t3-dev"));
+        assert.equal(yield* homeFor("~someone/t3-dev"), path.resolve("~someone/t3-dev"));
+        assert.equal(yield* homeFor("relative/t3-dev"), path.resolve("relative/t3-dev"));
+        assert.equal(yield* homeFor("/tmp/t3-dev"), path.resolve("/tmp/t3-dev"));
+      }),
+    );
+
     it.effect("pins desktop dev to a stable backend port and websocket url", () =>
       Effect.gen(function* () {
         const path = yield* Path.Path;

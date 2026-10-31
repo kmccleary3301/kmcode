@@ -26,17 +26,20 @@ import type { CodexScanState, UsageRecord, UsageSpeed } from "./usageTranscripts
 // v4: records carry Claude fast mode, which v3 rows never captured.
 // v5: Codex records carry their service tier. v4 rows store speed the same
 // way, so v4 entries still load; see `decodeScanCache` for v4 Codex entries.
-const USAGE_SCAN_CACHE_VERSION = 5 as const;
+// v6: Claude advisor usage is stored separately, so older Claude files must be rescanned.
+const USAGE_SCAN_CACHE_VERSION = 6 as const;
 const SPEED_COMPATIBLE_SINCE_VERSION = 4;
 
 /**
  * Each cache version writes its own file in the state directory. An older
  * server sharing that directory cannot read a newer cache and would replace
  * it, dropping saved usage for deleted transcripts. Separate files keep both.
- * A v5 server reads the legacy (v4) file once, when its own file is missing.
  */
-export const SCAN_CACHE_FILE_NAME = "usage-scan-cache-v5.json";
-export const LEGACY_SCAN_CACHE_FILE_NAME = "usage-scan-cache.json";
+export const SCAN_CACHE_FILE_NAME = "usage-scan-cache-v6.json";
+export const LEGACY_SCAN_CACHE_FILE_NAMES = [
+  "usage-scan-cache-v5.json",
+  "usage-scan-cache.json",
+] as const;
 
 /** Serialised as the index into this list. */
 const SPEEDS: readonly UsageSpeed[] = ["standard", "fast", "ultrafast"];
@@ -320,10 +323,11 @@ export function decodeScanCache(document: unknown): ScanCache {
     ) {
       continue;
     }
-    // v4 Codex records predate service tiers, so they all priced as standard.
-    // Keep them, because the rollout may be gone, but make a live rollout
-    // re-parse whole: no file has size -1, and a zero position cannot resume.
-    const legacyCodex = entry.p === "codex" && version < USAGE_SCAN_CACHE_VERSION;
+    // v4 Codex records predate service tiers; older Claude entries predate advisor records.
+    // Keep their saved records for deleted files, but re-parse live files from byte 0.
+    const legacyCodex = entry.p === "codex" && version < 5;
+    const legacyClaude = entry.p === "claude" && version < USAGE_SCAN_CACHE_VERSION;
+    const reparseWholeFile = legacyCodex || legacyClaude;
     const codexState = legacyCodex ? null : decodeCodexState(entry.cs);
     if (codexState === undefined) continue;
 
@@ -333,12 +337,12 @@ export function decodeScanCache(document: unknown): ScanCache {
     if (records === null || tailRecords === null) continue;
 
     cache.set(path, {
-      size: legacyCodex ? -1 : entry.s,
+      size: reparseWholeFile ? -1 : entry.s,
       mtimeMs: entry.m,
       provider,
       records,
       tailRecords,
-      position: legacyCodex
+      position: reparseWholeFile
         ? { resumeOffset: 0, guardLength: 0, guardHash: 0, codexState: null }
         : { resumeOffset: entry.o, guardLength: entry.gl, guardHash: entry.gh, codexState },
     });
@@ -361,6 +365,8 @@ function decodeCodexState(value: unknown): CodexScanState | null | undefined {
     !isSpeed(state.speed) ||
     typeof state.sessionId !== "string" ||
     (state.lastUsageSignature !== null && typeof state.lastUsageSignature !== "string") ||
+    (state.sequenceStartSignature !== undefined &&
+      typeof state.sequenceStartSignature !== "string") ||
     typeof state.sawSessionMeta !== "boolean" ||
     typeof state.suppressingForkCopies !== "boolean" ||
     typeof state.forkCopyAnchorMs !== "number" ||
@@ -373,6 +379,9 @@ function decodeCodexState(value: unknown): CodexScanState | null | undefined {
     speed: state.speed,
     sessionId: state.sessionId,
     lastUsageSignature: state.lastUsageSignature ?? null,
+    ...(state.sequenceStartSignature === undefined
+      ? {}
+      : { sequenceStartSignature: state.sequenceStartSignature }),
     sawSessionMeta: state.sawSessionMeta,
     suppressingForkCopies: state.suppressingForkCopies,
     forkCopyAnchorMs: state.forkCopyAnchorMs,

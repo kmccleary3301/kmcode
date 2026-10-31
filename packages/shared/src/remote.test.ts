@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vite-plus/test";
 
 import {
+  buildPairingAppLink,
+  readPairingAppLink,
   RemoteBackendUrlInvalidError,
   RemoteBackendUrlMissingError,
   RemotePairingTokenMissingError,
@@ -219,5 +221,20 @@ describe("remote", () => {
     expect(hostError).toBeInstanceOf(RemoteBackendUrlInvalidError);
     expect(hostError).toMatchObject({ source: "direct-host" });
     expect((hostError as RemoteBackendUrlInvalidError).cause).toBeInstanceOf(TypeError);
+  });
+  it("round-trips pairing URLs through production and development app links", () => {
+    const pairingUrl = "https://vps.example.com/pair#token=ABC123";
+    const appLink = buildPairingAppLink(pairingUrl);
+    expect(appLink.startsWith("t3code://pair?")).toBe(true);
+    expect(readPairingAppLink(appLink)).toBe(pairingUrl);
+    expect(readPairingAppLink(appLink.replace("t3code:", "t3code-dev:"))).toBe(pairingUrl);
+    expect(readPairingAppLink("t3code://pair")).toBeNull();
+    expect(readPairingAppLink(appLink.replace("//pair?", "//pair/other?"))).toBeNull();
+    expect(
+      readPairingAppLink(`t3code://threads?pairingUrl=${encodeURIComponent(pairingUrl)}`),
+    ).toBeNull();
+    expect(
+      readPairingAppLink(`https://pair?pairingUrl=${encodeURIComponent(pairingUrl)}`),
+    ).toBeNull();
   });
 });

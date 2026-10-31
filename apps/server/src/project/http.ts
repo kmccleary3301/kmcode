@@ -14,8 +14,9 @@ import {
 } from "../auth/http.ts";
 import { traceLocalHandlerWork } from "../cloud/traceRelayRequest.ts";
 import * as ServerRuntimeStartup from "../serverRuntimeStartup.ts";
+import * as ProjectCloneTracker from "./ProjectCloneTracker.ts";
 import * as ProjectService from "./ProjectService.ts";
-import { projectMutationOperation } from "./ProjectMutation.ts";
+import { mutateProjectWithClone } from "./ProjectMutation.ts";
 
 export const failProjectMutation = Effect.fn("environment.projects.failMutation")(function* (
   cause: ProjectService.ProjectServiceError | ServerRuntimeStartup.ServerRuntimeStartupError,
@@ -35,8 +36,8 @@ export const layer = HttpApiBuilder.group(
   "projects",
   Effect.fnUntraced(function* (handlers) {
     const projects = yield* ProjectService.ProjectService;
+    const projectClones = yield* ProjectCloneTracker.ProjectCloneTracker;
     const startup = yield* ServerRuntimeStartup.ServerRuntimeStartup;
-
     return handlers
       .handle(
         "snapshot",
@@ -56,7 +57,7 @@ export const layer = HttpApiBuilder.group(
           for (const scope of requiredScopesForProjectMutation(args.payload)) {
             yield* requireEnvironmentScope(scope);
           }
-          const operation = projectMutationOperation(projects, args.payload);
+          const operation = mutateProjectWithClone(projects, projectClones, args.payload);
           return yield* startup
             .enqueueCommand(operation)
             .pipe(traceLocalHandlerWork, Effect.catch(failProjectMutation));

@@ -18,6 +18,7 @@
 import * as NodeFSP from "node:fs/promises";
 import * as NodePath from "node:path";
 import * as NodeStringDecoder from "node:string_decoder";
+import * as NodeZlib from "node:zlib";
 
 import type { UsageProviderKind } from "@t3tools/contracts";
 
@@ -181,7 +182,11 @@ export async function listTranscriptFiles(
     for (const entry of entries) {
       const child = NodePath.join(dir, entry.name);
       if (entry.isDirectory()) await walk(child);
-      else if (fileName !== undefined ? entry.name === fileName : entry.name.endsWith(".jsonl")) {
+      else if (
+        fileName !== undefined
+          ? entry.name === fileName
+          : entry.name.endsWith(".jsonl") || entry.name.endsWith(".jsonl.zst")
+      ) {
         candidates.push(child);
       }
     }
@@ -268,6 +273,7 @@ export async function readTranscriptRecords(
   resumeFrom?: TranscriptParsePosition,
   options?: { readonly streamingThresholdBytes?: number },
 ): Promise<TranscriptParseResult | null> {
+  const compressed = filePath.endsWith(".jsonl.zst");
   const streamingThresholdBytes = options?.streamingThresholdBytes ?? STREAMING_THRESHOLD_BYTES;
   let handle: NodeFSP.FileHandle;
   try {
@@ -281,6 +287,7 @@ export async function readTranscriptRecords(
     let resumed = false;
     let start = 0;
     if (
+      !compressed &&
       resumeFrom !== undefined &&
       resumeFrom.resumeOffset > 0 &&
       (provider !== "codex" || resumeFrom.codexState !== null) &&
@@ -310,8 +317,7 @@ export async function readTranscriptRecords(
         for (const grokRecord of parseGrokLine(line)) out.push(grokRecord);
         return;
       }
-      const record = parseClaudeLine(line);
-      if (record !== null) out.push(record);
+      for (const record of parseClaudeLine(line)) out.push(record);
     };
 
     const toLineString = (lineBuffer: Buffer): string => {
@@ -357,11 +363,12 @@ export async function readTranscriptRecords(
         if (provider === "grok") {
           out.push(...parseGrokRecord(projected));
         } else {
-          const record =
-            provider === "codex"
-              ? parseCodexRecord(projected, state)
-              : parseClaudeRecord(projected);
-          if (record !== null) out.push(record);
+          if (provider === "codex") {
+            const record = parseCodexRecord(projected, state);
+            if (record !== null) out.push(record);
+          } else {
+            for (const record of parseClaudeRecord(projected)) out.push(record);
+          }
         }
       } else if (pendingBytes > 0) {
         const line =
@@ -375,11 +382,13 @@ export async function readTranscriptRecords(
       streaming = undefined;
       decoder = undefined;
     };
-    const stream = handle.createReadStream({
+    const input = handle.createReadStream({
       start,
-      autoClose: false,
+      autoClose: compressed,
       highWaterMark: 256 * 1024,
-    }) as AsyncIterable<Buffer>;
+    });
+    // Compressed snapshots cache a full parse; decoded byte offsets cannot resume the compressed input.
+    const stream = compressed ? input.compose(NodeZlib.createZstdDecompress()) : input;
     for await (const chunk of stream) {
       let lineStart = 0;
       while (lineStart < chunk.length) {
@@ -405,7 +414,7 @@ export async function readTranscriptRecords(
     const tailRecords: UsageRecord[] = [];
     finish({ ...codexState }, tailRecords);
 
-    const guardLength = Math.min(GUARD_LENGTH, resumeOffset);
+    const guardLength = compressed ? 0 : Math.min(GUARD_LENGTH, resumeOffset);
     let guardHash = 0;
     if (guardLength > 0) {
       const window = Buffer.alloc(guardLength);
@@ -417,7 +426,7 @@ export async function readTranscriptRecords(
       records,
       tailRecords,
       position: {
-        resumeOffset,
+        resumeOffset: compressed ? 0 : resumeOffset,
         guardLength,
         guardHash,
         codexState: provider === "codex" ? codexState : null,

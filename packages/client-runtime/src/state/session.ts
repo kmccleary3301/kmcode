@@ -11,6 +11,7 @@ import * as RemoteEnvironmentAuthorization from "../authorization/service.ts";
 import * as EnvironmentRegistry from "../connection/registry.ts";
 import type { PreparedConnection } from "../connection/model.ts";
 import * as EnvironmentSupervisor from "../connection/supervisor.ts";
+import type { RpcSession } from "../rpc/session.ts";
 import { environmentEndpointUrl } from "../environment/endpoint.ts";
 import * as ManagedRelay from "../relay/managedRelay.ts";
 import { safeErrorLogAttributes } from "../errors/safeLog.ts";
@@ -39,6 +40,8 @@ function initialConfigOption<E>(
 // Bounded so a wedged environment cannot pin the permissions check (and with it
 // the settings UI) in a loading state for long.
 const DEFAULT_SESSION_STATE_TIMEOUT_MS = 6_000;
+const SESSION_STATE_RETRY_BASE_MS = 2_000;
+const SESSION_STATE_RETRY_MAX_MS = 60_000;
 
 /**
  * Read the granted scopes of this client's session on one environment via its
@@ -128,15 +131,37 @@ function makeEnvironmentSessionAtoms<R, E>(
     ).pipe(Atom.withLabel(`environment-prepared-connection:${environmentId}`)),
   );
 
-  // Keyed on the prepared connection's identity: a reconnect (new credential,
-  // new base URL) swaps the prepared value, which re-runs the fetch, so scope
-  // changes from re-pairing are picked up without an explicit refresh.
-  const sessionStateAtom = Atom.family((environmentId: EnvironmentId) =>
-    runtime
+  const transportSessionAtom = Atom.family((environmentId: EnvironmentId) =>
+    runtime.atom(
+      followStreamInEnvironment(
+        environmentId,
+        Stream.unwrap(
+          EnvironmentSupervisor.EnvironmentSupervisor.pipe(
+            Effect.map((supervisor) => SubscriptionRef.changes(supervisor.session)),
+          ),
+        ),
+      ),
+      { initialValue: Option.none<RpcSession>() },
+    ),
+  );
+
+  // Each established transport triggers a fresh check, and failures retry while
+  // it stays up, so a fetch from before a reconnect cannot outlive its socket.
+  const sessionStateAtom = Atom.family((environmentId: EnvironmentId) => {
+    let consecutiveFailures = 0;
+    let backoffConnection: RpcSession | null = null;
+    return runtime
       .atom((get) => {
         const prepared = Option.getOrNull(get(preparedConnectionValueAtom(environmentId)));
-        if (prepared === null) {
+        const connection = AsyncResult.getOrElse(get(transportSessionAtom(environmentId)), () =>
+          Option.none<RpcSession>(),
+        );
+        if (prepared === null || Option.isNone(connection)) {
           return Effect.never;
+        }
+        if (connection.value !== backoffConnection) {
+          backoffConnection = connection.value;
+          consecutiveFailures = 0;
         }
         return Effect.gen(function* () {
           const signer = yield* Effect.serviceOption(ManagedRelay.ManagedRelayDpopSigner);
@@ -150,14 +175,31 @@ function makeEnvironmentSessionAtoms<R, E>(
             signer,
             remoteAuthorization,
           }).pipe(Effect.provideService(HttpClient.HttpClient, client.value));
-        });
+        }).pipe(
+          Effect.tap(() =>
+            Effect.sync(() => {
+              consecutiveFailures = 0;
+            }),
+          ),
+          Effect.tapError(() => {
+            const delayMs = Math.min(
+              SESSION_STATE_RETRY_BASE_MS * 2 ** consecutiveFailures,
+              SESSION_STATE_RETRY_MAX_MS,
+            );
+            consecutiveFailures += 1;
+            return Effect.sleep(delayMs).pipe(
+              Effect.andThen(Effect.sync(() => get.refreshSelf())),
+              Effect.forkScoped,
+            );
+          }),
+        );
       })
       .pipe(
         Atom.swr({ staleTime: 30_000, revalidateOnMount: true }),
         Atom.setIdleTTL(5 * 60_000),
         Atom.withLabel(`environment-session-state:${environmentId}`),
-      ),
-  );
+      );
+  });
 
   const sessionStateValueAtom = Atom.family((environmentId: EnvironmentId) =>
     Atom.make(

@@ -1,7 +1,10 @@
 import { Check, Copy, Maximize2, Minimize2 } from "lucide";
-import { useCallback, useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import type { NodeViewProps } from "@stream-mdx/react";
-import { serializeTableElementToCsv, serializeTableElementToMarkdown } from "../../markdown-clipboard";
+import {
+  serializeTableElementToCsv,
+  serializeTableElementToMarkdown,
+} from "../../markdown-clipboard";
 import { getClientSettings } from "../../hooks/useSettings";
 import { MorphIcon } from "../MorphIcon";
 import { Button } from "../ui/button";
@@ -14,49 +17,13 @@ export function MarkdownTablePresentation({ children }: NodeViewProps) {
   return <MarkdownTable>{children}</MarkdownTable>;
 }
 
-function tableHasClippedCells(container: HTMLDivElement, table: HTMLTableElement): boolean {
-  const viewport = table.closest<HTMLElement>("[data-slot='scroll-area-viewport']");
-  const scrollLeft = viewport?.scrollLeft;
-  const scrollTop = viewport?.scrollTop;
-  const previousExpanded = container.dataset.expanded;
-  container.dataset.expanded = "false";
-  const clipped = [...table.rows].some((row) =>
-    [...row.cells].some((cell) => cell.scrollWidth > cell.clientWidth),
-  );
-  if (previousExpanded === undefined) delete container.dataset.expanded;
-  else container.dataset.expanded = previousExpanded;
-  if (viewport && scrollLeft !== undefined && scrollTop !== undefined) {
-    viewport.scrollLeft = scrollLeft;
-    viewport.scrollTop = scrollTop;
-  }
-  return clipped;
-}
-
 function MarkdownTable({ children }: { readonly children: ReactNode }) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const [expanded, setExpanded] = useState(() => getClientSettings().wordWrap);
   const [copied, setCopied] = useState(false);
   const copiedTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const [hasClippedCells, setHasClippedCells] = useState(false);
   const expandLabel = expanded ? "Collapse table cells" : "Expand table cells";
   const copyLabel = copied ? "Copied" : "Copy table";
-  const measureClippedCells = useCallback(() => {
-    const container = containerRef.current;
-    const table = container?.querySelector("table") ?? null;
-    if (!container || !table) return;
-    setHasClippedCells(tableHasClippedCells(container, table));
-  }, []);
-
-  useLayoutEffect(measureClippedCells);
-  useEffect(() => {
-    const container = containerRef.current;
-    const table = container?.querySelector("table") ?? null;
-    if (!container || !table || typeof ResizeObserver === "undefined") return;
-    const observer = new ResizeObserver(measureClippedCells);
-    observer.observe(container);
-    observer.observe(table);
-    return () => observer.disconnect();
-  }, [measureClippedCells]);
 
   function toggleExpanded() {
     const table = containerRef.current?.querySelector("table") ?? null;
@@ -128,27 +95,23 @@ function MarkdownTable({ children }: { readonly children: ReactNode }) {
         {children}
       </ScrollArea>
       <div className="mt-0.5 flex items-center justify-between select-none">
-        {hasClippedCells ? (
-          <Tooltip>
-            <TooltipTrigger
-              render={
-                <Button
-                  type="button"
-                  variant={expanded ? "secondary" : "ghost-muted"}
-                  size="icon-xs"
-                  aria-pressed={expanded}
-                  onClick={toggleExpanded}
-                  aria-label={expandLabel}
-                />
-              }
-            >
-              <MorphIcon className="size-3" icon={expanded ? Minimize2 : Maximize2} />
-            </TooltipTrigger>
-            <TooltipPopup side="top">{expandLabel}</TooltipPopup>
-          </Tooltip>
-        ) : (
-          <span />
-        )}
+        <Tooltip>
+          <TooltipTrigger
+            render={
+              <Button
+                type="button"
+                variant={expanded ? "secondary" : "ghost-muted"}
+                size="icon-xs"
+                aria-pressed={expanded}
+                onClick={toggleExpanded}
+                aria-label={expandLabel}
+              />
+            }
+          >
+            <MorphIcon className="size-3" icon={expanded ? Minimize2 : Maximize2} />
+          </TooltipTrigger>
+          <TooltipPopup side="top">{expandLabel}</TooltipPopup>
+        </Tooltip>
         <Menu>
           <Tooltip>
             <TooltipTrigger

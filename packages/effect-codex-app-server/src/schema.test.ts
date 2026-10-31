@@ -33,6 +33,26 @@ it("keeps async questions in live notifications and thread history", () => {
   }
 });
 
+it("accepts partial answers in live notifications and persisted thread history", () => {
+  const item = {
+    type: "agentMessage",
+    id: "partial-1",
+    text: "A stable answer before more tool work.",
+    phase: "partial_answer",
+  } as const;
+  for (const schema of [
+    CodexSchema.ServerNotification__ThreadItem,
+    CodexSchema.V2ItemStartedNotification__ThreadItem,
+    CodexSchema.V2ItemCompletedNotification__ThreadItem,
+    CodexSchema.V2ThreadReadResponse__ThreadItem,
+    CodexSchema.V2ThreadResumeResponse__ThreadItem,
+    CodexSchema.V2ThreadForkResponse__ThreadItem,
+    CodexSchema.V2TurnCompletedNotification__ThreadItem,
+  ]) {
+    assert.deepEqual(Schema.decodeSync(schema)(item), item);
+  }
+});
+
 it("accepts Codex 0.150 multi-agent values", () => {
   const schemas = [
     CodexSchema.ServerNotification__SubAgentActivityKind,

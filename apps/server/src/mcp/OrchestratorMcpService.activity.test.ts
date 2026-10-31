@@ -137,15 +137,22 @@ it("readThread prefers activity-run status over a newer cancelled queued run", a
     updatedAt: now,
   } as unknown as OrchestrationV2ThreadProjection;
 
+  const callerMessageRoleFilters: Array<ReadonlyArray<string> | undefined> = [];
+
   const layer = layerService.pipe(
     Layer.provide(
       Layer.mergeAll(
         Layer.mock(ThreadManagementService.ThreadManagementService)({
           getTimelinePage: () => Effect.succeed({ items: [], totalItems: 0, hasMore: false }),
-          getThreadRecords: (threadId) =>
-            threadId === parentThreadId
+          getThreadRecords: (threadId, fields, filter) => {
+            const fieldNames: ReadonlyArray<string> = fields;
+            if (threadId === parentThreadId && fieldNames.includes("messages")) {
+              callerMessageRoleFilters.push(filter?.messageRoles);
+            }
+            return threadId === parentThreadId
               ? Effect.succeed(projection)
-              : Effect.die(`unexpected thread ${threadId}`),
+              : Effect.die(`unexpected thread ${threadId}`);
+          },
           getThreadShell: (threadId) =>
             Effect.succeed(
               threadId === parentThreadId
@@ -179,6 +186,7 @@ it("readThread prefers activity-run status over a newer cancelled queued run", a
     expect(result.thread.status).toBe("running");
     expect(result.thread.latestRunId).toBe(cancelledRunId);
     expect(result.thread.activeRunId).toBe(activeRunId);
+    expect(callerMessageRoleFilters).toEqual([[]]);
   }).pipe(Effect.provide(layer), Effect.runPromise);
 });
 
@@ -414,6 +422,25 @@ it("readThread and sendToThread reach threads in other projects", async () => {
             updatedAt: now,
           },
         },
+        {
+          position: 1,
+          visibility: "direct",
+          sourceThreadId: threadId,
+          sourceItemId: "item-approval",
+          item: {
+            id: "item-approval",
+            type: "approval_request",
+            runId: "run-foreign",
+            status: "pending",
+            title: null,
+            requestId: "request-approval",
+            requestKind: "command",
+            prompt: "rm -rf /tmp/example",
+            reason: "The provider requires confirmation for destructive commands.",
+            createdAt: now,
+            updatedAt: now,
+          },
+        },
       ],
       runtimeRequests: [],
       messages: [],
@@ -440,7 +467,7 @@ it("readThread and sendToThread reach threads in other projects", async () => {
           getTimelinePage: (threadId) =>
             Effect.succeed({
               items: foreignProjection(threadId).visibleTurnItems,
-              totalItems: 1,
+              totalItems: 2,
               hasMore: false,
             }),
           getProjectThreadRecords: (input) =>
@@ -489,7 +516,10 @@ it("readThread and sendToThread reach threads in other projects", async () => {
     const foreign = yield* service.readThread(makeScope(), { threadId: foreignThreadId });
     expect(foreign.thread.threadId).toBe(foreignThreadId);
     expect(foreign.thread.projectId).toBe(foreignProjectId);
-    expect(foreign.items.map((item) => item.text)).toEqual(["Foreign thread said hello"]);
+    expect(foreign.items.map((item) => item.text)).toEqual([
+      "Foreign thread said hello",
+      "rm -rf /tmp/example\nThe provider requires confirmation for destructive commands.",
+    ]);
 
     const sent = yield* service.sendToThread(makeScope(), {
       threadId: foreignThreadId,

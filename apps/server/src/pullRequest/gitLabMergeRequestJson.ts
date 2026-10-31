@@ -12,6 +12,7 @@ import type {
   PullRequestMergeability,
   PullRequestMergeCapabilities,
   PullRequestMergeMethod,
+  PullRequestOmittedFileStat,
   PullRequestReaction,
   PullRequestReactionContent,
   PullRequestReviewThread,
@@ -209,8 +210,8 @@ export interface GitLabMergeRequestListItem {
   readonly isDraft: boolean;
   readonly mergeability: PullRequestMergeability;
   /**
-   * GitLab reports neither added nor removed lines on a merge request, so both stay zero and
-   * the surface omits the stat. The Code tab counts them from the patch it already fetched.
+   * GitLab's REST list response omits line counts; the provider fills them from a separate GraphQL
+   * stats read when that API is available.
    */
   readonly additions: number;
   readonly deletions: number;
@@ -312,7 +313,6 @@ function toPipelineStatus(value: string | null | undefined): PullRequestCheckSta
       return "skipped";
     // A pipeline waiting on a person is not progress, and it is not a failure either.
     case "manual":
-    case "scheduled":
       return "neutral";
     default:
       return "pending";
@@ -692,6 +692,8 @@ export interface GitLabMergeRequestPatch {
   readonly truncated: boolean;
   /** Files GitLab returned, counted before decoding, so the caller can page. */
   readonly rawCount: number;
+  /** Files whose hunks were withheld, identified by the path the diff viewer renders. */
+  readonly omittedPaths: ReadonlyArray<string>;
 }
 
 /**
@@ -707,15 +709,16 @@ export function decodeMergeRequestDiffsJson(
     return Result.fail(decoded.failure);
   }
   const sections: string[] = [];
+  const omittedPaths: string[] = [];
   let truncated = false;
   for (const entry of decoded.success) {
     const file = decodeDiffEntry(entry);
     if (Exit.isFailure(file)) continue;
     const value = file.value;
     const hunks = value.diff ?? "";
-    if (hunks.length === 0) {
-      // A file GitLab declined to inline still belongs in the file list, header only.
-      truncated = truncated || value.too_large === true || value.collapsed === true;
+    if (hunks.length === 0 && (value.too_large === true || value.collapsed === true)) {
+      truncated = true;
+      omittedPaths.push(value.deleted_file === true ? value.old_path : value.new_path);
     }
     const { from, to } = diffHeaderPaths(value);
     const header = [
@@ -736,6 +739,7 @@ export function decodeMergeRequestDiffsJson(
   return Result.succeed({
     patch: sections.join("\n"),
     truncated,
+    omittedPaths,
     rawCount: decoded.success.length,
   });
 }
@@ -1029,4 +1033,110 @@ export function decodeRepositoryBlobsJson(
     blobs.set(path, oid);
   }
   return Result.succeed(blobs);
+}
+/**
+ * GitLab's REST listing and detail responses leave out line counts. The GraphQL summary answers
+ * them for a set of merge request ids in one project at a time.
+ */
+export const MERGE_REQUEST_STATS_GRAPHQL_QUERY = `query($fullPath: ID!, $iids: [String!]) {
+  project(fullPath: $fullPath) {
+    mergeRequests(iids: $iids, first: 100) {
+      nodes { iid diffStatsSummary { additions deletions } }
+    }
+  }
+}`;
+
+const LineCountsSchema = Schema.Struct({ additions: Schema.Int, deletions: Schema.Int });
+
+const decodeMergeRequestStats = decodeJsonResult(
+  Schema.Struct({
+    data: Schema.Struct({
+      project: Schema.NullOr(
+        Schema.Struct({
+          mergeRequests: Schema.NullOr(
+            Schema.Struct({
+              nodes: Schema.Array(
+                Schema.NullOr(
+                  Schema.Struct({
+                    iid: Schema.String,
+                    diffStatsSummary: Schema.NullOr(LineCountsSchema),
+                  }),
+                ),
+              ),
+            }),
+          ),
+        }),
+      ),
+    }),
+  }),
+);
+
+/** Merge request line counts keyed by the project-local IID. Missing summaries stay absent. */
+export function decodeMergeRequestStatsJson(
+  raw: string,
+): Result.Result<
+  ReadonlyMap<number, { readonly additions: number; readonly deletions: number }>,
+  DecodeFailure
+> {
+  const decoded = decodeMergeRequestStats(raw);
+  if (!Result.isSuccess(decoded)) return Result.fail(decoded.failure);
+
+  const stats = new Map<number, { readonly additions: number; readonly deletions: number }>();
+  for (const node of decoded.success.data.project?.mergeRequests?.nodes ?? []) {
+    const number = Number(node?.iid);
+    if (!Number.isSafeInteger(number) || number <= 0 || node?.diffStatsSummary == null) continue;
+    stats.set(number, node.diffStatsSummary);
+  }
+  return Result.succeed(stats);
+}
+
+/**
+ * Per-file GitLab counts for the merge requests whose patches were withheld from the REST diff.
+ */
+export const MERGE_REQUEST_FILE_STATS_GRAPHQL_QUERY = `query($fullPath: ID!, $iid: String!) {
+  project(fullPath: $fullPath) {
+    mergeRequest(iid: $iid) {
+      diffStatsSummary { fileCount }
+      diffStats { path additions deletions }
+    }
+  }
+}`;
+
+const decodeMergeRequestFileStats = decodeJsonResult(
+  Schema.Struct({
+    data: Schema.Struct({
+      project: Schema.NullOr(
+        Schema.Struct({
+          mergeRequest: Schema.NullOr(
+            Schema.Struct({
+              diffStatsSummary: Schema.NullOr(Schema.Struct({ fileCount: Schema.Int })),
+              diffStats: Schema.NullOr(
+                Schema.Array(
+                  Schema.Struct({ path: TrimmedNonEmptyString, ...LineCountsSchema.fields }),
+                ),
+              ),
+            }),
+          ),
+        }),
+      ),
+    }),
+  }),
+);
+
+export interface GitLabMergeRequestFileStats {
+  readonly files: ReadonlyArray<PullRequestOmittedFileStat>;
+  readonly truncated: boolean;
+}
+
+/** A shorter per-file list than the summary reports is itself truncated. */
+export function decodeMergeRequestFileStatsJson(
+  raw: string,
+): Result.Result<GitLabMergeRequestFileStats, DecodeFailure> {
+  const decoded = decodeMergeRequestFileStats(raw);
+  if (!Result.isSuccess(decoded)) return Result.fail(decoded.failure);
+
+  const mergeRequest = decoded.success.data.project?.mergeRequest;
+  const files = mergeRequest?.diffStats ?? [];
+  const fileCount = mergeRequest?.diffStatsSummary?.fileCount;
+  return Result.succeed({ files, truncated: fileCount === undefined || files.length < fileCount });
 }

@@ -51,6 +51,7 @@ import {
 } from "../auth/utils.ts";
 import * as ServerSecretStore from "../auth/ServerSecretStore.ts";
 import { parseAttachmentFileExtension, resolveAttachmentPathById } from "../attachmentStore.ts";
+import { makeIsServerInternalPath } from "../auth/serverInternalPaths.ts";
 import * as ServerConfig from "../config.ts";
 import * as Orchestrator from "../orchestration-v2/Orchestrator.ts";
 import { expandHomePathWith } from "../pathExpansion.ts";
@@ -241,7 +242,9 @@ const resolveCanonicalFile = Effect.fn("AssetAccess.resolveCanonicalFile")(funct
   if (Option.isNone(canonicalFile)) return null;
 
   const info = yield* optionOnNotFound(fileSystem.stat(canonicalFile.value));
-  return Option.isSome(info) && info.value.type === "File" ? canonicalFile.value : null;
+  if (Option.isNone(info) || info.value.type !== "File") return null;
+  const isServerInternalPath = yield* makeIsServerInternalPath;
+  return (yield* isServerInternalPath(canonicalFile.value)) ? null : canonicalFile.value;
 });
 
 const resolveCanonicalWorkspaceFile = Effect.fn("AssetAccess.resolveCanonicalWorkspaceFile")(
@@ -267,7 +270,9 @@ const resolveCanonicalWorkspaceFile = Effect.fn("AssetAccess.resolveCanonicalWor
     if (relative === "" || relative.startsWith("..") || path.isAbsolute(relative)) return null;
 
     const info = yield* optionOnNotFound(fileSystem.stat(canonicalFile.value));
-    return Option.isSome(info) && info.value.type === "File" ? canonicalFile.value : null;
+    if (Option.isNone(info) || info.value.type !== "File") return null;
+    const isServerInternalPath = yield* makeIsServerInternalPath;
+    return (yield* isServerInternalPath(canonicalFile.value)) ? null : canonicalFile.value;
   },
 );
 
@@ -430,7 +435,7 @@ const finalizeWorkspaceFileAsset = Effect.fn("AssetAccess.finalizeWorkspaceFileA
       ? yield* readImageDimensionsFromHeader(canonicalFile)
       : null;
     return {
-      claims: isWorkspaceImagePreviewPath(resolved.relativePath)
+      claims: !/\.html?$/i.test(resolved.relativePath)
         ? {
             version: 1 as const,
             kind: "workspace-file-exact" as const,
@@ -583,7 +588,10 @@ export const issueAssetUrl = Effect.fn("AssetAccess.issueAssetUrl")(function* (i
           ? inlinePreviewMimeTypeForExtension(extension)
           : undefined;
       if (!isGenericFile) {
-        imageDimensions = yield* readImageDimensionsFromHeader(attachmentPath);
+        imageDimensions = yield* fileSystem.realPath(attachmentPath).pipe(
+          Effect.flatMap(readImageDimensionsFromHeader),
+          Effect.orElseSucceed(() => null),
+        );
       }
       claims = {
         version: 1,

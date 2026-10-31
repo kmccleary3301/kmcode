@@ -75,6 +75,22 @@ describe("resolveProjectSettings", () => {
     expect(resolveProjectSettings(settings, otherProjectId).settings.defaultAutoPull).toBe(true);
   });
 
+  it("applies project-specific thread title instructions", () => {
+    const settings = applyServerSettingsPatch(DEFAULT_SERVER_SETTINGS, {
+      threadTitleInstructions: "Environment title style.",
+      projectSettingsOverrides: {
+        [projectId]: { threadTitleInstructions: "Put the project name first." },
+      },
+    });
+
+    const project = resolveProjectSettings(settings, projectId);
+    expect(project.settings.threadTitleInstructions).toBe("Put the project name first.");
+    expect(project.sources.threadTitleInstructions).toBe("project");
+    expect(resolveProjectSettings(settings, otherProjectId).settings.threadTitleInstructions).toBe(
+      "Environment title style.",
+    );
+  });
+
   it("keeps the environment text generation model when the override's provider is disabled", () => {
     const disabledSelection = createModelSelection(ProviderInstanceId.make("claudeAgent"), "opus");
     const settings = applyServerSettingsPatch(DEFAULT_SERVER_SETTINGS, {

@@ -213,7 +213,9 @@ export const make = Effect.gen(function* () {
     const linkedThisSweep = new Set<string>();
     const persistence = yield* Semaphore.make(1);
 
-    const syncEntry = Effect.fn("PullRequestSyncReactor.syncEntry")(function* (
+    // Effect.fn's stack frames close over these sweep-scoped bodies and their arguments, and a
+    // cache lookup forked inside keeps those frames, so a plain span leaves the sweep collectable.
+    const syncEntry = Effect.fnUntraced(function* (
       entry: LinkEntry,
       fields: SnapshotFields,
       fetchedStack: { readonly stack: ThreadPullRequestStack | null } | null,
@@ -269,12 +271,9 @@ export const make = Effect.gen(function* () {
           stack: nextStack,
         });
       }
-    });
+    }, Effect.withSpan("PullRequestSyncReactor.syncEntry"));
 
-    const syncGroup = Effect.fn("PullRequestSyncReactor.syncGroup")(function* (
-      key: string,
-      entries: ReadonlyArray<LinkEntry>,
-    ) {
+    const syncGroup = Effect.fnUntraced(function* (key: string, entries: ReadonlyArray<LinkEntry>) {
       const first = entries[0]!;
       const ref = {
         projectId: first.thread.projectId,
@@ -346,7 +345,7 @@ export const make = Effect.gen(function* () {
           ),
         { discard: true },
       );
-    });
+    }, Effect.withSpan("PullRequestSyncReactor.syncGroup"));
 
     // Failed host reads by reason: how many, and the first key that failed that way.
     const skips = new Map<string, { count: number; readonly key: string }>();
@@ -398,7 +397,7 @@ export const make = Effect.gen(function* () {
     Effect.suspend(() => {
       // Requests from here on queue another sweep; the ones already recorded are read by this.
       if (scope === "requested") requestedSweepQueued = false;
-      return sweep(scope);
+      return pullRequests.withSharedProjectReads(sweep(scope));
     }).pipe(Effect.catchCause(logSkipped("pull request sync sweep failed", {}))),
   );
 

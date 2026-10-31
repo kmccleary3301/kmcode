@@ -1,6 +1,7 @@
 import { assert, it } from "@effect/vitest";
 import {
   MessageId,
+  NodeId,
   ProjectId,
   ProviderDriverKind,
   ProviderInstanceId,
@@ -43,6 +44,8 @@ function makeProjection() {
       projectId: ProjectId.make("restart-project"),
       providerInstanceId: instanceId,
       archivedAt: null,
+      lineage: { parentThreadId: null, relationshipToParent: null, rootThreadId: threadId },
+      forkedFrom: null,
       deletedAt: null,
     },
     runs: [
@@ -609,14 +612,22 @@ it.effect("does not cancel or resume a run that completes while shutdown intent 
   }),
 );
 
-const continuationTexts = (projection: OrchestrationV2ThreadProjection) =>
+const continuationTexts = (
+  projection: OrchestrationV2ThreadProjection,
+  parentProjection?: OrchestrationV2ThreadProjection,
+) =>
   Effect.gen(function* () {
     const texts: Array<string> = [];
     yield* continueRestartedRun({ threadId, sourceRunId: runId }).pipe(
       Effect.provide(
         Layer.merge(
           Layer.mock(ThreadManagementService.ThreadManagementService)({
-            getThreadRecords: () => Effect.succeed(projection),
+            getThreadRecords: (targetThreadId) =>
+              Effect.succeed(
+                parentProjection !== undefined && targetThreadId === parentProjection.thread.id
+                  ? parentProjection
+                  : projection,
+              ),
             recoverDelegatedTask: () => Effect.void,
             dispatch: (command) => {
               if (command.type === "message.dispatch") texts.push(command.text);
@@ -766,6 +777,60 @@ it.effect("does not continue a run the user asked to stop before the restart", (
       turnItems: [{ id: "turn-item:interrupt", runId, type: "run_interrupt_request" }],
     } as unknown as OrchestrationV2ThreadProjection);
     assert.deepEqual(texts, []);
+  }),
+);
+
+it.effect("continues a failed restart continuation that never reached a provider turn", () =>
+  Effect.gen(function* () {
+    const cut = cutMidTurn();
+    const failed = {
+      ...cut.runs[0]!,
+      status: "failed",
+      restartContinuationOfRunId: RunId.make("run:previous-continuation"),
+    };
+    const texts = yield* continuationTexts({
+      ...cut,
+      runs: [failed],
+      providerTurns: [],
+    } as unknown as OrchestrationV2ThreadProjection);
+    assert.deepEqual(texts, ["Continue where you left off."]);
+  }),
+);
+
+it.effect("does not restart a failed continuation after its parent task was stopped", () =>
+  Effect.gen(function* () {
+    const cut = cutMidTurn();
+    const parentThreadId = ThreadId.make("thread:parent-stop");
+    const taskId = NodeId.make("node:parent-stop-task");
+    const parentRunId = RunId.make("run:parent-stop");
+    const child = {
+      ...cut,
+      thread: {
+        ...cut.thread,
+        lineage: {
+          relationshipToParent: "subagent",
+          parentThreadId,
+          rootThreadId: parentThreadId,
+        },
+      },
+      runs: [
+        {
+          ...cut.runs[0]!,
+          status: "failed",
+          restartContinuationOfRunId: RunId.make("run:previous-continuation"),
+          delegatedTaskId: taskId,
+        },
+      ],
+      providerTurns: [],
+    } as unknown as OrchestrationV2ThreadProjection;
+    const parent = {
+      ...makeProjection(),
+      thread: { ...makeProjection().thread, id: parentThreadId },
+      subagents: [{ id: taskId, status: "running", result: null, runId: parentRunId }],
+      turnItems: [{ id: "parent-stop", runId: parentRunId, type: "run_interrupt_request" }],
+    } as unknown as OrchestrationV2ThreadProjection;
+
+    assert.deepEqual(yield* continuationTexts(child, parent), []);
   }),
 );
 

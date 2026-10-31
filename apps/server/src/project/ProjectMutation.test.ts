@@ -1,10 +1,12 @@
 import { assert, it } from "@effect/vitest";
 import { CommandId, ProjectId, type Project } from "@t3tools/contracts";
+import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
+import * as Fiber from "effect/Fiber";
 import * as Ref from "effect/Ref";
 
-import { projectMutationOperation } from "./ProjectMutation.ts";
-import { type ProjectService } from "./ProjectService.ts";
+import { mutateProjectWithClone, projectMutationOperation } from "./ProjectMutation.ts";
+import { ProjectNotEmptyError, type ProjectService } from "./ProjectService.ts";
 
 const projectId = ProjectId.make("project:mutation-mapping");
 const project = {
@@ -89,5 +91,54 @@ it.effect("preserves every project mutation field", () =>
       },
       { commandId: "command:delete", projectId, force: true },
     ]);
+  }),
+);
+it.effect("keeps clone tracking when a project deletion is rejected", () =>
+  Effect.gen(function* () {
+    const rejected = new ProjectNotEmptyError({ projectId });
+    const projects: Pick<ProjectService["Service"], "create" | "delete" | "update"> = {
+      create: () => Effect.die("unused"),
+      update: () => Effect.die("unused"),
+      delete: () => Effect.fail(rejected),
+    };
+    const result = yield* mutateProjectWithClone(
+      projects,
+      { discard: () => Effect.die("must not discard a project that still exists") },
+      { type: "project.delete", commandId: CommandId.make("rejected-delete"), projectId },
+    ).pipe(Effect.flip);
+
+    assert.strictEqual(result, rejected);
+  }),
+);
+
+it.effect("discards the clone after a committed deletion despite request interruption", () =>
+  Effect.gen(function* () {
+    const committed = yield* Deferred.make<void>();
+    const finishDelete = yield* Deferred.make<void>();
+    const discarded: Array<ProjectId> = [];
+    const projects: Pick<ProjectService["Service"], "create" | "delete" | "update"> = {
+      create: () => Effect.die("unused"),
+      update: () => Effect.die("unused"),
+      delete: () =>
+        Deferred.succeed(committed, undefined).pipe(
+          Effect.andThen(Deferred.await(finishDelete)),
+          Effect.as(project),
+        ),
+    };
+    const clones = {
+      discard: (id: ProjectId) => Effect.sync(() => void discarded.push(id)),
+    };
+
+    const request = yield* mutateProjectWithClone(projects, clones, {
+      type: "project.delete",
+      commandId: CommandId.make("command:delete-interrupted"),
+      projectId,
+    }).pipe(Effect.forkChild);
+    yield* Deferred.await(committed);
+    request.interruptUnsafe();
+    yield* Deferred.succeed(finishDelete, undefined);
+    yield* Fiber.await(request);
+
+    assert.deepEqual(discarded, [projectId]);
   }),
 );

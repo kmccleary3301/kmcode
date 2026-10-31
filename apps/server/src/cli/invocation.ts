@@ -16,7 +16,7 @@ import {
   HostProcessIsExecutable,
   HostProcessPlatform,
 } from "@t3tools/shared/hostProcess";
-import { isCommandAvailable } from "@t3tools/shared/shell";
+import { resolveCommandPath } from "@t3tools/shared/shell";
 
 import packageJson from "../../package.json" with { type: "json" };
 
@@ -196,15 +196,28 @@ const resolveInstallLauncher = Effect.gen(function* () {
  * the package runner this process came from, or else the absolute path of the
  * launcher for this install, such as the one the desktop app installs.
  */
-const resolveHostCliCommand = (subcommand: string) =>
+const resolveHostCliCommand = (subcommand: string, args: ReadonlyArray<string> = []) =>
   Effect.gen(function* () {
     const command = yield* resolveCliCommand(subcommand);
-    if (command !== `t3 ${subcommand}`) return { command, launcher: false };
-    if (yield* isCommandAvailable("t3")) return { command, launcher: false };
+    const withArgs = (value: string) =>
+      args.length === 0 ? value : `${value} ${args.map(shellWord).join(" ")}`;
+    if (command !== `t3 ${subcommand}`) return { command: withArgs(command), launcher: false };
+    const onPath = yield* resolveCommandPath("t3").pipe(
+      Effect.catchTag("CommandResolutionError", () => Effect.succeed(null)),
+    );
+    if (onPath !== null) {
+      const shim = (yield* HostProcessEnvironment).T3CODE_CLI_PATH?.trim();
+      const fs = yield* FileSystem.FileSystem;
+      const real = (file: string) => fs.realPath(file).pipe(Effect.orElseSucceed(() => null));
+      const shimReal = shim ? yield* real(shim) : null;
+      if (shimReal === null || shimReal === (yield* real(onPath))) {
+        return { command: withArgs(command), launcher: false };
+      }
+    }
     const launcher = yield* resolveInstallLauncher;
     return Option.isSome(launcher)
-      ? { command: `${shellWord(launcher.value)} ${subcommand}`, launcher: true }
-      : { command, launcher: false };
+      ? { command: withArgs(`${shellWord(launcher.value)} ${subcommand}`), launcher: true }
+      : { command: withArgs(command), launcher: false };
   });
 
 /**
@@ -214,9 +227,9 @@ const resolveHostCliCommand = (subcommand: string) =>
  * PATH through unless Node is on root's PATH too. An absolute launcher needs
  * neither.
  */
-export const resolveRootCliCommand = (subcommand: string) =>
+export const resolveRootCliCommand = (subcommand: string, args: ReadonlyArray<string> = []) =>
   Effect.gen(function* () {
-    const { command, launcher } = yield* resolveHostCliCommand(subcommand);
+    const { command, launcher } = yield* resolveHostCliCommand(subcommand, args);
     if (launcher) return `sudo ${command}`;
     const executablePath = yield* HostProcessExecutablePath;
     const systemNode = ROOT_PATH_DIRECTORIES.some((directory) =>

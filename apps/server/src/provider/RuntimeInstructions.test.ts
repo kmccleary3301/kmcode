@@ -2,12 +2,21 @@ import { describe, expect, it } from "vite-plus/test";
 import { buildRuntimeInstructions } from "./RuntimeInstructions.ts";
 
 describe("buildRuntimeInstructions", () => {
-  it("requires explicit registration of every PR and stack layer", () => {
+  it("links only PRs created, taken over, or pushed to", () => {
     const instructions = buildRuntimeInstructions({ harness: "Codex" });
-    expect(instructions).toContain("When the t3-code MCP server exposes link_pull_request");
-    expect(instructions).toContain("with the full PR URL immediately after creating a PR");
-    expect(instructions).toContain("For a stack, call it for every layer");
-    expect(instructions).toContain("call list_thread_pull_requests and link any PR");
+    expect(instructions).toContain("Link each PR you create, take over, or push to");
+    expect(instructions).toContain("one link_pull_request per PR");
+    expect(instructions).toContain("Skip PRs you only read or review");
+    expect(instructions).not.toContain("list_thread_pull_requests");
+  });
+
+  it("watches only when requested or work still waits, without polling", () => {
+    const instructions = buildRuntimeInstructions({ harness: "Codex" });
+    expect(instructions).toContain("Call watch_pull_request when asked to monitor or babysit");
+    expect(instructions).toContain("Otherwise act now or hand back.");
+    expect(instructions).toContain("Delegated children never watch");
+    expect(instructions).toContain("Never wait with sleep");
+    expect(instructions).toContain("call unwatch_pull_request");
   });
 
   it("keeps known model and effort metadata on one line", () => {

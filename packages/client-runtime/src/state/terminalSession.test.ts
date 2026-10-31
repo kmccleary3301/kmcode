@@ -68,6 +68,29 @@ describe("terminal session reducers", () => {
       version: 1,
     });
   });
+  it("follows the shared PTY grid from snapshots and activity without disturbing output", () => {
+    const attached = applyTerminalAttachStreamEvent(nextTerminalAttachSeedState(), {
+      type: "snapshot",
+      snapshot: { ...BASE_SNAPSHOT, cols: 130, rows: 15 },
+    });
+    const activity = {
+      type: "activity",
+      threadId: TARGET.threadId,
+      terminalId: TARGET.terminalId,
+      hasRunningSubprocess: false,
+      label: "Terminal 1",
+    } as const;
+    const narrowed = applyTerminalAttachStreamEvent(attached, { ...activity, cols: 54, rows: 15 });
+    // Activity from a server without geometry, or a repeat, must not reset the renderer.
+    const unchanged = applyTerminalAttachStreamEvent(
+      applyTerminalAttachStreamEvent(narrowed, activity),
+      { ...activity, cols: 54, rows: 15 },
+    );
+
+    expect(attached.grid).toEqual({ cols: 130, rows: 15 });
+    expect(narrowed).toEqual({ ...attached, grid: { cols: 54, rows: 15 } });
+    expect(unchanged).toBe(narrowed);
+  });
 
   it("uses metadata status before an attach stream has emitted", () => {
     const summary = applyTerminalMetadataStreamEvent([], {
@@ -301,6 +324,32 @@ describe("terminal session reducers", () => {
     const update = readTerminalOutputUpdate(state.output, cursor);
     expect(update).toMatchObject({ type: "append", data: " one two three" });
     expect(readTerminalOutputUpdate(state.output, update.cursor).type).toBe("none");
+  });
+  it("reads a new tail chunk after a long output history", () => {
+    let state = applyTerminalAttachStreamEvent(EMPTY_TERMINAL_BUFFER_STATE, {
+      type: "snapshot",
+      snapshot: { ...BASE_SNAPSHOT, history: "" },
+    });
+    for (let index = 0; index < 512; index += 1) {
+      state = applyTerminalAttachStreamEvent(state, {
+        type: "output",
+        threadId: TARGET.threadId,
+        terminalId: TARGET.terminalId,
+        data: `chunk-${index}\n`,
+      });
+    }
+    const cursor = readTerminalOutputUpdate(state.output, INITIAL_TERMINAL_OUTPUT_CURSOR).cursor;
+    state = applyTerminalAttachStreamEvent(state, {
+      type: "output",
+      threadId: TARGET.threadId,
+      terminalId: TARGET.terminalId,
+      data: "tail",
+    });
+
+    expect(readTerminalOutputUpdate(state.output, cursor)).toMatchObject({
+      type: "append",
+      data: "tail",
+    });
   });
 
   it("preserves the byte-limited tail and resets a cursor before a partially trimmed chunk", () => {

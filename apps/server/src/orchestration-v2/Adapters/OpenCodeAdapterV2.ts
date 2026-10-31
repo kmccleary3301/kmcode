@@ -2702,7 +2702,11 @@ export function makeOpenCodeAdapterV2(
                       failure: makeProviderFailure({
                         message,
                         code: event.properties.error?.name ?? null,
-                        class: "provider_error",
+                        class:
+                          event.properties.error?.name === "APIError" &&
+                          recordValue(event.properties.error.data, "statusCode") === 429
+                            ? "usage_limit"
+                            : "provider_error",
                       }),
                       threadDisposition:
                         event.properties.sessionID === undefined ? "broken" : "reusable",

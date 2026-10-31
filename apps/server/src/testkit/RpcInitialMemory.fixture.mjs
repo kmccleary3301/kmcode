@@ -44,6 +44,7 @@ function start(ready) {
           snapshotSequence: 1,
           projection: {
             messages: [history()],
+            checkpoints: [],
             contextHandoffs: [],
             turnItems: [],
             visibleTurnItems: [],

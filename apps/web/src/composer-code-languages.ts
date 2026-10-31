@@ -57,11 +57,16 @@ const LANGUAGE_ALIASES: Record<string, string> = {
   "c++": "cpp",
   js: "javascript",
   md: "markdown",
+  none: "",
+  plain: "",
+  plaintext: "",
   py: "python",
   rb: "ruby",
   rs: "rust",
   sh: "bash",
   shell: "bash",
+  text: "",
+  txt: "",
   ts: "typescript",
   yml: "yaml",
 };
@@ -88,7 +93,7 @@ export function withInfoStringLanguage(info: string, language: string): string {
 
 /** The canonical entry a language names, if the picker lists it. */
 export function codeLanguageEntry(language: string): CodeBlockLanguage | null {
-  const id = language === "text" ? "" : (LANGUAGE_ALIASES[language.toLowerCase()] ?? language);
+  const id = LANGUAGE_ALIASES[language.toLowerCase()] ?? language;
   return CODE_BLOCK_LANGUAGES.find((entry) => entry.id === id.toLowerCase()) ?? null;
 }
 

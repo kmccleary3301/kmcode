@@ -5,9 +5,16 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test"
 
 import { AttachmentFilePreview } from "./AttachmentFilePreview";
 
-const { refresh } = vi.hoisted(() => ({ refresh: vi.fn<() => Promise<string | null>>() }));
+const { refresh, settings } = vi.hoisted(() => ({
+  refresh: vi.fn<() => Promise<string | null>>(),
+  settings: { wordWrap: true },
+}));
 
 vi.mock("~/assets/assetUrls", () => ({ useAssetUrlRefresh: () => refresh }));
+vi.mock("~/hooks/useSettings", () => ({
+  useClientSettings: (select: (current: { readonly wordWrap: boolean }) => boolean) =>
+    select(settings),
+}));
 vi.mock("~/hooks/useCopyToClipboard", () => ({
   useCopyToClipboard: () => ({ copyToClipboard: vi.fn(), isCopied: false }),
 }));
@@ -17,7 +24,9 @@ vi.mock("~/components/ui/scroll-area", () => ({
   ScrollArea: ({ children }: { children: ReactNode }) => children,
 }));
 vi.mock("./ReadOnlySourcePreview", () => ({
-  default: ({ text }: { text: string }) => <pre>{text}</pre>,
+  default: ({ text, wordWrap }: { text: string; wordWrap?: boolean }) => (
+    <pre data-word-wrap={String(wordWrap)}>{text}</pre>
+  ),
 }));
 vi.mock("./fileSurfaceChrome", () => ({
   FILE_SURFACE_SUBHEADER_CLASS: "",
@@ -38,6 +47,7 @@ describe("attachment HTML preview recovery", () => {
   beforeEach(() => {
     vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
     now = 0;
+    settings.wordWrap = true;
     vi.spyOn(Date, "now").mockImplementation(() => now);
     refresh.mockReset().mockResolvedValueOnce(originalUrl).mockResolvedValue(renewedUrl);
     vi.stubGlobal(
@@ -129,5 +139,29 @@ describe("attachment HTML preview recovery", () => {
     await toggleMode("Show rendered page");
     expect(renderer.root.findAllByProps({ role: "alert" })).toHaveLength(0);
     expect(renderer.root.findByType("iframe").props.title).toBe("document.html");
+  });
+
+  it("keeps word wrap overrides local to one attachment preview", async () => {
+    const file = new Blob(["a long line"], { type: "text/plain" });
+    await act(async () => {
+      renderer = create(
+        <AttachmentFilePreview
+          name="notes.txt"
+          mimeType={file.type}
+          sizeBytes={file.size}
+          file={file}
+        />,
+      );
+    });
+
+    await act(async () => {
+      await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    });
+
+    expect(renderer.root.findByType("pre").props["data-word-wrap"]).toBe("true");
+    await toggleMode("Disable word wrap");
+    expect(renderer.root.findByProps({ "aria-label": "Enable word wrap" })).toBeDefined();
+    expect(renderer.root.findByType("pre").props["data-word-wrap"]).toBe("false");
+    expect(settings.wordWrap).toBe(true);
   });
 });

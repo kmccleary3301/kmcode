@@ -404,6 +404,7 @@ const checkContextsPage = (
 
 /** A pull request's base and head, as the REST read a file expansion starts from answers them. */
 const pullRequestRefs = encodeJson({ base: { sha: "a1b2c3d" }, head: { sha: "b1c2d3e" } });
+const pullRequestMergeBase = encodeJson({ merge_base_commit: { sha: "c1d2e3f" } });
 
 /** A cross-repository pull request whose head waits on a maintainer to run its workflows. */
 const crossRepositoryDetail = (headRefOid = "abc123") =>
@@ -549,6 +550,68 @@ it.effect(
         viewer: "same-account",
       });
     }),
+);
+
+it.effect("keeps credential identity on not-found errors from a verified read", () =>
+  Effect.gen(function* () {
+    const credentials = Layer.succeed(
+      GitHubCredentials.GitHubCredentials,
+      GitHubCredentials.GitHubCredentials.of({
+        get: (host) =>
+          Effect.succeed({
+            host,
+            token: Redacted.make("saved-token"),
+            source: "settings",
+            fingerprint: `${host}:saved-token`,
+          }),
+        invalidate: () => Effect.void,
+      }),
+    );
+    const http = Layer.succeed(
+      HttpClient.HttpClient,
+      HttpClient.make((request) =>
+        Effect.sync(() => {
+          const body = request.url.endsWith("/user")
+            ? { id: 123, login: "same-account" }
+            : {
+                data: null,
+                errors: [
+                  {
+                    type: "NOT_FOUND",
+                    message: "Could not resolve to a Repository with the name 'acme/private'.",
+                  },
+                ],
+              };
+          return HttpClientResponse.fromWeb(request, new Response(encodeJson(body)));
+        }),
+      ),
+    );
+    const cli = yield* GitHubPullRequestApi.make.pipe(
+      Effect.provide(
+        GitHubApi.layer.pipe(
+          Layer.provide(Layer.mergeAll(credentials, http)),
+          Layer.provide(GitHubQuota.layer),
+          Layer.provide(SourceControlRateLimit.layer),
+          Layer.merge(VcsProcess.layer),
+          Layer.provideMerge(NodeServices.layer),
+        ),
+      ),
+    );
+    const input = {
+      cwd: "/repo",
+      repository: "acme/private",
+      host: "github.com",
+      number: 1,
+    };
+    const error = yield* cli.withVerifiedCredential(input, () =>
+      Effect.flip(cli.getPullRequestDetail(input)),
+    );
+
+    expect(error).toMatchObject({
+      _tag: "GitHubApiNotFoundError",
+      credential: "settings",
+    });
+  }),
 );
 
 layer("GitHubPullRequestApi.layer", (it) => {
@@ -3072,6 +3135,34 @@ layer("GitHubPullRequestApi.layer", (it) => {
     }),
   );
 
+  it.effect("expands a pull request file from its merge base, not the moved base tip", () =>
+    Effect.gen(function* () {
+      const answers: Record<string, string> = {
+        "repos/acme/web/pulls/7": pullRequestRefs,
+        "repos/acme/web/compare/a1b2c3d...b1c2d3e?per_page=1&page=2": pullRequestMergeBase,
+        "repos/acme/web/contents/src/a.ts?ref=a1b2c3d": "base tip\n",
+        "repos/acme/web/contents/src/a.ts?ref=c1d2e3f": "merge base\n",
+        "repos/acme/web/contents/src/a.ts?ref=b1c2d3e": "head\n",
+      };
+      mockedExecute.mockImplementation((call) =>
+        Effect.succeed(output(call.kind === "rest" ? (answers[call.path] ?? "") : "")),
+      );
+      const cli = yield* GitHubPullRequestApi.GitHubPullRequestApi;
+
+      const contents = yield* cli.getPullRequestDiffFileContents({
+        cwd: "/w",
+        repository: "acme/web",
+        host: "github.com",
+        number: 7,
+        changeType: "change",
+        oldPath: "src/a.ts",
+        newPath: "src/a.ts",
+      });
+
+      expect(contents).toEqual({ oldContents: "merge base\n", newContents: "head\n" });
+    }),
+  );
+
   it.effect("reports unusable diff revisions as a structured error", () =>
     Effect.gen(function* () {
       mockedExecute.mockReturnValueOnce(Effect.succeed(output("not-a-sha\tstill-not-a-sha\n")));
@@ -3101,6 +3192,7 @@ layer("GitHubPullRequestApi.layer", (it) => {
   it.effect("reports an oversized diff file with its path and reason", () =>
     Effect.gen(function* () {
       mockedExecute.mockReturnValueOnce(Effect.succeed(output(pullRequestRefs)));
+      mockedExecute.mockReturnValueOnce(Effect.succeed(output(pullRequestMergeBase)));
       mockedExecute.mockReturnValueOnce(Effect.succeed(output("partial", true)));
       const cli = yield* GitHubPullRequestApi.GitHubPullRequestApi;
 
@@ -3121,14 +3213,15 @@ layer("GitHubPullRequestApi.layer", (it) => {
         assert.strictEqual(error.path, "src/large.ts");
         assert.strictEqual(error.reason, "oversized");
       }
-      // A deleted file is read at the base revision only.
-      assert.strictEqual(pathAt(1), "repos/acme/web/contents/src/large.ts?ref=a1b2c3d");
+      // A deleted file is read at the merge base, not the moved base tip.
+      assert.strictEqual(pathAt(2), "repos/acme/web/contents/src/large.ts?ref=c1d2e3f");
     }),
   );
 
   it.effect("reports undecodable diff file contents as binary", () =>
     Effect.gen(function* () {
       mockedExecute.mockReturnValueOnce(Effect.succeed(output(pullRequestRefs)));
+      mockedExecute.mockReturnValueOnce(Effect.succeed(output(pullRequestMergeBase)));
       mockedExecute.mockReturnValueOnce(Effect.succeed(output("binary�contents", false, true)));
       const cli = yield* GitHubPullRequestApi.GitHubPullRequestApi;
 
@@ -3155,6 +3248,7 @@ layer("GitHubPullRequestApi.layer", (it) => {
   it.effect("returns valid text containing a literal replacement character", () =>
     Effect.gen(function* () {
       mockedExecute.mockReturnValueOnce(Effect.succeed(output(pullRequestRefs)));
+      mockedExecute.mockReturnValueOnce(Effect.succeed(output(pullRequestMergeBase)));
       mockedExecute.mockReturnValueOnce(Effect.succeed(output("before�after")));
       const cli = yield* GitHubPullRequestApi.GitHubPullRequestApi;
 

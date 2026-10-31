@@ -8,6 +8,8 @@ import {
   type RuntimeMode,
   type ThreadId,
 } from "@t3tools/contracts";
+import { formatThreadLink } from "@t3tools/shared/threadLinks";
+
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
@@ -36,6 +38,8 @@ export interface McpClientCaller {
   readonly label: string;
   /** Read only, or the most the threads it starts or changes may run with. */
   readonly access: AuthMcpClientAccess;
+  /** The origin an outside client reached; its thread links open the web app there. */
+  readonly webOrigin?: string | undefined;
 }
 
 /**
@@ -62,6 +66,34 @@ export interface McpInvocationScope {
   readonly thread: McpThreadCaller | undefined;
   readonly client: McpClientCaller | undefined;
 }
+
+/**
+ * Return an in-app thread link for native T3 clients and a route on the MCP
+ * request origin for clients that cannot open the custom thread protocol.
+ */
+export const threadLinkFor = (
+  scope: Pick<McpInvocationScope, "environmentId" | "client">,
+  threadId: ThreadId,
+  title: string,
+): string => {
+  const origin = scope.client?.webOrigin;
+  if (origin === undefined) {
+    return formatThreadLink({ environmentId: scope.environmentId, threadId, title });
+  }
+
+  const label =
+    title
+      .replace(/[[\]\\\r\n]/g, " ")
+      .replace(/\s+/g, " ")
+      .trim()
+      .slice(0, 120) || "Untitled thread";
+  const encodedEnvironmentId = encodeURIComponent(scope.environmentId)
+    .replace(/\(/g, "%28")
+    .replace(/\)/g, "%29");
+  const encodedThreadId = encodeURIComponent(threadId).replace(/\(/g, "%28").replace(/\)/g, "%29");
+  const href = `${origin}/${encodedEnvironmentId}/${encodedThreadId}`;
+  return `[${label}](${href})`;
+};
 
 export class McpInvocationContext extends Context.Service<
   McpInvocationContext,

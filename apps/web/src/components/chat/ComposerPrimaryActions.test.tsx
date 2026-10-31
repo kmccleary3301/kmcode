@@ -17,7 +17,11 @@ vi.mock("../SidebarStageBackdrop", () => ({
 
 import { ComposerPrimaryActions } from "./ComposerPrimaryActions";
 
-function renderPendingActions(isRunning: boolean) {
+function renderPendingActions(
+  isRunning: boolean,
+  forceStopAvailable = false,
+  forceStopping = false,
+) {
   return renderToStaticMarkup(
     createElement(ComposerPrimaryActions, {
       compact: true,
@@ -31,6 +35,8 @@ function renderPendingActions(isRunning: boolean) {
       },
       isRunning,
       canInterrupt: isRunning,
+      forceStopAvailable,
+      forceStopping,
       showPlanFollowUpPrompt: false,
       promptHasText: false,
       isSendBusy: false,
@@ -41,6 +47,7 @@ function renderPendingActions(isRunning: boolean) {
       hasSendableContent: false,
       onPreviousPendingQuestion: () => {},
       onInterrupt: () => {},
+      onForceStop: () => {},
       onImplementPlanInNewThread: () => {},
     }),
   );
@@ -88,6 +95,21 @@ describe("ComposerPrimaryActions", () => {
 
   it("does not offer Stop generation for a pending request without a running turn", () => {
     expect(renderPendingActions(false)).not.toContain('aria-label="Stop generation"');
+  });
+
+  it("offers Force stop instead of Stop for an unresponsive foreground run", () => {
+    const markup = renderPendingActions(true, true);
+
+    expect(markup).toContain('data-t3-part="stop-button"');
+    expect(markup).toContain('aria-label="Force stop generation"');
+    expect(markup).not.toContain('aria-label="Stop generation"');
+  });
+
+  it("disables the foreground Force stop action while its request is active", () => {
+    const markup = renderPendingActions(true, true, true);
+
+    expect(markup).toContain('aria-label="Force stop generation"');
+    expect(markup).toContain("disabled");
   });
 
   it("renders stage artwork inside the send button when artwork identification is active", () => {

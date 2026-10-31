@@ -16,6 +16,10 @@ export class SessionControl {
   readonly agentId: string | null;
   private readonly onGenerationChange: () => void;
   private tail: Promise<unknown> = Promise.resolve();
+  private latestHuman: {
+    entry: { viewerId: string; key: string; run: () => Promise<void> };
+    result: Promise<void>;
+  } | null = null;
   private pending: Promise<void> = Promise.resolve();
   private owner: string | null = null;
   private epoch = 0;
@@ -35,6 +39,7 @@ export class SessionControl {
   }
 
   private enqueue<A>(run: () => Promise<A>): Promise<A> {
+    this.latestHuman = null;
     const result = this.tail.then(run);
     this.tail = result.then(
       () => this.pending,
@@ -57,6 +62,7 @@ export class SessionControl {
   }
 
   private changeOwner(owner: string | null) {
+    this.latestHuman = null;
     this.owner = owner;
     this.epoch++;
     this.onGenerationChange();
@@ -101,6 +107,22 @@ export class SessionControl {
     return this.action(() => this.owner === viewerId, run);
   }
 
+  /** Replace only adjacent waiting work; the running action and intervening actions keep their order. */
+  humanLatest(viewerId: string, key: string, run: () => Promise<void>): Promise<void> {
+    if (this.closed || this.owner !== viewerId) return this.human(viewerId, run);
+    const latest = this.latestHuman;
+    if (latest?.entry.viewerId === viewerId && latest.entry.key === key) {
+      latest.entry.run = run;
+      return latest.result;
+    }
+    const entry = { viewerId, key, run };
+    const result = this.human(viewerId, async () => {
+      if (this.latestHuman?.entry === entry) this.latestHuman = null;
+      await entry.run();
+    });
+    this.latestHuman = { entry, result };
+    return result;
+  }
   async take(viewerId: string) {
     this.assertOpen();
     if (this.owner !== null && this.owner !== viewerId) {

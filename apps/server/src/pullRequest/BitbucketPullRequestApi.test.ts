@@ -13,6 +13,7 @@ const layer = it.layer(
   BitbucketPullRequestApi.layer.pipe(
     Layer.provide(
       Layer.mock(BitbucketApi.BitbucketApi)({
+        servesHost: (host) => host === "bitbucket.org",
         request: mockedRequest,
       }),
     ),
@@ -231,8 +232,8 @@ layer("BitbucketPullRequestApi.layer", (it) => {
         cursor: { updatedBefore: "2026-07-02T00:00:00.123456+00:00", delivered: 50 },
       });
 
-      // Inclusive, so the rows already sent at that instant come back for the caller to drop.
-      expect(filterOfCall(0)).toBe("updated_on <= 2026-07-02T00:00:00.123456+00:00");
+      // A one-millisecond exclusive bound includes the cursor's millisecond before seen IDs drop.
+      expect(filterOfCall(0)).toBe("updated_on < 2026-07-02T00:00:00.124Z");
       expect(callAt(0).url).toContain("sort=-updated_on");
     }),
   );
@@ -253,7 +254,7 @@ layer("BitbucketPullRequestApi.layer", (it) => {
       // Bitbucket takes one `q`, so the two narrowings are joined rather than one replacing the
       // other — and the search keeps its brackets, which is what keeps the AND out of its OR.
       expect(filterOfCall(0)).toBe(
-        '(title ~ "page" OR description ~ "page") AND updated_on <= 2026-07-02T00:00:00+00:00',
+        '(title ~ "page" OR description ~ "page") AND updated_on < 2026-07-02T00:00:00.001Z',
       );
     }),
   );

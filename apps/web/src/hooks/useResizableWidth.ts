@@ -45,6 +45,7 @@ export interface ResizableWidthHandlers {
  */
 export function useResizableWidth(options: UseResizableWidthOptions): {
   readonly width: number;
+  readonly setWidth: (width: number) => void;
   readonly handlers: ResizableWidthHandlers;
 } {
   const { storageKey, defaultWidth, minWidth, maxWidth, edge } = options;
@@ -75,6 +76,17 @@ export function useResizableWidth(options: UseResizableWidthOptions): {
   }
 
   const clampedWidth = clamp(widthState.width);
+
+  const commitWidth = (nextStorageKey: string, nextWidth: number) => {
+    // Resizing remains usable for this session when browser storage is unavailable.
+    setWidthState({ storageKey: nextStorageKey, width: nextWidth });
+    try {
+      setLocalStorageItem(nextStorageKey, nextWidth, WidthSchema);
+    } catch (error) {
+      console.error("Could not persist panel width.", error);
+    }
+  };
+
   const latestOptions = useRef({ clamp, storageKey });
   useLayoutEffect(() => {
     latestOptions.current = { clamp, storageKey };
@@ -90,16 +102,15 @@ export function useResizableWidth(options: UseResizableWidthOptions): {
         return nextWidth;
       },
       finish(finalWidth) {
-        // Commit once at drag-end to avoid 60Hz localStorage writes.
-        try {
-          setLocalStorageItem(latestOptions.current.storageKey, finalWidth, WidthSchema);
-        } catch (error) {
-          console.error("Could not persist panel width.", error);
-        }
+        commitWidth(latestOptions.current.storageKey, finalWidth);
       },
     }),
     storageKey,
   );
 
-  return { width: clampedWidth, handlers };
+  return {
+    width: clampedWidth,
+    setWidth: (value) => commitWidth(storageKey, clamp(value)),
+    handlers,
+  };
 }

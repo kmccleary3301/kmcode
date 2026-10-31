@@ -12,12 +12,15 @@ import * as Fiber from "effect/Fiber";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Path from "effect/Path";
+import * as Option from "effect/Option";
 import * as Sink from "effect/Sink";
 import * as Stream from "effect/Stream";
 import * as TestClock from "effect/testing/TestClock";
 import { ChildProcess, ChildProcessSpawner } from "effect/process";
 
-import { HostProcessPlatform } from "@t3tools/shared/hostProcess";
+import { EDITORS } from "@t3tools/contracts";
+import { resolveEditorCommand } from "@t3tools/shared/editor";
+import { HostProcessEnvironment, HostProcessPlatform } from "@t3tools/shared/hostProcess";
 import { SpawnExecutableResolution } from "@t3tools/shared/shell";
 import * as ExternalLauncher from "./externalLauncher.ts";
 
@@ -86,6 +89,7 @@ const layerTest = (input: {
   return Layer.mergeAll(
     ExternalLauncher.layer.pipe(Layer.provide(Layer.merge(NodeServices.layer, layerSpawner))),
     Layer.succeed(HostProcessPlatform, input.platform),
+    Layer.succeed(HostProcessEnvironment, input.env ?? {}),
     Layer.succeed(
       SpawnExecutableResolution,
       (command) => input.resolveExecutable?.(command) ?? command,
@@ -121,6 +125,63 @@ it.effect("launches the default browser through the platform command", () => {
     ),
   );
 });
+
+it.effect.skipIf(windowsHost)(
+  "restores the desktop session display for Linux editor launches",
+  () =>
+    Effect.gen(function* () {
+      const fileSystem = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const binDir = yield* fileSystem.makeTempDirectoryScoped({ prefix: "t3-editors-" });
+      const codiumPath = path.join(binDir, "codium");
+      yield* fileSystem.writeFileString(codiumPath, "#!/bin/sh\n");
+      yield* fileSystem.chmod(codiumPath, 0o755);
+
+      const launchEnv = (sessionManager: MockSpawnResult) => {
+        const spawned: ChildProcess.StandardCommand[] = [];
+        return Effect.gen(function* () {
+          const launcher = yield* ExternalLauncher.ExternalLauncher;
+          yield* launcher.launchEditor({ editor: "vscodium", cwd: "/workspace" });
+          yield* launcher.launchBrowser("https://example.com");
+
+          const browser = spawned.find((command) => command.command === "xdg-open");
+          assert.equal(browser?.options.env, undefined);
+          return spawned.find((command) => command.command === "codium")?.options.env;
+        }).pipe(
+          Effect.provide(
+            layerTest({
+              platform: "linux",
+              env: { PATH: binDir },
+              onSpawn: (command) => spawned.push(command),
+              spawnResult: (command) => (command.command === "busctl" ? sessionManager : undefined),
+            }),
+          ),
+        );
+      };
+
+      assert.deepEqual(
+        yield* launchEnv({
+          stdout: JSON.stringify({
+            type: "as",
+            data: [
+              "DISPLAY=:0",
+              "HOME=/home/user",
+              "WAYLAND_DISPLAY=wayland-1",
+              "XAUTHORITY=/home/user/auth files/cookie",
+            ],
+          }),
+        }),
+        {
+          PATH: binDir,
+          DISPLAY: ":0",
+          WAYLAND_DISPLAY: "wayland-1",
+          XAUTHORITY: "/home/user/auth files/cookie",
+        },
+      );
+      assert.deepEqual(yield* launchEnv({ stdout: "invalid JSON" }), { PATH: binDir });
+      assert.deepEqual(yield* launchEnv({ stdout: '{"data":[42]}' }), { PATH: binDir });
+    }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+);
 
 it.effect("launches an installed editor with platform-safe arguments", () =>
   Effect.gen(function* () {
@@ -192,7 +253,9 @@ for (const platform of ["darwin", "linux"] as const) {
       );
 
       assert.deepEqual(
-        spawned.map((command) => ({ command: command.command, args: command.args })),
+        spawned
+          .filter((command) => command.command === "cursor")
+          .map((command) => ({ command: command.command, args: command.args })),
         [
           { command: "cursor", args: ["--classic", "/workspace with spaces"] },
           { command: "cursor", args: ["--classic", "/workspace with spaces/src/index.ts"] },
@@ -1391,4 +1454,104 @@ it.effect("rejects unknown editors through the service API", () =>
     assert.equal(error.editor, "missing-editor");
     assert.equal(error.message, "Unknown editor: missing-editor");
   }).pipe(Effect.provide(layerTest({ platform: "linux", env: { PATH: "" } }))),
+);
+
+for (const { layout, pathNames, fallbackNames, expected } of [
+  { layout: "PATH", pathNames: ["zed", "zeditor"], fallbackNames: [], expected: "zeditor" },
+  {
+    layout: "mixed locations",
+    pathNames: ["zed"],
+    fallbackNames: ["zeditor"],
+    expected: "fallback",
+  },
+  {
+    layout: "fallback directory",
+    pathNames: [],
+    fallbackNames: ["zed", "zeditor"],
+    expected: "fallback",
+  },
+] as const) {
+  it.effect.skipIf(windowsHost)(`prefers the Zed editor on Linux with ${layout}`, () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const home = yield* fs.makeTempDirectoryScoped({ prefix: "t3-zed-linux-" });
+      const binDir = path.join(home, "bin");
+      const fallbackDir = path.join(home, ".local/bin");
+      for (const [dir, names] of [
+        [binDir, pathNames],
+        [fallbackDir, fallbackNames],
+      ] as const) {
+        yield* fs.makeDirectory(dir, { recursive: true });
+        for (const name of names) {
+          yield* fs.writeFileString(path.join(dir, name), "#!/bin/sh\n");
+          yield* fs.chmod(path.join(dir, name), 0o755);
+        }
+      }
+
+      let spawned: ChildProcess.StandardCommand | undefined;
+      yield* Effect.gen(function* () {
+        const launcher = yield* ExternalLauncher.ExternalLauncher;
+        assert.include(yield* launcher.resolveAvailableEditors(), "zed");
+        yield* launcher.launchEditor({ editor: "zed", cwd: "/workspace" });
+      }).pipe(
+        Effect.provide(
+          layerTest({
+            platform: "linux",
+            env: { HOME: home, PATH: binDir },
+            onSpawn: (command) => {
+              spawned = command;
+            },
+          }),
+        ),
+      );
+      assert.ok(spawned);
+      assert.equal(
+        spawned.command,
+        expected === "fallback" ? path.join(fallbackDir, "zeditor") : expected,
+      );
+      assert.deepEqual(spawned.args, ["/workspace"]);
+    }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+  );
+}
+
+it.effect.skipIf(windowsHost)("prefers zeditor in a later Linux fallback directory", () =>
+  Effect.gen(function* () {
+    const fs = yield* FileSystem.FileSystem;
+    const path = yield* Path.Path;
+    const home = yield* fs.makeTempDirectoryScoped({ prefix: "t3-zed-fallback-" });
+    const localBin = path.join(home, ".local/bin");
+    const systemBin = path.join(home, "system-bin");
+    for (const [dir, name] of [
+      [localBin, "zed"],
+      [systemBin, "zeditor"],
+    ] as const) {
+      yield* fs.makeDirectory(dir, { recursive: true });
+      const executable = path.join(dir, name);
+      yield* fs.writeFileString(executable, "#!/bin/sh\n");
+      yield* fs.chmod(executable, 0o755);
+    }
+    const editor = EDITORS.find((editor) => editor.id === "zed")!;
+    const resolve = resolveEditorCommand(editor, { HOME: home, PATH: "" }).pipe(
+      Effect.provideService(HostProcessPlatform, "linux"),
+      Effect.provideService(Path.Path, {
+        ...path,
+        join: (...parts) =>
+          path.join(
+            ...parts.map((part) =>
+              ["/usr/local/bin", "/usr/bin", "/snap/bin"].includes(part) ? systemBin : part,
+            ),
+          ),
+      }),
+    );
+    assert.deepEqual(
+      yield* resolve,
+      Option.some({ command: path.join(systemBin, "zeditor"), baseArgs: [] }),
+    );
+    yield* fs.remove(path.join(systemBin, "zeditor"));
+    assert.deepEqual(
+      yield* resolve,
+      Option.some({ command: path.join(localBin, "zed"), baseArgs: [] }),
+    );
+  }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
 );

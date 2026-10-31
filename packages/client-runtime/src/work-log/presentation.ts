@@ -520,9 +520,7 @@ export function resolveWorkEntryToolPresentation(
   }
   const definition = resolveT3McpToolDefinition(workEntryToolName(entry));
   const data =
-    deviceOperation?.kind === "call"
-      ? { arguments: workEntryToolInput(entry) }
-      : entry.toolData;
+    deviceOperation?.kind === "call" ? { arguments: workEntryToolInput(entry) } : entry.toolData;
   return resolveT3McpToolPresentation(
     definition,
     definition && t3ToolResultIndicatesFailure(workEntryToolOutput(entry)) ? "failed" : status,
@@ -733,9 +731,9 @@ function workEntryIndicatesToolFailureFromOutput(
     if (item.exitCode === 1 && item.input && /^\s*(?:rg|grep)\b/.test(item.input)) {
       return false;
     }
-    if (item.outputIndicatesFailure || (item.exitCode !== undefined && item.exitCode !== 0)) {
-      return true;
-    }
+    // The exit code outranks text in the output or the command itself.
+    if (item.exitCode !== undefined) return item.exitCode !== 0;
+    if (item.outputIndicatesFailure) return true;
     // Older servers/caches can still carry output. Read only the previous
     // preview-sized prefix for status, without exposing it in the row detail.
     if (item.output && toolOutputIndicatesFailure(item.output.slice(0, 32_768))) {

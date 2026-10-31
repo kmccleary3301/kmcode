@@ -7,6 +7,7 @@ import * as Effect from "effect/Effect";
 import { HttpClient, HttpClientResponse } from "effect/http";
 import * as ServerSettings from "../serverSettings.ts";
 import * as DeviceHost from "./DeviceHost.ts";
+import { releaseAgentDeviceSession } from "./AgentDeviceTarget.ts";
 import * as DeviceService from "./DeviceService.ts";
 
 it.effect("keeps hosts independent when serials collide and another host fails", () =>
@@ -16,6 +17,11 @@ it.effect("keeps hosts independent when serials collide and another host fails",
         nodePath: process.execPath,
         hub: { origin: `http://${id}` },
         agentDevice: { baseUrl: `http://${id}`, token: "test", entryPath: "/agent-device" },
+        releaseAgentSession: releaseAgentDeviceSession(http, {
+          baseUrl: `http://${id}`,
+          token: "test",
+          entryPath: "/agent-device",
+        }),
         run: () => Effect.succeed({ stdout: "", stderr: "", code: 0 }),
         helpers: { serveSimAxSettings: null, serveSimCli: null },
       };
@@ -50,19 +56,23 @@ it.effect("keeps hosts independent when serials collide and another host fails",
       Effect.succeed(
         HttpClientResponse.fromWeb(
           request,
-          Response.json({
-            simulators: [],
-            emulators: [
-              {
-                id: "emulator-5554",
-                name: "Pixel",
-                version: "36",
-                platform: "android",
-                booted: true,
-                physical: false,
-              },
-            ],
-          }),
+          Response.json(
+            request.url.endsWith("/rpc")
+              ? { result: { ok: true } }
+              : {
+                  simulators: [],
+                  emulators: [
+                    {
+                      id: "emulator-5554",
+                      name: "Pixel",
+                      version: "36",
+                      platform: "android",
+                      booted: true,
+                      physical: false,
+                    },
+                  ],
+                },
+          ),
         ),
       ),
     );

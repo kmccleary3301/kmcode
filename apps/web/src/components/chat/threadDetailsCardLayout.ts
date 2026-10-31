@@ -1,6 +1,8 @@
 import type { PreviewMiniPlayerFrame } from "../preview/previewMiniPlayerLayout";
 import { DETAILS_CARD_CLEARANCE } from "./chatCanvasLayout";
 
+export const THREAD_DETAILS_CARD_GAP = 12;
+
 export function resolveThreadDetailsCardDensity(
   height: number,
   content: { full: number; compact: number },
@@ -25,7 +27,7 @@ export function resolveThreadDetailsCardLayout({
   frame: PreviewMiniPlayerFrame | null;
   overlapsDetailsCard?: boolean;
 }) {
-  const gap = 12;
+  const gap = THREAD_DETAILS_CARD_GAP;
   // Keep in sync with --thread-details-panel-width, which sizes the popover.
   const width = 280;
   const x = container.width - width - gap;

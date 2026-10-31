@@ -6,6 +6,7 @@ import {
   type GrepResult,
 } from "@ff-labs/fff-node";
 import { afterEach, expect, it } from "@effect/vitest";
+import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as Cause from "effect/Cause";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
@@ -16,6 +17,10 @@ import * as WorkspaceSearchIndex from "./WorkspaceSearchIndex.ts";
 afterEach(() => {
   vi.restoreAllMocks();
 });
+const makeWorkspaceSearchIndex = (
+  cwd: string,
+  variant?: Parameters<typeof WorkspaceSearchIndex.make>[1],
+) => WorkspaceSearchIndex.make(cwd, variant).pipe(Effect.provide(NodeServices.layer));
 
 function fileItem(relativePath: string): FileItem {
   return {
@@ -53,7 +58,7 @@ it.effect("filters image searches before applying the result limit", () =>
       } as unknown as FileFinder;
       vi.spyOn(FileFinder, "create").mockReturnValueOnce({ ok: true, value: finder });
 
-      const searchIndex = yield* WorkspaceSearchIndex.make("/workspace/project");
+      const searchIndex = yield* makeWorkspaceSearchIndex("/workspace/project");
       const resultWithoutKind = yield* searchIndex.search("", 200, undefined, true);
       const resultWithDirectoryKind = yield* searchIndex.search("", 200, "directory", true);
 
@@ -72,9 +77,7 @@ it.effect("preserves unexpected FileFinder creation failures", () =>
       throw cause;
     });
 
-    const error = yield* Effect.flip(
-      Effect.scoped(WorkspaceSearchIndex.make("/workspace/project")),
-    );
+    const error = yield* Effect.flip(Effect.scoped(makeWorkspaceSearchIndex("/workspace/project")));
 
     expect(error).toMatchObject({
       _tag: "WorkspaceSearchIndexCreateFailed",
@@ -92,9 +95,7 @@ it.effect("keeps returned FileFinder creation diagnostics out of the cause chain
       error: "native index rejected the directory",
     });
 
-    const error = yield* Effect.flip(
-      Effect.scoped(WorkspaceSearchIndex.make("/workspace/project")),
-    );
+    const error = yield* Effect.flip(Effect.scoped(makeWorkspaceSearchIndex("/workspace/project")));
 
     expect(error).toMatchObject({
       _tag: "WorkspaceSearchIndexCreateFailed",
@@ -114,7 +115,7 @@ it.effect("waits for the full content index warmup before returning", () =>
     } as unknown as FileFinder;
     vi.spyOn(FileFinder, "create").mockReturnValueOnce({ ok: true, value: finder });
 
-    yield* Effect.scoped(WorkspaceSearchIndex.make("/workspace/project", "content"));
+    yield* Effect.scoped(makeWorkspaceSearchIndex("/workspace/project", "content"));
 
     expect(waitForIndexReady).toHaveBeenCalledWith(15_000);
   }),
@@ -129,7 +130,7 @@ it.effect("preserves a full-index warmup timeout as a structured error", () =>
     vi.spyOn(FileFinder, "create").mockReturnValueOnce({ ok: true, value: finder });
 
     const error = yield* Effect.flip(
-      Effect.scoped(WorkspaceSearchIndex.make("/workspace/project", "content")),
+      Effect.scoped(makeWorkspaceSearchIndex("/workspace/project", "content")),
     );
 
     expect(error).toMatchObject({
@@ -167,7 +168,7 @@ it.effect("returns partial path results when the initial scan times out", () =>
       } as unknown as FileFinder;
       vi.spyOn(FileFinder, "create").mockReturnValueOnce({ ok: true, value: finder });
 
-      const searchIndex = yield* WorkspaceSearchIndex.make("/workspace/project", "paths");
+      const searchIndex = yield* makeWorkspaceSearchIndex("/workspace/project", "paths");
       const list = yield* searchIndex.list();
       const search = yield* searchIndex.search("src", 10);
       scanning = true;
@@ -219,7 +220,7 @@ it.effect("preserves FileFinder destroy failures as structured defects", () =>
     } as unknown as FileFinder;
     vi.spyOn(FileFinder, "create").mockReturnValueOnce({ ok: true, value: finder });
 
-    const exit = yield* Effect.scoped(WorkspaceSearchIndex.make("/workspace/project")).pipe(
+    const exit = yield* Effect.scoped(makeWorkspaceSearchIndex("/workspace/project")).pipe(
       Effect.exit,
     );
 
@@ -258,7 +259,7 @@ it.effect("preserves search and refresh failures with operation context", () =>
       } as unknown as FileFinder;
       vi.spyOn(FileFinder, "create").mockReturnValueOnce({ ok: true, value: finder });
 
-      const searchIndex = yield* WorkspaceSearchIndex.make("/workspace/project");
+      const searchIndex = yield* makeWorkspaceSearchIndex("/workspace/project");
       const query = "authorization: Bearer secret-token";
       const searchError = yield* Effect.flip(searchIndex.search(query, 3));
       const contentSearchError = yield* Effect.flip(
@@ -313,7 +314,7 @@ it.effect("keeps returned search diagnostics out of the cause chain", () =>
       } as unknown as FileFinder;
       vi.spyOn(FileFinder, "create").mockReturnValueOnce({ ok: true, value: finder });
 
-      const searchIndex = yield* WorkspaceSearchIndex.make("/workspace/project");
+      const searchIndex = yield* makeWorkspaceSearchIndex("/workspace/project");
       const query = "authorization: Bearer secret-token";
       const searchError = yield* Effect.flip(searchIndex.search(query, 3));
       const refreshError = yield* Effect.flip(searchIndex.refresh());
@@ -389,7 +390,7 @@ it.effect("continues whole-word searches after a filtered grep page", () =>
       } as unknown as FileFinder;
       vi.spyOn(FileFinder, "create").mockReturnValueOnce({ ok: true, value: finder });
 
-      const searchIndex = yield* WorkspaceSearchIndex.make("/workspace/project", "content");
+      const searchIndex = yield* makeWorkspaceSearchIndex("/workspace/project", "content");
       const result = yield* searchIndex.searchContents({
         query: "needle",
         limit: 1,

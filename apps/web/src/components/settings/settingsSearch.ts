@@ -239,7 +239,9 @@ export const SETTINGS_SEARCH_ITEMS = [
     id: "live-steps-kept-open",
     title: "Steps kept open",
     to: "/settings/appearance",
-    searchTerms: ["minimal+ plus expanded open collapse fold recent latest tool calls edits commands"],
+    searchTerms: [
+      "minimal+ plus expanded open collapse fold recent latest tool calls edits commands",
+    ],
   },
   {
     id: "transcript-loaders",
@@ -536,6 +538,13 @@ export const SETTINGS_SEARCH_ITEMS = [
     searchTerms: ["generated thread titles source control content default provider"],
   },
   {
+    id: "thread-title-instructions",
+    title: "Thread title instructions",
+    to: "/settings/general",
+    scope: "project-defaults",
+    searchTerms: ["generated thread titles prompt custom style naming regenerate"],
+  },
+  {
     id: "cli-command",
     title: "t3 command",
     to: "/settings/general",
@@ -628,7 +637,7 @@ export const SETTINGS_SEARCH_ITEMS = [
     title: "Providers",
     to: "/settings/providers",
     searchTerms: [
-      "agents cli codex claude cursor grok opencode antigravity google sign in sign out install subscription instances authentication api key models configuration binary path config directory endpoint arguments environment variables display name accent color custom favorite hidden auto compact",
+      "agents cli codex claude cursor grok opencode antigravity google pi omp oh my pi sign in sign out install subscription instances authentication api key models configuration binary path config directory endpoint arguments environment variables display name accent color custom favorite hidden auto compact per-project enablement override inherit reset on off",
     ],
   },
   {

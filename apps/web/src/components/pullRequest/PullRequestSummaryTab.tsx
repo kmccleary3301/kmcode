@@ -833,6 +833,7 @@ export function PullRequestSummaryTab({
               cwd={detail.workspaceRoot}
               environmentId={environmentId}
               threadRef={threadRef}
+              lineBreaks
               label="Pull request description"
               placeholder="Describe this pull request"
               saving={bodySaving}
@@ -847,6 +848,7 @@ export function PullRequestSummaryTab({
                 cwd={detail.workspaceRoot}
                 environmentId={environmentId}
                 threadRef={threadRef}
+                lineBreaks
               />
               {canEditPullRequestChangeRequest(detail) ? (
                 <PullRequestEditButton

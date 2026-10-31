@@ -100,7 +100,15 @@ export class EnvironmentRegistry extends Context.Service<
     readonly start: Effect.Effect<void>;
     readonly register: (
       registration: ConnectionRegistration,
-    ) => Effect.Effect<void, Persistence.ConnectionPersistenceError>;
+      options?: { readonly knownAddressOnly?: boolean },
+    ) => Effect.Effect<void, Persistence.ConnectionPersistenceError | ConnectionBlockedError>;
+    readonly assertKnownAddress: (
+      route: ConnectionRoute,
+    ) => Effect.Effect<void, ConnectionBlockedError>;
+    /**
+     * Pairing a new environment may use an address only if it is not a new route on a saved
+     * environment. The registry repeats this check under its per-environment lease when saving.
+     */
     readonly registerPlatform: (registration: PrimaryConnectionRegistration) => Effect.Effect<void>;
     readonly reconcilePlatform: (
       registrations: ReadonlyArray<PlatformConnectionRegistration>,
@@ -552,16 +560,38 @@ export const make = Effect.gen(function* () {
     return { entry: rest, addressesChanged: true };
   };
 
+  const assertKnownAddress = Effect.fn("EnvironmentRegistry.assertKnownAddress")(function* (
+    route: ConnectionRoute,
+  ) {
+    const environmentId = route.target.environmentId;
+    if ((yield* Ref.get(platformEnvironmentIds)).has(environmentId)) return;
+    const saved = (yield* SubscriptionRef.get(entries)).get(environmentId);
+    if (
+      saved !== undefined &&
+      findRouteToSameAddress(connectionRoutes(saved), route) === undefined
+    ) {
+      return yield* new ConnectionBlockedError({
+        reason: "configuration",
+        detail: `That address claims to be ${saved.target.label}, which is already saved. Add it as a route from that environment's settings instead.`,
+      });
+    }
+  });
+
   const register = Effect.fn("EnvironmentRegistry.register")(function* (
     registration: ConnectionRegistration,
+    options?: { readonly knownAddressOnly?: boolean },
   ) {
     const registered = connectionRegistrationCatalogEntry(registration);
     const environmentId = registered.target.environmentId;
+    const route: ConnectionRoute = { target: registered.target, profile: registered.profile };
     yield* withLeaseLock(
       environmentId,
       Effect.gen(function* () {
         if ((yield* Ref.get(platformEnvironmentIds)).has(environmentId)) {
           return;
+        }
+        if (options?.knownAddressOnly === true) {
+          yield* assertKnownAddress(route);
         }
         // A new route joins the environment's saved routes. Registering one it
         // already has (the same id, or a pairing to the same address) replaces
@@ -569,7 +599,6 @@ export const make = Effect.gen(function* () {
         const previous = (yield* SubscriptionRef.get(entries)).get(environmentId);
         let entry = registered;
         if (previous !== undefined) {
-          const route: ConnectionRoute = { target: registered.target, profile: registered.profile };
           const existing = connectionRoutes(previous);
           const sameAddress = findRouteToSameAddress(existing, route);
           const routes = existing.filter(
@@ -619,9 +648,10 @@ export const make = Effect.gen(function* () {
     function* (registration: PlatformConnectionRegistration) {
       const registered = connectionRegistrationCatalogEntry(registration);
       const target = registered.target;
-      yield* withLeaseLock(
+      return yield* withLeaseLock(
         target.environmentId,
         Effect.gen(function* () {
+          let applied = true;
           const previous = (yield* SubscriptionRef.get(entries)).get(target.environmentId);
           const entry: ConnectionCatalogEntry =
             previous?.unsupportedReason !== undefined &&
@@ -646,7 +676,7 @@ export const make = Effect.gen(function* () {
               ),
               Effect.exit,
             );
-            if (Exit.isFailure(revoked)) return;
+            if (Exit.isFailure(revoked)) return false;
           }
           yield* Ref.update(platformEnvironmentIds, (current) => {
             const next = new Set(current);
@@ -658,19 +688,44 @@ export const make = Effect.gen(function* () {
           // on their own loopback origin, so they authenticate with a bearer
           // token instead of the primary's same-origin cookie. Stash it where
           // the resolver's bearer broker looks it up.
-          let bearerReplaced = false;
+          let bearerChanged = false;
           if (registration._tag === "BearerConnectionRegistration") {
             const stored = yield* credentials
               .get(registration.target.connectionId)
               .pipe(Effect.orElseSucceed(() => Option.none<ConnectionCredential>()));
-            const changed =
+            bearerChanged =
               Option.isSome(stored) && !Equal.equals(stored.value, registration.credential);
-            // Only a bearer that was actually stored can be retried with; a
-            // failed write leaves the rejected one in place.
-            bearerReplaced = yield* credentials
+          }
+
+          if (persisted) {
+            const removed = yield* registrations.remove(target.environmentId).pipe(
+              Effect.tap(() =>
+                Ref.update(persistedEnvironmentIds, (current) => {
+                  const next = new Set(current);
+                  next.delete(target.environmentId);
+                  return next;
+                }),
+              ),
+              Effect.as(true),
+              Effect.catch((error) =>
+                Effect.logWarning(
+                  "Could not remove a persisted registration shadowed by a platform environment.",
+                  {
+                    environmentId: target.environmentId,
+                    error,
+                  },
+                ).pipe(Effect.as(false)),
+              ),
+            );
+            applied &&= removed;
+          }
+
+          let bearerReplaced = false;
+          if (registration._tag === "BearerConnectionRegistration") {
+            const written = yield* credentials
               .put(registration.target.connectionId, registration.credential)
               .pipe(
-                Effect.as(changed),
+                Effect.as(true),
                 Effect.catch((error) =>
                   Effect.logWarning("Could not store the platform bearer credential.", {
                     environmentId: target.environmentId,
@@ -678,6 +733,10 @@ export const make = Effect.gen(function* () {
                   }).pipe(Effect.as(false)),
                 ),
               );
+            // Only a bearer that was actually stored can be retried with; a
+            // failed write leaves the rejected one in place.
+            bearerReplaced = written && bearerChanged;
+            applied &&= written;
           }
 
           if (persisted) {
@@ -723,6 +782,7 @@ export const make = Effect.gen(function* () {
               }
             }
           }
+          return applied;
         }),
       );
     },
@@ -734,7 +794,7 @@ export const make = Effect.gen(function* () {
   // bootstrap rather than removed by hand.
   const removePlatformEnvironment = Effect.fn("EnvironmentRegistry.removePlatformEnvironment")(
     function* (environmentId: EnvironmentId) {
-      yield* withLeaseLock(
+      return yield* withLeaseLock(
         environmentId,
         Effect.gen(function* () {
           const entry = (yield* SubscriptionRef.get(entries)).get(environmentId);
@@ -750,7 +810,7 @@ export const make = Effect.gen(function* () {
             ),
             Effect.exit,
           );
-          if (Exit.isFailure(revoked)) return;
+          if (Exit.isFailure(revoked)) return false;
           yield* Ref.update(platformEnvironmentIds, (current) => {
             const next = new Set(current);
             next.delete(environmentId);
@@ -786,6 +846,7 @@ export const make = Effect.gen(function* () {
             ],
             { concurrency: "unbounded", discard: true },
           );
+          return true;
         }),
       );
     },
@@ -800,21 +861,35 @@ export const make = Effect.gen(function* () {
   // Reconcile the full set of platform-managed environments against what the
   // host currently reports: add/refresh the desired ones and tear down any
   // platform environment that disappeared (WSL toggled off, distro switched).
-  const reconcilePlatform = Effect.fn("EnvironmentRegistry.reconcilePlatform")(function* (
+  const applyPlatformRegistrations = Effect.fn("EnvironmentRegistry.reconcilePlatform")(function* (
     platformRegistrations: ReadonlyArray<PlatformConnectionRegistration>,
   ) {
     const desiredIds = new Set(
       platformRegistrations.map((registration) => registration.target.environmentId),
     );
     const currentPlatformIds = yield* Ref.get(platformEnvironmentIds);
-    yield* Effect.forEach(
-      currentPlatformIds,
-      (environmentId) =>
-        desiredIds.has(environmentId) ? Effect.void : removePlatformEnvironment(environmentId),
-      { discard: true },
+    const removed = yield* Effect.forEach(currentPlatformIds, (environmentId) =>
+      desiredIds.has(environmentId)
+        ? Effect.succeed(true)
+        : removePlatformEnvironment(environmentId),
     );
-    yield* Effect.forEach(platformRegistrations, installPlatformRegistration, { discard: true });
+    const installed = yield* Effect.forEach(platformRegistrations, installPlatformRegistration);
+    return [...removed, ...installed].every(Boolean);
   });
+
+  const reconcileLock = yield* Semaphore.make(1);
+  let appliedPlatformRegistrations: ReadonlyArray<PlatformConnectionRegistration> | undefined;
+  // Untraced: platforms repeat unchanged registrations every few seconds, and a
+  // span per poll would make idle clients export traces continuously.
+  const reconcilePlatform = Effect.fnUntraced(function* (
+    platformRegistrations: ReadonlyArray<PlatformConnectionRegistration>,
+  ) {
+    if (Equal.equals(appliedPlatformRegistrations, platformRegistrations)) return;
+    appliedPlatformRegistrations = undefined;
+    if (yield* applyPlatformRegistrations(platformRegistrations)) {
+      appliedPlatformRegistrations = platformRegistrations;
+    }
+  }, reconcileLock.withPermits(1));
 
   /** Forgets a user-saved environment. Callers hold its lease lock. */
   const removeLocked = Effect.fn("EnvironmentRegistry.removeLocked")(function* (
@@ -1123,20 +1198,17 @@ export const make = Effect.gen(function* () {
           serverUpdateRequired: _previousUpdateRequired,
           ...rest
         } = entry;
+        const platformManaged = (yield* Ref.get(platformEnvironmentIds)).has(environmentId);
         const next: ConnectionCatalogEntry =
           error === null
             ? rest
             : {
                 ...rest,
-                enabled: false,
+                ...(platformManaged ? {} : { enabled: false }),
                 unsupportedReason: error.message,
                 ...(error.serverUpdateRequired === true ? { serverUpdateRequired: true } : {}),
               };
-        if (
-          error !== null &&
-          entry.enabled &&
-          !(yield* Ref.get(platformEnvironmentIds)).has(environmentId)
-        ) {
+        if (error !== null && entry.enabled && !platformManaged) {
           yield* registrations.setEnabled(environmentId, false);
         }
         const lease = (yield* SubscriptionRef.get(serviceScopes)).get(environmentId);
@@ -1157,6 +1229,7 @@ export const make = Effect.gen(function* () {
     entries,
     networkStatus,
     start,
+    assertKnownAddress,
     register,
     registerPlatform,
     reconcilePlatform,

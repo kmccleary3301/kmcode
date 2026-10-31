@@ -458,15 +458,13 @@ export const make = Effect.gen(function* () {
     const { projectId } = input;
     // The V2 shell is the only record of which threads are live.
     const snapshot = yield* threadProjections
-      .getShellSnapshot()
+      .getShellSnapshot({ projectId })
       .pipe(
         Effect.mapError(
           (cause) => new ProjectOperationError({ operation: "list-threads", projectId, cause }),
         ),
       );
-    const projectThreads = [...snapshot.threads, ...snapshot.archivedThreads].filter(
-      (thread) => thread.projectId === projectId,
-    );
+    const projectThreads = [...snapshot.threads, ...snapshot.archivedThreads];
     if (projectThreads.length > 0 && input.force !== true) {
       return yield* new ProjectNotEmptyError({ projectId });
     }

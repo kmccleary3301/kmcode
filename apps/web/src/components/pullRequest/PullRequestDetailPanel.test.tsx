@@ -1,4 +1,6 @@
 import {
+  AuthOrchestrationOperateScope,
+  AuthSourceControlWriteScope,
   EnvironmentId,
   ProjectId,
   ThreadId,
@@ -12,10 +14,11 @@ import { create, type ReactTestRenderer } from "react-test-renderer";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 import { DraftId, useComposerDraftStore } from "~/composerDraftStore";
 
-const { newThread, prepareThread, refresh, Wrapper, Trigger } = vi.hoisted(() => ({
+const { newThread, prepareThread, refresh, permissions, Wrapper, Trigger } = vi.hoisted(() => ({
   newThread: vi.fn(),
   prepareThread: vi.fn(),
   refresh: vi.fn(),
+  permissions: { write: true, operate: true },
   Wrapper: ({ children }: { children?: ReactNode }) => children,
   Trigger: ({ children, render }: { children?: ReactNode; render?: ReactElement }) => (
     <>
@@ -26,8 +29,10 @@ const { newThread, prepareThread, refresh, Wrapper, Trigger } = vi.hoisted(() =>
 }));
 vi.mock("~/state/session", async (original) => ({
   ...(await original<typeof import("~/state/session")>()),
-  useEnvironmentScope: () => true,
-  readEnvironmentScope: () => true,
+  useEnvironmentScope: (_environmentId: unknown, scope: unknown) =>
+    scope === AuthOrchestrationOperateScope ? permissions.operate : permissions.write,
+  readEnvironmentScope: (_environmentId: unknown, scope: unknown) =>
+    scope === AuthOrchestrationOperateScope ? permissions.operate : permissions.write,
 }));
 vi.mock("@effect/atom-react", () => ({ useAtomValue: () => [] }));
 vi.mock("~/state/server", () => ({ primaryServerKeybindingsAtom: {} }));
@@ -44,7 +49,11 @@ vi.mock("~/hooks/useSettings", () => ({
 vi.mock("~/hooks/useLiveRefresh", () => ({ useLiveRefresh: () => {} }));
 vi.mock("~/hooks/useHandleNewThread", () => ({ useNewThreadHandler: () => newThread }));
 vi.mock("~/lib/sourceControlActions", () => ({
-  usePreparePullRequestThreadAction: () => ({ run: prepareThread, isAllowed: true, error: null }),
+  usePreparePullRequestThreadAction: () => ({
+    run: prepareThread,
+    isAllowed: permissions.write,
+    error: null,
+  }),
 }));
 vi.mock("~/state/use-atom-command", () => ({ useAtomCommand: () => vi.fn() }));
 vi.mock("~/state/pullRequests", async (importOriginal) => ({
@@ -214,6 +223,8 @@ beforeEach(() => {
   vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
   vi.stubGlobal("window", { addEventListener: vi.fn(), removeEventListener: vi.fn() });
   useComposerDraftStore.setState({ draftsByThreadKey: {} });
+  permissions.write = true;
+  permissions.operate = true;
   newThread
     .mockReset()
     .mockResolvedValue({ draftId: newDraftId, threadId: ThreadId.make("new-thread") });
@@ -340,5 +351,91 @@ describe.each([
     } else {
       expect(newThread).toHaveBeenCalled();
     }
+  });
+});
+
+describe("conflict resolution permissions", () => {
+  it.each([AuthSourceControlWriteScope, AuthOrchestrationOperateScope])(
+    "disables conflict resolution when the connection lacks %s",
+    async (scope) => {
+      await act(async () => {
+        renderer = create(
+          <PullRequestDetailPanel
+            environmentId={threadRef.environmentId}
+            reference={detail}
+            context="page"
+            shortcutsEnabled={false}
+            getShortcutContext={() => ({
+              terminalFocus: false,
+              terminalOpen: false,
+              previewFocus: false,
+              previewOpen: false,
+              isWeb: true,
+              isDesktop: false,
+            })}
+          />,
+        );
+      });
+      const resolveButton = renderer.root
+        .findAllByType("button")
+        .find((node) => node.props["aria-label"] === "Resolve conflicts");
+      expect(resolveButton?.props.disabled).toBe(false);
+      if (scope === AuthSourceControlWriteScope) permissions.write = false;
+      else permissions.operate = false;
+      await act(async () =>
+        renderer.update(
+          <PullRequestDetailPanel
+            environmentId={threadRef.environmentId}
+            reference={detail}
+            context="page"
+            shortcutsEnabled={false}
+            getShortcutContext={() => ({
+              terminalFocus: false,
+              terminalOpen: false,
+              previewFocus: false,
+              previewOpen: false,
+              isWeb: true,
+              isDesktop: false,
+            })}
+          />,
+        ),
+      );
+      const disabledResolveButton = renderer.root
+        .findAllByType("button")
+        .find((node) => node.props["aria-label"] === "Resolve conflicts");
+      expect(disabledResolveButton?.props.disabled).toBe(true);
+    },
+  );
+
+  it("can still add conflict resolution to an existing composer without checkout scopes", async () => {
+    permissions.write = false;
+    permissions.operate = false;
+    await act(async () => {
+      renderer = create(
+        <PullRequestDetailPanel
+          environmentId={threadRef.environmentId}
+          reference={detail}
+          context="page"
+          composerDraftTarget={draftId}
+          shortcutsEnabled={false}
+          getShortcutContext={() => ({
+            terminalFocus: false,
+            terminalOpen: false,
+            previewFocus: false,
+            previewOpen: false,
+            isWeb: true,
+            isDesktop: false,
+          })}
+        />,
+      );
+    });
+    const resolveButton = renderer.root
+      .findAllByType("button")
+      .find((node) => node.props["aria-label"] === "Resolve conflicts");
+    expect(resolveButton?.props.disabled).toBe(false);
+    await click("Resolve conflicts");
+    const draft = useComposerDraftStore.getState().getComposerDraft(draftId);
+    expect(draft?.prompt).toContain("resolve every conflict");
+    expect(draft?.prompt).toContain(detail.url);
   });
 });

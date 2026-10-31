@@ -888,6 +888,45 @@ describe("cross-command precedence", () => {
 });
 
 describe("resolveChatShortcutCommand", () => {
+  it("resolves the default Cmd/Ctrl+F thread-find shortcut and honors remapping", () => {
+    const defaults = DEFAULT_RESOLVED_KEYBINDINGS;
+    assert.strictEqual(
+      resolveChatShortcutCommand(event({ key: "f", metaKey: true }), defaults, defaults, {
+        platform: "MacIntel",
+      }),
+      "chat.find",
+    );
+    assert.strictEqual(
+      resolveChatShortcutCommand(event({ key: "f", ctrlKey: true }), defaults, defaults, {
+        platform: "Linux",
+      }),
+      "chat.find",
+    );
+    assert.isNull(
+      resolveChatShortcutCommand(event({ key: "f", metaKey: true }), defaults, defaults, {
+        platform: "MacIntel",
+        context: { terminalFocus: true },
+      }),
+    );
+
+    const custom = mergeWithDefaultKeybindings(
+      compileResolvedKeybindingsConfig([
+        { key: "alt+f", command: "chat.find", when: "!terminalFocus" },
+      ]),
+    );
+    assert.isNull(
+      resolveChatShortcutCommand(event({ key: "f", metaKey: true }), custom, custom, {
+        platform: "MacIntel",
+      }),
+    );
+    assert.strictEqual(
+      resolveChatShortcutCommand(event({ key: "f", altKey: true }), custom, custom, {
+        platform: "MacIntel",
+      }),
+      "chat.find",
+    );
+  });
+
   it("runs the active environment's script shortcut instead of the primary environment's", () => {
     const primary = compile([{ shortcut: modShortcut("r"), command: "script.setup.run" }]);
     const active = compile([{ shortcut: modShortcut("t"), command: "script.setup.run" }]);
@@ -1302,16 +1341,14 @@ describe("terminalNavigationShortcutData", () => {
     );
   });
 
-  it("maps Ctrl+Arrow on non-macOS to word movement", () => {
-    assert.strictEqual(
-      terminalNavigationShortcutData(event({ key: "ArrowLeft", ctrlKey: true }), "Win32"),
-      "\u001bb",
-    );
-    assert.strictEqual(
-      terminalNavigationShortcutData(event({ key: "ArrowRight", ctrlKey: true }), "Linux"),
-      "\u001bf",
-    );
-  });
+  it.each(["Win32", "Linux x86_64"])(
+    "leaves Ctrl+Arrow to the terminal encoder on %s",
+    (platform) => {
+      for (const key of ["ArrowLeft", "ArrowRight"]) {
+        assert.isNull(terminalNavigationShortcutData(event({ key, ctrlKey: true }), platform));
+      }
+    },
+  );
 
   it("rejects unsupported combinations", () => {
     assert.isNull(

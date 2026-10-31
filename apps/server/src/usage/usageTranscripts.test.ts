@@ -3,6 +3,7 @@ import { describe, expect, it } from "@effect/vitest";
 import {
   GROK_COST_USD_TICKS_PER_DOLLAR,
   initialCodexScanState,
+  parseClaudeRecord,
   parseClaudeLine,
   parseCodexLine,
   parseGrokLine,
@@ -40,9 +41,9 @@ function claudeLine(overrides: {
 
 describe("parseClaudeLine", () => {
   it("extracts token totals and a dedupe key", () => {
-    const record = parseClaudeLine(claudeLine({ messageId: "msg_1", contentType: "text" }));
+    const [record] = parseClaudeLine(claudeLine({ messageId: "msg_1", contentType: "text" }));
 
-    expect(record).not.toBeNull();
+    expect(record).toBeDefined();
     expect(record?.provider).toBe("claude");
     expect(record?.model).toBe("claude-fable-5");
     expect(record?.totals).toEqual({
@@ -57,26 +58,152 @@ describe("parseClaudeLine", () => {
   });
 
   it("marks fast-mode requests", () => {
-    const line = (speed: string) =>
-      parseClaudeLine(claudeLine({ messageId: "msg_1", contentType: "text", speed }));
+    const parse = (speed: string) =>
+      parseClaudeLine(claudeLine({ messageId: "msg_1", contentType: "text", speed }))[0];
 
-    expect(line("fast")?.speed).toBe("fast");
-    expect(line("standard")?.speed).toBe("standard");
+    expect(parse("fast")?.speed).toBe("fast");
+    expect(parse("standard")?.speed).toBe("standard");
   });
 
   it("gives every content block of one message the same dedupe key", () => {
     // T3 Code writes one record per content block, each repeating the parent
     // message's full usage. Summing them would overcount ~2.4x on real data.
-    const text = parseClaudeLine(claudeLine({ messageId: "msg_2", contentType: "text" }));
-    const toolUse = parseClaudeLine(claudeLine({ messageId: "msg_2", contentType: "tool_use" }));
+    const [text] = parseClaudeLine(claudeLine({ messageId: "msg_2", contentType: "text" }));
+    const [toolUse] = parseClaudeLine(claudeLine({ messageId: "msg_2", contentType: "tool_use" }));
 
     expect(text?.dedupeKey).toBe(toolUse?.dedupeKey);
     expect(text?.totals).toEqual(toolUse?.totals);
   });
 
   it("ignores records that are not assistant messages", () => {
-    expect(parseClaudeLine(JSON.stringify({ type: "user", message: {} }))).toBeNull();
-    expect(parseClaudeLine("not json")).toBeNull();
+    expect(parseClaudeLine(JSON.stringify({ type: "user", message: {} }))).toEqual([]);
+    expect(parseClaudeLine("not json")).toEqual([]);
+  });
+});
+
+describe("Claude advisor iterations", () => {
+  const advisorTurn = {
+    type: "assistant",
+    timestamp: "2026-10-22T01:31:11.984Z",
+    sessionId: "5a128faa-8253-489e-b935-6c08e8e670c0",
+    requestId: "req_1",
+    message: {
+      id: "msg_1",
+      model: "claude-opus-5-5",
+      usage: {
+        input_tokens: 4,
+        cache_read_input_tokens: 118320,
+        cache_creation_input_tokens: 2676,
+        output_tokens: 4506,
+        speed: "standard",
+        iterations: [
+          {
+            type: "message",
+            input_tokens: 2,
+            cache_read_input_tokens: 58352,
+            cache_creation_input_tokens: 1616,
+            output_tokens: 141,
+          },
+          {
+            type: "advisor_message",
+            model: "claude-fable-5-1",
+            input_tokens: 54204,
+            cache_read_input_tokens: 0,
+            cache_creation_input_tokens: 0,
+            output_tokens: 4229,
+          },
+          {
+            type: "message",
+            input_tokens: 2,
+            cache_read_input_tokens: 59968,
+            cache_creation_input_tokens: 1060,
+            output_tokens: 4365,
+          },
+        ],
+      },
+    },
+  };
+  const withIterations = (iterations: readonly unknown[]) => ({
+    ...advisorTurn,
+    message: { ...advisorTurn.message, usage: { ...advisorTurn.message.usage, iterations } },
+  });
+  const parse = (turn: unknown) => parseClaudeLine(JSON.stringify(turn));
+
+  it("reports advisor tokens under their model beside the executor record", () => {
+    const records = parse(advisorTurn);
+
+    expect(records).toHaveLength(2);
+    expect(records[0]).toMatchObject({
+      provider: "claude",
+      model: "claude-opus-5-5",
+      totals: {
+        uncachedInputTokens: 4,
+        cachedInputTokens: 118320,
+        cacheCreationTokens: 2676,
+        outputTokens: 4506,
+        reasoningTokens: 0,
+      },
+      dedupeKey: "msg_1:req_1",
+    });
+    expect(records[1]).toMatchObject({
+      provider: "claude",
+      model: "claude-fable-5-1",
+      sessionId: "5a128faa-8253-489e-b935-6c08e8e670c0",
+      totals: {
+        uncachedInputTokens: 54204,
+        cachedInputTokens: 0,
+        cacheCreationTokens: 0,
+        outputTokens: 4229,
+        reasoningTokens: 0,
+      },
+      reportedCostUsd: null,
+      dedupeKey: "msg_1:req_1:advisor:1",
+    });
+    expect(parseClaudeRecord(advisorTurn)).toEqual(records);
+  });
+
+  it("keys advisor records separately and consistently across message content blocks", () => {
+    const block = (contentType: string) =>
+      parse({
+        ...advisorTurn,
+        message: { ...advisorTurn.message, content: [{ type: contentType }] },
+      });
+    const [executorKey, advisorKey] = block("text").map((record) => record.dedupeKey);
+
+    expect(advisorKey).toEqual(expect.any(String));
+    expect(advisorKey).not.toBe(executorKey);
+    expect(block("tool_use").map((record) => record.dedupeKey)).toEqual([executorKey, advisorKey]);
+
+    const unkeyed = parse({
+      ...advisorTurn,
+      requestId: undefined,
+      message: { ...advisorTurn.message, id: undefined },
+    });
+    expect(unkeyed.map((record) => record.dedupeKey)).toEqual([null, null]);
+  });
+
+  it("emits only the executor record without an advisor iteration", () => {
+    const executorIterations = advisorTurn.message.usage.iterations.filter(
+      (iteration) => iteration.type === "message",
+    );
+
+    expect(parse(withIterations(executorIterations))).toHaveLength(1);
+    expect(parse(withIterations([]))).toHaveLength(1);
+    expect(parseClaudeLine(claudeLine({ messageId: "msg_3", contentType: "text" }))).toHaveLength(
+      1,
+    );
+  });
+
+  it("ignores advisor iterations without a usable model and malformed entries", () => {
+    const unusable = withIterations([
+      null,
+      "advisor_message",
+      { type: "advisor_message", input_tokens: 5 },
+      { type: "advisor_message", model: "", input_tokens: 5 },
+      { type: "advisor_message", model: "<synthetic>", input_tokens: 5 },
+    ]);
+
+    expect(parse(unusable).map((record) => record.model)).toEqual(["claude-opus-5-5"]);
   });
 });
 
@@ -108,6 +235,40 @@ describe("parseCodexLine", () => {
         },
       },
     });
+  type CodexUsageCounters = {
+    readonly input_tokens: number;
+    readonly cached_input_tokens: number;
+    readonly cache_write_input_tokens: number;
+    readonly output_tokens: number;
+    readonly reasoning_output_tokens: number;
+    readonly total_tokens: number;
+  };
+  const counters = (
+    inputTokens: number,
+    cached: number,
+    output: number,
+    reasoning: number,
+  ): CodexUsageCounters => ({
+    input_tokens: inputTokens,
+    cached_input_tokens: cached,
+    cache_write_input_tokens: 0,
+    output_tokens: output,
+    reasoning_output_tokens: reasoning,
+    total_tokens: inputTokens + output,
+  });
+  const counted = (
+    last: CodexUsageCounters,
+    total: CodexUsageCounters,
+    timestamp = "2026-08-01T05:17:49.919Z",
+  ) =>
+    JSON.stringify({
+      type: "event_msg",
+      timestamp,
+      payload: {
+        type: "token_count",
+        info: { last_token_usage: last, total_token_usage: total },
+      },
+    });
 
   it("attributes usage to the model from the preceding turn context", () => {
     const state = initialCodexScanState();
@@ -132,6 +293,56 @@ describe("parseCodexLine", () => {
 
     expect(first).not.toBeNull();
     expect(repeat).toBeNull();
+  });
+
+  it("ignores a replay of the current sequence's first request without rewinding the baseline", () => {
+    const state = initialCodexScanState();
+    parseCodexLine(turnContext, state);
+    const request = counters(100, 20, 20, 0);
+    const processed = [
+      counted(request, request),
+      counted(counters(200, 40, 40, 0), counters(300, 60, 60, 0), "2026-08-01T05:17:50.000Z"),
+      counted(request, request),
+      counted(counters(30, 5, 5, 0), counters(330, 65, 65, 0), "2026-08-01T05:17:51.000Z"),
+    ].map((line) => {
+      const record = parseCodexLine(line, state);
+      return record === null ? 0 : totalTokens(record.totals);
+    });
+
+    expect(processed).toEqual([120, 240, 0, 35]);
+  });
+
+  it("bills a genuine restart with the same counters at a new timestamp", () => {
+    const state = initialCodexScanState();
+    parseCodexLine(turnContext, state);
+    const request = counters(100, 20, 20, 0);
+    const processed = [
+      counted(request, request),
+      counted(counters(200, 40, 40, 0), counters(300, 60, 60, 0), "2026-08-01T05:17:50.000Z"),
+      counted(request, request, "2026-08-01T05:18:49.919Z"),
+    ].map((line) => {
+      const record = parseCodexLine(line, state);
+      return record === null ? 0 : totalTokens(record.totals);
+    });
+
+    expect(processed).toEqual([120, 240, 120]);
+  });
+
+  it("forgets the sequence start when a zero baseline resets the counters", () => {
+    const state = initialCodexScanState();
+    parseCodexLine(turnContext, state);
+    const request = counters(100, 20, 20, 0);
+    const zero = counters(0, 0, 0, 0);
+    const processed = [
+      counted(request, request),
+      counted(zero, zero, "2026-08-01T05:17:50.000Z"),
+      counted(request, request),
+    ].map((line) => {
+      const record = parseCodexLine(line, state);
+      return record === null ? 0 : totalTokens(record.totals);
+    });
+
+    expect(processed).toEqual([120, 0, 120]);
   });
 
   it("drops usage that arrives before any model is known", () => {

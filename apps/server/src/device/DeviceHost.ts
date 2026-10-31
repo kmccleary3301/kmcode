@@ -12,6 +12,7 @@
 import type {
   DeviceHostId,
   DeviceHostSummary,
+  DeviceOperationError,
   DevicePlatform,
   DevicePlatformAvailability,
 } from "@t3tools/contracts";
@@ -53,6 +54,14 @@ export interface AgentDeviceEndpoint {
 
 export interface DeviceHostReady {
   readonly nodePath: string;
+  /**
+   * Releases one agent-device session without starting a daemon or device.
+   * Remote hosts provide this only while the forwarded daemon is reachable.
+   */
+  readonly releaseAgentSession?: (
+    session: string,
+    deviceId: string,
+  ) => Effect.Effect<void, DeviceOperationError>;
   readonly hub: DeviceHubEndpoint;
   /**
    * Runs a host command (`xcrun`, `adb`, or a helper bundled with the hub)

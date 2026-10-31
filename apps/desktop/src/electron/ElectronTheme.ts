@@ -1,6 +1,7 @@
 import { DesktopThemeSchema, type DesktopTheme } from "@t3tools/contracts";
 import type { AppearanceResolved } from "@t3tools/client-runtime/appearance";
 import { themeColorToNativeColor } from "@t3tools/shared/themePalettes";
+import * as HostProcess from "@t3tools/shared/hostProcess";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
@@ -8,6 +9,7 @@ import * as Schema from "effect/Schema";
 import * as Scope from "effect/Scope";
 
 import * as Electron from "electron";
+import { watchLinuxColorScheme, type LinuxColorScheme } from "./LinuxColorScheme.ts";
 
 const LIGHT_BACKGROUND = "#ffffff";
 const DARK_BACKGROUND = "#0a0a0a";
@@ -98,28 +100,65 @@ export class ElectronTheme extends Context.Service<
   }
 >()("@t3tools/desktop/electron/ElectronTheme") {}
 
-/** @public Service construction is part of the canonical Effect module API. */
-export const make = ElectronTheme.of({
-  shouldUseDarkColors: Effect.sync(() => Electron.nativeTheme.shouldUseDarkColors),
-  setSource: (theme) =>
-    Effect.try({
-      try: () => {
-        Electron.nativeTheme.themeSource = theme;
-      },
-      catch: (cause) => new ElectronThemeSetSourceError({ source: theme, cause }),
-    }),
-  onUpdated: (listener) =>
-    Effect.acquireRelease(
-      Effect.suspend(() => {
-        Electron.nativeTheme.on("updated", listener);
-        return Effect.void;
+type WatchSystemColorScheme = (onChange: (scheme: LinuxColorScheme) => void) => {
+  readonly stop: () => void;
+};
+
+export const makeWith = Effect.fn("ElectronTheme.make")(function* (
+  watchSystemColorScheme: WatchSystemColorScheme | undefined,
+) {
+  let source: DesktopTheme = Electron.nativeTheme.themeSource;
+  let systemScheme: LinuxColorScheme = null;
+  // On Linux, Electron reads the desktop color scheme once and ignores portal changes.
+  const apply = () => {
+    Electron.nativeTheme.themeSource = source === "system" ? (systemScheme ?? source) : source;
+  };
+
+  if (watchSystemColorScheme) {
+    yield* Effect.acquireRelease(
+      Effect.sync(() => {
+        try {
+          return watchSystemColorScheme((scheme) => {
+            systemScheme = scheme;
+            apply();
+          });
+        } catch {
+          return undefined;
+        }
       }),
-      () =>
+      (watcher) => Effect.sync(() => watcher?.stop()),
+    );
+  }
+
+  return ElectronTheme.of({
+    shouldUseDarkColors: Effect.sync(() => Electron.nativeTheme.shouldUseDarkColors),
+    setSource: (theme) =>
+      Effect.try({
+        try: () => {
+          source = theme;
+          apply();
+        },
+        catch: (cause) => new ElectronThemeSetSourceError({ source: theme, cause }),
+      }),
+    onUpdated: (listener) =>
+      Effect.acquireRelease(
         Effect.suspend(() => {
-          Electron.nativeTheme.removeListener("updated", listener);
+          Electron.nativeTheme.on("updated", listener);
           return Effect.void;
         }),
-    ),
+        () =>
+          Effect.suspend(() => {
+            Electron.nativeTheme.removeListener("updated", listener);
+            return Effect.void;
+          }),
+      ),
+  });
 });
 
-export const layer = Layer.succeed(ElectronTheme, make);
+/** @public Service construction is part of the canonical Effect module API. */
+export const make = Effect.gen(function* () {
+  const platform = yield* HostProcess.HostProcessPlatform;
+  return yield* makeWith(platform === "linux" ? watchLinuxColorScheme : undefined);
+});
+
+export const layer = Layer.effect(ElectronTheme, make);

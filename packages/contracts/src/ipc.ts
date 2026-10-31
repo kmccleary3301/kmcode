@@ -1206,6 +1206,7 @@ export interface DesktopBridge {
   setNotificationBadge?: (badge: { count: number; image: string | null }) => Promise<void>;
   onNotificationBadgeClear?: (listener: () => void) => () => void;
   onTrackpadScrollEnd?: (listener: () => void) => () => void;
+  onTrackpadScrollBegin?: (listener: () => void) => () => void;
   /**
    * The OS locale as a BCP-47 tag, which the renderer cannot read for itself:
    * the packaged app ships only the `en-US` Chromium locale pak, so
@@ -1251,9 +1252,7 @@ export interface DesktopBridge {
     options?: { issuePairingToken?: boolean },
   ) => Promise<DesktopSshEnvironmentBootstrap>;
   disconnectSshEnvironment: (target: DesktopSshEnvironmentTarget) => Promise<void>;
-  getSshTunnelStatus?: (
-    target: DesktopSshEnvironmentTarget,
-  ) => Promise<DesktopSshTunnelStatus>;
+  getSshTunnelStatus?: (target: DesktopSshEnvironmentTarget) => Promise<DesktopSshTunnelStatus>;
   fetchSshEnvironmentDescriptor: (httpBaseUrl: string) => Promise<ExecutionEnvironmentDescriptor>;
   bootstrapSshBearerSession: (
     httpBaseUrl: string,
@@ -1354,6 +1353,10 @@ export interface DesktopBridge {
     setReady: (ready: boolean) => Promise<void>;
     complete: (response: DesktopAppActivationResponse) => Promise<void>;
     onRequest: (listener: (request: DesktopAppActivationRequest) => void) => () => void;
+  };
+  /** Pairing URLs received by the desktop's `t3code://pair` deep link. */
+  pairingAppLink?: {
+    onLink: (listener: (pairingUrl: string) => void) => () => void;
   };
   /**
    * Desktop-only preview surface. Present iff the renderer is hosted by the

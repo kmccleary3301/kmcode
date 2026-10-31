@@ -107,6 +107,12 @@ interface FakePi {
   readonly allRequests: () => ReadonlyArray<PiRpcRecord>;
   /** Data returned by the next `get_session_stats` acks, consumed in order. */
   readonly queueStats: (data: unknown) => void;
+  /** Pi before 0.84.4 answers clear_queue as an unknown command. */
+  readonly setClearQueue: (
+    result:
+      | { readonly steering: ReadonlyArray<string>; readonly followUp: ReadonlyArray<string> }
+      | "unknown_command",
+  ) => void;
   /** Data returned by the next `get_commands` acks, consumed in order. */
   readonly queueCommands: (data: unknown) => void;
   /** Make the next `get_commands` ack fail. */
@@ -164,6 +170,7 @@ const makeFakePi: Effect.Effect<FakePi> = Effect.gen(function* () {
   let sessionFile = FAKE_SESSION_FILE;
   let sessionGeneration = 0;
   let models: ReadonlyArray<unknown> = [];
+  let clearQueue: Parameters<FakePi["setClearQueue"]>[0] = { steering: [], followUp: [] };
   let stdinBuffer = "";
 
   const emit = (record: PiRpcRecord) =>
@@ -207,6 +214,10 @@ const makeFakePi: Effect.Effect<FakePi> = Effect.gen(function* () {
         return { ...base, data: messagesQueue.shift() ?? { messages: [] } };
       case "get_session_stats":
         return { ...base, data: statsQueue.shift() ?? {} };
+      case "clear_queue":
+        return clearQueue === "unknown_command"
+          ? { ...base, success: false, error: "Unknown command: clear_queue" }
+          : { ...base, data: clearQueue };
       case "get_commands":
         return { ...base, ...(commandsQueue.shift() ?? { data: { commands: [] } }) };
       case "fork":
@@ -324,6 +335,9 @@ const makeFakePi: Effect.Effect<FakePi> = Effect.gen(function* () {
     },
     queueState: (data) => stateQueue.push(data),
     queueStats: (data) => statsQueue.push(data),
+    setClearQueue: (result) => {
+      clearQueue = result;
+    },
     queueCommands: (data) => commandsQueue.push({ success: true, data }),
     failNextCommands: () => commandsQueue.push({ success: false }),
     failNextGoal: () => {
@@ -1486,6 +1500,67 @@ describe("PiAdapterV2", () => {
     }).pipe(Effect.scoped, Effect.provide(layerTest)),
   );
 
+  it.effect("nests tools invoked through another tool under their caller", () =>
+    Effect.gen(function* () {
+      const fake = yield* makeFakePi;
+      const { runtime, takeEvent } = yield* openRuntime(fake);
+      const providerThread = yield* runtime.ensureThread({
+        threadId: THREAD_ID,
+        modelSelection: modelSelection("default"),
+        runtimePolicy,
+      });
+      yield* startTurn(runtime, providerThread);
+      yield* fake.takeRequest("prompt");
+      yield* fake.emit({ type: "agent_start" });
+      const takeToolEvents = Effect.fnUntraced(function* (toolCallId: string) {
+        const node = yield* takeEvent(
+          (event) =>
+            event.type === "node.updated" && event.node.nativeItemRef?.nativeId === toolCallId,
+        );
+        const item = yield* takeEvent(
+          (event) =>
+            event.type === "turn_item.updated" &&
+            event.turnItem.nativeItemRef?.nativeId === toolCallId,
+        );
+        if (node.type !== "node.updated" || item.type !== "turn_item.updated") {
+          return yield* Effect.die("Expected tool node and item events");
+        }
+        return { node: node.node, item: item.turnItem };
+      });
+
+      yield* fake.emit({
+        type: "tool_execution_start",
+        toolCallId: "call_code",
+        toolName: "codemode",
+        args: { code: "await read({ path: 'a.ts' })" },
+      });
+      const caller = yield* takeToolEvents("call_code");
+      assert.equal(caller.node.parentNodeId, caller.node.rootNodeId);
+      assert.isNull(caller.item.parentItemId);
+
+      const phases = [
+        { type: "tool_execution_update", partialResult: { content: [] } },
+        { type: "tool_execution_start", args: { path: "a.ts" } },
+        {
+          type: "tool_execution_end",
+          isError: true,
+          result: { content: [{ type: "text", text: "ENOENT" }] },
+        },
+      ] as const;
+      for (const phase of phases) {
+        yield* fake.emit({
+          ...phase,
+          toolCallId: "call_code/1",
+          toolName: "read",
+          parentToolCallId: "call_code",
+        });
+        const nested = yield* takeToolEvents("call_code/1");
+        assert.equal(nested.node.parentNodeId, caller.node.id);
+        assert.equal(nested.item.parentItemId, caller.item.id);
+      }
+    }).pipe(Effect.scoped, Effect.provide(layerTest)),
+  );
+
   it.effect(
     "terminalizes parallel tool calls when one call's execution events race its preview",
     () =>
@@ -1779,10 +1854,10 @@ describe("PiAdapterV2", () => {
         thinking.kind === "subagent-live" ? thinking.turnItemId : null,
         lifecycleItem?.id,
       );
-      assert.deepEqual(
-        thinking.kind === "subagent-live" ? thinking.liveContent : null,
-        { kind: "reasoning", text: "Considering layout" },
-      );
+      assert.deepEqual(thinking.kind === "subagent-live" ? thinking.liveContent : null, {
+        kind: "reasoning",
+        text: "Considering layout",
+      });
       assert.isUndefined(running?.liveContent);
       assert.equal(lifecycleItem?.transcriptFile, "/tmp/omp/child.jsonl");
       const persistedEventsAfterThinking = yield* takeAvailableEvents;
@@ -1813,17 +1888,14 @@ describe("PiAdapterV2", () => {
       const answering = yield* takeOverlayItem(
         (item) => item.kind === "subagent-live" && item.liveContent?.kind === "assistant",
       );
-      const answeringContent =
-        answering.kind === "subagent-live" ? answering.liveContent : null;
+      const answeringContent = answering.kind === "subagent-live" ? answering.liveContent : null;
       assert.equal(answeringContent?.truncated, true);
       assert.equal(answeringContent?.text.length, 8_192);
       assert.isTrue(answeringContent?.text.endsWith("END"));
 
       const persistedEventsAfterAnswer = yield* takeAvailableEvents;
       assert.isFalse(
-        persistedEventsAfterAnswer.some(
-          (event) => subagentItem(event)?.liveContent !== undefined,
-        ),
+        persistedEventsAfterAnswer.some((event) => subagentItem(event)?.liveContent !== undefined),
       );
       yield* fake.emit({
         type: "tool_execution_end",
@@ -1863,24 +1935,15 @@ describe("PiAdapterV2", () => {
         supportedProtocolVersions: [1, 2],
       });
       yield* openRuntime(fake, "default", THREAD_ID, SESSION_ID, undefined, OMP_DIALECT);
-      assert.equal(
-        (yield* fake.takeRequest("set_subagent_subscription"))["level"],
-        "progress",
-      );
+      assert.equal((yield* fake.takeRequest("set_subagent_subscription"))["level"], "progress");
       const overlay = yield* ThreadLiveOverlay.ThreadLiveOverlay;
       const viewer = yield* Effect.scoped(
         overlay.view(THREAD_ID).pipe(Effect.andThen(Effect.never)),
       ).pipe(Effect.forkScoped);
-      assert.equal(
-        (yield* fake.takeRequest("set_subagent_subscription"))["level"],
-        "events",
-      );
+      assert.equal((yield* fake.takeRequest("set_subagent_subscription"))["level"], "events");
       yield* Fiber.interrupt(viewer);
       yield* TestClock.adjust(Duration.seconds(15));
-      assert.equal(
-        (yield* fake.takeRequest("set_subagent_subscription"))["level"],
-        "progress",
-      );
+      assert.equal((yield* fake.takeRequest("set_subagent_subscription"))["level"], "progress");
     }).pipe(Effect.scoped, Effect.provide(layerTestWithTestClock)),
   );
 
@@ -1902,14 +1965,8 @@ describe("PiAdapterV2", () => {
         overlay.view(THREAD_ID).pipe(Effect.andThen(Effect.never)),
       ).pipe(Effect.forkScoped);
       yield* openRuntime(fake, "default", THREAD_ID, SESSION_ID, undefined, OMP_DIALECT);
-      assert.equal(
-        (yield* fake.takeRequest("set_subagent_subscription"))["level"],
-        "progress",
-      );
-      assert.equal(
-        (yield* fake.takeRequest("set_subagent_subscription"))["level"],
-        "events",
-      );
+      assert.equal((yield* fake.takeRequest("set_subagent_subscription"))["level"], "progress");
+      assert.equal((yield* fake.takeRequest("set_subagent_subscription"))["level"], "events");
       for (let index = 0; index < 201; index += 1) {
         yield* fake.emit({
           type: "subagent_event",
@@ -1926,10 +1983,7 @@ describe("PiAdapterV2", () => {
           },
         });
       }
-      assert.equal(
-        (yield* fake.takeRequest("set_subagent_subscription"))["level"],
-        "progress",
-      );
+      assert.equal((yield* fake.takeRequest("set_subagent_subscription"))["level"], "progress");
       const rateLimitedMode = yield* Effect.gen(function* () {
         while (true) {
           const item = yield* Queue.take(overlayEvents);
@@ -1938,10 +1992,7 @@ describe("PiAdapterV2", () => {
       });
       assert.equal(rateLimitedMode.mode, "progress");
       yield* TestClock.adjust(Duration.seconds(60));
-      assert.equal(
-        (yield* fake.takeRequest("set_subagent_subscription"))["level"],
-        "events",
-      );
+      assert.equal((yield* fake.takeRequest("set_subagent_subscription"))["level"], "events");
       yield* Fiber.interrupt(viewer);
     }).pipe(Effect.scoped, Effect.provide(layerTestWithTestClock)),
   );
@@ -2019,9 +2070,7 @@ describe("PiAdapterV2", () => {
         },
       });
       const pending = yield* takeEvent(
-        (event) =>
-          event.type === "turn_item.updated" &&
-          event.turnItem.type === "subagent",
+        (event) => event.type === "turn_item.updated" && event.turnItem.type === "subagent",
       );
       const pendingItem = subagentItem(pending);
       if (pendingItem === undefined) {
@@ -2066,9 +2115,7 @@ describe("PiAdapterV2", () => {
         },
       });
       const runningSubagentEvent = yield* takeEvent(
-        (event) =>
-          event.type === "subagent.updated" &&
-          event.subagent.id === stableSubagentId,
+        (event) => event.type === "subagent.updated" && event.subagent.id === stableSubagentId,
       );
       if (runningSubagentEvent.type !== "subagent.updated") {
         return yield* Effect.die("Expected the OMP subagent projection");
@@ -2151,7 +2198,10 @@ describe("PiAdapterV2", () => {
           event.turnItem.type === "subagent" &&
           event.turnItem.subagentId === stableSubagentId,
       );
-      if (completedEvent.type !== "turn_item.updated" || completedEvent.turnItem.type !== "subagent") {
+      if (
+        completedEvent.type !== "turn_item.updated" ||
+        completedEvent.turnItem.type !== "subagent"
+      ) {
         return yield* Effect.die("Expected the late OMP child completion");
       }
       assert.equal(completedEvent.turnItem.status, "completed");
@@ -2323,7 +2373,6 @@ describe("PiAdapterV2", () => {
     }).pipe(Effect.scoped, Effect.provide(layerTest)),
   );
 
-
   it.effect("keeps an async OMP task call completed while its background subagent finishes", () =>
     Effect.gen(function* () {
       const fake = yield* makeFakePi;
@@ -2466,13 +2515,9 @@ describe("PiAdapterV2", () => {
       assert.isNotNull(completionNotice?.providerTurnId);
       assert.isNotNull(completionNotice?.nodeId);
       assert.isTrue(completionNotice?.message.startsWith("Background job completed"));
-      assert.equal(
-        DateTime.toEpochMillis(completionNotice!.startedAt!),
-        1_800_000_000_000,
-      );
+      assert.equal(DateTime.toEpochMillis(completionNotice!.startedAt!), 1_800_000_000_000);
     }).pipe(Effect.scoped, Effect.provide(layerTest)),
   );
-
 
   it.effect(
     "does not reuse prior activation timing for a new native task activation without timing metadata",
@@ -2510,8 +2555,7 @@ describe("PiAdapterV2", () => {
         const takePair = (id: string) =>
           Effect.gen(function* () {
             const canonicalEvent = yield* takeEvent(
-              (event) =>
-                event.type === "subagent.updated" && event.subagent.nativeAgentId === id,
+              (event) => event.type === "subagent.updated" && event.subagent.nativeAgentId === id,
             );
             if (canonicalEvent.type !== "subagent.updated") {
               return yield* Effect.die("Expected the native subagent update");
@@ -2744,8 +2788,7 @@ describe("PiAdapterV2", () => {
         Effect.gen(function* () {
           const event = yield* takeEvent(
             (event) =>
-              event.type === "subagent.updated" &&
-              event.subagent.nativeAgentId === nativeAgentId,
+              event.type === "subagent.updated" && event.subagent.nativeAgentId === nativeAgentId,
           );
           if (event.type !== "subagent.updated") {
             return yield* Effect.die("Expected an OMP subagent update");
@@ -2869,252 +2912,262 @@ describe("PiAdapterV2", () => {
     }).pipe(Effect.scoped, Effect.provide(layerTest)),
   );
 
-  it.effect("preserves native Task metrics through progress, terminal results, and a new activation", () =>
-    Effect.gen(function* () {
-      const fake = yield* makeFakePi;
-      yield* fake.emit({
-        type: "ready",
-        protocolVersion: 1,
-        supportedProtocolVersions: [1, 2],
-      });
-      const { runtime, takeEvent } = yield* openRuntime(
-        fake,
-        "default",
-        THREAD_ID,
-        SESSION_ID,
-        undefined,
-        OMP_DIALECT,
-      );
-      const providerThread = yield* runtime.ensureThread({
-        threadId: THREAD_ID,
-        modelSelection: modelSelection("default"),
-        runtimePolicy,
-      });
-      yield* startTurn(runtime, providerThread);
-      yield* fake.takeRequest("prompt");
-      yield* fake.emit({ type: "agent_start" });
-      yield* fake.emit({
-        type: "tool_execution_start",
-        toolCallId: "call_metrics",
-        toolName: "task",
-        args: { tasks: [{ task: "inspect metrics" }] },
-      });
-      const nativeAgentId = "job-metrics";
-      const canonicalAgent = (event: ProviderAdapterV2Event, agentId = nativeAgentId) =>
-        event.type === "subagent.updated" && event.subagent.nativeAgentId === agentId
-          ? event.subagent
-          : undefined;
-      const subagentItem = (event: ProviderAdapterV2Event, agentId = nativeAgentId) =>
-        event.type === "turn_item.updated" &&
-        event.turnItem.type === "subagent" &&
-        event.turnItem.nativeAgentId === agentId
-          ? event.turnItem
-          : undefined;
-      const takeAgentPair = (agentId = nativeAgentId) =>
-        Effect.gen(function* () {
-          const canonical = canonicalAgent(
-            yield* takeEvent((event) => canonicalAgent(event, agentId) !== undefined),
-            agentId,
-          );
-          const turnItem = subagentItem(
-            yield* takeEvent((event) => subagentItem(event, agentId) !== undefined),
-            agentId,
-          );
-          return { canonical, turnItem };
+  it.effect(
+    "preserves native Task metrics through progress, terminal results, and a new activation",
+    () =>
+      Effect.gen(function* () {
+        const fake = yield* makeFakePi;
+        yield* fake.emit({
+          type: "ready",
+          protocolVersion: 1,
+          supportedProtocolVersions: [1, 2],
         });
+        const { runtime, takeEvent } = yield* openRuntime(
+          fake,
+          "default",
+          THREAD_ID,
+          SESSION_ID,
+          undefined,
+          OMP_DIALECT,
+        );
+        const providerThread = yield* runtime.ensureThread({
+          threadId: THREAD_ID,
+          modelSelection: modelSelection("default"),
+          runtimePolicy,
+        });
+        yield* startTurn(runtime, providerThread);
+        yield* fake.takeRequest("prompt");
+        yield* fake.emit({ type: "agent_start" });
+        yield* fake.emit({
+          type: "tool_execution_start",
+          toolCallId: "call_metrics",
+          toolName: "task",
+          args: { tasks: [{ task: "inspect metrics" }] },
+        });
+        const nativeAgentId = "job-metrics";
+        const canonicalAgent = (event: ProviderAdapterV2Event, agentId = nativeAgentId) =>
+          event.type === "subagent.updated" && event.subagent.nativeAgentId === agentId
+            ? event.subagent
+            : undefined;
+        const subagentItem = (event: ProviderAdapterV2Event, agentId = nativeAgentId) =>
+          event.type === "turn_item.updated" &&
+          event.turnItem.type === "subagent" &&
+          event.turnItem.nativeAgentId === agentId
+            ? event.turnItem
+            : undefined;
+        const takeAgentPair = (agentId = nativeAgentId) =>
+          Effect.gen(function* () {
+            const canonical = canonicalAgent(
+              yield* takeEvent((event) => canonicalAgent(event, agentId) !== undefined),
+              agentId,
+            );
+            const turnItem = subagentItem(
+              yield* takeEvent((event) => subagentItem(event, agentId) !== undefined),
+              agentId,
+            );
+            return { canonical, turnItem };
+          });
 
-      yield* fake.emit({
-        type: "subagent_progress",
-        payload: {
-          id: nativeAgentId,
-          agent: "scout",
-          parentToolCallId: "call_metrics",
-          index: 0,
-          progress: {
-            status: "running",
-            task: "inspect metrics",
-            toolCount: 5,
-            requests: 3,
-            tokens: 150,
-            contextTokens: 45,
-            contextWindow: 200,
-            cost: 0.04,
+        yield* fake.emit({
+          type: "subagent_progress",
+          payload: {
+            id: nativeAgentId,
+            agent: "scout",
+            parentToolCallId: "call_metrics",
+            index: 0,
+            progress: {
+              status: "running",
+              task: "inspect metrics",
+              toolCount: 5,
+              requests: 3,
+              tokens: 150,
+              contextTokens: 45,
+              contextWindow: 200,
+              cost: 0.04,
+            },
           },
-        },
-      });
-      const initial = yield* takeAgentPair();
-      const initialMetrics = {
-        toolCount: 5,
-        requests: 3,
-        tokens: 150,
-        contextTokens: 45,
-        contextWindow: 200,
-        cost: 0.04,
-      };
-      assert.deepEqual(initial.canonical?.metrics, initialMetrics);
-      assert.deepEqual(initial.turnItem?.metrics, initialMetrics);
+        });
+        const initial = yield* takeAgentPair();
+        const initialMetrics = {
+          toolCount: 5,
+          requests: 3,
+          tokens: 150,
+          contextTokens: 45,
+          contextWindow: 200,
+          cost: 0.04,
+        };
+        assert.deepEqual(initial.canonical?.metrics, initialMetrics);
+        assert.deepEqual(initial.turnItem?.metrics, initialMetrics);
 
-      yield* fake.emit({
-        type: "subagent_progress",
-        payload: {
-          id: nativeAgentId,
-          parentToolCallId: "call_metrics",
-          index: 0,
-          progress: {
-            status: "running",
-            requests: 4,
-            contextTokens: 0,
+        yield* fake.emit({
+          type: "subagent_progress",
+          payload: {
+            id: nativeAgentId,
+            parentToolCallId: "call_metrics",
+            index: 0,
+            progress: {
+              status: "running",
+              requests: 4,
+              contextTokens: 0,
+            },
           },
-        },
-      });
-      const partial = yield* takeAgentPair();
-      const mergedMetrics = { ...initialMetrics, requests: 4, contextTokens: 0 };
-      assert.deepEqual(partial.canonical?.metrics, mergedMetrics);
-      assert.deepEqual(partial.turnItem?.metrics, mergedMetrics);
+        });
+        const partial = yield* takeAgentPair();
+        const mergedMetrics = { ...initialMetrics, requests: 4, contextTokens: 0 };
+        assert.deepEqual(partial.canonical?.metrics, mergedMetrics);
+        assert.deepEqual(partial.turnItem?.metrics, mergedMetrics);
 
-      yield* fake.emit({
-        type: "tool_execution_end",
-        toolCallId: "call_metrics",
-        toolName: "task",
-        isError: false,
-        result: {
-          content: [{ type: "text", text: "finished" }],
-          details: {
-            results: [
-              {
-                id: nativeAgentId,
-                status: "completed",
-                requests: 8,
-                tokens: 250,
-                contextTokens: 70,
-                contextWindow: 300,
-                usage: { cost: { total: 0.17 } },
-              },
-            ],
+        yield* fake.emit({
+          type: "tool_execution_end",
+          toolCallId: "call_metrics",
+          toolName: "task",
+          isError: false,
+          result: {
+            content: [{ type: "text", text: "finished" }],
+            details: {
+              results: [
+                {
+                  id: nativeAgentId,
+                  status: "completed",
+                  requests: 8,
+                  tokens: 250,
+                  contextTokens: 70,
+                  contextWindow: 300,
+                  usage: { cost: { total: 0.17 } },
+                },
+              ],
+            },
           },
-        },
-      });
-      const terminal = yield* takeAgentPair();
-      const terminalMetrics = {
-        toolCount: 5,
-        requests: 8,
-        tokens: 250,
-        contextTokens: 70,
-        contextWindow: 300,
-        cost: 0.17,
-      };
-      assert.equal(terminal.turnItem?.status, "completed");
-      assert.deepEqual(terminal.canonical?.metrics, terminalMetrics);
-      assert.deepEqual(terminal.turnItem?.metrics, terminalMetrics);
+        });
+        const terminal = yield* takeAgentPair();
+        const terminalMetrics = {
+          toolCount: 5,
+          requests: 8,
+          tokens: 250,
+          contextTokens: 70,
+          contextWindow: 300,
+          cost: 0.17,
+        };
+        assert.equal(terminal.turnItem?.status, "completed");
+        assert.deepEqual(terminal.canonical?.metrics, terminalMetrics);
+        assert.deepEqual(terminal.turnItem?.metrics, terminalMetrics);
 
-      yield* fake.emit({
-        type: "subagent_progress",
-        payload: {
-          id: "job-metrics-next",
-          agent: "scout",
-          parentToolCallId: "call_metrics",
-          index: 0,
-          progress: { status: "running", toolCount: 2 },
-        },
-      });
-      const nextActivation = yield* takeAgentPair("job-metrics-next");
-      assert.equal(nextActivation.turnItem?.status, "running");
-      assert.deepEqual(nextActivation.canonical?.metrics, { toolCount: 2 });
-      assert.deepEqual(nextActivation.turnItem?.metrics, { toolCount: 2 });
-    }).pipe(Effect.scoped, Effect.provide(layerTest)),
+        yield* fake.emit({
+          type: "subagent_progress",
+          payload: {
+            id: "job-metrics-next",
+            agent: "scout",
+            parentToolCallId: "call_metrics",
+            index: 0,
+            progress: { status: "running", toolCount: 2 },
+          },
+        });
+        const nextActivation = yield* takeAgentPair("job-metrics-next");
+        assert.equal(nextActivation.turnItem?.status, "running");
+        assert.deepEqual(nextActivation.canonical?.metrics, { toolCount: 2 });
+        assert.deepEqual(nextActivation.turnItem?.metrics, { toolCount: 2 });
+      }).pipe(Effect.scoped, Effect.provide(layerTest)),
   );
 
-  it.effect("links native child items to their actual parent task items and retains known links", () =>
-    Effect.gen(function* () {
-      const fake = yield* makeFakePi;
-      yield* fake.emit({
-        type: "ready",
-        protocolVersion: 1,
-        supportedProtocolVersions: [1, 2],
-      });
-      const { runtime, takeEvent } = yield* openRuntime(
-        fake,
-        "default",
-        THREAD_ID,
-        SESSION_ID,
-        undefined,
-        OMP_DIALECT,
-      );
-      const providerThread = yield* runtime.ensureThread({
-        threadId: THREAD_ID,
-        modelSelection: modelSelection("default"),
-        runtimePolicy,
-      });
-      yield* startTurn(runtime, providerThread);
-      yield* fake.takeRequest("prompt");
-      yield* fake.emit({ type: "agent_start" });
-      const parentTaskItem = (event: ProviderAdapterV2Event) =>
-        event.type === "turn_item.updated" &&
-        event.turnItem.type === "dynamic_tool" &&
-        event.turnItem.toolName === "task"
-          ? event.turnItem
-          : undefined;
-      const childItem = (event: ProviderAdapterV2Event) =>
-        event.type === "turn_item.updated" && event.turnItem.type === "subagent"
-          ? event.turnItem
-          : undefined;
-      yield* fake.emit({
-        type: "tool_execution_start",
-        toolCallId: "call_parent_a",
-        toolName: "task",
-        args: { tasks: [{ task: "parent A" }] },
-      });
-      const parentA = parentTaskItem(yield* takeEvent((event) => parentTaskItem(event) !== undefined));
-      yield* fake.emit({
-        type: "tool_execution_start",
-        toolCallId: "call_parent_b",
-        toolName: "task",
-        args: { tasks: [{ task: "parent B" }] },
-      });
-      const parentB = parentTaskItem(yield* takeEvent((event) => parentTaskItem(event) !== undefined));
+  it.effect(
+    "links native child items to their actual parent task items and retains known links",
+    () =>
+      Effect.gen(function* () {
+        const fake = yield* makeFakePi;
+        yield* fake.emit({
+          type: "ready",
+          protocolVersion: 1,
+          supportedProtocolVersions: [1, 2],
+        });
+        const { runtime, takeEvent } = yield* openRuntime(
+          fake,
+          "default",
+          THREAD_ID,
+          SESSION_ID,
+          undefined,
+          OMP_DIALECT,
+        );
+        const providerThread = yield* runtime.ensureThread({
+          threadId: THREAD_ID,
+          modelSelection: modelSelection("default"),
+          runtimePolicy,
+        });
+        yield* startTurn(runtime, providerThread);
+        yield* fake.takeRequest("prompt");
+        yield* fake.emit({ type: "agent_start" });
+        const parentTaskItem = (event: ProviderAdapterV2Event) =>
+          event.type === "turn_item.updated" &&
+          event.turnItem.type === "dynamic_tool" &&
+          event.turnItem.toolName === "task"
+            ? event.turnItem
+            : undefined;
+        const childItem = (event: ProviderAdapterV2Event) =>
+          event.type === "turn_item.updated" && event.turnItem.type === "subagent"
+            ? event.turnItem
+            : undefined;
+        yield* fake.emit({
+          type: "tool_execution_start",
+          toolCallId: "call_parent_a",
+          toolName: "task",
+          args: { tasks: [{ task: "parent A" }] },
+        });
+        const parentA = parentTaskItem(
+          yield* takeEvent((event) => parentTaskItem(event) !== undefined),
+        );
+        yield* fake.emit({
+          type: "tool_execution_start",
+          toolCallId: "call_parent_b",
+          toolName: "task",
+          args: { tasks: [{ task: "parent B" }] },
+        });
+        const parentB = parentTaskItem(
+          yield* takeEvent((event) => parentTaskItem(event) !== undefined),
+        );
 
-      yield* fake.emit({
-        type: "subagent_progress",
-        payload: {
-          id: "job-parent-a",
-          parentToolCallId: "call_parent_a",
-          index: 0,
-          progress: { status: "running", task: "parent A" },
-        },
-      });
-      const childA = childItem(
-        yield* takeEvent((event) => childItem(event)?.nativeAgentId === "job-parent-a"),
-      );
-      yield* fake.emit({
-        type: "subagent_progress",
-        payload: {
-          id: "job-parent-b",
-          parentToolCallId: "call_parent_b",
-          index: 0,
-          progress: { status: "running", task: "parent B" },
-        },
-      });
-      const childB = childItem(
-        yield* takeEvent((event) => childItem(event)?.nativeAgentId === "job-parent-b"),
-      );
-      assert.equal(childA?.parentItemId, parentA?.id);
-      assert.equal(childB?.parentItemId, parentB?.id);
-      assert.notEqual(parentA?.id, parentB?.id);
+        yield* fake.emit({
+          type: "subagent_progress",
+          payload: {
+            id: "job-parent-a",
+            parentToolCallId: "call_parent_a",
+            index: 0,
+            progress: { status: "running", task: "parent A" },
+          },
+        });
+        const childA = childItem(
+          yield* takeEvent((event) => childItem(event)?.nativeAgentId === "job-parent-a"),
+        );
+        yield* fake.emit({
+          type: "subagent_progress",
+          payload: {
+            id: "job-parent-b",
+            parentToolCallId: "call_parent_b",
+            index: 0,
+            progress: { status: "running", task: "parent B" },
+          },
+        });
+        const childB = childItem(
+          yield* takeEvent((event) => childItem(event)?.nativeAgentId === "job-parent-b"),
+        );
+        assert.equal(childA?.parentItemId, parentA?.id);
+        assert.equal(childB?.parentItemId, parentB?.id);
+        assert.notEqual(parentA?.id, parentB?.id);
 
-      yield* fake.emit({
-        type: "subagent_progress",
-        payload: {
-          id: "job-parent-a",
-          progress: { status: "running", requests: 2 },
-        },
-      });
-      const partialChildA = childItem(
-        yield* takeEvent(
-          (event) => childItem(event)?.nativeAgentId === "job-parent-a" && childItem(event)?.metrics?.requests === 2,
-        ),
-      );
-      assert.equal(partialChildA?.parentItemId, parentA?.id);
-    }).pipe(Effect.scoped, Effect.provide(layerTest)),
+        yield* fake.emit({
+          type: "subagent_progress",
+          payload: {
+            id: "job-parent-a",
+            progress: { status: "running", requests: 2 },
+          },
+        });
+        const partialChildA = childItem(
+          yield* takeEvent(
+            (event) =>
+              childItem(event)?.nativeAgentId === "job-parent-a" &&
+              childItem(event)?.metrics?.requests === 2,
+          ),
+        );
+        assert.equal(partialChildA?.parentItemId, parentA?.id);
+      }).pipe(Effect.scoped, Effect.provide(layerTest)),
   );
 
   it.effect("records late async job completion once as a runless native notice", () =>
@@ -3173,7 +3226,15 @@ describe("PiAdapterV2", () => {
       });
       yield* fake.emit({ type: "agent_end", isTerminal: true, willRetry: false });
       yield* takeEvent((event) => event.type === "turn.terminal");
-      yield* startTurn(runtime, providerThread, "default", [], "Run two remains active", undefined, 2);
+      yield* startTurn(
+        runtime,
+        providerThread,
+        "default",
+        [],
+        "Run two remains active",
+        undefined,
+        2,
+      );
       yield* fake.takeRequest("prompt");
       yield* fake.emit({ type: "agent_start" });
       yield* takeEvent(
@@ -3243,11 +3304,7 @@ describe("PiAdapterV2", () => {
         const event = yield* takeEvent(() => true);
         const notice = systemNotice(event);
         const jobId = notice?.jobCompletion?.jobId;
-        if (
-          notice !== undefined &&
-          jobId !== undefined &&
-          expectedJobIds[jobId] === true
-        ) {
+        if (notice !== undefined && jobId !== undefined && expectedJobIds[jobId] === true) {
           completionNoticeCount += 1;
           completionNotices.set(jobId, notice);
         }
@@ -3263,10 +3320,10 @@ describe("PiAdapterV2", () => {
       const firstCompletionNotice = completionNotices.get("job-actual-17");
       const secondCompletionNotice = completionNotices.get("job-actual-18");
       assert.equal(completionNoticeCount, 2);
-      assert.deepEqual(
-        Array.from(completionNotices.keys()).sort(),
-        ["job-actual-17", "job-actual-18"],
-      );
+      assert.deepEqual(Array.from(completionNotices.keys()).sort(), [
+        "job-actual-17",
+        "job-actual-18",
+      ]);
       assert.isFalse(rootRevived);
       assert.isFalse(activeRootTerminated);
       assert.equal(completedChild?.status, "completed");
@@ -3544,7 +3601,6 @@ describe("PiAdapterV2", () => {
         }
       }).pipe(Effect.scoped, Effect.provide(layerTest)),
   );
-
 
   it.effect("leaves /compacted as an ordinary prompt", () =>
     Effect.gen(function* () {
@@ -4331,6 +4387,62 @@ describe("PiAdapterV2", () => {
     }).pipe(Effect.scoped, Effect.provide(layerTest)),
   );
 
+  it.effect.each([
+    {
+      pi: "clears its native queue",
+      clearQueue: { steering: ["Use the other file", ""], followUp: ["Then summarize"] },
+      notices: [
+        "Stop cleared 3 queued messages Pi had not read:\n\nUse the other file\n\nThen summarize",
+      ],
+    },
+    { pi: "predates clear_queue", clearQueue: "unknown_command", notices: [] },
+  ] as const)("Stop aborts and retires Pi when it $pi", ({ clearQueue, notices }) =>
+    Effect.gen(function* () {
+      const fake = yield* makeFakePi;
+      fake.setClearQueue(clearQueue);
+      const { runtime, takeEvent } = yield* openRuntime(fake);
+      const providerThread = yield* runtime.ensureThread({
+        threadId: THREAD_ID,
+        modelSelection: modelSelection("default"),
+        runtimePolicy,
+      });
+      yield* startTurn(runtime, providerThread);
+      yield* fake.takeRequest("prompt");
+      yield* fake.emit({ type: "agent_start" });
+      const runningTurn = yield* takeEvent(
+        (event) =>
+          event.type === "provider_turn.updated" && event.providerTurn.status === "running",
+      );
+      const providerTurnId =
+        runningTurn.type === "provider_turn.updated" ? runningTurn.providerTurn.id : undefined;
+      assert.isDefined(providerTurnId);
+
+      yield* runtime.interruptTurn({
+        providerThread,
+        providerTurnId: providerTurnId!,
+        requestRuntimeRestart: true,
+      });
+      yield* fake.takeRequest("abort");
+      assert.deepEqual(
+        fake
+          .allRequests()
+          .map((request) => request["type"])
+          .filter((type) => type === "clear_queue" || type === "abort"),
+        ["clear_queue", "abort"],
+      );
+      const emitted: Array<string> = [];
+      yield* takeEvent((event) => {
+        if (event.type === "turn_item.updated" && event.turnItem.type === "system_notice") {
+          emitted.push(event.turnItem.message);
+        }
+        return (
+          event.type === "provider_session.updated" && event.providerSession.status === "stopped"
+        );
+      });
+      assert.deepEqual<ReadonlyArray<string>>(emitted, notices);
+    }).pipe(Effect.scoped, Effect.provide(layerTest)),
+  );
+
   it.effect("stops active retry progress when the turn is interrupted", () =>
     Effect.gen(function* () {
       const fake = yield* makeFakePi;
@@ -4978,7 +5090,8 @@ describe("PiAdapterV2", () => {
       assert.isTrue(waitingTask.taskId.startsWith("omp:async:"));
 
       const completionCheckFiber = yield* takeEvent(
-        (event) => event.type === "provider_turn.updated" && event.providerTurn.status === "completed",
+        (event) =>
+          event.type === "provider_turn.updated" && event.providerTurn.status === "completed",
       ).pipe(Effect.timeoutOption(Duration.millis(1)), Effect.forkScoped);
       yield* Effect.yieldNow;
       yield* TestClock.adjust(Duration.millis(1));

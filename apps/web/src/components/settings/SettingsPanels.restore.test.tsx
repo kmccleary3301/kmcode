@@ -78,6 +78,23 @@ describe("restoring V2 settings", () => {
     expect(state.update.mock.calls[0]?.[0][key]).toBe(DEFAULT_UNIFIED_SETTINGS[key]);
   });
 
+  it("restores thread title instructions", async () => {
+    state.settings = {
+      ...DEFAULT_UNIFIED_SETTINGS,
+      threadTitleInstructions: "Use fewer words.",
+    };
+    hooks.beginRender();
+    const restore = useSettingsRestore();
+
+    expect(restore.changedSettingLabels).toEqual(["Thread title instructions"]);
+    await restore.restoreDefaults();
+
+    expect(state.confirm.mock.calls[0]?.[0]).toContain("Thread title instructions");
+    expect(state.update.mock.calls[0]?.[0].threadTitleInstructions).toBe(
+      DEFAULT_UNIFIED_SETTINGS.threadTitleInstructions,
+    );
+  });
+
   it("does not reset settings after cancellation", async () => {
     state.settings = { ...DEFAULT_UNIFIED_SETTINGS, autoResumeLimitedThreads: true };
     state.confirm.mockResolvedValue(false);

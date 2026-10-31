@@ -34,13 +34,33 @@ const CUSTOM_MODEL_PLACEHOLDER_BY_KIND: Partial<Record<ProviderDriverKind, strin
 /** Above this many models the list gets a filter input. */
 const FILTER_THRESHOLD = 8;
 
+const REASONING_SELECT_DESCRIPTOR_IDS = {
+  reasoningEffort: true,
+  effort: true,
+  reasoning: true,
+  variant: true,
+};
+const PROVIDER_ALIAS_SLUGS = { default: true, auto: true };
+
 /**
  * Short capability words shown after a model's slug. Claude and Cursor report
  * fast mode as a boolean `fastMode` option; Codex reports it as a
  * `serviceTier` select whose fast tier is labelled "Fast" (catalog id
  * `priority`, or `fast` from the speed-tier fallback), matching the composer.
  */
-function describeModelCapabilities(model: ServerProviderModel): string[] {
+function hasReasoningControl(model: ServerProviderModel): boolean {
+  return (model.capabilities?.optionDescriptors ?? []).some(
+    (descriptor) =>
+      descriptor.type === "select" && Object.hasOwn(REASONING_SELECT_DESCRIPTOR_IDS, descriptor.id),
+  );
+}
+
+// Reasoning is the norm, so only its absence is labeled. Custom, unknown, and
+// provider-alias models do not establish that a discovered model lacks it.
+function describeModelCapabilities(
+  model: ServerProviderModel,
+  flagMissingReasoning: boolean,
+): string[] {
   const descriptors = model.capabilities?.optionDescriptors ?? [];
   const labels: string[] = [];
   const hasFastMode = descriptors.some(
@@ -51,18 +71,14 @@ function describeModelCapabilities(model: ServerProviderModel): string[] {
         descriptor.options.some((option) => option.id === "fast" || option.label === "Fast")),
   );
   if (hasFastMode) labels.push("Fast mode");
-  if (descriptors.some((descriptor) => descriptor.id === "thinking")) labels.push("Thinking");
   if (
-    descriptors.some(
-      (descriptor) =>
-        descriptor.type === "select" &&
-        (descriptor.id === "reasoningEffort" ||
-          descriptor.id === "effort" ||
-          descriptor.id === "reasoning" ||
-          descriptor.id === "variant"),
-    )
+    flagMissingReasoning &&
+    !model.isCustom &&
+    model.capabilities &&
+    !Object.hasOwn(PROVIDER_ALIAS_SLUGS, model.slug) &&
+    !hasReasoningControl(model)
   ) {
-    labels.push("Reasoning");
+    labels.push("No reasoning");
   }
   return labels;
 }
@@ -451,8 +467,10 @@ export function ProviderModelsSection({
     </Tooltip>
   );
 
+  const flagMissingReasoning = models.some(hasReasoningControl);
+
   const renderRow = (model: DisplayModel) => {
-    const capLabels = describeModelCapabilities(model);
+    const capLabels = describeModelCapabilities(model, flagMissingReasoning);
     const group = groupOf(model);
     // Hidden is read from the preference itself: a favorited model can still be
     // hidden, and its switch must say so even though it sits in the favorites group.

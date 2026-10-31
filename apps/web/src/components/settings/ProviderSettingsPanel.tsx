@@ -21,6 +21,7 @@ import {
   ProviderDriverKind,
   type ProviderInstanceConfig,
   type ProviderInstanceId,
+  type ProjectId,
   resolveEnvironmentMachineKind,
   resolveProviderInstanceEnabled,
 } from "@t3tools/contracts";
@@ -116,6 +117,7 @@ import {
 } from "./settingsLayout";
 import {
   buildProviderEnvironmentOptions,
+  buildProviderInstanceOverridePatch,
   classifyProviderEnvironmentAccess,
   isProviderSettingsEnvironmentAvailable,
   type ProviderEnvironmentAccess,
@@ -283,6 +285,8 @@ interface ProviderSettingsTarget {
   readonly instanceId?: ProviderInstanceId;
   readonly scoped?: boolean;
   readonly environmentIds?: readonly EnvironmentId[];
+  /** Project checkouts on the selected environment, for enablement overrides. */
+  readonly projectIds?: readonly ProjectId[];
 }
 
 export function ProviderSettingsPanel(target: ProviderSettingsTarget) {
@@ -460,6 +464,7 @@ function ProviderSettingsPanelContent(target: ProviderSettingsTarget) {
               ? target.instanceId
               : undefined
           }
+          projectIds={target.projectIds ?? []}
         />
       ) : null}
     </>
@@ -470,16 +475,19 @@ function SelectedEnvironmentProviderSettings({
   environment,
   deviceTabs,
   targetInstanceId,
+  projectIds,
 }: {
   readonly environment: EnvironmentPresentation;
   readonly deviceTabs?: ReactNode;
   readonly targetInstanceId?: ProviderInstanceId | undefined;
+  readonly projectIds: readonly ProjectId[];
 }) {
   return (
     <RemoteSessionGatedProviderSettings
       environment={environment}
       deviceTabs={deviceTabs}
       targetInstanceId={targetInstanceId}
+      projectIds={projectIds}
     />
   );
 }
@@ -488,10 +496,12 @@ function RemoteSessionGatedProviderSettings({
   environment,
   deviceTabs,
   targetInstanceId,
+  projectIds,
 }: {
   readonly environment: EnvironmentPresentation;
   readonly deviceTabs?: ReactNode;
   readonly targetInstanceId?: ProviderInstanceId | undefined;
+  readonly projectIds: readonly ProjectId[];
 }) {
   const sessionState = useEnvironmentSessionState(environment.environmentId);
   const operateAccess = resolveRemoteOperateAccess({
@@ -499,12 +509,22 @@ function RemoteSessionGatedProviderSettings({
     isPending: sessionState.isPending,
     hasError: sessionState.hasError,
   });
+  const permissionMessage =
+    environment.connection.phase !== "connected"
+      ? undefined
+      : sessionState.hasError
+        ? "Could not verify your permissions. Retrying automatically."
+        : sessionState.data?.authenticated === false
+          ? "This environment did not accept your session. Reconnect to try again."
+          : undefined;
   return (
     <AccessGatedProviderSettings
       environment={environment}
       operateAccess={operateAccess}
       deviceTabs={deviceTabs}
+      permissionMessage={permissionMessage}
       targetInstanceId={targetInstanceId}
+      projectIds={projectIds}
     />
   );
 }
@@ -514,11 +534,15 @@ function AccessGatedProviderSettings({
   operateAccess,
   deviceTabs,
   targetInstanceId,
+  permissionMessage,
+  projectIds,
 }: {
   readonly environment: EnvironmentPresentation;
   readonly operateAccess: ProviderOperateAccess;
   readonly deviceTabs?: ReactNode;
   readonly targetInstanceId?: ProviderInstanceId | undefined;
+  readonly permissionMessage?: string | undefined;
+  readonly projectIds: readonly ProjectId[];
 }) {
   const access = classifyProviderEnvironmentAccess({
     connectionPhase: environment.connection.phase,
@@ -541,6 +565,8 @@ function AccessGatedProviderSettings({
       readOnly={access.kind === "read-only"}
       deviceTabs={deviceTabs}
       targetInstanceId={targetInstanceId}
+      permissionMessage={permissionMessage}
+      projectIds={projectIds}
     />
   );
 }
@@ -551,11 +577,18 @@ export function EnvironmentProviderSettings({
   readOnly = false,
   deviceTabs,
   targetInstanceId,
+  permissionMessage,
+  projectIds = [],
 }: {
   readonly environmentId: EnvironmentId;
   readonly environmentLabel: string;
   readonly deviceTabs?: ReactNode;
   readonly targetInstanceId?: ProviderInstanceId | undefined;
+  readonly projectIds?: readonly ProjectId[];
+  /**
+   * Explain why this session's permission state is unavailable while keeping writes disabled.
+   */
+  readonly permissionMessage?: string | undefined;
   /**
    * Grey out and freeze every write control when this session's credential
    * lacks `providers:manage` on the environment. Selecting providers
@@ -998,11 +1031,39 @@ export function EnvironmentProviderSettings({
     );
     const resetLabel = driverOption?.label ?? String(row.driver);
 
+    const representativeProjectId = projectIds[0];
+    const writeProjectOverride = (next: boolean | undefined) => {
+      updateSettings({
+        projectSettingsOverrides: buildProviderInstanceOverridePatch(
+          settings,
+          projectIds,
+          row.instanceId,
+          next,
+        ),
+      });
+    };
+    const projectOverride =
+      representativeProjectId === undefined
+        ? undefined
+        : {
+            value:
+              settings.projectSettingsOverrides[representativeProjectId]?.providerInstances?.[
+                row.instanceId
+              ]?.enabled,
+            effectiveEnabled:
+              settings.projectSettingsOverrides[representativeProjectId]?.providerInstances?.[
+                row.instanceId
+              ]?.enabled ?? resolveProviderInstanceEnabled(row.instance),
+            onChange: (next: boolean) => writeProjectOverride(next),
+            onReset: () => writeProjectOverride(undefined),
+          };
+
     return (
       <ProviderInstanceCard
         key={row.instanceId}
         environmentId={environmentId}
         acpProjects={projects}
+        projectOverride={projectOverride}
         onAcceptUrlAuth={
           readOnly ? undefined : (action) => acceptUrlAuthentication(row.instanceId, action)
         }
@@ -1214,8 +1275,15 @@ export function EnvironmentProviderSettings({
         {readOnly ? (
           <SettingsGroup divided={false} className="overflow-hidden">
             <SettingsRow
-              title="Limited permissions"
-              description={`This session can view ${environmentLabel}'s providers but can't change their settings.`}
+              title={
+                permissionMessage === undefined
+                  ? "Limited permissions"
+                  : "Session permissions unavailable"
+              }
+              description={
+                permissionMessage ??
+                `This session can view ${environmentLabel}'s providers but can't change their settings.`
+              }
             />
           </SettingsGroup>
         ) : null}

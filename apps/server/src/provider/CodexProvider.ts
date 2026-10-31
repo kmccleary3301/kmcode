@@ -35,8 +35,10 @@ import { resolveSpawnCommand } from "@t3tools/shared/shell";
 import { codexAppServerArgs, resolveCodexLaunchArgs } from "./codexLaunchArgs.ts";
 import {
   AUTH_PROBE_TIMEOUT_MS,
+  DEFAULT_TIMEOUT_MS,
   buildServerProvider,
   COMPACT_SLASH_COMMAND,
+  spawnAndCollect,
   type ServerProviderDraft,
 } from "./providerSnapshot.ts";
 import { expandHomePath } from "../pathExpansion.ts";
@@ -50,6 +52,7 @@ import {
 import packageJson from "../../package.json" with { type: "json" };
 const isCodexAppServerSpawnError = Schema.is(CodexErrors.CodexAppServerSpawnError);
 const RATE_LIMITS_PROBE_TIMEOUT_MS = 3_000;
+const CODEX_CLI_VERSION_PATTERN = /(?:^|\s)v?(\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?)(?=\s|$)/u;
 
 type CodexRateLimitsProbe =
   | {
@@ -481,6 +484,42 @@ const probeCodexAppServerProvider = Effect.fn("probeCodexAppServerProvider")(fun
   } satisfies CodexAppServerProviderSnapshot;
 });
 
+const probeCodexCliVersion = Effect.fn("probeCodexCliVersion")(
+  function* (input: {
+    readonly binaryPath: string;
+    readonly homePath?: string;
+    readonly cwd: string;
+    readonly environment?: NodeJS.ProcessEnv;
+  }) {
+    const resolvedHomePath = input.homePath ? expandHomePath(input.homePath) : undefined;
+    const environment = {
+      ...input.environment,
+      ...(resolvedHomePath ? { CODEX_HOME: resolvedHomePath } : {}),
+    };
+    const spawnCommand = yield* resolveSpawnCommand(input.binaryPath, ["--version"], {
+      env: environment,
+      extendEnv: true,
+    });
+    const result = yield* spawnAndCollect(
+      input.binaryPath,
+      ChildProcess.make(spawnCommand.command, spawnCommand.args, {
+        cwd: input.cwd,
+        env: environment,
+        extendEnv: true,
+        forceKillAfter: CODEX_APP_SERVER_PROBE_FORCE_KILL_AFTER,
+        shell: spawnCommand.shell,
+      }),
+    );
+    if (result.code !== 0) return null;
+    return CODEX_CLI_VERSION_PATTERN.exec(result.stdout)?.[1] ?? null;
+  },
+  Effect.timeoutOption(Duration.millis(DEFAULT_TIMEOUT_MS)),
+  Effect.map(Option.getOrNull),
+  Effect.catch((cause) =>
+    Effect.logDebug("Codex --version fallback failed.", { cause }).pipe(Effect.as(null)),
+  ),
+);
+
 export const probeCodexSkillsForCwd = Effect.fn("probeCodexSkillsForCwd")(function* (input: {
   readonly binaryPath: string;
   readonly homePath?: string;
@@ -536,12 +575,18 @@ const makePendingCodexProvider = (
     });
   });
 
-function accountProbeStatus(account: CodexAppServerProviderSnapshot["account"]): {
+function accountProbeStatus(
+  account: CodexAppServerProviderSnapshot["account"],
+  usagePlanType?: string | null,
+): {
   readonly status: Exclude<ServerProviderState, "disabled">;
   readonly auth: ServerProvider["auth"];
   readonly message?: string;
 } {
-  const authLabel = codexAccountAuthLabel(account.account);
+  const authLabel =
+    account.account?.type === "chatgpt"
+      ? (codexPlanLabel(usagePlanType) ?? codexAccountAuthLabel(account.account))
+      : codexAccountAuthLabel(account.account);
   const authEmail = codexAccountEmail(account.account);
   const auth = {
     status: account.account ? ("authenticated" as const) : ("unknown" as const),
@@ -625,6 +670,14 @@ export const checkCodexProviderStatus = Effect.fn("checkCodexProviderStatus")(fu
   if (Result.isFailure(probeResult)) {
     const error = probeResult.failure;
     const installed = !isCodexAppServerSpawnError(error);
+    const version = installed
+      ? yield* probeCodexCliVersion({
+          binaryPath: codexSettings.binaryPath,
+          homePath: codexSettings.homePath,
+          cwd: process.cwd(),
+          environment: resolvedEnvironment,
+        })
+      : null;
     return buildServerProvider({
       presentation: CODEX_PRESENTATION,
       enabled: codexSettings.enabled,
@@ -633,7 +686,7 @@ export const checkCodexProviderStatus = Effect.fn("checkCodexProviderStatus")(fu
       skills: [],
       probe: {
         installed,
-        version: null,
+        version,
         status: "error",
         auth: { status: "unknown" },
         message: installed
@@ -664,9 +717,13 @@ export const checkCodexProviderStatus = Effect.fn("checkCodexProviderStatus")(fu
   }
 
   const snapshot = probeResult.success.value;
+  const usagePlanType =
+    snapshot.rateLimits && !("failure" in snapshot.rateLimits)
+      ? snapshot.rateLimits.snapshot.planType
+      : undefined;
   const accountStatus = managedAuth
     ? { status: "ready" as const, auth: managedAuth, message: undefined }
-    : accountProbeStatus(snapshot.account);
+    : accountProbeStatus(snapshot.account, usagePlanType);
   const usageLimits =
     snapshot.account.account?.type === "apiKey"
       ? makeUnavailableUsageLimits({ checkedAt, reason: "unsupported" })

@@ -30,7 +30,26 @@ vi.mock("electron", () => ({
 }));
 
 import * as ElectronTheme from "./ElectronTheme.ts";
+import type { LinuxColorScheme } from "./LinuxColorScheme.ts";
 
+function setupSystemColorScheme() {
+  const portal: {
+    report: (scheme: LinuxColorScheme) => void;
+    stopped: boolean;
+  } = {
+    report: () => undefined,
+    stopped: false,
+  };
+  const watch = (onChange: (scheme: LinuxColorScheme) => void) => {
+    portal.report = onChange;
+    return {
+      stop: () => {
+        portal.stopped = true;
+      },
+    };
+  };
+  return { portal, watch };
+}
 describe("ElectronTheme", () => {
   beforeEach(() => {
     onMock.mockClear();
@@ -92,5 +111,53 @@ describe("ElectronTheme", () => {
       assert.include(error.message, "dark");
       assert.notInclude(error.message, cause.message);
     }).pipe(Effect.provide(ElectronTheme.layer)),
+  );
+
+  it.effect("follows the system color scheme when the requested theme is system", () =>
+    Effect.gen(function* () {
+      const { portal, watch } = setupSystemColorScheme();
+      const theme = yield* ElectronTheme.makeWith(watch);
+      yield* theme.setSource("system");
+
+      portal.report("dark");
+      assert.equal(themeState.themeSource, "dark");
+      portal.report("light");
+      assert.equal(themeState.themeSource, "light");
+      portal.report(null);
+      assert.equal(themeState.themeSource, "system");
+    }).pipe(Effect.scoped),
+  );
+
+  it.effect("preserves explicit appearance over system color-scheme changes", () =>
+    Effect.gen(function* () {
+      const { portal, watch } = setupSystemColorScheme();
+      const theme = yield* ElectronTheme.makeWith(watch);
+      portal.report("dark");
+
+      yield* theme.setSource("light");
+      portal.report("dark");
+      assert.equal(themeState.themeSource, "light");
+
+      yield* theme.setSource("system");
+      assert.equal(themeState.themeSource, "dark");
+    }).pipe(Effect.scoped),
+  );
+
+  it.effect("stops following system color scheme when its scope closes", () =>
+    Effect.gen(function* () {
+      const { portal, watch } = setupSystemColorScheme();
+      yield* ElectronTheme.makeWith(watch).pipe(Effect.scoped);
+      assert.isTrue(portal.stopped);
+    }),
+  );
+
+  it.effect("keeps Electron system theme when the portal is unavailable", () =>
+    Effect.gen(function* () {
+      const theme = yield* ElectronTheme.makeWith(() => {
+        throw new Error("no session bus");
+      });
+      yield* theme.setSource("system");
+      assert.equal(themeState.themeSource, "system");
+    }).pipe(Effect.scoped),
   );
 });

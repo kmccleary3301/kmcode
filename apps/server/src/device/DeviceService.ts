@@ -57,7 +57,7 @@ import * as Scope from "effect/Scope";
 import * as Semaphore from "effect/Semaphore";
 import * as Stream from "effect/Stream";
 import * as SynchronizedRef from "effect/SynchronizedRef";
-import { HttpClient, HttpClientRequest, HttpClientResponse } from "effect/http";
+import { HttpClient, HttpClientError, HttpClientRequest, HttpClientResponse } from "effect/http";
 
 import * as ServerSettings from "../serverSettings.ts";
 import { isLocalSshDeviceHost, remoteSshDeviceHosts } from "./localSshDeviceHost.ts";
@@ -737,11 +737,10 @@ export const makeWithHosts = Effect.fn("DeviceService.makeWithHosts")(function* 
   });
 
   const shutdownDevice = Effect.fn("DeviceService.shutdownDevice")(function* (
-    hostId: DeviceHostId,
+    ready: DeviceReadiness,
     deviceId: DeviceId,
     platform: DevicePlatform,
   ) {
-    const ready = yield* readiness(hostId);
     const postShutdown = (path: string, body: Record<string, string>) =>
       HttpClientRequest.post(`${ready.hub.origin}${path}`).pipe(
         HttpClientRequest.bodyJson(body),
@@ -787,47 +786,86 @@ export const makeWithHosts = Effect.fn("DeviceService.makeWithHosts")(function* 
           ? { ...device, booted: false }
           : device,
       ),
-      sessions: state.sessions.filter(
-        (session) => !(session.hostId === ready.hostId && session.deviceId === deviceId),
-      ),
     }));
-    // Discovery can stall while an emulator saves its snapshot. A failed
-    // refresh must not turn an accepted shutdown into an action failure.
-    yield* refresh(ready).pipe(
+  });
+  const refreshAfterShutdown = (ready: DeviceReadiness) =>
+    refresh(ready).pipe(
       Effect.catch((cause) =>
         Effect.logWarning("Device discovery unavailable after shutdown", { cause }),
       ),
     );
-  });
 
   const close: DeviceService["Service"]["close"] = Effect.fn("DeviceService.close")(
     function* (input) {
-      const { state } = yield* SynchronizedRef.get(stateRef);
-      const closing = state.sessions.filter(
-        (session) =>
-          session.threadId === input.threadId &&
-          (input.hostId === undefined || session.hostId === input.hostId) &&
-          (input.deviceId === undefined || session.deviceId === input.deviceId),
+      const closing = yield* lifecycleLock.withPermit(
+        Effect.gen(function* () {
+          const { state } = yield* SynchronizedRef.get(stateRef);
+          const closing = state.sessions.filter(
+            (session) =>
+              session.threadId === input.threadId &&
+              (input.hostId === undefined || session.hostId === input.hostId) &&
+              (input.deviceId === undefined || session.deviceId === input.deviceId),
+          );
+          const ending = input.shutdown
+            ? state.sessions.filter((session) =>
+                closing.some(
+                  (closed) =>
+                    closed.hostId === session.hostId && closed.deviceId === session.deviceId,
+                ),
+              )
+            : closing;
+          for (const session of ending) {
+            const host = yield* resolveHost(session.hostId);
+            const ready = yield* host.current;
+            if (!ready && (yield* host.summary).kind === "ssh")
+              return yield* new DeviceHostUnavailableError({
+                hostId: session.hostId,
+                reason: "Device host is reconnecting. Retry close after it reconnects.",
+              });
+            if (ready?.releaseAgentSession) {
+              const name = yield* agentDeviceSession(
+                session.threadId,
+                session.hostId,
+                session.deviceId,
+              ).pipe(Effect.provideService(Crypto.Crypto, crypto));
+              yield* ready.releaseAgentSession(name, session.deviceId);
+            }
+          }
+          if (input.shutdown) {
+            for (const session of closing) {
+              const ready = yield* currentReadiness(session.hostId);
+              if (!ready)
+                return yield* new DeviceHostUnavailableError({
+                  hostId: session.hostId,
+                  reason: "Device host is not running. Reconnect before retrying close.",
+                });
+              yield* shutdownDevice(ready, session.deviceId, session.platform);
+            }
+          }
+          yield* publish((current) => ({
+            ...current,
+            sessions: current.sessions.filter((session) => !ending.includes(session)),
+          }));
+          return closing;
+        }),
       );
-      if (closing.length === 0) return;
-      yield* publish((current) => ({
-        ...current,
-        sessions: current.sessions.filter((session) => !closing.includes(session)),
-      }));
-      if (input.shutdown) {
+      if (input.shutdown)
         yield* Effect.forEach(
           closing,
-          (session) => shutdownDevice(session.hostId, session.deviceId, session.platform),
+          (session) =>
+            currentReadiness(session.hostId).pipe(
+              Effect.flatMap((ready) => (ready ? refreshAfterShutdown(ready) : Effect.void)),
+            ),
           { discard: true },
         );
-      }
     },
   );
 
   const shutdown: DeviceService["Service"]["shutdown"] = Effect.fn("DeviceService.shutdown")(
     function* (input) {
       const host = yield* resolveHost(input.hostId);
-      yield* shutdownDevice(host.id, input.deviceId, input.platform);
+      const ready = yield* readiness(host.id);
+      yield* shutdownDevice(ready, input.deviceId, input.platform);
       // Sessions on a powered-off device are stale in every thread.
       yield* publish((current) => ({
         ...current,
@@ -835,6 +873,7 @@ export const makeWithHosts = Effect.fn("DeviceService.makeWithHosts")(function* 
           (session) => !(session.hostId === host.id && session.deviceId === input.deviceId),
         ),
       }));
+      yield* refreshAfterShutdown(ready);
     },
   );
 
@@ -852,7 +891,10 @@ export const makeWithHosts = Effect.fn("DeviceService.makeWithHosts")(function* 
           (cause) =>
             new DeviceOperationError({
               operation: "screenshot",
-              reason: "request_failed",
+              reason:
+                HttpClientError.isHttpClientError(cause) && cause.reason._tag === "StatusCodeError"
+                  ? "hub_rejected"
+                  : "request_failed",
               cause,
             }),
         ),

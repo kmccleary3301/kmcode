@@ -14,6 +14,7 @@ import {
   buildCommandPaletteRows,
   buildProjectActionItems,
   buildThreadActionItems,
+  resolveCommandPaletteProject,
   buildAppearanceCommandPaletteItem,
   buildLinkedThreadActionItems,
   enumerateCommandPaletteItems,
@@ -21,6 +22,7 @@ import {
   filterCommandPaletteGroups,
   findHighlightedCommandPaletteItem,
   reduceCommandPaletteUiState,
+  isImeCompositionKey,
   type CommandPaletteActionItem,
   type CommandPaletteGroup,
 } from "./CommandPalette.logic";
@@ -456,6 +458,10 @@ function makeThread(overrides: Partial<Thread> = {}): Thread {
   });
 }
 
+function makeProjectLookup(title = "Project"): ReadonlyMap<string, Pick<Project, "title">> {
+  return new Map([[`${LOCAL_ENVIRONMENT_ID}:${PROJECT_ID}`, { title }]]);
+}
+
 describe("buildProjectActionItems", () => {
   it("shows the grouped display name but keeps the real title for icons", () => {
     const project = makeProject({ title: "fleet", workspaceRoot: "/Users/theo/Code/p/fleet" });
@@ -479,6 +485,36 @@ describe("buildProjectActionItems", () => {
 });
 
 describe("buildThreadActionItems", () => {
+  it("looks up each thread project in its own environment", () => {
+    const sharedProjectId = ProjectId.make("shared-project");
+    const localEnvironmentId = EnvironmentId.make("environment-local");
+    const remoteEnvironmentId = EnvironmentId.make("environment-remote");
+    const localThread = makeThread({
+      id: ThreadId.make("local-thread"),
+      environmentId: localEnvironmentId,
+      projectId: sharedProjectId,
+      updatedAt: "2026-03-25T00:00:00.000Z",
+    });
+    const remoteThread = makeThread({
+      id: ThreadId.make("remote-thread"),
+      environmentId: remoteEnvironmentId,
+      projectId: sharedProjectId,
+      updatedAt: "2026-03-24T00:00:00.000Z",
+    });
+    const items = buildThreadActionItems({
+      threads: [localThread, remoteThread],
+      projectByKey: new Map([
+        [`${localEnvironmentId}:${sharedProjectId}`, { title: "Local project" }],
+        [`${remoteEnvironmentId}:${sharedProjectId}`, { title: "Remote project" }],
+      ]),
+      sortOrder: "updated_at",
+      icon: null,
+      runThread: async () => undefined,
+    });
+
+    expect(items.map((item) => item.description)).toEqual(["Local project", "Remote project"]);
+  });
+
   it("orders threads by most recent activity and formats timestamps from updatedAt", () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-03-25T12:00:00.000Z"));
@@ -498,15 +534,15 @@ describe("buildThreadActionItems", () => {
             updatedAt: "2026-03-20T00:00:00.000Z",
           }),
         ],
-        projectTitleById: new Map([[PROJECT_ID, "Project"]]),
+        projectByKey: makeProjectLookup(),
         sortOrder: "updated_at",
         icon: null,
         runThread: async (_thread) => undefined,
       });
 
       expect(items.map((item) => item.value)).toEqual([
-        "thread:thread-older",
-        "thread:thread-newer",
+        `thread:${LOCAL_ENVIRONMENT_ID}:thread-older`,
+        `thread:${LOCAL_ENVIRONMENT_ID}:thread-newer`,
       ]);
       expect(items[0]?.timestamp).toBe("1d ago");
       expect(items[1]?.timestamp).toBe("5d ago");
@@ -530,7 +566,7 @@ describe("buildThreadActionItems", () => {
           updatedAt: "2026-03-19T00:00:00.000Z",
         }),
       ],
-      projectTitleById: new Map([[PROJECT_ID, "Project"]]),
+      projectByKey: makeProjectLookup(),
       sortOrder: "updated_at",
       icon: null,
       runThread: async (_thread) => undefined,
@@ -547,8 +583,8 @@ describe("buildThreadActionItems", () => {
     expect(groups).toHaveLength(1);
     expect(groups[0]?.value).toBe("threads-search");
     expect(groups[0]?.items.map((item) => item.value)).toEqual([
-      "thread:thread-title-match",
-      "thread:thread-context-match",
+      `thread:${LOCAL_ENVIRONMENT_ID}:thread-title-match`,
+      `thread:${LOCAL_ENVIRONMENT_ID}:thread-context-match`,
     ]);
   });
 
@@ -559,29 +595,21 @@ describe("buildThreadActionItems", () => {
         title: "Convex InvalidCursor in Convex threads query",
         createdAt: "2026-01-01T00:00:00.000Z",
         updatedAt: "2026-01-02T00:00:00.000Z",
+        latestUserAuthoredMessageAt: "2026-01-02T00:00:00.000Z",
       }),
       makeThread({
         id: ThreadId.make("recent-title"),
         title: "Disable Convex schema validation",
         createdAt: "2025-12-01T00:00:00.000Z",
         updatedAt: "2026-03-24T00:00:00.000Z",
-      }),
-      makeThread({
-        id: ThreadId.make("recent-content"),
-        title: "Fix schema validation",
-        createdAt: "2026-03-25T00:00:00.000Z",
-        updatedAt: "2026-03-25T00:00:00.000Z",
+        latestUserAuthoredMessageAt: "2026-03-24T00:00:00.000Z",
       }),
     ];
     const items = buildThreadActionItems({
       threads,
-      projectTitleById: new Map([[PROJECT_ID, "T3 Code"]]),
+      projectByKey: makeProjectLookup("T3 Code"),
       sortOrder: "created_at",
       icon: null,
-      getContentMatch: (thread) =>
-        thread.id === ThreadId.make("recent-content")
-          ? { source: "user", snippet: "Please check Convex", query: "convex" }
-          : undefined,
       runThread: async () => undefined,
     });
 
@@ -594,9 +622,8 @@ describe("buildThreadActionItems", () => {
     });
 
     expect(groups[0]?.items.map((item) => item.value)).toEqual([
-      "thread:recent-title",
-      "thread:old-prefix",
-      "thread:recent-content",
+      `thread:${LOCAL_ENVIRONMENT_ID}:recent-title`,
+      `thread:${LOCAL_ENVIRONMENT_ID}:old-prefix`,
     ]);
   });
 
@@ -721,26 +748,19 @@ describe("buildThreadActionItems", () => {
     }
   });
 
-  it("keeps message excerpts searchable without replacing thread metadata", () => {
+  it("keeps message hits separate from searchable thread metadata", () => {
     const [item] = buildThreadActionItems({
       threads: [makeThread({ branch: "feat/search" })],
-      projectTitleById: new Map([[PROJECT_ID, "T3 Code"]]),
+      projectByKey: makeProjectLookup("T3 Code"),
       sortOrder: "updated_at",
       icon: null,
-      getContentMatch: () => ({
-        source: "assistant",
-        snippet: "The relay reconnect is now bounded.",
-        query: "reconnect",
-      }),
       runThread: async (_thread) => undefined,
     });
 
-    expect(item?.searchTerms).toContain("The relay reconnect is now bounded.");
-    expect(item?.threadContentMatch).toEqual({
-      source: "assistant",
-      snippet: "The relay reconnect is now bounded.",
-      query: "reconnect",
-    });
+    expect(item?.value).toBe(`thread:${LOCAL_ENVIRONMENT_ID}:thread-1`);
+    expect(item?.searchTerms).toEqual(["Thread"]);
+    expect(item?.threadSearch?.title).toBe("Thread");
+    expect(item?.threadContentMatch).toBeUndefined();
     expect(item?.description).toBe("T3 Code · #feat/search");
   });
 
@@ -757,7 +777,7 @@ describe("buildThreadActionItems", () => {
     });
     const items = buildThreadActionItems({
       threads: [idThread, titleThread],
-      projectTitleById: new Map([[PROJECT_ID, "T3 Code"]]),
+      projectByKey: makeProjectLookup("T3 Code"),
       sortOrder: "updated_at",
       icon: null,
       runThread: async (_thread) => undefined,
@@ -773,15 +793,15 @@ describe("buildThreadActionItems", () => {
     });
 
     expect(groups.flatMap((group) => group.items)).toEqual([
-      expect.objectContaining({ value: `thread:${titleThread.id}` }),
-      expect.objectContaining({ value: `thread:${idThread.id}` }),
+      expect.objectContaining({ value: `thread:${titleThread.environmentId}:${titleThread.id}` }),
+      expect.objectContaining({ value: `thread:${idThread.environmentId}:${idThread.id}` }),
     ]);
   });
 
   it("prefers renderDescription when provided", () => {
     const [item] = buildThreadActionItems({
       threads: [makeThread({ branch: "feat/search", worktreePath: "/tmp/wt" })],
-      projectTitleById: new Map([[PROJECT_ID, "T3 Code"]]),
+      projectByKey: makeProjectLookup("T3 Code"),
       sortOrder: "updated_at",
       icon: null,
       renderDescription: (thread, { projectTitle }) =>
@@ -808,13 +828,15 @@ describe("buildThreadActionItems", () => {
           updatedAt: "2026-03-20T00:00:00.000Z",
         }),
       ],
-      projectTitleById: new Map([[PROJECT_ID, "Project"]]),
+      projectByKey: makeProjectLookup(),
       sortOrder: "updated_at",
       icon: null,
       runThread: async (_thread) => undefined,
     });
 
-    expect(items.map((item) => item.value)).toEqual(["thread:thread-active"]);
+    expect(items.map((item) => item.value)).toEqual([
+      `thread:${LOCAL_ENVIRONMENT_ID}:thread-active`,
+    ]);
   });
 });
 
@@ -917,7 +939,7 @@ it.each([
       }),
       makeThread({ id: ThreadId.make("unrelated"), title: "Other work" }),
     ],
-    projectTitleById: new Map(),
+    projectByKey: new Map(),
     sortOrder: "updated_at",
     icon: null,
     runThread: async () => undefined,
@@ -962,6 +984,60 @@ describe("filterCommandPaletteGroups", () => {
       "setting:keybinding-modelPicker.toggle",
     ]);
   });
+  it("shows message hits in their own group", () => {
+    const messageItem = {
+      kind: "action",
+      value: "thread:environment-local:thread-1",
+      title: "Thread",
+      searchTerms: ["Thread"],
+      threadContentMatch: {
+        source: "user",
+        snippet: "The requested needle is here.",
+        query: "needle",
+      },
+      icon: null,
+      run: async () => undefined,
+    } satisfies CommandPaletteActionItem;
+
+    const groups = filterCommandPaletteGroups({
+      activeGroups: [],
+      query: "needle",
+      isInSubmenu: false,
+      projectSearchItems: [],
+      threadSearchItems: [],
+      threadMessageItems: [messageItem],
+    });
+
+    expect(groups).toEqual([
+      { value: "threads-messages", label: "In messages", items: [messageItem] },
+    ]);
+  });
+
+  it("does not duplicate message hits already listed as thread results", () => {
+    const threadItem = {
+      kind: "action",
+      value: "thread:environment-local:thread-1",
+      title: "Needle thread",
+      searchTerms: ["Needle thread"],
+      icon: null,
+      run: async () => undefined,
+    } satisfies CommandPaletteActionItem;
+    const messageItem = {
+      ...threadItem,
+      threadContentMatch: { source: "user", snippet: "needle in a message", query: "needle" },
+    } satisfies CommandPaletteActionItem;
+
+    const groups = filterCommandPaletteGroups({
+      activeGroups: [],
+      query: "needle",
+      isInSubmenu: false,
+      projectSearchItems: [],
+      threadSearchItems: [threadItem],
+      threadMessageItems: [messageItem],
+    });
+
+    expect(groups).toEqual([{ value: "threads-search", label: "Threads", items: [threadItem] }]);
+  });
 });
 
 describe("virtualized command palette rows", () => {
@@ -1004,5 +1080,37 @@ describe("virtualized command palette rows", () => {
     expect(findHighlightedCommandPaletteItem(groups, "thread-b")?.value).toBe("thread-b");
     expect(findHighlightedCommandPaletteItem(groups, "offline")).toBeNull();
     expect(findHighlightedCommandPaletteItem(groups, null)).toBeNull();
+  });
+});
+
+it("resolves project metadata and browse roots within the active environment", () => {
+  const local = { title: "Local project", workspaceRoot: "/local/repo" };
+  const remote = { title: "Remote project", workspaceRoot: "/remote/repo" };
+  const projects = new Map([
+    ["local:shared-project", local],
+    ["remote:shared-project", remote],
+  ]);
+  const sharedId = ProjectId.make("shared-project");
+
+  expect(
+    resolveCommandPaletteProject(projects, EnvironmentId.make("local"), PROJECT_ID),
+  ).toBeUndefined();
+  expect(resolveCommandPaletteProject(projects, EnvironmentId.make("local"), sharedId)).toBe(local);
+  expect(resolveCommandPaletteProject(projects, EnvironmentId.make("remote"), sharedId)).toBe(
+    remote,
+  );
+  expect(resolveCommandPaletteProject(projects, null, sharedId)).toBeUndefined();
+  expect(resolveCommandPaletteProject(projects, EnvironmentId.make("local"), null)).toBeUndefined();
+});
+describe("IME composition key classification", () => {
+  it.each([
+    { isComposing: true, keyCode: 13 },
+    { isComposing: false, keyCode: 229 },
+  ])("recognizes composition: %j", ({ isComposing, keyCode }) => {
+    expect(isImeCompositionKey(isComposing, keyCode)).toBe(true);
+  });
+
+  it("allows ordinary Enter keys", () => {
+    expect(isImeCompositionKey(false, 13)).toBe(false);
   });
 });

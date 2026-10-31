@@ -5,16 +5,13 @@ import {
   squashAtomCommandFailure,
   type AtomCommandResult,
 } from "@t3tools/client-runtime/state/runtime";
-import {
-  type EnvironmentId,
-  type ScopedThreadRef,
-} from "@t3tools/contracts";
+import { type EnvironmentId, type ScopedThreadRef } from "@t3tools/contracts";
 import { parseAssistantCitationHref } from "@t3tools/shared/assistantCitations";
 import { parseComposerContextHref } from "@t3tools/shared/composerContextReferences";
 import { faviconUrlForOrigin } from "@t3tools/shared/favicon";
 import { mediaKindFromPath } from "@t3tools/shared/filePreview";
 import { parseThreadLinkHref } from "@t3tools/shared/threadLinks";
-import React, {
+import {
   Children,
   isValidElement,
   memo,
@@ -46,9 +43,7 @@ import {
 } from "~/lib/openPullRequestLink";
 import { resolveLinkTarget } from "../../browser/browserLinkTarget";
 import { isPreviewAvailableFor } from "../../browser/previewRuntime";
-import {
-  BrowserSettingsReadError,
-} from "../../browser/openFileInPreview";
+import { BrowserSettingsReadError } from "../../browser/openFileInPreview";
 import { writeTextToClipboard } from "../../hooks/useCopyToClipboard";
 import { cn } from "../../lib/utils";
 import { readLocalApi } from "../../localApi";
@@ -59,7 +54,10 @@ import { AssistantCitationChip } from "../chat/AssistantCitationChip";
 import { MarkdownThreadLink } from "../chat/MarkdownThreadLink";
 import { FileTagChipContent } from "../chat/FileTagChip";
 import { GitHubIcon } from "../Icons";
-import { resolveExternalWebLinkHost, showExternalLinkContextMenu } from "../chat/externalLinkContextMenu";
+import {
+  resolveExternalWebLinkHost,
+  showExternalLinkContextMenu,
+} from "../chat/externalLinkContextMenu";
 import { ChatMarkdownRendererContext, type ChatMarkdownComponentState } from "./markdownContext";
 import { MarkdownLinkContext } from "./MarkdownMedia";
 import { PullRequestLinkPreview } from "../pullRequest/PullRequestLinkPreview";
@@ -124,7 +122,11 @@ export function inlineNodesToPlainText(nodes: readonly InlineNode[]): string {
         break;
       case "html":
       case "plugin":
-        text += node.children ? inlineNodesToPlainText(node.children) : node.kind === "plugin" ? node.raw : "";
+        text += node.children
+          ? inlineNodesToPlainText(node.children)
+          : node.kind === "plugin"
+            ? node.raw
+            : "";
         break;
       case "image":
         text += node.alt ?? "";
@@ -185,7 +187,9 @@ function pathParentSegments(path: string): string[] {
   return segments.slice(0, -1);
 }
 
-export function buildFileLinkParentSuffixByPath(filePaths: ReadonlyArray<string>): Map<string, string> {
+export function buildFileLinkParentSuffixByPath(
+  filePaths: ReadonlyArray<string>,
+): Map<string, string> {
   const groups = new Map<string, Set<string>>();
   for (const filePath of filePaths) {
     const normalizedPath = filePath.replaceAll("\\", "/");
@@ -309,14 +313,16 @@ function leadingExternalLinkTextLength(text: string): number {
 }
 
 function breakableExternalLinkText(text: string): ReactNode[] {
-  return Array.from(text, (character, index) => (
-    <React.Fragment key={`${index}:${character}`}>
-      {character}
-      <wbr />
-    </React.Fragment>
-  ));
+  return Array.from(text.matchAll(/\s+|\S+/g), ({ 0: word, index: start }) =>
+    word.length <= 16 ? (
+      word
+    ) : (
+      <span key={start} className="[overflow-wrap:anywhere]">
+        {word}
+      </span>
+    ),
+  );
 }
-
 
 const SANITIZED_FRAGMENT_PREFIX = "user-content-";
 
@@ -419,7 +425,7 @@ function MarkdownExternalLinkContent({
 
   return (
     <>
-      <span className="whitespace-nowrap">
+      <span className="[overflow-wrap:anywhere]">
         <MarkdownLinkFavicon host={host} />
         {firstChild}
       </span>
@@ -833,240 +839,233 @@ export function MarkdownAnchor({
   } = markdownState;
   const plainText = suppliedPlainText ?? nodeToPlainText(children);
   const linkChildren = <MarkdownLinkContext value>{children}</MarkdownLinkContext>;
-    const citation = href ? parseAssistantCitationHref(href) : null;
-    if (citation) return <AssistantCitationChip citation={citation} />;
-    // A thread link opens the thread here, never a browser.
-    const threadLink = href ? parseThreadLinkHref(href) : null;
-    if (threadLink) {
-      return (
-        <MarkdownThreadLink {...threadLink}>
-          {linkChildren}
-        </MarkdownThreadLink>
-      );
-    }
-    const contextReference = href ? parseComposerContextHref(href) : null;
-    if (contextReference) {
-      const label = plainText || contextReference.contextId;
-      return renderContextReference ? (
-        renderContextReference({ ...contextReference, label })
-      ) : (
-        <span>{label}</span>
-      );
-    }
-    const normalizedHref = href ? normalizeMarkdownLinkHrefKey(href) : "";
-    const fileLinkMeta = normalizedHref
-      ? (markdownFileLinkMetaByHref.get(normalizedHref) ??
-        resolveMarkdownFileLinkMeta(normalizedHref, cwd, imageBaseDir ?? cwd))
-      : null;
-    if (!fileLinkMeta) {
-      const faviconHost = resolveExternalWebLinkHost(href);
-      const pullRequestCopy =
-        pullRequestCopyOverride ??
-        (pullRequestAutolink === "commit"
-          ? /\/commit\/([0-9a-f]{40})$/iu.exec(href ?? "")?.[1]
-          : pullRequestAutolink === "reference"
-            ? plainText
-            : undefined);
-      const isPullRequestAutolink = pullRequestCopy !== undefined;
-      const confirmBeforeOpen = pullRequestAutolink === "reference";
-      const pullRequestCandidateUrl =
-        confirmBeforeOpen && href ? pullRequestCandidateUrlFromReferenceAutolink(href) : href;
-      const pullRequestPreviewTarget = pullRequestCandidateUrl
-        ? resolvePullRequestPreviewTarget({
-            environmentId,
-            projects,
-            pullRequestsEnabled: serverConfig?.environment.capabilities.pullRequests === true,
-            url: pullRequestCandidateUrl,
-          })
-        : null;
-      const isSameDocumentLink = href?.startsWith("#") ?? false;
-      const onClick = props.onClick;
-      const canOpenInPreview =
-        canOperatePreview && Boolean(threadRef && isPreviewAvailableFor(threadRef.environmentId));
-      const link = (
-        <a
-          {...props}
-          className={cn(className, pullRequestAutolink === "commit" && "font-mono")}
-          data-markdown-copy={pullRequestCopy}
-          href={href}
-          target={isSameDocumentLink ? undefined : "_blank"}
-          rel={isSameDocumentLink ? undefined : "noopener noreferrer"}
-          onClick={(event) => {
-            onClick?.(event);
-            if (isSameDocumentLink && href) {
-              handleMarkdownFragmentClick(event, href);
-              return;
-            }
-            if (
-              href &&
-              faviconHost !== null &&
-              mediaKindFromPath(href) !== null &&
-              !event.defaultPrevented &&
-              !event.metaKey &&
-              !event.ctrlKey &&
-              !event.shiftKey &&
-              !event.altKey
-            ) {
-              event.preventDefault();
-              event.stopPropagation();
-              openMarkdownMedia(
-                href,
-                undefined,
-                event.target instanceof HTMLImageElement
-                  ? event.target
-                  : event.currentTarget.querySelector("img"),
-              );
-              return;
-            }
-            // A link to a change request in a workspace project opens beside the
-            // conversation instead of in a browser: it is the thing being talked about, and
-            // the panel it opens offers the browser as one of its actions.
-            if (
-              !href ||
-              openChangeRequestLink(event, href, undefined, environmentId ?? undefined)
-            ) {
-              return;
-            }
-            // Anything else follows the "Open links in" setting. The system browser
-            // keeps the `_blank` the shell already handles; the in-app browser needs
-            // the click intercepted here. A modifier click is the way out of the
-            // in-app default, so it is left to the shell too.
-            if (
-              event.defaultPrevented ||
-              resolveLinkTarget({
-                url: href,
-                event,
-                preference: linkTargetPreference,
-                canOpenInApp: canOpenInPreview,
-              }) !== "app"
-            ) {
-              return;
-            }
-            event.preventDefault();
-            event.stopPropagation();
-            // Keep the link here if saved settings could not be read.
-            void openExternalLinkInPreview(href).then((result) => {
-              if (result._tag === "Success" || isAtomCommandInterrupted(result)) return;
-              reportMarkdownActionFailure(
-                { operation: "open-link-in-preview", target: href },
-                result.cause,
-              );
-              if (squashAtomCommandFailure(result) instanceof BrowserSettingsReadError) return;
-              void readLocalApi()?.shell.openExternal(href);
-            });
-          }}
-          onContextMenu={(event) => {
-            if (!href || !faviconHost) return;
-            event.preventDefault();
-            event.stopPropagation();
-            const api = readLocalApi();
-            if (!api) return;
-            const threadLinkAction = !canOperateHost
-              ? undefined
-              : linkedThreadPullRequestFor(href) !== null
-                ? "unlink-from-thread"
-                : resolveThreadPullRequest(href) === null
-                  ? undefined
-                  : "link-to-thread";
-            void showExternalLinkContextMenu({
-              href,
-              canOpenInPreview,
-              threadLinkAction,
-              position: { x: event.clientX, y: event.clientY },
-              showContextMenu: (items, position) => api.contextMenu.show(items, position),
-              openInPreview: async (target) => {
-                const result = await openExternalLinkInPreview(target);
-                if (result._tag === "Failure" && !isAtomCommandInterrupted(result)) {
-                  reportMarkdownActionFailure(
-                    { operation: "open-link-in-preview", target },
-                    result.cause,
-                  );
-                }
-              },
-              openExternal: (target) => api.shell.openExternal(target),
-              copyLink: (target) => writeTextToClipboard(target, "link"),
-              updateThreadLink: updateThreadPullRequestLink,
-              reportFailure: (operation, cause) => {
-                reportMarkdownActionFailure({ operation, target: href }, cause);
-                if (
-                  operation === "link-pull-request-to-thread" ||
-                  operation === "unlink-pull-request-from-thread"
-                ) {
-                  toastManager.add(
-                    stackedThreadToast({
-                      type: "error",
-                      title:
-                        operation === "link-pull-request-to-thread"
-                          ? "Unable to link pull request"
-                          : "Unable to unlink pull request",
-                      description: cause instanceof Error ? cause.message : "The request failed.",
-                    }),
-                  );
-                }
-              },
-            });
-          }}
-        >
-          {faviconHost && plainText.trim().length > 0 && !isPullRequestAutolink ? (
-            <MarkdownExternalLinkContent host={faviconHost} plainText={plainText}>
-              {linkChildren}
-            </MarkdownExternalLinkContent>
-          ) : (
-            linkChildren
-          )}
-        </a>
-      );
-      if (!faviconHost || !href) {
-        return link;
-      }
-      if (pullRequestPreviewTarget !== null) {
-        return (
-          <PullRequestLinkPreview
-            link={link}
-            originalUrl={href}
-            target={pullRequestPreviewTarget}
-            confirmBeforeOpen={confirmBeforeOpen}
-            onOpenPullRequest={(targetUrl) =>
-              openChangeRequestLink(
-                {
-                  metaKey: false,
-                  ctrlKey: false,
-                  preventDefault: () => undefined,
-                  stopPropagation: () => undefined,
-                },
-                targetUrl,
-                undefined,
-                environmentId ?? undefined,
-              )
-            }
-            onOpenFallback={openDeferredMarkdownLink}
-          />
-        );
-      }
-      return (
-        <Tooltip>
-          <TooltipTrigger render={link} />
-          <TooltipPopup side="top">{href}</TooltipPopup>
-        </Tooltip>
-      );
-    }
-
-    const label = plainText;
-    const start = sourceRange?.from;
-    const end = sourceRange?.to;
-    const source = start !== undefined && end !== undefined ? text.slice(start, end) : "";
-    const copyMarkdown =
-      source.startsWith("[") && source.includes("](")
-        ? source
-        : `[${(label || fileLinkMeta.basename).replace(/[\\[\]]/g, "\\$&")}](${normalizedHref})`;
-    const chip = fileLinkChip(fileLinkMeta, copyMarkdown, normalizedHref);
-    return isMarkdownFileLinkLabel(label, normalizedHref) ? (
-      chip
+  const citation = href ? parseAssistantCitationHref(href) : null;
+  if (citation) return <AssistantCitationChip citation={citation} />;
+  // A thread link opens the thread here, never a browser.
+  const threadLink = href ? parseThreadLinkHref(href) : null;
+  if (threadLink) {
+    return <MarkdownThreadLink {...threadLink}>{linkChildren}</MarkdownThreadLink>;
+  }
+  const contextReference = href ? parseComposerContextHref(href) : null;
+  if (contextReference) {
+    const label = plainText || contextReference.contextId;
+    return renderContextReference ? (
+      renderContextReference({ ...contextReference, label })
     ) : (
-      <span data-markdown-copy={copyMarkdown}>
-        {children} {chip}
-      </span>
+      <span>{label}</span>
     );
+  }
+  const normalizedHref = href ? normalizeMarkdownLinkHrefKey(href) : "";
+  const fileLinkMeta = normalizedHref
+    ? (markdownFileLinkMetaByHref.get(normalizedHref) ??
+      resolveMarkdownFileLinkMeta(normalizedHref, cwd, imageBaseDir ?? cwd))
+    : null;
+  if (!fileLinkMeta) {
+    const faviconHost = resolveExternalWebLinkHost(href);
+    const pullRequestCopy =
+      pullRequestCopyOverride ??
+      (pullRequestAutolink === "commit"
+        ? /\/commit\/([0-9a-f]{40})$/iu.exec(href ?? "")?.[1]
+        : pullRequestAutolink === "reference"
+          ? plainText
+          : undefined);
+    const isPullRequestAutolink = pullRequestCopy !== undefined;
+    const confirmBeforeOpen = pullRequestAutolink === "reference";
+    const pullRequestCandidateUrl =
+      confirmBeforeOpen && href ? pullRequestCandidateUrlFromReferenceAutolink(href) : href;
+    const pullRequestPreviewTarget = pullRequestCandidateUrl
+      ? resolvePullRequestPreviewTarget({
+          environmentId,
+          projects,
+          pullRequestsEnabled: serverConfig?.environment.capabilities.pullRequests === true,
+          url: pullRequestCandidateUrl,
+        })
+      : null;
+    const isSameDocumentLink = href?.startsWith("#") ?? false;
+    const onClick = props.onClick;
+    const canOpenInPreview =
+      canOperatePreview && Boolean(threadRef && isPreviewAvailableFor(threadRef.environmentId));
+    const link = (
+      <a
+        {...props}
+        className={cn(className, pullRequestAutolink === "commit" && "font-mono")}
+        data-markdown-copy={pullRequestCopy}
+        href={href}
+        target={isSameDocumentLink ? undefined : "_blank"}
+        rel={isSameDocumentLink ? undefined : "noopener noreferrer"}
+        onClick={(event) => {
+          onClick?.(event);
+          if (isSameDocumentLink && href) {
+            handleMarkdownFragmentClick(event, href);
+            return;
+          }
+          if (
+            href &&
+            faviconHost !== null &&
+            mediaKindFromPath(href) !== null &&
+            !event.defaultPrevented &&
+            !event.metaKey &&
+            !event.ctrlKey &&
+            !event.shiftKey &&
+            !event.altKey
+          ) {
+            event.preventDefault();
+            event.stopPropagation();
+            openMarkdownMedia(
+              href,
+              undefined,
+              event.target instanceof HTMLImageElement
+                ? event.target
+                : event.currentTarget.querySelector("img"),
+            );
+            return;
+          }
+          // A link to a change request in a workspace project opens beside the
+          // conversation instead of in a browser: it is the thing being talked about, and
+          // the panel it opens offers the browser as one of its actions.
+          if (!href || openChangeRequestLink(event, href, undefined, environmentId ?? undefined)) {
+            return;
+          }
+          // Anything else follows the "Open links in" setting. The system browser
+          // keeps the `_blank` the shell already handles; the in-app browser needs
+          // the click intercepted here. A modifier click is the way out of the
+          // in-app default, so it is left to the shell too.
+          if (
+            event.defaultPrevented ||
+            resolveLinkTarget({
+              url: href,
+              event,
+              preference: linkTargetPreference,
+              canOpenInApp: canOpenInPreview,
+            }) !== "app"
+          ) {
+            return;
+          }
+          event.preventDefault();
+          event.stopPropagation();
+          // Keep the link here if saved settings could not be read.
+          void openExternalLinkInPreview(href).then((result) => {
+            if (result._tag === "Success" || isAtomCommandInterrupted(result)) return;
+            reportMarkdownActionFailure(
+              { operation: "open-link-in-preview", target: href },
+              result.cause,
+            );
+            if (squashAtomCommandFailure(result) instanceof BrowserSettingsReadError) return;
+            void readLocalApi()?.shell.openExternal(href);
+          });
+        }}
+        onContextMenu={(event) => {
+          if (!href || !faviconHost) return;
+          event.preventDefault();
+          event.stopPropagation();
+          const api = readLocalApi();
+          if (!api) return;
+          const threadLinkAction = !canOperateHost
+            ? undefined
+            : linkedThreadPullRequestFor(href) !== null
+              ? "unlink-from-thread"
+              : resolveThreadPullRequest(href) === null
+                ? undefined
+                : "link-to-thread";
+          void showExternalLinkContextMenu({
+            href,
+            canOpenInPreview,
+            threadLinkAction,
+            position: { x: event.clientX, y: event.clientY },
+            showContextMenu: (items, position) => api.contextMenu.show(items, position),
+            openInPreview: async (target) => {
+              const result = await openExternalLinkInPreview(target);
+              if (result._tag === "Failure" && !isAtomCommandInterrupted(result)) {
+                reportMarkdownActionFailure(
+                  { operation: "open-link-in-preview", target },
+                  result.cause,
+                );
+              }
+            },
+            openExternal: (target) => api.shell.openExternal(target),
+            copyLink: (target) => writeTextToClipboard(target, "link"),
+            updateThreadLink: updateThreadPullRequestLink,
+            reportFailure: (operation, cause) => {
+              reportMarkdownActionFailure({ operation, target: href }, cause);
+              if (
+                operation === "link-pull-request-to-thread" ||
+                operation === "unlink-pull-request-from-thread"
+              ) {
+                toastManager.add(
+                  stackedThreadToast({
+                    type: "error",
+                    title:
+                      operation === "link-pull-request-to-thread"
+                        ? "Unable to link pull request"
+                        : "Unable to unlink pull request",
+                    description: cause instanceof Error ? cause.message : "The request failed.",
+                  }),
+                );
+              }
+            },
+          });
+        }}
+      >
+        {faviconHost && plainText.trim().length > 0 && !isPullRequestAutolink ? (
+          <MarkdownExternalLinkContent host={faviconHost} plainText={plainText}>
+            {linkChildren}
+          </MarkdownExternalLinkContent>
+        ) : (
+          linkChildren
+        )}
+      </a>
+    );
+    if (!faviconHost || !href) {
+      return link;
+    }
+    if (pullRequestPreviewTarget !== null) {
+      return (
+        <PullRequestLinkPreview
+          link={link}
+          originalUrl={href}
+          target={pullRequestPreviewTarget}
+          confirmBeforeOpen={confirmBeforeOpen}
+          onOpenPullRequest={(targetUrl) =>
+            openChangeRequestLink(
+              {
+                metaKey: false,
+                ctrlKey: false,
+                preventDefault: () => undefined,
+                stopPropagation: () => undefined,
+              },
+              targetUrl,
+              undefined,
+              environmentId ?? undefined,
+            )
+          }
+          onOpenFallback={openDeferredMarkdownLink}
+        />
+      );
+    }
+    return (
+      <Tooltip>
+        <TooltipTrigger render={link} />
+        <TooltipPopup side="top">{href}</TooltipPopup>
+      </Tooltip>
+    );
+  }
+
+  const label = plainText;
+  const start = sourceRange?.from;
+  const end = sourceRange?.to;
+  const source = start !== undefined && end !== undefined ? text.slice(start, end) : "";
+  const copyMarkdown =
+    source.startsWith("[") && source.includes("](")
+      ? source
+      : `[${(label || fileLinkMeta.basename).replace(/[\\[\]]/g, "\\$&")}](${normalizedHref})`;
+  const chip = fileLinkChip(fileLinkMeta, copyMarkdown, normalizedHref);
+  return isMarkdownFileLinkLabel(label, normalizedHref) ? (
+    chip
+  ) : (
+    <span data-markdown-copy={copyMarkdown}>
+      {children} {chip}
+    </span>
+  );
 }
 
 export function MarkdownPrReferencePresentation({ node }: InlineNodeViewProps) {
@@ -1112,11 +1111,7 @@ export function MarkdownFileCitationPresentation({ node }: InlineNodeViewProps) 
       markdownState.imageBaseDir ?? markdownState.cwd,
     );
   if (fileLinkMeta) {
-    return markdownState.fileLinkChip(
-      fileLinkMeta,
-      codexFileCitationMarkdown(citation),
-      href,
-    );
+    return markdownState.fileLinkChip(fileLinkMeta, codexFileCitationMarkdown(citation), href);
   }
   return (
     <MarkdownAnchor

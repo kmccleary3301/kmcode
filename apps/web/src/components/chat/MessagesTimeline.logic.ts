@@ -76,6 +76,7 @@ import {
   type OrchestrationV2TurnItem,
   type RunAttemptId,
   RunId,
+  type RuntimeRequestId,
   type ThreadId,
   type TurnItemId,
 } from "@t3tools/contracts";
@@ -1065,6 +1066,40 @@ function timelineEntryStartsResponse(entry: TimelineEntry): boolean {
   );
 }
 
+/** Maps entries to the fold key used for runless imported turns and V2 turns. */
+export function timelineEntryTurnFoldRunIdsByEntryId(
+  entries: ReadonlyArray<TimelineEntry>,
+): ReadonlyMap<string, RunId> {
+  const runIds = new Map<string, RunId>();
+  let runlessKey: RunId | null = null;
+  for (const entry of entries) {
+    if (timelineEntryStartsResponse(entry)) {
+      const boundaryRunId =
+        entry.kind === "message"
+          ? entry.message.runId
+          : entry.kind === "work"
+            ? entry.entry.runId
+            : null;
+      runlessKey =
+        boundaryRunId === null || boundaryRunId === undefined
+          ? RunId.make(`runless:${entry.id}`)
+          : null;
+      continue;
+    }
+    const runId = timelineEntryFoldRunId(entry, runlessKey);
+    if (runId !== null) runIds.set(entry.id, runId);
+  }
+  return runIds;
+}
+
+/** Returns the fold key that owns a timeline entry, including imported runless turns. */
+export function timelineEntryTurnFoldRunId(
+  entries: ReadonlyArray<TimelineEntry>,
+  entryId: string,
+): RunId | null {
+  return timelineEntryTurnFoldRunIdsByEntryId(entries).get(entryId) ?? null;
+}
+
 /**
  * A promptless provider restart replaces the native turn without adding a
  * user message. Keep every provider turn since the initiating prompt in one
@@ -1623,6 +1658,7 @@ function settleSupersededReasoning(entries: ReadonlyArray<TimelineEntry>) {
 
 export function deriveMessagesTimelineRows(input: {
   timelineEntries: ReadonlyArray<TimelineEntry>;
+  pendingApprovalRequestIds?: ReadonlySet<RuntimeRequestId>;
   latestRun?: TimelineLatestRun | null;
   runTimingsById?: ReadonlyMap<RunId, TimelineRunTiming>;
   runningRunId?: RunId | null;
@@ -1657,6 +1693,13 @@ export function deriveMessagesTimelineRows(input: {
 }): MessagesTimelineRow[] {
   const settledEntries = settleSupersededReasoning(input.timelineEntries);
   const timelineEntries = withoutSubagentDelegationRows(settledEntries);
+  const isPendingApproval = (entry: WorkLogEntry) => {
+    const item = entry.projectedItem?.item;
+    return (
+      item?.type === "approval_request" &&
+      input.pendingApprovalRequestIds?.has(item.requestId) === true
+    );
+  };
   const turnDiffSummaryByAssistantMessageId = new Map<MessageId, TurnDiffSummary>();
   for (const summary of input.turnDiffSummaries) {
     if (summary.assistantMessageId) {
@@ -1773,10 +1816,15 @@ export function deriveMessagesTimelineRows(input: {
       }
     }
   }
-  const subagentEventsByTurn = new Map<
-    string,
-    Array<Extract<TimelineEntry, { kind: "event" }>>
-  >();
+  if (input.pendingApprovalRequestIds?.size) {
+    for (const entry of timelineEntries) {
+      if (entry.kind === "work" && isPendingApproval(entry.entry)) {
+        collapsedEntryIds.delete(entry.id);
+        collapsedSupersededEntryIds.delete(entry.id);
+      }
+    }
+  }
+  const subagentEventsByTurn = new Map<string, Array<Extract<TimelineEntry, { kind: "event" }>>>();
   const subagentTurnKeyByEntryId = new Map<string, string>();
   let subagentGroupSegment = 0;
   for (const entry of timelineEntries) {
@@ -1803,7 +1851,6 @@ export function deriveMessagesTimelineRows(input: {
     subagentEventsByTurn.set(turnKey, group);
     subagentTurnKeyByEntryId.set(entry.id, turnKey);
   }
-
 
   const runIdIsActiveResponse = (runId: RunId | null | undefined) =>
     runId == null ? runlessWorkActive : activeVisualResponseRunIds.has(runId);
@@ -1841,6 +1888,7 @@ export function deriveMessagesTimelineRows(input: {
       const entry = timelineEntries[index]!;
       if (
         entry.kind !== "work" ||
+        isPendingApproval(entry.entry) ||
         // The plan strip stands alone; it never joins the live step group.
         timelineEntryPlan(entry) !== undefined ||
         entry.entry.tone === "error" ||
@@ -1881,7 +1929,8 @@ export function deriveMessagesTimelineRows(input: {
   const latestToolKeepsActivityLive =
     latestRunningToolEntry !== undefined ||
     (latestVisibleToolEntry !== undefined &&
-      workEntryIndicatesToolSuccess(latestVisibleToolEntry.entry));
+      workEntryIndicatesToolSuccess(latestVisibleToolEntry.entry) &&
+      !input.pendingApprovalRequestIds?.size);
   const latestToolFailed =
     latestRunningToolEntry === undefined &&
     latestVisibleToolEntry !== undefined &&
@@ -2244,6 +2293,7 @@ export function deriveMessagesTimelineRows(input: {
         continue;
       }
       if (
+        isPendingApproval(timelineEntry.entry) ||
         (timelineEntry.entry.runId != null && failedRunIds.has(timelineEntry.entry.runId)) ||
         (timelineEntry.entry.itemType === "error" &&
           timelineEntry.entry.toolLifecycleStatus === "failed") ||
@@ -2290,6 +2340,7 @@ export function deriveMessagesTimelineRows(input: {
         if (
           !nextEntry ||
           nextEntry.kind !== "work" ||
+          isPendingApproval(nextEntry.entry) ||
           timelineEntryPlan(nextEntry) !== undefined ||
           nextEntry.entry.sourceActivityKind === "context-compaction" ||
           nextEntry.entry.tone === "error" ||
@@ -2532,9 +2583,7 @@ export function deriveMessagesTimelineRows(input: {
         if (groupAnchor === undefined || groupAnchor.id !== timelineEntry.id) continue;
         const groupItem = groupAnchor.projectedItem.item;
         if (groupItem.type !== "subagent") continue;
-        let taskCall:
-          | Extract<OrchestrationV2TurnItem, { type: "dynamic_tool" }>
-          | undefined;
+        let taskCall: Extract<OrchestrationV2TurnItem, { type: "dynamic_tool" }> | undefined;
         const autoExpandedSubagentItemIds: string[] = [];
         for (const memberEntry of group) {
           const member = memberEntry.projectedItem.item;
@@ -2555,7 +2604,9 @@ export function deriveMessagesTimelineRows(input: {
           id: groupAnchor.id,
           createdAt: groupAnchor.createdAt,
           projectedItem: groupAnchor.projectedItem,
-          ...(group.length > 1 ? { subagents: group.map(({ projectedItem }) => projectedItem) } : {}),
+          ...(group.length > 1
+            ? { subagents: group.map(({ projectedItem }) => projectedItem) }
+            : {}),
           autoExpanded: activityDecisions.isAutoExpanded(groupAnchor.id, groupItem.id),
           ...(autoExpandedSubagentItemIds.length > 0 ? { autoExpandedSubagentItemIds } : {}),
           ...(taskCall === undefined ? {} : { taskCall }),
@@ -2575,7 +2626,6 @@ export function deriveMessagesTimelineRows(input: {
       });
       continue;
     }
-
 
     const assistantResponseStillInProgress =
       timelineEntry.message.role === "assistant" &&
@@ -2785,6 +2835,7 @@ function replaceStreamingMessageRows(
     expandedRunIds: previousExpandedRuns,
     expandedAttemptIds: previousExpandedAttempts,
     expandedWorkGroupIds: previousExpandedGroups,
+    pendingApprovalRequestIds: previousPendingApprovalRequestIds,
     ...previousContext
   } = previous.input;
   const {
@@ -2794,6 +2845,7 @@ function replaceStreamingMessageRows(
     expandedRunIds,
     expandedAttemptIds,
     expandedWorkGroupIds,
+    pendingApprovalRequestIds,
     ...context
   } = input;
   // V2 shell and checkpoint selectors produce fresh summaries for each event.
@@ -2805,6 +2857,7 @@ function replaceStreamingMessageRows(
     !shallow(previousExpandedRuns, expandedRunIds) ||
     !shallow(previousExpandedAttempts, expandedAttemptIds) ||
     !shallow(previousExpandedGroups, expandedWorkGroupIds) ||
+    !shallow(previousPendingApprovalRequestIds, pendingApprovalRequestIds) ||
     !sameCheckpointSummaries(previousCheckpoints, turnDiffSummaries)
   ) {
     return null;

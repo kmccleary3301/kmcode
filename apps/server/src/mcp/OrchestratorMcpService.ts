@@ -1,5 +1,4 @@
 import {
-  type EnvironmentId,
   CommandId,
   type RunId,
   isProviderAvailable,
@@ -61,7 +60,6 @@ import {
   ThreadId,
 } from "@t3tools/contracts";
 import { runRanAfter } from "@t3tools/shared/orchestrationV2ThreadError";
-import { formatThreadLink } from "@t3tools/shared/threadLinks";
 import {
   normalizeThreadPullRequestKey,
   threadPullRequestsOf,
@@ -98,6 +96,7 @@ import * as ProviderRegistry from "../provider/ProviderRegistry.ts";
 import * as ScheduledTaskService from "../scheduledTasks/ScheduledTaskService.ts";
 import {
   clientRuntimeModeCeiling,
+  threadLinkFor,
   type McpInvocationScope,
   type McpThreadInvocationScope,
   requireThreadScope,
@@ -424,6 +423,21 @@ function directAppOwnedChildTask(
   );
 }
 
+/** Every task `directAppOwnedChildTask` can return, so callers load only those. */
+function directChildTaskIds(
+  target: Pick<OrchestrationV2ThreadProjection, "thread" | "runs">,
+  returnedRunIds: ReadonlySet<RunId | null>,
+): ReadonlyArray<NodeId> {
+  const ids = new Set<NodeId>();
+  if (target.thread.forkedFrom?.type === "node") ids.add(target.thread.forkedFrom.nodeId);
+  for (const run of target.runs) {
+    if (returnedRunIds.has(run.id) && run.delegatedTaskId !== undefined) {
+      ids.add(run.delegatedTaskId);
+    }
+  }
+  return [...ids];
+}
+
 function pageIncludesTerminalTaskResult(input: {
   readonly parent: Pick<OrchestrationV2ThreadProjection, "thread" | "contextTransfers">;
   readonly page: ReadonlyArray<OrchestrationV2ThreadProjection["visibleTurnItems"][number]>;
@@ -696,8 +710,7 @@ function threadPullRequests(
   return pullRequests;
 }
 /** Where and when a thread is shown: the environment for its link, and the time for snooze state. */
-interface ThreadViewContext {
-  readonly environmentId: EnvironmentId;
+interface ThreadViewContext extends Pick<McpInvocationScope, "environmentId" | "client"> {
   readonly nowMs: number;
 }
 
@@ -707,11 +720,8 @@ function listItemFromShell(
 ): OrchestratorMcpThreadListItem {
   return {
     threadId: shell.id,
-    link: formatThreadLink({
-      environmentId: context.environmentId,
-      threadId: shell.id,
-      title: shell.title,
-    }),
+    projectId: shell.projectId,
+    link: threadLinkFor(context, shell.id, shell.title),
     title: shell.title,
     createdBy: shell.createdBy,
     creationSource: shell.creationSource,
@@ -743,11 +753,7 @@ function threadDetail(
   const active = ThreadManagementService.latestActiveRun(projection);
   return {
     threadId: projection.thread.id,
-    link: formatThreadLink({
-      environmentId: context.environmentId,
-      threadId: projection.thread.id,
-      title: projection.thread.title,
-    }),
+    link: threadLinkFor(context, projection.thread.id, projection.thread.title),
     projectId: projection.thread.projectId,
     title: projection.thread.title,
     createdBy: projection.thread.createdBy,
@@ -843,7 +849,9 @@ function turnItemText(item: OrchestrationV2TurnItem): string | null {
     case "web_search":
       return jsonText({ patterns: item.patterns, results: item.results });
     case "approval_request":
-      return item.prompt ?? item.requestKind;
+      return [item.prompt ?? item.requestKind, item.reason]
+        .filter((line): line is string => line !== undefined)
+        .join("\n");
     case "checkpoint":
       return jsonText(item.files);
     case "run_interrupt_request":
@@ -958,21 +966,20 @@ const make = Effect.gen(function* () {
           ),
         );
 
-  const loadProjection = (threadId: ThreadId) =>
+  const loadProjection = (threadId: ThreadId, includeUserMessages = true) =>
     threadManagement
       .getThreadRecords(
         threadId,
         [
           "runs",
           "messages",
-          "subagents",
           "providerThreads",
           "providerTurns",
           "runtimeRequests",
           "contextTransfers",
           "turnItems",
         ],
-        { turnItemTypes: [], messageRoles: ["user"] },
+        { turnItemTypes: [], messageRoles: includeUserMessages ? ["user"] : [] },
       )
       .pipe(
         Effect.mapError((error) =>
@@ -982,6 +989,14 @@ const make = Effect.gen(function* () {
           ),
         ),
       );
+  // A dispatcher thread can hold thousands of tasks, each with its full prompt; read only the named tasks.
+  const loadTasks = (threadId: ThreadId, taskIds: ReadonlyArray<NodeId>) =>
+    threadManagement.getThreadRecords(threadId, ["subagents"], { subagentIds: taskIds }).pipe(
+      Effect.map(({ subagents }) => subagents),
+      Effect.mapError((error) =>
+        failure("orchestration_error", `Unable to read thread ${threadId}: ${errorMessage(error)}`),
+      ),
+    );
 
   const loadProjectThread = (
     projectId: OrchestrationV2ThreadProjection["thread"]["projectId"],
@@ -993,7 +1008,6 @@ const make = Effect.gen(function* () {
         [
           "runs",
           "messages",
-          "subagents",
           "providerThreads",
           "providerTurns",
           "runtimeRequests",
@@ -1009,7 +1023,7 @@ const make = Effect.gen(function* () {
    * thread caller is capped by its own modes; an OAuth client by the ceiling
    * chosen when it was approved.
    */
-  const loadCaller = (scope: McpInvocationScope) =>
+  const loadCaller = (scope: McpInvocationScope, includeUserMessages = true) =>
     Effect.gen(function* () {
       yield* requireCapability(scope);
       if (scope.thread === undefined) {
@@ -1021,7 +1035,7 @@ const make = Effect.gen(function* () {
           } satisfies { runtimeMode: RuntimeMode; interactionMode: ProviderInteractionMode },
         } as const;
       }
-      const parent = yield* loadProjection(scope.thread.threadId);
+      const parent = yield* loadProjection(scope.thread.threadId, includeUserMessages);
       return {
         parent,
         limits: {
@@ -1117,20 +1131,26 @@ const make = Effect.gen(function* () {
 
   const loadReadableThread = (scope: McpInvocationScope, threadId: ThreadId) =>
     Effect.gen(function* () {
-      const { parent } = yield* loadCaller(scope);
+      const { parent } = yield* loadCaller(scope, false);
       const shell = yield* threadManagement
         .getThreadShell(threadId)
         .pipe(Effect.mapError(threadManagementFailure));
       if (shell === null || shell.deletedAt !== null) {
         return yield* failure("thread_not_found", `Thread ${threadId} is no longer available.`);
       }
-      const target = yield* threadManagement
-        .getProjectThreadRecords({ projectId: shell.projectId, threadId }, [
-          "runs",
-          "runtimeRequests",
-          "contextTransfers",
-        ])
-        .pipe(Effect.mapError(threadManagementFailure));
+      const input = { projectId: shell.projectId, threadId };
+      // Transfers are needed only to acknowledge a caller's child-task result.
+      const records =
+        parent === undefined
+          ? threadManagement
+              .getProjectThreadRecords(input, ["runs", "runtimeRequests"])
+              .pipe(Effect.map((target) => ({ ...target, contextTransfers: [] })))
+          : threadManagement.getProjectThreadRecords(input, [
+              "runs",
+              "runtimeRequests",
+              "contextTransfers",
+            ]);
+      const target = yield* records.pipe(Effect.mapError(threadManagementFailure));
       return { parent, target, shell } as const;
     });
 
@@ -1316,11 +1336,9 @@ const make = Effect.gen(function* () {
     Effect.gen(function* () {
       yield* requireCapability(scope);
       const parentProjection = yield* loadProjection(scope.thread.threadId);
-      const task = parentProjection.subagents.find(
+      const task = (yield* loadTasks(scope.thread.threadId, [taskId])).find(
         (candidate) =>
-          candidate.id === taskId &&
-          candidate.origin === "app_owned" &&
-          candidate.threadId === scope.thread.threadId,
+          candidate.origin === "app_owned" && candidate.threadId === scope.thread.threadId,
       );
       if (task === undefined || task.childThreadId === null) {
         return yield* failure(
@@ -1339,7 +1357,7 @@ const make = Effect.gen(function* () {
             "providerThreads",
             "runtimeRequests",
           ],
-          { messageRoles: ["user"] },
+          { messageRoles: ["user"], omitSettledSubagents: true },
         )
         .pipe(Effect.mapError(threadManagementFailure));
       const childRun = delegatedTaskRun(childControls, task);
@@ -2143,8 +2161,8 @@ const make = Effect.gen(function* () {
             }
           });
         yield* assertStoppable(current.childThreadId);
-        const parentTask = parentProjection.subagents.find(
-          (task) => task.id === input.taskId && task.origin === "app_owned",
+        const parentTask = (yield* loadTasks(scope.thread.threadId, [input.taskId])).find(
+          (task) => task.origin === "app_owned",
         );
         const disposeCompletionDelivery =
           parentTask?.completionDelivery?.state === "disposed"
@@ -2440,10 +2458,12 @@ const make = Effect.gen(function* () {
     listThreads: (scope, input) =>
       Effect.gen(function* () {
         const { parent } = yield* loadCaller(scope);
-        const projectId = yield* resolveProjectTarget(parent, input.projectId);
+        const projectId = input.allProjects
+          ? null
+          : yield* resolveProjectTarget(parent, input.projectId);
         const projectThreads = yield* threadManagement
           .listProjectThreads({
-            projectId,
+            projectId: projectId ?? undefined,
             includeSubagents: input.includeSubagents !== false,
           })
           .pipe(
@@ -2452,7 +2472,11 @@ const make = Effect.gen(function* () {
             ),
           );
         const nowMs = yield* Clock.currentTimeMillis;
-        const statuses = input.statuses === undefined ? null : new Set(input.statuses);
+        // An empty list is no filter: clients that fill every optional field send `[]`.
+        const statuses =
+          input.statuses === undefined || input.statuses.length === 0
+            ? null
+            : new Set(input.statuses);
         const titleContains = input.titleContains?.toLocaleLowerCase();
         const filtered = projectThreads
           .filter(
@@ -2479,7 +2503,11 @@ const make = Effect.gen(function* () {
           projectId,
           currentThreadId: parent?.thread.id ?? null,
           threads: page.map((shell) =>
-            listItemFromShell(shell, { environmentId: scope.environmentId, nowMs }),
+            listItemFromShell(shell, {
+              environmentId: scope.environmentId,
+              client: scope.client,
+              nowMs,
+            }),
           ),
           nextCursor,
           total: filtered.length,
@@ -2501,6 +2529,11 @@ const make = Effect.gen(function* () {
           })
           .pipe(Effect.mapError(threadManagementFailure));
         const page = timeline.items;
+        const returnedRunIds = new Set(
+          page
+            .filter((row) => row.sourceThreadId === target.thread.id)
+            .map((row) => row.item.runId),
+        );
         const messageIdsByThread = new Map<ThreadId, Array<MessageId>>();
         for (const row of page) {
           if (row.item.type !== "user_message" && row.item.type !== "assistant_message") continue;
@@ -2518,7 +2551,19 @@ const make = Effect.gen(function* () {
           { concurrency: 1 },
         );
         const messagesByThreadId = new Map(sourceMessages);
-        const task = parent === undefined ? undefined : directAppOwnedChildTask(parent, target);
+        const task =
+          parent === undefined
+            ? undefined
+            : directAppOwnedChildTask(
+                {
+                  ...parent,
+                  subagents: yield* loadTasks(
+                    parent.thread.id,
+                    directChildTaskIds(target, returnedRunIds),
+                  ),
+                },
+                target,
+              );
         if (
           parent !== undefined &&
           scope.thread !== undefined &&
@@ -2562,6 +2607,7 @@ const make = Effect.gen(function* () {
         return {
           thread: threadDetail(target, timeline.totalItems, shell, {
             environmentId: scope.environmentId,
+            client: scope.client,
             nowMs: yield* Clock.currentTimeMillis,
           }),
           recentRuns: target.runs

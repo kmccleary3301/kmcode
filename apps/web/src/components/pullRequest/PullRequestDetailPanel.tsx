@@ -1608,7 +1608,10 @@ export function PullRequestDetailPanel({
             <Button
               size="xs"
               variant="destructive-outline"
-              disabled={handoff !== null || (attachTarget === null && checkoutRoot === null)}
+              disabled={
+                handoff !== null ||
+                (attachTarget === null && (checkoutRoot === null || !canPrepareWorktree))
+              }
               onClick={startResolveConflicts}
               aria-label={handoff === "conflicts" ? "Preparing..." : "Resolve conflicts"}
             >

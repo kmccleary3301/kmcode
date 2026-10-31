@@ -3,6 +3,7 @@ import type {
   OrchestrationV2RuntimeRequest,
   OrchestrationV2UserInputQuestion,
   ProviderApprovalDecision,
+  ProviderApprovalFullAccessOverride,
   ProviderApprovalOption,
   ProviderRequestKind,
   RuntimeRequestId,
@@ -15,7 +16,20 @@ export type ApprovalResponse = AtomCommandResult<unknown, unknown> | undefined;
 export type ApprovalResponder = (
   requestId: RuntimeRequestId,
   decision: ProviderApprovalDecision,
+  feedback?: string,
 ) => Promise<ApprovalResponse>;
+
+/** Sends trimmed provider feedback only to the displayed approval request. */
+export async function sendApprovalFeedback(
+  approval: ThreadPendingApproval,
+  feedback: string,
+  respond: ApprovalResponder,
+): Promise<boolean> {
+  const trimmedFeedback = feedback.trim();
+  if (!approval.supportsFeedback || approval.responseCapability !== "live" || !trimmedFeedback)
+    return false;
+  return (await respond(approval.requestId, "decline", trimmedFeedback))?._tag === "Success";
+}
 
 /** Declines every approval a redirect replaces; any one still pending would block the agent. */
 export async function declinePendingApprovals(
@@ -35,11 +49,24 @@ export interface ThreadPendingApproval {
   readonly requestKind: ProviderRequestKind;
   readonly createdAt: string;
   readonly detail?: string;
+  readonly reason?: string;
+  readonly fullAccessOverride?: ProviderApprovalFullAccessOverride;
   /** App requesting access for mcp-elicitation approvals (#8058). */
   readonly appName?: string;
   /** Approval choices advertised by the provider (#8058); defaults apply when absent. */
   readonly options?: ReadonlyArray<ProviderApprovalOption>;
   readonly responseCapability: "live" | "not_resumable";
+  readonly supportsFeedback?: boolean;
+}
+
+export const FULL_ACCESS_OVERRIDE_QUESTION = "Why am I being asked this?";
+
+export function fullAccessOverrideExplanation(
+  override: ProviderApprovalFullAccessOverride,
+): string {
+  return override === "ask_rule"
+    ? "Full access skips approvals, but an ask rule in the agent's own settings matches this action, so it still asks. Remove or narrow that rule to stop these prompts."
+    : "Full access skips approvals, but the agent still stops for a few safety checks of its own that no setting can skip, such as a delete whose path it can't verify. T3 Code can't turn these off, so check the request and approve it if it's what you expect.";
 }
 
 export interface ThreadUserInputQuestion extends Omit<
@@ -104,11 +131,19 @@ export function derivePendingThreadRequests(
       requestKind: request.kind,
       createdAt: DateTime.formatIso(request.createdAt),
       ...(item?.type === "approval_request" && item.prompt ? { detail: item.prompt } : {}),
+      ...(item?.type === "approval_request" && item.reason ? { reason: item.reason } : {}),
+      ...(item?.type === "approval_request" && item.fullAccessOverride
+        ? { fullAccessOverride: item.fullAccessOverride }
+        : {}),
       ...(item?.type === "approval_request" && item.appName ? { appName: item.appName } : {}),
       ...(item?.type === "approval_request" && item.options !== undefined
         ? { options: item.options }
         : {}),
       responseCapability: responseCapability === "live" ? "live" : "not_resumable",
+      ...(request.responseCapability.type === "live" &&
+      request.responseCapability.supportsFeedback === true
+        ? { supportsFeedback: true }
+        : {}),
     });
   }
 

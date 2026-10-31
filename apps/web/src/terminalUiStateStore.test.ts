@@ -244,6 +244,26 @@ describe("terminalUiStateStore actions", () => {
       { id: "group-terminal-2", terminalIds: ["terminal-2"] },
     ]);
   });
+  it.each([
+    ["terminal-3", "terminal-3", DEFAULT_THREAD_TERMINAL_ID],
+    [DEFAULT_THREAD_TERMINAL_ID, DEFAULT_THREAD_TERMINAL_ID, "terminal-3"],
+    ["terminal-3", DEFAULT_THREAD_TERMINAL_ID, "terminal-3"],
+  ])("keeps the split's tab when %s is active and %s closes", (activeId, closedId, nextId) => {
+    const store = useTerminalUiStateStore.getState();
+    store.setTerminalOpen(THREAD_REF, true);
+    store.newTerminal(THREAD_REF, "terminal-2");
+    store.setActiveTerminal(THREAD_REF, DEFAULT_THREAD_TERMINAL_ID);
+    store.splitTerminal(THREAD_REF, "terminal-3");
+    store.setActiveTerminal(THREAD_REF, activeId);
+    store.closeTerminal(THREAD_REF, closedId);
+
+    const terminalUiState = selectThreadTerminalUiState(
+      useTerminalUiStateStore.getState().terminalUiStateByThreadKey,
+      THREAD_REF,
+    );
+    expect(terminalUiState.activeTerminalId).toBe(nextId);
+    expect(terminalUiState.activeTerminalGroupId).toBe(`group-${DEFAULT_THREAD_TERMINAL_ID}`);
+  });
 
   it("reconciles terminal ids from an external ordered list", () => {
     const store = useTerminalUiStateStore.getState();

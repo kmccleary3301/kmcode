@@ -1,4 +1,5 @@
 import type { Session } from "electron";
+import * as ElectronDialog from "../electron/ElectronDialog.ts";
 import { session } from "electron";
 import * as Context from "effect/Context";
 import * as Crypto from "effect/Crypto";
@@ -25,19 +26,19 @@ export type BrowserSessionPartitionNamespace = "profile";
 // Electron permission behind `navigator.clipboard.writeText()` — note it is NOT
 // `clipboard-write`, which is not a valid Electron permission name. Async
 // clipboard writes are gated by the permission *check* handler (not only the
-// request handler), so both handlers must allow it; otherwise built-in "Copy"
-// buttons — e.g. the Next.js / Vercel error overlay — fail with
-// `Failed to execute 'writeText' on 'Clipboard': Write permission denied`.
+// request handler), so both handlers must allow it.
 const ALLOWED_PREVIEW_PERMISSIONS: ReadonlySet<string> = new Set([
-  "clipboard-read",
   "clipboard-sanitized-write",
   "geolocation",
+  // Permission-aware sign-in widgets query this before using loopback redirects.
+  "loopback-network",
   // Notifications stay ungranted: untrusted pages must not post OS notifications as KM Code.
   // Deliberately NOT local-fonts: preview sessions run untrusted web content,
   // and silently granting it would hand every page the user's installed-font
   // fingerprint (and font file bytes via FontData.blob()). The app's own font
   // picker runs in the main window session, which is unaffected by this list.
 ]);
+const MAX_PROMPT_URL_LENGTH = 300;
 
 export class BrowserSessionPartitionDerivationError extends Schema.TaggedError<BrowserSessionPartitionDerivationError>()(
   "BrowserSessionPartitionDerivationError",
@@ -162,6 +163,9 @@ const encodeScopeForDigest = (scope: string): Uint8Array =>
 /** @public Service construction is part of the canonical Effect module API. */
 export const make = Effect.gen(function* BrowserSessionMake() {
   const crypto = yield* Crypto.Crypto;
+  const electronDialog = yield* ElectronDialog.ElectronDialog;
+  const runFork = Effect.runForkWith(yield* Effect.context<never>());
+  let permissionPromptOpen = false;
   const sessionsRef = yield* SynchronizedRef.make<ReadonlyMap<string, Session>>(new Map());
 
   const getPartition = Effect.fn("BrowserSession.getPartition")(function* (
@@ -203,12 +207,87 @@ export const make = Effect.gen(function* BrowserSessionMake() {
           // the challenge every few seconds, so logins behind it never complete
           // (#5002). Re-setting the unchanged native string is harmless, so it
           // is the rewritten string itself that trips the check.
-          browserSession.setPermissionRequestHandler((_webContents, permission, callback) => {
-            callback(ALLOWED_PREVIEW_PERMISSIONS.has(permission));
-          });
-          browserSession.setPermissionCheckHandler((_webContents, permission) =>
-            ALLOWED_PREVIEW_PERMISSIONS.has(permission),
+          const clipboardReadDecisions = new Map<string, boolean>();
+          const confirmClipboardRead = (
+            rawUrl: string | undefined,
+            callback: (granted: boolean) => void,
+          ): void => {
+            if (!rawUrl || permissionPromptOpen) {
+              callback(false);
+              return;
+            }
+            let origin: string;
+            try {
+              origin = new URL(rawUrl).origin;
+            } catch {
+              callback(false);
+              return;
+            }
+            if (origin === "null") {
+              callback(false);
+              return;
+            }
+            const remembered = clipboardReadDecisions.get(origin);
+            if (remembered !== undefined) {
+              callback(remembered);
+              return;
+            }
+            permissionPromptOpen = true;
+            const promptOrigin =
+              origin.length > MAX_PROMPT_URL_LENGTH
+                ? `${origin.slice(0, MAX_PROMPT_URL_LENGTH)}…`
+                : origin;
+            runFork(
+              electronDialog
+                .showMessageBox({
+                  type: "question",
+                  buttons: ["Allow", "Block"],
+                  message: `${promptOrigin} wants to see text and images copied to the clipboard`,
+                  defaultId: 1,
+                  cancelId: 1,
+                })
+                .pipe(
+                  Effect.match({
+                    onFailure: () => ({ granted: false, remember: false }),
+                    onSuccess: ({ response }) => ({
+                      granted: response === 0,
+                      remember: true,
+                    }),
+                  }),
+                  Effect.tap(({ granted, remember }) =>
+                    Effect.sync(() => {
+                      permissionPromptOpen = false;
+                      if (remember) clipboardReadDecisions.set(origin, granted);
+                      callback(granted);
+                    }),
+                  ),
+                ),
+            );
+          };
+          browserSession.setPermissionRequestHandler(
+            (_webContents, permission, callback, details) => {
+              if (permission === "clipboard-read") {
+                confirmClipboardRead(
+                  "requestingUrl" in details ? details.requestingUrl : undefined,
+                  callback,
+                );
+                return;
+              }
+              callback(ALLOWED_PREVIEW_PERMISSIONS.has(permission));
+            },
           );
+          browserSession.setPermissionCheckHandler((_webContents, permission, requestingOrigin) => {
+            if (permission !== "clipboard-read") {
+              return ALLOWED_PREVIEW_PERMISSIONS.has(permission);
+            }
+            if (!requestingOrigin) return false;
+            try {
+              const origin = new URL(requestingOrigin).origin;
+              return origin !== "null" && clipboardReadDecisions.get(origin) === true;
+            } catch {
+              return false;
+            }
+          });
           const next = new Map(sessions);
           next.set(partition, browserSession);
           return [browserSession, next] as const;
@@ -237,7 +316,7 @@ export const make = Effect.gen(function* BrowserSessionMake() {
           Effect.tryPromise({
             try: () =>
               browserSession.clearStorageData({
-                storages: ["cookies", "localstorage", "indexdb", "serviceworkers"],
+                storages: ["cookies", "localstorage", "indexdb", "serviceworkers", "cachestorage"],
               }),
             catch: (cause) =>
               new BrowserSessionStorageClearError({

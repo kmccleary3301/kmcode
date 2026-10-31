@@ -70,10 +70,10 @@ describe("normalized diff renderer palette", () => {
 });
 
 describe("buildPatchCacheKey", () => {
-  it("normalizes outer whitespace before hashing", () => {
+  it("preserves outer whitespace in the cache key", () => {
     const patch = "diff --git a/a.ts b/a.ts\n+console.log('hello')";
 
-    expect(buildPatchCacheKey(`\n${patch}\n`)).toBe(buildPatchCacheKey(patch));
+    expect(buildPatchCacheKey(`\n${patch}\n`)).not.toBe(buildPatchCacheKey(patch));
   });
 
   it("changes when diff content changes", () => {
@@ -299,6 +299,50 @@ describe("getRenderablePatch", () => {
     expect(parsed?.kind).toBe("files");
     if (parsed?.kind !== "files") return;
     expect(parsed.files[0]?.hunks[0]?.unifiedLineStart).toBe(47);
+  });
+
+  it("preserves trailing whitespace in review hunks", () => {
+    const patch = (lastLines: string[]) =>
+      [
+        "diff --git a/example.ts b/example.ts",
+        "--- a/example.ts",
+        "+++ b/example.ts",
+        ...lastLines,
+        "",
+      ].join("\n");
+
+    const trailing = getRenderablePatch(patch(["@@ -1 +1 @@", "-a", "+  b \t"]), "review");
+    expect(trailing?.kind).toBe("files");
+    if (trailing?.kind !== "files") return;
+    expect(trailing.files[0]?.additionLines).toEqual(["  b \t\n"]);
+
+    const blankContext = getRenderablePatch(patch(["@@ -1,2 +1,2 @@", "-a", "+b", " "]), "review");
+    expect(blankContext?.kind).toBe("files");
+    if (blankContext?.kind !== "files") return;
+    expect(blankContext.files[0]?.additionLines).toEqual(["b\n", "\n"]);
+    expect(blankContext.files[0]?.hunks[0]?.unifiedLineCount).toBe(3);
+
+    expect(getRenderablePatch(" \n\t\n", "review")).toBeNull();
+  });
+
+  it("uses distinct cache keys for patches differing only in trailing whitespace", () => {
+    const patch = (added: string) =>
+      [
+        "diff --git a/example.ts b/example.ts",
+        "--- a/example.ts",
+        "+++ b/example.ts",
+        "@@ -1 +1 @@",
+        "-a",
+        `+${added}`,
+        "",
+      ].join("\n");
+
+    const plain = getRenderablePatch(patch("b"), "review");
+    const tabbed = getRenderablePatch(patch("b\t"), "review");
+    expect(plain?.kind).toBe("files");
+    expect(tabbed?.kind).toBe("files");
+    if (plain?.kind !== "files" || tabbed?.kind !== "files") return;
+    expect(tabbed.files[0]?.cacheKey).not.toBe(plain.files[0]?.cacheKey);
   });
 });
 

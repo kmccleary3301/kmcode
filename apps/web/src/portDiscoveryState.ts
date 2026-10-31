@@ -72,16 +72,24 @@ export function useDiscoveredPortsState(
   );
 }
 
+export function isDiscoveredLocalServerOwnedByThread(
+  server: DiscoveredLocalServer,
+  threadId: ThreadId,
+): boolean {
+  return server.terminal?.threadId === threadId || server.agent?.threadId === threadId;
+}
+
 export function useThreadDiscoveredPorts(input: {
   readonly environmentId: EnvironmentId | null;
   readonly threadId: ThreadId | null;
 }): ReadonlyArray<DiscoveredLocalServer> {
   const ports = useDiscoveredPorts(input.environmentId);
+  const threadId = input.threadId;
   return useMemo(
     () =>
-      input.threadId
-        ? ports.filter((port) => port.terminal?.threadId === input.threadId)
-        : EMPTY_PORTS,
-    [input.threadId, ports],
+      threadId === null
+        ? EMPTY_PORTS
+        : ports.filter((port) => isDiscoveredLocalServerOwnedByThread(port, threadId)),
+    [threadId, ports],
   );
 }

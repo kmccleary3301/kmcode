@@ -1,5 +1,6 @@
 import { assert, describe, it, vi } from "@effect/vitest";
 import {
+  ChatAttachmentId,
   type ChatAttachment,
   CommandId,
   MessageId,
@@ -9,6 +10,7 @@ import {
   ThreadId,
   TextGenerationError,
 } from "@t3tools/contracts";
+import { ATTACHMENT_ONLY_BOOTSTRAP_PROMPT } from "@t3tools/shared/composerContextReferences";
 import * as Effect from "effect/Effect";
 import * as Deferred from "effect/Deferred";
 import * as Fiber from "effect/Fiber";
@@ -45,6 +47,7 @@ const adapter = {
 function makeHarness(
   options: {
     readonly generateTitle?: TextGeneration.TextGeneration["Service"]["generateThreadTitle"];
+    readonly settings?: Parameters<typeof ServerSettings.layerTest>[0];
   } = {},
 ) {
   const layerDatabase = SqlitePersistence.layerMemory;
@@ -86,7 +89,7 @@ function makeHarness(
         layerThreadManagement,
         layerProjectedProjects,
         Layer.mock(TextGeneration.TextGeneration)({ generateThreadTitle }),
-        ServerSettings.layerTest({}),
+        ServerSettings.layerTest(options.settings),
       ),
     ),
   );
@@ -127,6 +130,7 @@ function dispatchUserMessage(input: {
   readonly command: string;
   readonly threadId: ThreadId;
   readonly text: string;
+  readonly attachments?: ReadonlyArray<ChatAttachment>;
 }) {
   return Effect.gen(function* () {
     const threads = yield* ThreadManagement.ThreadManagementService;
@@ -136,7 +140,7 @@ function dispatchUserMessage(input: {
       threadId: input.threadId,
       messageId: MessageId.make(`${input.command}:message`),
       text: input.text,
-      attachments: [],
+      attachments: input.attachments ?? [],
       modelSelection,
       dispatchMode: { type: "defer_start" },
       createdBy: "user",
@@ -224,6 +228,56 @@ describe("formatThreadTitleContext", () => {
 });
 
 describe("ThreadTitleRegenerationService", () => {
+  it.effect.each(["", "Ultrathink:\n"])(
+    "omits image-only bootstrap text from the initial title request (%j)",
+    (prefix) =>
+      Effect.gen(function* () {
+        const harness = makeHarness();
+        yield* Effect.gen(function* () {
+          const threads = yield* ThreadManagement.ThreadManagementService;
+          const titleRegeneration = yield* ThreadTitleRegeneration.ThreadTitleRegenerationService;
+          const threadId = yield* createThread({
+            command: "command:title:image:create",
+            thread: "thread:title:image",
+          });
+          const text = prefix + ATTACHMENT_ONLY_BOOTSTRAP_PROMPT;
+          const attachments = [
+            {
+              type: "image" as const,
+              id: ChatAttachmentId.make("diagram"),
+              name: "diagram.png",
+              mimeType: "image/png",
+              sizeBytes: 10,
+            },
+          ];
+          yield* dispatchUserMessage({
+            command: "command:title:image:message",
+            threadId,
+            text,
+            attachments,
+          });
+          const requestId = yield* armRegeneration({
+            command: "command:title:image:arm",
+            threadId,
+          });
+          const messageId = MessageId.make("command:title:image:message:message");
+
+          yield* titleRegeneration.execute({
+            threadId,
+            requestId,
+            kind: { type: "initial", messageId },
+          });
+
+          const call = harness.generateThreadTitle.mock.calls[0]?.[0];
+          assert.equal(call?.message, "");
+          assert.deepEqual(call?.attachments, attachments);
+          const projection = yield* threads.getThreadProjection(threadId);
+          assert.equal(projection.messages[0]?.text, text);
+          assert.equal(projection.thread.title, "Generated title");
+        }).pipe(Effect.provide(harness.layer));
+      }),
+  );
+
   it.effect("arms and clears the regeneration marker through metadata commands", () =>
     Effect.gen(function* () {
       const harness = makeHarness();
@@ -324,6 +378,41 @@ describe("ThreadTitleRegenerationService", () => {
         const projection = yield* threads.getThreadProjection(threadId);
         assert.equal(projection.thread.title, "Fresh title");
         assert.isNotOk(projection.thread.titleRegeneration);
+      }).pipe(Effect.provide(harness.layer));
+    }),
+  );
+
+  it.effect("uses project-specific title instructions", () =>
+    Effect.gen(function* () {
+      const instructions = "Put the project name first.";
+      const harness = makeHarness({
+        settings: {
+          threadTitleInstructions: "Environment instructions",
+          projectSettingsOverrides: {
+            [projectId]: { threadTitleInstructions: instructions },
+          },
+        },
+      });
+      yield* Effect.gen(function* () {
+        const titleRegeneration = yield* ThreadTitleRegeneration.ThreadTitleRegenerationService;
+        const threadId = yield* createThread({
+          command: "command:title:instructions:create",
+          thread: "thread:title:instructions",
+        });
+        yield* dispatchUserMessage({
+          command: "command:title:instructions:message",
+          threadId,
+          text: "Investigate the flaky login test",
+        });
+        const requestId = yield* armRegeneration({
+          command: "command:title:instructions:arm",
+          threadId,
+        });
+
+        yield* titleRegeneration.execute({ threadId, requestId, kind: { type: "regenerate" } });
+
+        const call = harness.generateThreadTitle.mock.calls[0]?.[0];
+        assert.equal(call?.policy?.threadTitleInstructions, instructions);
       }).pipe(Effect.provide(harness.layer));
     }),
   );

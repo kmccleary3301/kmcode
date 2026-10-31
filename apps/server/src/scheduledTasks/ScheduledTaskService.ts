@@ -44,6 +44,7 @@ import * as ThreadLaunchService from "../orchestration-v2/ThreadLaunchService.ts
 import * as Metrics from "../observability/Metrics.ts";
 import * as ThreadManagementService from "../orchestration-v2/ThreadManagementService.ts";
 import * as SecretRequests from "../secrets/SecretRequests.ts";
+import * as DueHint from "../scheduling/DueHint.ts";
 import * as Scheduler from "../scheduling/Scheduler.ts";
 import { isMissedFixedTimeRun, isSameSchedule, nextScheduledRunAt } from "./Schedule.ts";
 import {
@@ -58,6 +59,10 @@ import { constantTimeEquals, verifyWebhookSignature } from "./webhookVerificatio
 export const WEBHOOK_ROUTE_PREFIX = "/api/hooks";
 /** Deliveries kept per task; older ones are pruned on insert. */
 const WEBHOOK_DELIVERY_RETENTION = 50;
+const WEBHOOK_DEDUPE_DELIVERY_RETENTION = 20;
+const WEBHOOK_FILTERED_DELIVERY_RETENTION = 20;
+type WebhookDeliveryBucket = "filtered" | "dedupe" | "main";
+
 /** Body text kept in the delivery log. Larger bodies are cut and flagged. */
 const WEBHOOK_DELIVERY_LOG_BODY_LIMIT = 64 * 1024;
 /** Rendered prompt text kept in the delivery log. */
@@ -66,6 +71,7 @@ const WEBHOOK_DELIVERY_LOG_PROMPT_LIMIT = 64 * 1024;
 const WEBHOOK_MAX_QUEUED_PER_TASK = 20;
 /** Accepted deliveries per task per minute, enforced here as well as on the relay because the tunnel hostname is public too. */
 const WEBHOOK_RATE_LIMIT_PER_MINUTE = 60;
+const PROMPT_TOO_LONG = "The filled-in prompt is too long.";
 
 /**
  * Where a webhook task's public URL points: `${relayHookBaseUrl}/${taskId}/${token}`.
@@ -411,7 +417,12 @@ export const layer = Layer.effect(
     // full list() re-emit anyway, so a slow subscriber only ever needs the
     // latest signal — an unbounded backlog would just grow memory.
     const changesPubSub = yield* PubSub.sliding<void>(1);
-    const notifyChanged = PubSub.publish(changesPubSub, undefined).pipe(Effect.asVoid);
+    // Pollers check every few seconds; invalidate this hint whenever a write may move work earlier.
+    const dueTasks = DueHint.make();
+    const notifyChanged = dueTasks.invalidate.pipe(
+      Effect.andThen(PubSub.publish(changesPubSub, undefined)),
+      Effect.asVoid,
+    );
 
     const selectAllRows = () => sql<ScheduledTaskRow>`
       SELECT
@@ -901,6 +912,24 @@ export const layer = Layer.effect(
 
     const runDueTasks = Effect.fn("ScheduledTaskService.runDueTasks")(function* () {
       const now = yield* localNow;
+      const nowMs = DateTime.toEpochMillis(now);
+      if (yield* dueTasks.isIdle(nowMs)) return;
+      const readVersion = yield* dueTasks.version;
+      const [next] = yield* sql<{ next_run_at: string | null }>`
+        SELECT MIN(next_run_at) AS next_run_at FROM scheduled_tasks
+        WHERE enabled = 1 AND next_run_at IS NOT NULL AND last_run_status <> 'running'
+      `.pipe(Effect.mapError((cause) => taskError("Could not list schedule tasks.", { cause })));
+      const nextRunAt = next?.next_run_at ?? null;
+      if (nextRunAt === null || nextRunAt > iso(now)) {
+        const nextDueAt =
+          nextRunAt === null
+            ? Option.some(Infinity)
+            : DateTime.make(nextRunAt).pipe(Option.map(DateTime.toEpochMillis));
+        if (Option.isSome(nextDueAt) && nextDueAt.value > nowMs) {
+          yield* dueTasks.record(readVersion, nextDueAt.value, nowMs);
+        }
+        return;
+      }
       const tasks = yield* listDueTasks(now).pipe(
         Effect.mapError((cause) => taskError("Could not list schedule tasks.", { cause })),
       );
@@ -1268,7 +1297,10 @@ export const layer = Layer.effect(
     }) => {
       const truncated = input.request.body.byteLength > WEBHOOK_DELIVERY_LOG_BODY_LIMIT;
       const loggedBody = truncated
-        ? new TextDecoder().decode(input.request.body.subarray(0, WEBHOOK_DELIVERY_LOG_BODY_LIMIT))
+        ? new TextDecoder().decode(
+            input.request.body.subarray(0, WEBHOOK_DELIVERY_LOG_BODY_LIMIT),
+            { stream: true },
+          )
         : input.request.bodyText;
       return sql
         .withTransaction(
@@ -1300,17 +1332,7 @@ export const layer = Layer.effect(
                 rendered_prompt = excluded.rendered_prompt,
                 error = excluded.error
             `;
-            yield* sql`
-            DELETE FROM scheduled_task_webhook_deliveries
-            WHERE task_id = ${input.taskId}
-              AND delivery_id NOT IN (
-                SELECT delivery_id FROM scheduled_task_webhook_deliveries
-                WHERE task_id = ${input.taskId}
-                -- rowid breaks timestamp ties in arrival order; delivery ids are random.
-                ORDER BY received_at DESC, rowid DESC
-                LIMIT ${WEBHOOK_DELIVERY_RETENTION}
-              )
-          `;
+            yield* pruneDeliveries(input.taskId, deliveryBucket(input.outcome, input.error));
           }),
         )
         .pipe(
@@ -1319,13 +1341,47 @@ export const layer = Layer.effect(
           ),
         );
     };
+    // Keep each suppression bucket bounded without evicting real delivery history.
+    const deliveryBucket = (outcome: string, error: string | undefined): WebhookDeliveryBucket =>
+      outcome === "filtered"
+        ? "filtered"
+        : outcome === "duplicate" ||
+            outcome === "coalesced" ||
+            outcome === "rate_limited" ||
+            error === PROMPT_TOO_LONG
+          ? "dedupe"
+          : "main";
+    const pruneDeliveries = (taskId: string, retentionBucket: WebhookDeliveryBucket) => {
+      const rowBucket = sql.literal(`CASE WHEN outcome = 'filtered' THEN 'filtered'
+        WHEN outcome IN ('duplicate', 'coalesced', 'rate_limited') OR error = '${PROMPT_TOO_LONG}' THEN 'dedupe'
+        ELSE 'main' END`);
+      return sql`
+        DELETE FROM scheduled_task_webhook_deliveries
+        WHERE task_id = ${taskId} AND ${rowBucket} = ${retentionBucket}
+          AND delivery_id NOT IN (
+            SELECT delivery_id FROM scheduled_task_webhook_deliveries
+            WHERE task_id = ${taskId} AND ${rowBucket} = ${retentionBucket}
+            ORDER BY received_at DESC, rowid DESC
+            LIMIT ${retentionBucket === "main" ? WEBHOOK_DELIVERY_RETENTION : retentionBucket === "filtered" ? WEBHOOK_FILTERED_DELIVERY_RETENTION : WEBHOOK_DEDUPE_DELIVERY_RETENTION}
+          )
+      `;
+    };
 
     const markDeliveryFailed = (deliveryId: string, message: string) =>
-      sql`
-        UPDATE scheduled_task_webhook_deliveries
-        SET outcome = 'dispatch_failed', error = ${message}
-        WHERE delivery_id = ${deliveryId}
-      `.pipe(Effect.ignore);
+      sql
+        .withTransaction(
+          Effect.gen(function* () {
+            const [updated] = yield* sql<{ task_id: string }>`
+              UPDATE scheduled_task_webhook_deliveries
+              SET outcome = 'dispatch_failed', error = ${message}
+              WHERE delivery_id = ${deliveryId}
+              RETURNING task_id
+            `;
+            if (updated !== undefined)
+              yield* pruneDeliveries(updated.task_id, deliveryBucket("dispatch_failed", message));
+          }),
+        )
+        .pipe(Effect.ignore);
 
     /**
      * Sliding one-minute window counting every request with a valid token,
@@ -1580,7 +1636,7 @@ export const layer = Layer.effect(
                 signatureVerified: signature !== null,
                 missing: rendered.missing,
                 renderedPrompt: rendered.prompt,
-                error: "The filled-in prompt is too long.",
+                error: PROMPT_TOO_LONG,
               });
               yield* observe("prompt_too_long");
               return { _tag: "accepted" as const, deliveryId, outcome: "prompt_too_long" as const };

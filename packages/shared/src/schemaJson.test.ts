@@ -52,6 +52,18 @@ Done.`),
       values: [1, 2],
     });
   });
+  it.each(["\n", "\r\n", "\r"])("decodes comments with %j line endings", (eol) => {
+    expect(
+      decodeLenientJson(`{${eol}"enabled":true,// comment${eol}"values":[1,2],${eol}}`),
+    ).toEqual({ enabled: true, values: [1, 2] });
+  });
+
+  it("keeps properties after CR-terminated comments in mixed line endings", () => {
+    expect(decodeLenientJson('{\n"enabled":true,// comment\r"values":[1,2],\n}')).toEqual({
+      enabled: true,
+      values: [1, 2],
+    });
+  });
 
   it("rejects malformed JSON after lenient preprocessing", () => {
     expect(() => decodeLenientJson('{ "enabled": true,, }')).toThrow();

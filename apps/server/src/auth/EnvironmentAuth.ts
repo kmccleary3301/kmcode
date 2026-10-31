@@ -33,6 +33,7 @@ import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
+import * as Redacted from "effect/Redacted";
 import * as Schema from "effect/Schema";
 import * as HttpServerRequest from "effect/http/HttpServerRequest";
 
@@ -451,7 +452,7 @@ export class ServerAuthMcpApprovalCodeError extends Schema.TaggedError<ServerAut
 ) {
   override get message(): string {
     return this.reason === "insufficient_scope"
-      ? "That pairing code cannot grant this access, and it is now used up. Create one with the standard scopes, or choose Read only with a new code."
+      ? "That pairing code cannot grant this access. It has not been used, so choose an access level it grants, or create a code with the standard scopes."
       : this.reason === "not_a_pairing_code"
         ? "That is not a one-time pairing code."
         : "That pairing code is unknown, expired, or already used.";
@@ -564,7 +565,11 @@ export class EnvironmentAuth extends Context.Service<
       readonly access: AuthMcpClientAccess;
       readonly client: AuthClientMetadata;
     }) => Effect.Effect<
-      { readonly token: string; readonly expiresAt: DateTime.DateTime },
+      {
+        readonly sessionId: AuthSessionId;
+        readonly token: string;
+        readonly expiresAt: DateTime.DateTime;
+      },
       ServerAuthInternalError
     >;
     /**
@@ -593,7 +598,11 @@ type BootstrapExchangeResult = {
 
 const AUTHORIZATION_PREFIX = "Bearer ";
 const DPOP_AUTHORIZATION_PREFIX = "DPoP ";
-const WEBSOCKET_TICKET_QUERY_PARAM = "wsTicket";
+const WebSocketUpgradeQuery = Schema.Struct({
+  wsTicket: Schema.optionalKey(Schema.RedactedFromValue(Schema.String)),
+  dpop: Schema.optionalKey(Schema.RedactedFromValue(Schema.String)),
+});
+const decodeWebSocketUpgradeQuery = Schema.decodeEffect(WebSocketUpgradeQuery);
 
 const bySessionPriority = (left: AuthClientSession, right: AuthClientSession) => {
   const leftCanManage = left.scopes.includes(AuthAccessWriteScope);
@@ -871,6 +880,7 @@ export const make = Effect.gen(function* () {
     input?: {
       readonly proofKeyThumbprint?: string;
       readonly requestedScopes?: ReadonlyArray<AuthEnvironmentScope>;
+      readonly requiredScopes?: ReadonlyArray<AuthEnvironmentScope>;
     },
   ): Effect.Effect<
     ResolvedBootstrapGrant,
@@ -889,6 +899,12 @@ export const make = Effect.gen(function* () {
     }
     return sessions.verify(credential).pipe(
       mapSessionVerificationErrors,
+      Effect.filterOrFail(
+        (session) =>
+          input?.requiredScopes === undefined ||
+          input.requiredScopes.every((scope) => session.scopes.includes(scope)),
+        () => new ServerAuthScopeNotGrantedError({}),
+      ),
       Effect.map(
         (session) =>
           ({
@@ -1168,7 +1184,7 @@ export const make = Effect.gen(function* () {
       Effect.map(
         (issued) =>
           ({
-            ticket: issued.token,
+            ticket: Redacted.make(issued.token),
             expiresAt: DateTime.toUtc(issued.expiresAt),
           }) satisfies AuthWebSocketTicketResult,
       ),
@@ -1184,7 +1200,10 @@ export const make = Effect.gen(function* () {
     Effect.fn("EnvironmentAuth.authenticateWebSocketUpgrade")(function* (request) {
       const requestUrl = HttpServerRequest.toURL(request);
       if (Option.isSome(requestUrl)) {
-        const websocketTicket = requestUrl.value.searchParams.get(WEBSOCKET_TICKET_QUERY_PARAM);
+        const query = yield* decodeWebSocketUpgradeQuery(
+          Object.fromEntries(requestUrl.value.searchParams),
+        ).pipe(Effect.orDie);
+        const websocketTicket = query.wsTicket && Redacted.value(query.wsTicket);
         if (websocketTicket && websocketTicket.trim().length > 0) {
           return yield* sessions.verifyWebSocketToken(websocketTicket).pipe(
             mapSessionVerificationErrors,
@@ -1238,7 +1257,11 @@ export const make = Effect.gen(function* () {
         client: { ...input.client, label: input.label, deviceType: "bot" },
       })
       .pipe(
-        Effect.map((issued) => ({ token: issued.token, expiresAt: issued.expiresAt })),
+        Effect.map((issued) => ({
+          sessionId: issued.sessionId,
+          token: issued.token,
+          expiresAt: issued.expiresAt,
+        })),
         Effect.mapError((cause) => new ServerAuthSessionTokenIssueError({ cause })),
         Effect.withSpan("EnvironmentAuth.issueMcpClientSession"),
       );
@@ -1265,7 +1288,7 @@ export const make = Effect.gen(function* () {
     access,
   ) =>
     // No proof key: a code bound to a T3 Connect client's key fails without being spent.
-    resolveBootstrapGrant(code.trim()).pipe(
+    resolveBootstrapGrant(code.trim(), { requiredScopes: mcpClientScopes(access) }).pipe(
       Effect.catchTags({
         ServerAuthInvalidCredentialError: () =>
           Effect.fail(new ServerAuthMcpApprovalCodeError({ reason: "unknown_or_used" })),
@@ -1275,9 +1298,7 @@ export const make = Effect.gen(function* () {
       Effect.flatMap((grant) =>
         grant.method !== "one-time-token" && grant.method !== "reusable-dev-token"
           ? Effect.fail(new ServerAuthMcpApprovalCodeError({ reason: "not_a_pairing_code" }))
-          : mcpClientScopes(access).every((scope) => grant.scopes.includes(scope))
-            ? Effect.void
-            : Effect.fail(new ServerAuthMcpApprovalCodeError({ reason: "insufficient_scope" })),
+          : Effect.void,
       ),
       Effect.withSpan("EnvironmentAuth.consumeMcpApprovalCode"),
     );

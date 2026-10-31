@@ -8,6 +8,7 @@ import type {
 } from "@t3tools/contracts";
 
 import * as GitHubApi from "../sourceControl/GitHubApi.ts";
+import type { GitHubCredentialSource } from "../sourceControl/GitHubCredentials.ts";
 import * as GitHubPullRequestApi from "./GitHubPullRequestApi.ts";
 import {
   PullRequestProviderError,
@@ -102,6 +103,13 @@ export function gitHubViewerPermissions(access: GitHubViewerAccess): PullRequest
   };
 }
 
+const REPOSITORY_ACCESS_HINTS: Record<GitHubCredentialSource, string> = {
+  settings:
+    "Your saved GitHub token can't see it. Give it access, or change it in Settings → Source Control.",
+  env: "The server's environment token can't see it. Give it access, or unset it.",
+  gh: "Your gh login can't see it. Give it access, or save a token in Settings → Source Control.",
+};
+
 /** The tags that mean GitHub is out of reach for this account, rather than one request failing. */
 export function gitHubProviderFailure(
   error: GitHubPullRequestApi.GitHubPullRequestApiError,
@@ -121,7 +129,12 @@ export function gitHubProviderFailure(
     case "SourceControlRateLimitPausedError":
       return { reason: "rate-limited", retryAt: error.retryAt };
     case "GitHubApiNotFoundError":
-      return { reason: "not-found" };
+      return {
+        reason: "not-found",
+        ...(error.credential === undefined
+          ? {}
+          : { accessHint: REPOSITORY_ACCESS_HINTS[error.credential] }),
+      };
     default:
       return { reason: "failed" };
   }

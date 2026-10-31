@@ -1,13 +1,16 @@
 import {
-  MessageId,
   ContextHandoffId,
-  ProviderThreadId,
+  CheckpointId,
+  CheckpointRef,
+  CheckpointScopeId,
   NodeId,
   EventId,
+  MessageId,
   ProjectId,
   ProviderDriverKind,
   ProviderInstanceId,
   ThreadId,
+  ProviderThreadId,
   TurnItemId,
   type OrchestrationV2ThreadProjection,
   OrchestrationV2TurnItem,
@@ -21,6 +24,7 @@ import {
   projectTurnItemForWire,
   projectTurnItemForDetail,
   projectDomainEventForWire,
+  projectThreadProjectionForWire,
 } from "./WireProjection.ts";
 import { threadShellFromProjection } from "./ProjectionStore.ts";
 import { MAX_TOOL_OUTPUT_IMAGES, toolOutputImages } from "@t3tools/shared/toolOutput";
@@ -74,6 +78,109 @@ describe("orchestration V2 wire projection", () => {
     };
     expect(JSON.stringify(projectDomainEventForWire(event))).not.toContain(item.summary);
     expect(item.summary).toBe("PRIVATE_HANDOFF_TRANSCRIPT");
+  });
+
+  it("caps checkpoint files in projections and live events while reporting full totals", () => {
+    const now = DateTime.makeUnsafe("2026-08-13T00:00:00.000Z");
+    const threadId = ThreadId.make("thread-large-checkpoint");
+    const checkpointId = CheckpointId.make("checkpoint-large");
+    const scopeId = CheckpointScopeId.make("scope-large");
+    const files = Array.from({ length: 250 }, (_, index) => ({
+      path: `src/file-${index}.ts`,
+      kind: "modified" as const,
+      additions: 2,
+      deletions: 1,
+    }));
+    const checkpoint = {
+      id: checkpointId,
+      threadId,
+      scopeId,
+      runId: null,
+      nodeId: NodeId.make("node-large-checkpoint"),
+      parentCheckpointId: null,
+      ordinalWithinScope: 1,
+      appRunOrdinal: null,
+      ref: CheckpointRef.make("checkpoint-ref-large"),
+      status: "ready" as const,
+      files,
+      capturedAt: now,
+    };
+    const checkpointItem = {
+      ...base,
+      id: TurnItemId.make("checkpoint-item-large"),
+      type: "checkpoint" as const,
+      checkpointId,
+      scopeId,
+      files,
+    };
+    const projection = {
+      thread: {
+        createdBy: "user",
+        creationSource: "web",
+        id: threadId,
+        projectId: ProjectId.make("project-large-checkpoint"),
+        title: "Large checkpoint",
+        providerInstanceId: ProviderInstanceId.make("codex"),
+        modelSelection: { instanceId: ProviderInstanceId.make("codex"), model: "gpt-5.4" },
+        runtimeMode: "full-access",
+        interactionMode: "default",
+        branch: null,
+        worktreePath: null,
+        lineage: {
+          parentThreadId: null,
+          relationshipToParent: null,
+          rootThreadId: threadId,
+        },
+        forkedFrom: null,
+        activeProviderThreadId: null,
+        lastVisitedAt: null,
+        createdAt: now,
+        updatedAt: now,
+        archivedAt: null,
+        settledOverride: null,
+        settledAt: null,
+        deletedAt: null,
+      },
+      runs: [],
+      attempts: [],
+      nodes: [],
+      subagents: [],
+      providerSessions: [],
+      providerThreads: [],
+      providerTurns: [],
+      runtimeRequests: [],
+      messages: [],
+      plans: [],
+      turnItems: [checkpointItem],
+      checkpointScopes: [],
+      checkpoints: [checkpoint],
+      contextHandoffs: [],
+      contextTransfers: [],
+      visibleTurnItems: [],
+      updatedAt: now,
+    } satisfies OrchestrationV2ThreadProjection;
+
+    const expectedTotals = { count: 250, additions: 500, deletions: 250 };
+    const projected = projectThreadProjectionForWire(projection);
+    expect(projected.checkpoints[0]).toMatchObject({
+      files: files.slice(0, 200),
+      filesTotal: expectedTotals,
+    });
+    expect(projected.turnItems[0]).toMatchObject({
+      files: files.slice(0, 200),
+      filesTotal: expectedTotals,
+    });
+
+    const event = {
+      id: EventId.make("checkpoint-large-event"),
+      type: "checkpoint.captured" as const,
+      threadId,
+      occurredAt: now,
+      payload: checkpoint,
+    };
+    expect(projectDomainEventForWire(event)).toMatchObject({
+      payload: { files: files.slice(0, 200), filesTotal: expectedTotals },
+    });
   });
 
   it("preserves image metadata through wire and JSON contracts while redacting output", () => {
@@ -354,6 +461,21 @@ describe("orchestration V2 wire projection", () => {
       outputIndicatesFailure: true,
       exitCode: 2,
     });
+  });
+
+  it.each([
+    "logs/app.log:12: Error: ENOENT: no such file or directory",
+    "fixtures/ci.txt:3: Process exited with exit code 2",
+  ])("trusts a zero exit code over failure text in the output: %s", (output) => {
+    const projected = projectTurnItemForWire({
+      ...base,
+      type: "command_execution" as const,
+      input: "rg -n error logs fixtures",
+      output,
+      exitCode: 0,
+    });
+    expect(projected).not.toHaveProperty("outputIndicatesFailure");
+    expect(projected).toMatchObject({ exitCode: 0, outputOmitted: true });
   });
 
   it("omits inline file bodies but preserves file identity and change counts", () => {

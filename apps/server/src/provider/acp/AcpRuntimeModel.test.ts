@@ -378,6 +378,18 @@ describe("AcpRuntimeModel", () => {
         command: "bun run typecheck",
       });
     }
+    const cancelled = parseSessionUpdateEvent({
+      sessionId: "session-1",
+      update: {
+        sessionUpdate: "tool_call_update",
+        toolCallId: "tool-1",
+        status: "cancelled",
+      },
+    } satisfies EffectAcpSchema.SessionNotification);
+    expect(cancelled.events[0]).toMatchObject({
+      _tag: "ToolCallUpdated",
+      toolCall: { toolCallId: "tool-1", status: "failed" },
+    });
   });
 
   it("clears prior ACP locations when an update explicitly replaces them", () => {
@@ -427,6 +439,34 @@ describe("AcpRuntimeModel", () => {
       {
         _tag: "ModeChanged",
         modeId: "code",
+      },
+    ]);
+  });
+
+  it("emits empty legacy ACP plan updates", () => {
+    const result = parseSessionUpdateEvent({
+      sessionId: "session-1",
+      update: {
+        sessionUpdate: "plan",
+        entries: [],
+      },
+    } satisfies EffectAcpSchema.SessionNotification);
+
+    expect(result.events).toEqual([
+      {
+        _tag: "PlanUpdated",
+        payload: {
+          nativePlanId: "legacy",
+          kind: "items",
+          plan: [],
+        },
+        rawPayload: {
+          sessionId: "session-1",
+          update: {
+            sessionUpdate: "plan",
+            entries: [],
+          },
+        },
       },
     ]);
   });
@@ -1268,8 +1308,26 @@ describe("AcpRuntimeModel", () => {
       command: "pnpm test",
       cwd: "/workspace",
       output: "first line\nsecond line\n",
+      outputBytes: 23,
       exitStatus: { exitCode: 0 },
     });
+  });
+  it("trims ACP terminal output in one-megabyte increments", () => {
+    const first = applyAcpAgentTerminalUpdate(undefined, {
+      sessionUpdate: "terminal_output_chunk",
+      terminalId: "terminal-trim",
+      data: Buffer.alloc(15 * 1024 * 1024, "a").toString("base64"),
+    });
+    const second = applyAcpAgentTerminalUpdate(first, {
+      sessionUpdate: "terminal_output_chunk",
+      terminalId: "terminal-trim",
+      data: Buffer.alloc(2 * 1024 * 1024, "b").toString("base64"),
+    });
+
+    expect(first.outputBytes).toBe(15 * 1024 * 1024);
+    expect(second.outputBytes).toBe(15 * 1024 * 1024);
+    expect(second.output.startsWith("a")).toBe(true);
+    expect(second.output.endsWith("b")).toBe(true);
   });
 
   it("preserves UTF-8 characters split across ACP terminal output chunks", () => {
@@ -1289,6 +1347,7 @@ describe("AcpRuntimeModel", () => {
     expect(first.pendingOutputBytes).toBeDefined();
     expect(second.output).toBe("A🙂B");
     expect(second.pendingOutputBytes).toBeUndefined();
+    expect(second.outputBytes).toBe(Buffer.byteLength("A🙂B", "utf8"));
   });
 
   it("drops malformed and oversized ACP terminal frames without decoding them", () => {

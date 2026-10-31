@@ -1,3 +1,7 @@
+import { useAtomRefresh, useAtomValue } from "@effect/atom-react";
+import { AsyncResult } from "effect/reactivity";
+import * as Cause from "effect/Cause";
+import * as Option from "effect/Option";
 import { RefreshIcon } from "~/components/ui/refresh-icon";
 import { Spinner } from "~/components/ui/spinner";
 import type { EnvironmentId } from "@t3tools/contracts";
@@ -19,6 +23,7 @@ import { Tooltip, TooltipPopup, TooltipTrigger } from "~/components/ui/tooltip";
 import { useTheme } from "~/hooks/useTheme";
 import { useWorkspaceMutationRefresh } from "~/hooks/useWorkspaceMutationRefresh";
 import { cn } from "~/lib/utils";
+import { filesystemEnvironment, useFilesystemReadAccess } from "~/state/filesystem";
 import { isAbsolutePath } from "~/terminal-links";
 
 import {
@@ -26,6 +31,7 @@ import {
   fileBreadcrumbChildren,
   fileBreadcrumbParent,
   fileBreadcrumbs,
+  isHostHomePath,
 } from "./filePath";
 import { useProjectEntriesQuery } from "./projectFilesQueryState";
 
@@ -39,7 +45,7 @@ interface FileBreadcrumbsProps {
 }
 
 function pathLabel(path: string, projectName: string): string {
-  return path.slice(path.lastIndexOf("/") + 1) || projectName;
+  return path === "~/" ? "~" : path.slice(path.lastIndexOf("/") + 1) || projectName;
 }
 
 function BreadcrumbLabel(props: {
@@ -213,6 +219,108 @@ function BreadcrumbMenuContent(props: {
   );
 }
 
+function HostBreadcrumbMenuContent(props: {
+  readonly cwd: string;
+  readonly directoryPath: string;
+  readonly environmentId: EnvironmentId;
+  readonly onDirectoryChange: (path: string) => void;
+  readonly projectName: string;
+  readonly rootPath: string;
+}) {
+  const browsePath = props.directoryPath.endsWith("/")
+    ? props.directoryPath
+    : `${props.directoryPath}/`;
+  const browseAtom = filesystemEnvironment.browse({
+    environmentId: props.environmentId,
+    input: { cwd: props.cwd, partialPath: browsePath },
+  });
+  const result = useAtomValue(browseAtom);
+  const refresh = useAtomRefresh(browseAtom);
+  const fileAccess = useFilesystemReadAccess(props.environmentId);
+  const { resolvedTheme } = useTheme();
+  const data = Option.getOrNull(AsyncResult.value(result));
+  const cause = result._tag === "Failure" ? Cause.squash(result.cause) : null;
+  const error =
+    cause === null ? null : cause instanceof Error ? cause.message : "Failed to load folder.";
+  const parentPath = fileBreadcrumbParent(props.directoryPath);
+  const rootPrefix = props.rootPath.endsWith("/") ? props.rootPath : `${props.rootPath}/`;
+  const canGoBack =
+    props.directoryPath !== props.rootPath &&
+    parentPath !== null &&
+    (parentPath === props.rootPath || parentPath.startsWith(rootPrefix));
+
+  return (
+    <MenuPopup
+      align="start"
+      side="bottom"
+      onKeyDown={(event) => {
+        if (event.key !== "ArrowLeft" || !canGoBack || parentPath === null) return;
+        event.preventDefault();
+        event.stopPropagation();
+        props.onDirectoryChange(parentPath);
+      }}
+    >
+      {canGoBack && parentPath !== null ? (
+        <>
+          <MenuItem closeOnClick={false} onClick={() => props.onDirectoryChange(parentPath)}>
+            <ArrowLeftIcon />
+            <span className="truncate">Back to {pathLabel(parentPath, props.projectName)}</span>
+          </MenuItem>
+          <MenuSeparator />
+        </>
+      ) : null}
+      <MenuGroup key={props.directoryPath}>
+        {fileAccess.isPending || (result.waiting && data === null) ? (
+          <MenuItem disabled>
+            <Spinner />
+            Loading folder…
+          </MenuItem>
+        ) : !fileAccess.canReadFiles ? (
+          <MenuItem disabled>
+            {fileAccess.error ?? "This connection cannot read host files."}
+          </MenuItem>
+        ) : error && data === null ? (
+          <MenuItem closeOnClick={false} onClick={refresh}>
+            <RefreshIcon refreshing={result.waiting} />
+            <span className="min-w-0 flex-1 truncate">Retry loading folder</span>
+          </MenuItem>
+        ) : data === null ? (
+          <MenuItem disabled>This folder is no longer available.</MenuItem>
+        ) : data.entries.length === 0 ? (
+          <MenuItem disabled>No folders found.</MenuItem>
+        ) : (
+          data.entries.map((entry) => {
+            const prefix = props.directoryPath.endsWith("/")
+              ? props.directoryPath
+              : `${props.directoryPath}/`;
+            const childPath = `${prefix}${entry.name}`;
+            return (
+              <MenuItem
+                key={entry.fullPath}
+                closeOnClick={false}
+                onClick={() => props.onDirectoryChange(childPath)}
+              >
+                <PierreEntryIcon pathValue={childPath} kind="directory" theme={resolvedTheme} />
+                <span className="min-w-0 flex-1 truncate">{entry.name}</span>
+                <ChevronRightIcon />
+              </MenuItem>
+            );
+          })
+        )}
+      </MenuGroup>
+      {error && data !== null ? (
+        <>
+          <MenuSeparator />
+          <MenuItem closeOnClick={false} onClick={refresh}>
+            <RefreshIcon refreshing={result.waiting} />
+            Refresh failed — retry
+          </MenuItem>
+        </>
+      ) : null}
+    </MenuPopup>
+  );
+}
+
 function DirectoryBreadcrumb(props: FileBreadcrumbsProps & { readonly crumb: FileBreadcrumb }) {
   const [open, setOpen] = useState(false);
   const [directoryPath, setDirectoryPath] = useState(props.crumb.path);
@@ -248,25 +356,36 @@ function DirectoryBreadcrumb(props: FileBreadcrumbsProps & { readonly crumb: Fil
         <TooltipPopup side="top">{props.crumb.path || props.projectName}</TooltipPopup>
       </Tooltip>
       {open ? (
-        <BreadcrumbMenuContent
-          cwd={props.cwd}
-          currentFilePath={props.relativePath}
-          directoryPath={directoryPath}
-          environmentId={props.environmentId}
-          onDirectoryChange={setDirectoryPath}
-          onOpenChange={handleOpenChange}
-          onOpenFile={props.onOpenFile}
-          projectName={props.projectName}
-          rootPath={props.crumb.path}
-          workspaceMutationId={props.workspaceMutationId}
-        />
+        isHostHomePath(props.crumb.path) ? (
+          <HostBreadcrumbMenuContent
+            cwd={props.cwd}
+            directoryPath={directoryPath}
+            environmentId={props.environmentId}
+            onDirectoryChange={setDirectoryPath}
+            projectName={props.projectName}
+            rootPath={props.crumb.path}
+          />
+        ) : (
+          <BreadcrumbMenuContent
+            cwd={props.cwd}
+            currentFilePath={props.relativePath}
+            directoryPath={directoryPath}
+            environmentId={props.environmentId}
+            onDirectoryChange={setDirectoryPath}
+            onOpenChange={handleOpenChange}
+            onOpenFile={props.onOpenFile}
+            projectName={props.projectName}
+            rootPath={props.crumb.path}
+            workspaceMutationId={props.workspaceMutationId}
+          />
+        )
       ) : null}
     </Menu>
   );
 }
 
 export function FileBreadcrumbs(props: FileBreadcrumbsProps) {
-  const hostPath = isAbsolutePath(props.relativePath);
+  const hostPath = isAbsolutePath(props.relativePath) || isHostHomePath(props.relativePath);
   const breadcrumbs = useMemo(
     () => fileBreadcrumbs(props.projectName, props.relativePath),
     [props.projectName, props.relativePath],
@@ -285,7 +404,7 @@ export function FileBreadcrumbs(props: FileBreadcrumbsProps) {
         <span aria-current="page">
           <BreadcrumbLabel current label={crumb.label} pathLabel={crumb.path} />
         </span>
-      ) : hostPath ? (
+      ) : hostPath && !isHostHomePath(crumb.path) ? (
         <BreadcrumbLabel label={crumb.label} pathLabel={crumb.path} />
       ) : (
         <DirectoryBreadcrumb {...props} crumb={crumb} />

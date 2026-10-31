@@ -521,52 +521,53 @@ const nextTurnSelectionHarness = Effect.fn("nextTurnSelectionHarness")(function*
     { runEffectWorker: false },
   );
   // Creates the thread and starts its first turn on `runSelection`.
-  const startFirstTurn = (text = "first") => Effect.gen(function* () {
-    const orchestrator = yield* Orchestrator.OrchestratorV2;
-    const worker = yield* EffectWorker.OrchestrationEffectWorkerV2;
-    const threadId = ThreadId.make(`thread:${name}`);
-    yield* orchestrator.dispatch({
-      type: "thread.create",
-      commandId: CommandId.make("create"),
-      threadId,
-      projectId: ProjectId.make(`project:${name}`),
-      title: "Steer with changed options",
-      modelSelection: runSelection,
-      runtimeMode: "full-access",
-      interactionMode: "default",
-      branch: null,
-      worktreePath: cwd,
-      createdBy: "user",
-      creationSource: "web",
-    });
-    const running = yield* orchestrator.streamDomainEvents.pipe(
-      Stream.filter(
-        (event) => event.type === "provider-turn.updated" && event.payload.status === "running",
-      ),
-      Stream.take(1),
-      Stream.runDrain,
-      Effect.forkScoped,
-    );
-    const initialDispatch = yield* orchestrator
-      .dispatch({
-        type: "message.dispatch",
-        commandId: CommandId.make("first"),
+  const startFirstTurn = (text = "first") =>
+    Effect.gen(function* () {
+      const orchestrator = yield* Orchestrator.OrchestratorV2;
+      const worker = yield* EffectWorker.OrchestrationEffectWorkerV2;
+      const threadId = ThreadId.make(`thread:${name}`);
+      yield* orchestrator.dispatch({
+        type: "thread.create",
+        commandId: CommandId.make("create"),
         threadId,
-        messageId: MessageId.make("message:first"),
-        text,
-        attachments: [],
-        dispatchMode: { type: "start_immediately" },
+        projectId: ProjectId.make(`project:${name}`),
+        title: "Steer with changed options",
+        modelSelection: runSelection,
+        runtimeMode: "full-access",
+        interactionMode: "default",
+        branch: null,
+        worktreePath: cwd,
         createdBy: "user",
         creationSource: "web",
-      })
-      .pipe(Effect.timeoutOption("5 seconds"));
-    assert.isTrue(Option.isSome(initialDispatch), "initial turn should dispatch");
-    const startedEffects = yield* worker.drain().pipe(Effect.timeoutOption("5 seconds"));
-    assert.isTrue(Option.isSome(startedEffects), "provider start effects should drain");
-    const runningTurn = yield* Fiber.join(running).pipe(Effect.timeoutOption("5 seconds"));
-    assert.isTrue(Option.isSome(runningTurn), "provider should report a running turn");
-    return threadId;
-  });
+      });
+      const running = yield* orchestrator.streamDomainEvents.pipe(
+        Stream.filter(
+          (event) => event.type === "provider-turn.updated" && event.payload.status === "running",
+        ),
+        Stream.take(1),
+        Stream.runDrain,
+        Effect.forkScoped,
+      );
+      const initialDispatch = yield* orchestrator
+        .dispatch({
+          type: "message.dispatch",
+          commandId: CommandId.make("first"),
+          threadId,
+          messageId: MessageId.make("message:first"),
+          text,
+          attachments: [],
+          dispatchMode: { type: "start_immediately" },
+          createdBy: "user",
+          creationSource: "web",
+        })
+        .pipe(Effect.timeoutOption("5 seconds"));
+      assert.isTrue(Option.isSome(initialDispatch), "initial turn should dispatch");
+      const startedEffects = yield* worker.drain().pipe(Effect.timeoutOption("5 seconds"));
+      assert.isTrue(Option.isSome(startedEffects), "provider start effects should drain");
+      const runningTurn = yield* Fiber.join(running).pipe(Effect.timeoutOption("5 seconds"));
+      assert.isTrue(Option.isSome(runningTurn), "provider should report a running turn");
+      return threadId;
+    });
   return { events, started, steered, layer, startFirstTurn };
 });
 
@@ -712,6 +713,91 @@ it.effect("starts a steer that missed the turn on the saved next-turn selection"
     }),
   ),
 );
+it.effect("force sends multiple queued messages and can force send a requeued message again", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const { started, steered, layer, startFirstTurn } = yield* nextTurnSelectionHarness(
+        "multiple-promoted-messages",
+      );
+      yield* Effect.gen(function* () {
+        const orchestrator = yield* Orchestrator.OrchestratorV2;
+        const worker = yield* EffectWorker.OrchestrationEffectWorkerV2;
+        const threadId = yield* startFirstTurn();
+        for (const text of ["one", "two", "remaining"]) {
+          yield* orchestrator.dispatch({
+            type: "message.dispatch",
+            commandId: CommandId.make(`queue-${text}`),
+            threadId,
+            messageId: MessageId.make(`message:${text}`),
+            text,
+            attachments: [],
+            dispatchMode: { type: "queue_after_active" },
+            createdBy: "user",
+            creationSource: "web",
+          });
+        }
+        const promote = Effect.fn("test.promote")(function* (text: string, commandId: string) {
+          const projection = yield* orchestrator.getThreadProjection(threadId);
+          const messageId = MessageId.make(`message:${text}`);
+          const queued = projection.runs.find(
+            (run) => run.status === "queued" && run.userMessageId === messageId,
+          );
+          assert.isDefined(queued);
+          if (queued === undefined) return;
+          yield* orchestrator.dispatch({
+            type: "queued-message.promote-to-steer",
+            commandId: CommandId.make(commandId),
+            threadId,
+            queuedRunId: queued.id,
+            targetRunId: started[0]!.runId,
+          });
+        });
+        yield* promote("one", "promote-one");
+        yield* promote("two", "promote-two");
+        yield* worker.drain();
+        assert.deepEqual(steered, ["one", "two"]);
+
+        // The completion-race fallback redispatches the same message into the queue.
+        yield* orchestrator.dispatch({
+          type: "message.dispatch",
+          commandId: CommandId.make("requeue-one"),
+          threadId,
+          messageId: MessageId.make("message:one"),
+          text: "one",
+          attachments: [],
+          dispatchMode: { type: "queue_after_active" },
+          createdBy: "user",
+          creationSource: "web",
+        });
+        const requeued = yield* orchestrator.getThreadProjection(threadId);
+        const requeuedItem = requeued.turnItems.find(
+          (item) =>
+            item.type === "user_message" && item.messageId === MessageId.make("message:one"),
+        );
+        assert.equal(requeuedItem?.status, "pending");
+        assert.isNull(requeuedItem?.startedAt);
+        assert.isNull(requeuedItem?.completedAt);
+        yield* promote("one", "promote-one-again");
+        yield* worker.drain();
+        assert.deepEqual(steered, ["one", "two", "one"]);
+        assert.lengthOf(started, 1);
+        const final = yield* orchestrator.getThreadProjection(threadId);
+        assert.deepEqual(
+          final.runs.filter((run) => run.status === "queued").map((run) => run.userMessageId),
+          [MessageId.make("message:remaining")],
+        );
+        for (const text of ["one", "two"]) {
+          const items = final.turnItems.filter(
+            (item) => item.type === "user_message" && item.messageId === `message:${text}`,
+          );
+          assert.lengthOf(items, 1);
+          assert.equal(items[0]?.status, "completed");
+        }
+      }).pipe(Effect.provide(layer));
+    }),
+  ),
+);
+
 it.live("skips active compaction when promoting a queued message to steer", () =>
   Effect.scoped(
     Effect.gen(function* () {
@@ -823,11 +909,15 @@ it.live("skips active compaction when promoting a queued message to steer", () =
         });
         const stoppedEffects = yield* worker.drain().pipe(Effect.timeoutOption("5 seconds"));
         assert.isTrue(Option.isSome(stoppedEffects), "interrupt effects should drain");
-        const settled = yield* Fiber.join(compactionSettled).pipe(Effect.timeoutOption("2 seconds"));
+        const settled = yield* Fiber.join(compactionSettled).pipe(
+          Effect.timeoutOption("2 seconds"),
+        );
         assert.isTrue(Option.isSome(settled), "compaction should settle after its interrupt");
         const settledEffects = yield* worker.drain().pipe(Effect.timeoutOption("5 seconds"));
         assert.isTrue(Option.isSome(settledEffects), "settled compaction effects should drain");
-        const resumed = yield* orchestrator.resumeQueuedRuns.pipe(Effect.timeoutOption("5 seconds"));
+        const resumed = yield* orchestrator.resumeQueuedRuns.pipe(
+          Effect.timeoutOption("5 seconds"),
+        );
         assert.isTrue(Option.isSome(resumed), "queued message should resume");
         const followupEffects = yield* worker.drain().pipe(Effect.timeoutOption("5 seconds"));
         assert.isTrue(Option.isSome(followupEffects), "follow-up effects should drain");

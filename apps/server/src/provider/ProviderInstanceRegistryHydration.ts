@@ -43,15 +43,22 @@
  */
 import {
   defaultInstanceIdForDriver,
+  ProviderDriverKind,
+  ProviderInstanceId,
   type ProviderInstanceConfig,
   type ProviderInstanceConfigMap,
   ServerSettings,
 } from "@t3tools/contracts";
+import { HostProcessExecutablePath } from "@t3tools/shared/hostProcess";
 import * as Effect from "effect/Effect";
+import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
+import * as Path from "effect/Path";
+import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
 
 import * as Settings from "../serverSettings.ts";
+import * as ServerConfig from "../config.ts";
 import { BUILT_IN_DRIVERS, type BuiltInDriversEnv } from "./builtInDrivers.ts";
 import * as ProviderInstanceRegistry from "./ProviderInstanceRegistry.ts";
 import * as ProviderInstanceRegistryMutator from "./ProviderInstanceRegistryMutator.ts";
@@ -59,13 +66,20 @@ import * as ProviderOrchestrationAdapterInfrastructure from "./ProviderOrchestra
 import * as AcpRegistrySupport from "./acp/AcpRegistrySupport.ts";
 import * as AcpRegistryCatalog from "./AcpRegistryCatalog.ts";
 
+const ProviderConfigRecord = Schema.Record(Schema.String, Schema.Unknown);
+const isProviderConfigRecord = Schema.is(ProviderConfigRecord);
+const isStringArray = Schema.is(Schema.Array(Schema.String));
+
 type ProviderInstanceRegistryHydrationEnv =
   | Exclude<
       BuiltInDriversEnv,
       | ProviderOrchestrationAdapterInfrastructure.ProviderOrchestrationAdapterInfrastructure
       | AcpRegistrySupport.AcpRegistryCatalog
     >
-  | Settings.ServerSettingsService;
+  | Settings.ServerSettingsService
+  | ServerConfig.ServerConfig
+  | Path.Path
+  | FileSystem.FileSystem;
 
 /**
  * Synthesize a `ProviderInstanceConfigMap` from a `ServerSettings` snapshot.
@@ -112,6 +126,48 @@ export const deriveProviderInstanceConfigMap = (
 
   return merged as ProviderInstanceConfigMap;
 };
+export const DEV_REPLAY_INSTANCE_ID = ProviderInstanceId.make("devReplay");
+
+/**
+ * Dev servers register a local ACP agent that replays recorded turns. Packaged servers
+ * have no script file and skip it.
+ */
+export const seedDevReplayInstance = Effect.fn(
+  "ProviderInstanceRegistryHydration.seedDevReplayInstance",
+)(function* () {
+  const config = yield* ServerConfig.ServerConfig;
+  if (config.devUrl === undefined) return;
+  const path = yield* Path.Path;
+  const agentPath = yield* path.fromFileUrl(
+    new URL("../../scripts/dev-replay-agent.ts", import.meta.url),
+  );
+  if (!(yield* (yield* FileSystem.FileSystem).exists(agentPath))) return;
+  const commandPath = yield* HostProcessExecutablePath;
+  const serverSettings = yield* Settings.ServerSettingsService;
+  const existing = (yield* serverSettings.getSettings).providerInstances[DEV_REPLAY_INSTANCE_ID];
+  const existingConfig: Record<string, unknown> = isProviderConfigRecord(existing?.config)
+    ? existing.config
+    : {};
+  const commandArgs = existingConfig.commandArgs;
+  if (
+    existingConfig.commandPath === commandPath &&
+    isStringArray(commandArgs) &&
+    commandArgs[0] === agentPath
+  ) {
+    return;
+  }
+  const instance: ProviderInstanceConfig = {
+    displayName: "Replay (dev)",
+    ...existing,
+    driver: ProviderDriverKind.make("acpRegistry"),
+    config: { ...existingConfig, source: "local", commandPath, commandArgs: [agentPath] },
+  };
+  yield* serverSettings.updateProviderInstance({
+    operation: "upsert",
+    instanceId: DEV_REPLAY_INSTANCE_ID,
+    instance,
+  });
+});
 
 /**
  * Layer that consumes `ProviderInstanceRegistryMutator` and forks a
@@ -167,6 +223,10 @@ export const layer: Layer.Layer<
 > = Layer.unwrap(
   Effect.gen(function* () {
     const serverSettings = yield* Settings.ServerSettingsService;
+    yield* seedDevReplayInstance().pipe(
+      Effect.catchCause((cause) => Effect.logWarning("Dev replay agent unavailable", cause)),
+    );
+
     const initialSettings: ServerSettings | undefined = yield* serverSettings.getSettings.pipe(
       Effect.orElseSucceed(() => undefined),
     );

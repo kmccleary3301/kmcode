@@ -35,6 +35,19 @@ Read ports from the `[dev-runner]` output. Worktrees derive stable preferences f
 but occupied ports can shift them. `T3CODE_PORT_OFFSET` or `T3CODE_DEV_INSTANCE` can select a
 different preference when needed.
 
+### Replay provider
+
+`vp run dev` registers `Replay (dev)` on a source-checkout server. It streams recorded ACP
+transcripts through the normal provider adapter, orchestration, and UI without API keys. Each
+scenario is a model: `showcase` includes thinking, a plan, tool calls, an approval, and markdown;
+`todo-list`, `approval`, `question`, and `multi-turn` use recorded fixtures. The replay agent
+does not execute the recorded tools or change the project files.
+
+Press `Ctrl+Alt+Shift+R` to open the scenario picker, or call
+`await window.t3dev?.replay("showcase")` from the browser console. Bundled servers have no
+replay-agent script and do not register the provider. Disable **Replay (dev)** in provider
+settings if it should not appear in a dev server.
+
 ### Sharing and remote debugging
 
 `vp run dev --share` publishes the web port over the machine's tailnet and prints a pairing URL

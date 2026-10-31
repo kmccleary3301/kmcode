@@ -308,6 +308,42 @@ export function resolveThreadPullRequestBadge(
   return { kind: "pull-request", others: visible.length - 1, state };
 }
 
+export interface ThreadSearchPullRequest {
+  readonly number: number;
+  readonly title: string | null;
+  readonly references: ReadonlyArray<string>;
+}
+
+const SEARCHED_PULL_REQUEST_TITLES = 3;
+
+/** Pull request titles and references used when ranking thread search results. */
+export function threadSearchPullRequests(thread: {
+  readonly pullRequests?: ReadonlyArray<ThreadPullRequestLink> | undefined;
+  readonly linkedPullRequest?: ThreadLinkedPullRequest | null | undefined;
+  readonly branchPullRequest?: ThreadLinkedPullRequest | null | undefined;
+}): ThreadSearchPullRequest[] {
+  const entry = (
+    link: Pick<ThreadLinkedPullRequest, "number" | "repository" | "url">,
+    title: string | null,
+  ): ThreadSearchPullRequest => ({
+    number: link.number,
+    title,
+    references: [`${link.repository}#${link.number}`, link.url],
+  });
+  const branch = thread.branchPullRequest ? [entry(thread.branchPullRequest, null)] : [];
+  if (thread.pullRequests !== undefined && thread.pullRequests.length > 0) {
+    const newestFirst = [...visibleThreadPullRequests(thread.pullRequests)].sort(
+      (left, right) => latestUpdatedAt(right) - latestUpdatedAt(left),
+    );
+    return branch.concat(
+      newestFirst.map((link, index) =>
+        entry(link, index < SEARCHED_PULL_REQUEST_TITLES ? (link.snapshot?.title ?? null) : null),
+      ),
+    );
+  }
+  return thread.linkedPullRequest ? branch.concat(entry(thread.linkedPullRequest, null)) : branch;
+}
+
 /** Search terms for visible PR links, including the legacy single-link projection. */
 export function threadPullRequestSearchTerms(thread: {
   readonly pullRequests?: ReadonlyArray<ThreadPullRequestLink> | undefined;

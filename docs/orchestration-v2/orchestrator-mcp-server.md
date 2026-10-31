@@ -363,8 +363,11 @@ Pass the task in `message`. Project, model, and modes inherit when omitted;
 workspace does not. `scratch: true` launches without a project, in a folder of
 its own under the environment's Scratch project. For stacked PRs, use the parent branch as `baseRef` with
 `startFromOrigin: false`. The new thread may not run with broader runtime or
-interaction modes than the caller. Launch has no retry key, so inspect existing threads after a failed or lost response before
-launching again. `create_threads` remains the batch option for a shared checkout.
+interaction modes than the caller. If the selected provider does not offer a
+requested runtime mode, launch is refused; inherited modes step down to the
+broadest mode that provider offers within the caller's limit. Launch has no retry
+key, so inspect existing threads after a failed or lost response before launching
+again. `create_threads` remains the batch option for a shared checkout.
 
 ### `t3_thread_list`
 

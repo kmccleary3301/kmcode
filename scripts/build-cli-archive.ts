@@ -282,6 +282,64 @@ const stageWebClient = Effect.fn("stageWebClient")(function* (source: string, ta
   }
 });
 
+/** Node links libatomic.so.1, which fresh Ubuntu servers and containers may lack. */
+const bundleLinuxLibatomic = Effect.fn("bundleLinuxLibatomic")(function* (input: {
+  readonly repoRoot: string;
+  readonly contentDir: string;
+  readonly executablePath: string;
+}) {
+  const fs = yield* FileSystem.FileSystem;
+  const path = yield* Path.Path;
+  const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
+  const ldd = yield* spawner.string(ChildProcess.make("ldd", [input.executablePath]));
+  const source = /libatomic\.so\.1 => (\/\S+)/.exec(ldd)?.[1];
+  if (source === undefined) {
+    return yield* new CliArchiveInputMissingError({
+      inputPath: "libatomic.so.1",
+      hint: `ldd did not resolve it for ${input.executablePath}. Install libatomic1 on the build host.`,
+    });
+  }
+  const libDir = path.join(input.contentDir, "lib");
+  yield* fs.makeDirectory(libDir);
+  yield* fs.copyFile(source, path.join(libDir, "libatomic.so.1"));
+
+  const owner = yield* spawner.string(
+    ChildProcess.make("dpkg-query", ["-S", yield* fs.realPath(source)]),
+  );
+  const [, qualifiedPkg, pkg] = /^(([^:\s]+)(?::[^:\s]+)?): /.exec(owner) ?? [];
+  const versions = qualifiedPkg
+    ? yield* spawner.string(
+        ChildProcess.make("dpkg-query", [
+          "-W",
+          "-f=${Version} ${source:Package} ${source:Version}",
+          qualifiedPkg,
+        ]),
+      )
+    : "";
+  const [version, sourcePackage, sourceVersion] = versions.trim().split(" ");
+  if (!pkg || !version || !sourcePackage || !sourceVersion) {
+    return yield* new CliArchiveInputMissingError({
+      inputPath: `dpkg package for ${source}`,
+      hint: "The archive copies libatomic's license and source reference from its Ubuntu package.",
+    });
+  }
+  const header = [
+    `libatomic.so.1 is copied from the Ubuntu package ${pkg} ${version}.`,
+    `Source: https://launchpad.net/ubuntu/+source/${sourcePackage}/${sourceVersion}`,
+    "License: GPL-3.0-or-later WITH GCC-exception-3.1. The package copyright file and GPL-3 follow.",
+  ].join("\n");
+  const license = yield* fs.readFileString(
+    path.join(input.repoRoot, "scripts/licenses/libatomic.LICENSE"),
+  );
+  yield* fs.writeFileString(path.join(libDir, "libatomic.so.1.LICENSE"), `${header}\n\n${license}`);
+
+  yield* runCommand(
+    ChildProcess.make("patchelf", ["--set-rpath", "$ORIGIN/lib", input.executablePath]),
+    "patchelf --set-rpath",
+  );
+  yield* Effect.log(`[cli-archive] Bundled ${source} as lib/libatomic.so.1.`);
+});
+
 const MacSigningConfig = Config.all({
   identity: Config.String("T3CODE_CLI_MAC_SIGN_IDENTITY").pipe(Config.option),
   appleApiKey: Config.String("APPLE_API_KEY").pipe(Config.option),
@@ -518,6 +576,9 @@ const buildCliArchive = Effect.fn("buildCliArchive")(function* (input: {
   });
 
   const executablePath = path.join(contentDir, executableName);
+  if (input.platform === "linux") {
+    yield* bundleLinuxLibatomic({ repoRoot, contentDir, executablePath });
+  }
   if (input.platform === "mac") {
     yield* signMacArchiveContents({ repoRoot, contentDir, executablePath });
   } else if (input.platform === "win") {

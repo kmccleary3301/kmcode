@@ -15,6 +15,7 @@ import {
   ThreadId,
 } from "@t3tools/contracts";
 import * as DateTime from "effect/DateTime";
+import * as Effect from "effect/Effect";
 
 import {
   makeSubagentChildThread,
@@ -23,7 +24,7 @@ import {
   makeSubagentConversationArtifacts,
 } from "./SubagentProjection.ts";
 
-import { emptyProjection } from "./ProjectionStore.ts";
+import { emptyProjection, layerMemory, ProjectionStoreV2 } from "./ProjectionStore.ts";
 
 const parentThreadId = ThreadId.make("thread:subagent-snoozed-parent");
 const childThreadId = ThreadId.make("thread:subagent-awake-child");
@@ -75,8 +76,8 @@ function makeParentThread(): OrchestrationV2AppThread {
   };
 }
 
-it("keeps a subagent child awake when its parent thread is snoozed", () => {
-  const parentThread = makeParentThread();
+it("does not inherit parent snooze or settlement protection", () => {
+  const parentThread = { ...makeParentThread(), autoSettleDisabledAt: parentCreatedAt };
   const childProviderThreadId = ProviderThreadId.make("provider-thread:subagent-awake-child");
   const parentNodeId = NodeId.make("node:subagent-parent");
   const childThread = makeSubagentChildThread({
@@ -94,6 +95,8 @@ it("keeps a subagent child awake when its parent thread is snoozed", () => {
 
   assert.isNull(childThread.snoozedUntil);
   assert.isNull(childThread.snoozedAt);
+  assert.deepEqual(parentThread.autoSettleDisabledAt, parentCreatedAt);
+  assert.isNull(childThread.autoSettleDisabledAt);
   assert.equal(childThread.projectId, parentThread.projectId);
   assert.equal(childThread.runtimeMode, parentThread.runtimeMode);
   assert.equal(childThread.interactionMode, parentThread.interactionMode);
@@ -113,6 +116,60 @@ it("keeps a subagent child awake when its parent thread is snoozed", () => {
     nodeId: parentNodeId,
   });
 });
+
+it.effect.each(["provider", "mcp"] as const)(
+  "settles an unprotected %s child when the parent disables auto-settlement",
+  (creationSource) =>
+    Effect.gen(function* () {
+      const store = yield* ProjectionStoreV2;
+      const parentThread = {
+        ...makeParentThread(),
+        autoSettleDisabledAt: parentCreatedAt,
+        pinnedAt: parentCreatedAt,
+        pinOrderKey: "a0",
+      };
+      const childThread = makeSubagentChildThread({
+        parentThread,
+        childThreadId,
+        parentNodeId: NodeId.make("node:settlement-parent"),
+        activeProviderThreadId: ProviderThreadId.make("provider-thread:settlement-child"),
+        providerInstanceId: childProviderInstanceId,
+        modelSelection: childModelSelection,
+        title: "Child",
+        now: childCreatedAt,
+        createdBy: "agent",
+        creationSource,
+      });
+
+      yield* store.apply({
+        id: EventId.make("settlement-protected-parent"),
+        type: "thread.created",
+        threadId: parentThreadId,
+        occurredAt: parentCreatedAt,
+        payload: parentThread,
+      });
+      yield* store.apply({
+        id: EventId.make("settlement-unprotected-child"),
+        type: "thread.created",
+        threadId: childThreadId,
+        occurredAt: childCreatedAt,
+        payload: childThread,
+      });
+
+      const savedParent = yield* store.getThread(parentThreadId);
+      const savedChild = yield* store.getThread(childThreadId);
+      assert.deepEqual(savedParent.pinnedAt, parentCreatedAt);
+      assert.equal(savedParent.pinOrderKey, "a0");
+      assert.deepEqual(savedParent.autoSettleDisabledAt, parentCreatedAt);
+      assert.isNull(savedChild.autoSettleDisabledAt);
+      assert.isNull(savedChild.pinnedAt);
+      assert.isNull(savedChild.pinOrderKey);
+      assert.deepEqual(
+        (yield* store.getSettlementCandidates()).map((candidate) => candidate.id),
+        [childThreadId],
+      );
+    }).pipe(Effect.provide(layerMemory)),
+);
 
 it("attributes native subagent prompts to their parent thread", () => {
   for (const role of ["user", "assistant"] as const) {

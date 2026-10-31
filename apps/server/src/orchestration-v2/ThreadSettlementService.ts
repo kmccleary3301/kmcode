@@ -232,6 +232,7 @@ export function resolveAutoSettlementAt(input: {
     toMillis(thread.latestRunRequestedAt),
     toMillis(thread.latestRunStartedAt),
     toMillis(thread.latestRunCompletedAt),
+    toMillis(thread.lastSnoozeWakeAt),
   ]);
   if (pullRequest !== null && pullRequestSettles(thread, pullRequest, input.autoSettleOnMerge)) {
     return activityAtMs === null ? thread.createdAt : DateTime.makeUnsafe(activityAtMs);
@@ -324,7 +325,8 @@ export const make = Effect.gen(function* () {
     // sweep on a possibly stale cached answer.
     const candidates = threads.filter((thread) => isAutoSettlementCandidate(thread, nowMs));
 
-    const settleThread = Effect.fn("ThreadSettlementServiceV2.settleThread")(
+    // Thousands of candidates can share a sweep; it owns their work span.
+    const settleThread = Effect.fnUntraced(
       function* (thread: (typeof candidates)[number], pullRequest: SettlementPullRequest | null) {
         const currentSettings = resolveProjectSettings(
           yield* settingsService.getSettings,
@@ -424,7 +426,8 @@ export const make = Effect.gen(function* () {
     };
     const groups = Map.groupBy(lookupCandidates, lookupKey);
 
-    const wouldSettle = Effect.fn("ThreadSettlementServiceV2.wouldSettle")(function* (
+    // Git and pull request reads inside the group carry the useful spans.
+    const wouldSettle = Effect.fnUntraced(function* (
       group: ReadonlyArray<(typeof lookupCandidates)[number]>,
       pullRequest: SettlementPullRequest,
     ) {
@@ -444,7 +447,8 @@ export const make = Effect.gen(function* () {
       });
     });
 
-    const pullRequestFor = Effect.fn("ThreadSettlementServiceV2.pullRequestFor")(function* (
+    // The group-level helper is called from wouldSettle and pullRequestFor.
+    const pullRequestFor = Effect.fnUntraced(function* (
       group: ReadonlyArray<(typeof lookupCandidates)[number]>,
     ) {
       const thread = group[0]!;

@@ -46,7 +46,7 @@ describe("model price entry", () => {
     });
   });
 
-  it.each(["", " ", "-1", "Infinity", "NaN", "1e999", "$2", "0x10"])(
+  it.each(["", " ", "-1", "Infinity", "NaN", "1e999", "$2", "0x10", "1,2,3", "1.2,3", "1,2.3"])(
     "rejects invalid required prices: %j",
     (inputCostPerMillionTokens) => {
       expect(
@@ -60,6 +60,25 @@ describe("model price entry", () => {
       ).toBeNull();
     },
   );
+  it("accepts a comma as the decimal separator", () => {
+    const form = usagePriceForm("example-model", {
+      inputCostPerMillionTokens: 2,
+      outputCostPerMillionTokens: 8,
+    });
+    expect(
+      parseUsagePriceForm({
+        ...form,
+        inputCostPerMillionTokens: "2,5",
+        outputCostPerMillionTokens: "0,075",
+      }),
+    ).toEqual({
+      model: "example-model",
+      price: { inputCostPerMillionTokens: 2.5, outputCostPerMillionTokens: 0.075 },
+    });
+    for (const inputCostPerMillionTokens of ["1,2,3", "1.2,3", "1,2.3"]) {
+      expect(parseUsagePriceForm({ ...form, inputCostPerMillionTokens })).toBeNull();
+    }
+  });
 
   it("rejects invalid optional rates and missing model IDs", () => {
     const form = usagePriceForm("example-model", {

@@ -1,6 +1,11 @@
 import { describe, expect, it } from "vite-plus/test";
 
-import { fileBreadcrumbChildren, fileBreadcrumbParent, fileBreadcrumbs } from "./filePath";
+import {
+  fileBreadcrumbChildren,
+  fileBreadcrumbParent,
+  fileBreadcrumbs,
+  isHostHomePath,
+} from "./filePath";
 
 describe("fileBreadcrumbs", () => {
   it("builds project, directory, and file crumbs", () => {
@@ -37,6 +42,17 @@ describe("fileBreadcrumbs", () => {
       "\\\\server\\share",
       "\\\\server\\share\\report.md",
     ]);
+  });
+
+  it("builds home-relative breadcrumbs without treating a project folder named ~ as home", () => {
+    expect(fileBreadcrumbs("t3code", "~/.claude/CLAUDE.md")).toEqual([
+      { label: "~", path: "~/", kind: "directory" },
+      { label: ".claude", path: "~/.claude", kind: "directory" },
+      { label: "CLAUDE.md", path: "~/.claude/CLAUDE.md", kind: "file" },
+    ]);
+    expect(fileBreadcrumbs("t3code", "~").map((crumb) => crumb.path)).toEqual(["", "~"]);
+    expect(isHostHomePath("~/")).toBe(true);
+    expect(isHostHomePath("~")).toBe(false);
   });
 });
 
@@ -90,6 +106,8 @@ describe("fileBreadcrumbParent", () => {
   it.each([
     ["src/lib", "src"],
     ["src", ""],
+    ["~/.claude", "~/"],
+    ["~/", null],
     ["", null],
   ])("returns the parent of %j", (path, expected) => {
     expect(fileBreadcrumbParent(path)).toBe(expected);

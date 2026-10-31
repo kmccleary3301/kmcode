@@ -287,6 +287,33 @@ it.effect("serves plain reads while another fiber holds the writer", () =>
   }).pipe(Effect.provide(NodeServices.layer)),
 );
 
+it.effect("spreads concurrent reads across the worker pool", () =>
+  Effect.gen(function* () {
+    const { filename } = yield* makeTempDatabase;
+    yield* Effect.gen(function* () {
+      const sql = yield* SqlClient.SqlClient;
+      const workersBefore = startedWorkers.length;
+      const readerCount = 4;
+      const read = sql`
+        WITH RECURSIVE numbers(value) AS (
+          SELECT 1
+          UNION ALL SELECT value + 1 FROM numbers WHERE value < 100000
+        )
+        SELECT MAX(value) AS maximum FROM numbers
+      `.values;
+      const readers = yield* Effect.forEach(Array.from({ length: readerCount }), () =>
+        Effect.forkChild(read, { startImmediately: true }),
+      );
+
+      assert.deepEqual(
+        yield* Effect.forEach(readers, Fiber.join),
+        Array.from({ length: readerCount }, () => [[100_000]]),
+      );
+      assert.equal(startedWorkers.length - workersBefore, readerCount);
+    }).pipe(Effect.provide(SqliteClient.layer({ filename, readerConnection: true })));
+  }).pipe(Effect.provide(NodeServices.layer)),
+);
+
 it.effect.skipIf(!supportsNoopCheckpoint)("checkpoints and truncates the WAL on its worker", () =>
   Effect.gen(function* () {
     const { filename } = yield* makeTempDatabase;

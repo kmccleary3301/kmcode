@@ -95,7 +95,7 @@ function makeRegistry(input: {
         layerRegistry,
         layerProcess,
         Layer.mock(AzureDevOpsCli.AzureDevOpsCli)({}),
-        Layer.mock(BitbucketApi.BitbucketApi)({}),
+        Layer.mock(BitbucketApi.BitbucketApi)({ servesHost: () => true }),
         ServerSettings.ServerSettingsService.layerTest(),
         Layer.mock(GitHubApi.GitHubApi)(input.githubApi ?? {}),
         Layer.mock(GitVcsDriver.GitVcsDriver)({}),

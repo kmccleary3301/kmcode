@@ -10,7 +10,11 @@ import { environmentThreadDetails } from "../../state/threads";
 import { MiddleTruncate } from "../ui/middle-truncate";
 import * as DateTime from "effect/DateTime";
 import { WorkLogRow } from "./WorkLog";
-import { resolveHandoffEndpoints, type HandoffTimelineRun } from "@t3tools/client-runtime/handoff";
+import {
+  resolveHandoffEndpoints,
+  type HandoffEndpoints,
+  type HandoffTimelineRun,
+} from "@t3tools/client-runtime/handoff";
 import { Fragment } from "react";
 import {
   formatSubagentDisplayTitle,
@@ -63,10 +67,7 @@ import { RollingText } from "./RollingText";
 import { EXCERPT_FOLD_DELAY_MS } from "./timelineActivityPolicy";
 import { observeVisibleAnimation } from "~/lib/visibleAnimation";
 import { useChildThreadLiveStep } from "./childThreadSteps";
-import {
-  LiveViewPausedNote,
-  useSubagentLiveContent,
-} from "../../hooks/useSubagentLiveContent";
+import { LiveViewPausedNote, useSubagentLiveContent } from "../../hooks/useSubagentLiveContent";
 import ChatMarkdown from "../ChatMarkdown";
 import { TranscriptStyleCtx } from "./transcriptStyle";
 const MINIMAL_SUBAGENT_SETTLE_HOLD_MS = 700;
@@ -145,39 +146,11 @@ export function V2LifecycleRow(props: {
     );
   }
   if (item.type === "handoff") {
-    const { from: fromEndpoints, to } = resolveHandoffEndpoints(item, props.runs);
     return (
-      <TimelineSystemDivider
-        label="Context handoff"
-        icon={ArrowRightLeftIcon}
-        showDetailSeparator={false}
-        tone={item.status === "failed" ? "danger" : "neutral"}
-        detail={
-          <span className="inline-flex min-w-0 flex-wrap items-center justify-center gap-1.5">
-            {fromEndpoints.map((endpoint, index) => (
-              <Fragment key={`${endpoint.instanceId}:${endpoint.model ?? ""}`}>
-                {index > 0 ? (
-                  <span aria-hidden="true" className="-ml-1">
-                    ,
-                  </span>
-                ) : null}
-                <HandoffEndpoint
-                  providers={props.providerStatuses}
-                  instanceId={endpoint.instanceId}
-                  model={endpoint.model}
-                />
-              </Fragment>
-            ))}
-            {fromEndpoints.length > 0 ? (
-              <ArrowRightIcon aria-hidden="true" className="size-3 shrink-0" />
-            ) : null}
-            <HandoffEndpoint
-              providers={props.providerStatuses}
-              instanceId={item.toProviderInstanceId}
-              model={to.model}
-            />
-          </span>
-        }
+      <HandoffRow
+        endpoints={resolveHandoffEndpoints(item, props.runs)}
+        providers={props.providerStatuses}
+        failed={item.status === "failed"}
       />
     );
   }
@@ -534,7 +507,6 @@ export function MinimalSubagentDetails(props: {
   );
 }
 
-
 /** The status a notification reported, frozen at the time it arrived. */
 const NOTIFICATION_OUTCOME_STATUS: Record<
   OrchestrationV2Notification["outcome"],
@@ -580,7 +552,9 @@ export function SubagentNotificationLink(props: {
   });
   if (agent === null) return props.fallback;
   const threadId =
-    props.taskIds !== undefined ? agent.childThreadId : (props.childThreadId ?? agent.childThreadId);
+    props.taskIds !== undefined
+      ? agent.childThreadId
+      : (props.childThreadId ?? agent.childThreadId);
   return (
     <SubagentTimelineLink
       parentRef={props.parentRef}
@@ -678,8 +652,7 @@ function SubagentTimelineLink(props: {
   const opensWhileActive = transcriptStyle === "km" || transcriptStyle === "minimal-plus";
   const shownStatus = status ?? liveStatus;
   const active = isOrchestrationV2WorkActive(shownStatus);
-  const displayLiveContent =
-    liveContent?.kind === "assistant" ? liveContent.text : null;
+  const displayLiveContent = liveContent?.kind === "assistant" ? liveContent.text : null;
   const [cardExpandedPreference, setCardExpandedPreference] = useState<boolean | undefined>();
   const [detailsExpandedPreference, setDetailsExpandedPreference] = useState<boolean | undefined>();
   const [cardSettleHold, setCardSettleHold] = useState(false);
@@ -716,7 +689,7 @@ function SubagentTimelineLink(props: {
       ? currentTool.argsPreview?.trim()
         ? `${currentTool.name} ${currentTool.argsPreview.trim()}`
         : currentTool.name
-      : childLiveStep ?? progress ?? (shownStatus === "pending" ? "Starting up" : "Thinking"));
+      : (childLiveStep ?? progress ?? (shownStatus === "pending" ? "Starting up" : "Thinking")));
   const task = (agent?.prompt ?? props.task).trim();
   const tooltip = (
     <ThreadHoverCardPopup>
@@ -877,7 +850,7 @@ function SubagentTimelineLink(props: {
             task={task}
             active={active}
             rowActivity={active ? plainDetail(liveActivity) : null}
-            liveStep={active ? childLiveStep ?? progress ?? null : null}
+            liveStep={active ? (childLiveStep ?? progress ?? null) : null}
             liveContent={displayLiveContent}
             result={
               result && !GENERIC_CHILD_END.test(result)
@@ -1030,6 +1003,49 @@ function SubagentTimelineTooltip(
       turnItemId={props.turnItemId}
       liveContent={props.liveContent}
       childProject={childProject ?? undefined}
+    />
+  );
+}
+
+export function HandoffRow(props: {
+  readonly endpoints: HandoffEndpoints;
+  readonly providers: ReadonlyArray<ServerProvider>;
+  readonly pending?: boolean;
+  readonly failed?: boolean;
+}) {
+  const { from, to } = props.endpoints;
+  return (
+    <TimelineSystemDivider
+      label={props.pending ? "Context handoff pending" : "Context handoff"}
+      icon={ArrowRightLeftIcon}
+      showDetailSeparator={false}
+      tone={props.failed ? "danger" : "neutral"}
+      detail={
+        <span className="inline-flex min-w-0 flex-wrap items-center justify-center gap-1.5">
+          {from.map((endpoint, index) => (
+            <Fragment key={`${endpoint.instanceId}:${endpoint.model ?? ""}`}>
+              {index > 0 ? (
+                <span aria-hidden="true" className="-ml-1">
+                  ,
+                </span>
+              ) : null}
+              <HandoffEndpoint
+                providers={props.providers}
+                instanceId={endpoint.instanceId}
+                model={endpoint.model}
+              />
+            </Fragment>
+          ))}
+          {from.length > 0 ? (
+            <ArrowRightIcon aria-hidden="true" className="size-3 shrink-0" />
+          ) : null}
+          <HandoffEndpoint
+            providers={props.providers}
+            instanceId={to.instanceId}
+            model={to.model}
+          />
+        </span>
+      }
     />
   );
 }

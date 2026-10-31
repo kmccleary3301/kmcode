@@ -167,6 +167,7 @@ it.effect(
       const provider = yield* BitbucketSourceControlProvider.make.pipe(
         Effect.provide(
           Layer.mock(BitbucketApi.BitbucketApi)({
+            servesHost: () => true,
             getRepositoryCloneUrls: () => Effect.fail(locatorCause),
             createRepository: () => Effect.fail(locatorCause),
           }),
@@ -241,6 +242,7 @@ it.effect("keeps arbitrary Bitbucket request failures out of the repository mess
     const provider = yield* BitbucketSourceControlProvider.make.pipe(
       Effect.provide(
         Layer.mock(BitbucketApi.BitbucketApi)({
+          servesHost: () => true,
           getRepositoryCloneUrls: () => Effect.fail(cause),
         }),
       ),
@@ -407,6 +409,69 @@ it.effect("reports clone progress from git's stderr and keeps its error text on 
   }).pipe(Effect.provide(NodeServices.layer)),
 );
 
+it.effect.each([
+  ["a plain token", "s3cret"],
+  ["a token with an apostrophe", "s3'cret"],
+  ["a token with a double quote", 's3"cret'],
+  ["a host-only token with an at sign", "abc@secret"],
+  ["an unquoted token with an apostrophe", "s3'cret", true],
+  ["an unquoted token with a double quote", 's3"cret', true],
+  ["an unquoted URL with an apostrophe in its path", "path-token", true],
+] as const)("keeps %s in the query out of a failed clone's error text", ([, token, unquoted]) =>
+  Effect.gen(function* () {
+    const fs = yield* FileSystem.FileSystem;
+    const path = yield* Path.Path;
+    const parent = yield* fs.makeTempDirectoryScoped({ prefix: "t3-source-control-query-" });
+    const remote =
+      token === "abc@secret"
+        ? "https://github.com"
+        : token === "path-token"
+          ? "https://github.com/octocat/t3code's.git"
+          : "https://github.com/octocat/t3code.git";
+    const error = yield* Effect.gen(function* () {
+      const service = yield* SourceControlRepositoryService.SourceControlRepositoryService;
+      return yield* Effect.flip(
+        service.cloneRepository({
+          remoteUrl: `${remote}?access_token=${token}`,
+          destinationPath: path.join(parent, "clone"),
+        }),
+      );
+    }).pipe(
+      Effect.provide(
+        layer({
+          git: {
+            execute: (input) =>
+              Effect.gen(function* () {
+                const cloneUrl = input.args[input.args.length - 2] ?? "";
+                const diagnosticUrl = cloneUrl;
+                yield* (
+                  input.progress?.onStderrLine?.(
+                    unquoted
+                      ? `fatal: ${diagnosticUrl}/info/refs not valid: is this a git repository?`
+                      : `fatal: unable to access '${diagnosticUrl}/': Could not resolve host: github.com`,
+                  ) ?? Effect.void
+                );
+                return yield* new GitCommandError({
+                  operation: input.operation,
+                  command: "git",
+                  cwd: input.cwd,
+                  detail: "Git command exited with a non-zero status.",
+                  exitCode: 128,
+                });
+              }),
+          },
+        }),
+      ),
+    );
+
+    assert.strictEqual(
+      error.detail,
+      unquoted
+        ? `fatal: ${remote} not valid: is this a git repository?`
+        : `fatal: unable to access '${remote}${token === "abc@secret" ? "/" : ""}': Could not resolve host: github.com`,
+    );
+  }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
+);
 it.effect("strips embedded credentials from the remote URL it reports", () =>
   Effect.gen(function* () {
     const fs = yield* FileSystem.FileSystem;

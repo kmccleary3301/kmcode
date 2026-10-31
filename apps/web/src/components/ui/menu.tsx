@@ -6,6 +6,7 @@ import type * as React from "react";
 
 import { cn } from "~/lib/utils";
 import { buttonVariants } from "./button";
+import { renderClosingPositioner } from "./closing-positioner";
 
 const Menu = MenuPrimitive.Root;
 
@@ -43,6 +44,7 @@ function MenuPopup({
         anchor={anchor}
         className="z-[130]"
         data-slot="menu-positioner"
+        render={renderClosingPositioner}
         data-t3-surface="menu"
         side={side}
         sideOffset={sideOffset}

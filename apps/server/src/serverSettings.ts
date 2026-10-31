@@ -19,6 +19,7 @@ import {
   ProjectId,
   ProjectScript,
   ProjectSettingsOverrides,
+  keepUnknownOverrideKeys,
   type ProviderInstanceConfig,
   type ProviderInstanceEnvironmentVariable,
   type UsageLimitSourceConfig,
@@ -204,10 +205,7 @@ function redactProviderEnvironmentVariable(
   };
 }
 
-function redactProviderSettingsConfig<Value>(
-  config: Value,
-  fields: Schema.Struct.Fields,
-): Value {
+function redactProviderSettingsConfig<Value>(config: Value, fields: Schema.Struct.Fields): Value {
   if (typeof config !== "object" || config === null || Array.isArray(config)) return config;
   const values = config as Record<string, unknown>;
   let redacted: Record<string, unknown> | undefined;
@@ -255,14 +253,42 @@ function restoreProviderSettingsSecrets(
   next: ServerSettings,
 ): ServerSettings {
   const providers = {
-    codex: restoreProviderSettingsConfig(current.providers.codex, next.providers.codex, CodexSettings.fields),
-    claudeAgent: restoreProviderSettingsConfig(current.providers.claudeAgent, next.providers.claudeAgent, ClaudeSettings.fields),
-    cursor: restoreProviderSettingsConfig(current.providers.cursor, next.providers.cursor, CursorSettings.fields),
-    grok: restoreProviderSettingsConfig(current.providers.grok, next.providers.grok, GrokSettings.fields),
+    codex: restoreProviderSettingsConfig(
+      current.providers.codex,
+      next.providers.codex,
+      CodexSettings.fields,
+    ),
+    claudeAgent: restoreProviderSettingsConfig(
+      current.providers.claudeAgent,
+      next.providers.claudeAgent,
+      ClaudeSettings.fields,
+    ),
+    cursor: restoreProviderSettingsConfig(
+      current.providers.cursor,
+      next.providers.cursor,
+      CursorSettings.fields,
+    ),
+    grok: restoreProviderSettingsConfig(
+      current.providers.grok,
+      next.providers.grok,
+      GrokSettings.fields,
+    ),
     pi: restoreProviderSettingsConfig(current.providers.pi, next.providers.pi, PiSettings.fields),
-    opencode: restoreProviderSettingsConfig(current.providers.opencode, next.providers.opencode, OpenCodeSettings.fields),
-    antigravity: restoreProviderSettingsConfig(current.providers.antigravity, next.providers.antigravity, AntigravitySettings.fields),
-    omp: restoreProviderSettingsConfig(current.providers.omp, next.providers.omp, OmpSettings.fields),
+    opencode: restoreProviderSettingsConfig(
+      current.providers.opencode,
+      next.providers.opencode,
+      OpenCodeSettings.fields,
+    ),
+    antigravity: restoreProviderSettingsConfig(
+      current.providers.antigravity,
+      next.providers.antigravity,
+      AntigravitySettings.fields,
+    ),
+    omp: restoreProviderSettingsConfig(
+      current.providers.omp,
+      next.providers.omp,
+      OmpSettings.fields,
+    ),
   };
   const providerInstances: Record<ProviderInstanceId, ProviderInstanceConfig> = {
     ...next.providerInstances,
@@ -286,12 +312,18 @@ function restoreProviderSettingsSecrets(
 export function redactServerSettingsForClient(settings: ServerSettings): ServerSettings {
   const providers = {
     codex: redactProviderSettingsConfig(settings.providers.codex, CodexSettings.fields),
-    claudeAgent: redactProviderSettingsConfig(settings.providers.claudeAgent, ClaudeSettings.fields),
+    claudeAgent: redactProviderSettingsConfig(
+      settings.providers.claudeAgent,
+      ClaudeSettings.fields,
+    ),
     cursor: redactProviderSettingsConfig(settings.providers.cursor, CursorSettings.fields),
     grok: redactProviderSettingsConfig(settings.providers.grok, GrokSettings.fields),
     pi: redactProviderSettingsConfig(settings.providers.pi, PiSettings.fields),
     opencode: redactProviderSettingsConfig(settings.providers.opencode, OpenCodeSettings.fields),
-    antigravity: redactProviderSettingsConfig(settings.providers.antigravity, AntigravitySettings.fields),
+    antigravity: redactProviderSettingsConfig(
+      settings.providers.antigravity,
+      AntigravitySettings.fields,
+    ),
     omp: redactProviderSettingsConfig(settings.providers.omp, OmpSettings.fields),
   };
   const providerInstances = Object.fromEntries(
@@ -499,10 +531,12 @@ const ServerSettingsJson = fromLenientJson(
     ),
     projectSettingsOverrides: Schema.Record(
       ProjectId,
-      Schema.Struct({
-        ...ProjectSettingsOverrides.fields,
-        responseStreamingMode: Schema.optionalKey(PersistedResponseStreamingMode),
-      }),
+      keepUnknownOverrideKeys(
+        Schema.Struct({
+          ...ProjectSettingsOverrides.fields,
+          responseStreamingMode: Schema.optionalKey(PersistedResponseStreamingMode),
+        }),
+      ),
     ).pipe(Schema.withDecodingDefault(Effect.succeed({}))),
   }),
 );
@@ -1056,6 +1090,35 @@ const make = Effect.gen(function* () {
         github: { ...settings.github, tokens },
       };
     });
+  // Background sweeps often read settings only to find a few scheduling options.
+  // Reuse the resolved values while the persisted settings snapshot is unchanged.
+  let materializedSettings: {
+    readonly source: ServerSettings;
+    readonly value: ServerSettings;
+  } | null = null;
+  let secretWriteGeneration = 0;
+  const invalidateMaterializedSettings = Effect.sync(() => {
+    secretWriteGeneration++;
+    materializedSettings = null;
+  });
+  const getMaterializedSettings = getSettingsFromCache.pipe(
+    Effect.flatMap((source) => {
+      if (materializedSettings?.source === source) {
+        return Effect.succeed(materializedSettings.value);
+      }
+      const generation = secretWriteGeneration;
+      return materializeProviderEnvironmentSecrets(source).pipe(
+        Effect.map(resolveTextGenerationProvider),
+        Effect.tap((value) =>
+          Effect.sync(() => {
+            if (generation === secretWriteGeneration) {
+              materializedSettings = { source, value };
+            }
+          }),
+        ),
+      );
+    }),
+  );
 
   const materializeChanges = (changes: Stream.Stream<ServerSettings>) =>
     changes.pipe(
@@ -1344,8 +1407,9 @@ const make = Effect.gen(function* () {
         const updated = restoreProviderSettingsSecrets(current, yield* update(current));
         const persisted = yield* persistProviderEnvironmentSecrets(current, updated);
         const next = yield* normalizeServerSettings(persisted.settings);
-        const materialized = yield* Effect.uninterruptibleMask(() =>
+        const materializedNext = yield* Effect.uninterruptibleMask(() =>
           Effect.gen(function* () {
+            yield* invalidateMaterializedSettings;
             const rollbackSecretChanges = yield* applyProviderEnvironmentSecretChanges(
               persisted.changes,
             );
@@ -1362,22 +1426,18 @@ const make = Effect.gen(function* () {
               return yield* Effect.failCause(writeExit.cause);
             }
             return materializedExit.value;
-          }),
+          }).pipe(Effect.ensuring(invalidateMaterializedSettings)),
         );
         yield* Cache.set(settingsCache, cacheKey, next);
+        const resolved = resolveTextGenerationProvider(materializedNext);
+        materializedSettings = { source: next, value: resolved };
         yield* emitChange(next);
-        return resolveTextGenerationProvider(materialized);
+        return resolved;
       }),
     );
 
   const withSettingsSnapshot: ServerSettingsService["Service"]["withSettingsSnapshot"] = (use) =>
-    writeSemaphore.withPermits(1)(
-      getSettingsFromCache.pipe(
-        Effect.flatMap(materializeProviderEnvironmentSecrets),
-        Effect.map(resolveTextGenerationProvider),
-        Effect.flatMap(use),
-      ),
-    );
+    writeSemaphore.withPermits(1)(getMaterializedSettings.pipe(Effect.flatMap(use)));
 
   const revalidateAndEmit = writeSemaphore.withPermits(1)(
     Effect.gen(function* () {
@@ -1488,10 +1548,7 @@ const make = Effect.gen(function* () {
   return {
     start,
     ready: Deferred.await(startedDeferred),
-    getSettings: getSettingsFromCache.pipe(
-      Effect.flatMap(materializeProviderEnvironmentSecrets),
-      Effect.map(resolveTextGenerationProvider),
-    ),
+    getSettings: getMaterializedSettings,
     updateSettings: (patch) =>
       updateAndPersistSettings((current) =>
         Effect.succeed(applyServerSettingsPatch(current, patch)),

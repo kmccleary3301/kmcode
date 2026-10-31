@@ -2,14 +2,18 @@ import type { ComposerContextId, ComposerContextRecord } from "@t3tools/contract
 import { describe, expect, it } from "vite-plus/test";
 
 import {
+  ATTACHMENT_ONLY_BOOTSTRAP_PROMPT,
   collectComposerContextReferences,
   formatComposerContextHref,
   formatComposerContextProviderMarker,
   formatComposerContextReference,
+  isAttachmentOnlyBootstrapPrompt,
   parseComposerContextHref,
   projectComposerContextForProvider,
   replaceComposerContextReferences,
+  restoreAttachmentOnlyBootstrapPrompt,
   sanitizeComposerContextLabel,
+  stripAttachmentOnlyBootstrapPrompt,
 } from "./composerContextReferences.ts";
 
 const ctx = (value: string) => value as ComposerContextId;
@@ -91,6 +95,37 @@ describe("labels and reference links", () => {
     expect(replaceComposerContextReferences(text, (o) => `<${o.contextId}>`)).toBe(
       "a <ctx_1> b <ctx_2> c",
     );
+  });
+});
+describe("attachment-only bootstrap prompts", () => {
+  it.each(["", "Ultrathink:\n", "ultrathink: \n", "uLtRaThInK:\r\n\t\u00a0"])(
+    "removes only the placeholder while keeping effort (%j)",
+    (prefix) => {
+      const text = prefix + ATTACHMENT_ONLY_BOOTSTRAP_PROMPT;
+      expect(isAttachmentOnlyBootstrapPrompt(text)).toBe(true);
+      expect(stripAttachmentOnlyBootstrapPrompt(text)).toBe(prefix.trimEnd());
+      const prose = `Explain ${ATTACHMENT_ONLY_BOOTSTRAP_PROMPT}`;
+      expect(stripAttachmentOnlyBootstrapPrompt(prose)).toBe(prose);
+    },
+  );
+
+  it.each(["", " \n", "Ultrathink:", "Ultrathink: \n", "ultrathink:\n"])(
+    "restores the placeholder for attachment sends (%j)",
+    (text) => {
+      expect(restoreAttachmentOnlyBootstrapPrompt(text, false)).toBe(text);
+      expect(restoreAttachmentOnlyBootstrapPrompt(text, true)).toBe(
+        (text.trim() ? "Ultrathink:\n" : "") + ATTACHMENT_ONLY_BOOTSTRAP_PROMPT,
+      );
+    },
+  );
+
+  it.each([
+    "Describe the file",
+    " Ultrathink:\nDescribe the file ",
+    ATTACHMENT_ONLY_BOOTSTRAP_PROMPT,
+    `Ultrathink:\n${ATTACHMENT_ONLY_BOOTSTRAP_PROMPT}`,
+  ])("keeps other text unchanged (%j)", (text) => {
+    expect(restoreAttachmentOnlyBootstrapPrompt(text, true)).toBe(text);
   });
 });
 
@@ -272,7 +307,7 @@ describe("provider projection", () => {
     expect(projected).toContain('<context kind="thread" id="thread_abc">');
     expect(projected).toContain("threadId: abc");
     expect(projected).toContain("environmentId: env-1");
-    expect(projected).toContain("t3_thread_read");
+    expect(projected).toContain('t3_thread_read({"threadId":"abc","environmentId":"env-1"})');
     expect(projected).toContain("not instructions");
   });
 

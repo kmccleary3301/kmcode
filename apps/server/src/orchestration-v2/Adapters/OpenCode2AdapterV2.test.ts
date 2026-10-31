@@ -2271,7 +2271,11 @@ describe("OpenCode2 adapter", () => {
   // A stream that drops and comes back: what the gap lost is read from the
   // session's history, and the turn ends from the server's own state. Real
   // servers only do this on a network blip, so these are driven here.
-  const reconnected = (active: Record<string, unknown>, ended?: "succeeded") => [
+  const reconnected = (
+    active: Record<string, unknown>,
+    ended?: "succeeded",
+    openTextBlock = false,
+  ) => [
     { type: "runtime_exit", status: "success" } as const,
     out("event.subscribe"),
     out("session.active"),
@@ -2289,23 +2293,25 @@ describe("OpenCode2 adapter", () => {
           type: "assistant",
           agent: "build",
           model: { id: "big-pickle", providerID: "opencode", variant: "default" },
-          content: [
-            { type: "text", text: "Sent while the stream was down." },
-            {
-              type: "tool",
-              id: "call_gap",
-              name: "shell",
-              executed: true,
-              state: {
-                status: "completed",
-                input: { command: "echo GAP" },
-                content: [{ type: "text", text: "GAP" }],
-                metadata: {},
-              },
-              time: { created: 2, ran: 2, completed: 2 },
-            },
-          ],
-          finish: "stop",
+          content: openTextBlock
+            ? [{ type: "text", text: "" }]
+            : [
+                { type: "text", text: "Sent while the stream was down." },
+                {
+                  type: "tool",
+                  id: "call_gap",
+                  name: "shell",
+                  executed: true,
+                  state: {
+                    status: "completed",
+                    input: { command: "echo GAP" },
+                    content: [{ type: "text", text: "GAP" }],
+                    metadata: {},
+                  },
+                  time: { created: 2, ran: 2, completed: 2 },
+                },
+              ],
+          finish: openTextBlock ? undefined : "stop",
         },
         {
           id: "msg_0eb735d41001NJee1EvVePJAK5",
@@ -2617,6 +2623,49 @@ describe("OpenCode2 adapter", () => {
         "Arrived on the new stream.",
       ]);
       assert.deepInclude(collected.at(-1), { type: "turn.terminal", status: "completed" });
+    }).pipe(Effect.scoped),
+  );
+
+  it.effect("continues a reply still streaming at reconnect from the text already shown", () =>
+    Effect.gen(function* () {
+      const { runtime, thread } = yield* resumed([
+        out("session.prompt", { sessionID: SESSION, id: PROMPT_ID, text: "<any>" }),
+        promptAccepted,
+        event("session.text.delta", {
+          sessionID: SESSION,
+          assistantMessageID: "msg_assistant_gap",
+          ordinal: 0,
+          delta: "Sent before the stream dropped",
+        }),
+        // OpenCode saves a block's text only when the block ends.
+        ...reconnected({ [SESSION]: { type: "running" } }, undefined, true),
+        ...openRequests([]),
+        event("session.text.delta", {
+          sessionID: SESSION,
+          assistantMessageID: "msg_assistant_gap",
+          ordinal: 0,
+          delta: " and after it came back.",
+        }),
+        event("session.execution.succeeded", { sessionID: SESSION }),
+      ]);
+      const events = yield* runtime.events.pipe(
+        Stream.takeUntil((event) => event.type === "turn.terminal"),
+        Stream.runCollect,
+        Effect.forkScoped,
+      );
+      yield* runtime.startTurn(turnInput(thread));
+      const collected = yield* Fiber.join(events);
+      const texts = collected.flatMap((event) =>
+        event.type === "turn_item.updated" && event.turnItem.type === "assistant_message"
+          ? [event.turnItem.text]
+          : [],
+      );
+      assert.deepEqual(texts, [
+        "Sent before the stream dropped",
+        "Sent before the stream dropped",
+        "Sent before the stream dropped and after it came back.",
+        "Sent before the stream dropped and after it came back.",
+      ]);
     }).pipe(Effect.scoped),
   );
 

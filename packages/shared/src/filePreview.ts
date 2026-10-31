@@ -1,3 +1,5 @@
+import { GENERIC_MIME_TYPES } from "./image.ts";
+
 import { videoMimeType } from "./video.ts";
 
 export type FilePreviewKind =
@@ -18,12 +20,12 @@ export function filePreviewKind(file: {
   const mime = file.mimeType?.split(";", 1)[0]?.trim().toLowerCase() ?? "";
   const name = file.name.toLowerCase();
   const extension = name.slice(name.lastIndexOf("."));
-  const generic = !mime || mime === "application/octet-stream" || mime === "text/plain";
+  const generic = !mime || GENERIC_MIME_TYPES.has(mime) || mime === "text/plain";
   if (mime === "application/pdf") return "pdf";
   if (mime === "text/html") return "html";
   if (mime === "text/markdown" || mime === "text/x-markdown") return "markdown";
   if (mime.startsWith("image/")) return "image";
-  if (mime.startsWith("video/")) return "video";
+  if (mime.startsWith("video/") && !GENERIC_MIME_TYPES.has(mime)) return "video";
   if (mime.startsWith("audio/")) return "audio";
   if (generic) {
     if (extension === ".pdf") return "pdf";
@@ -193,6 +195,24 @@ export function isWorkspaceAudioPreviewPath(path: string): boolean {
   return extensionIndex >= 0 && audioMimeTypeFromExtension(path.slice(extensionIndex)) !== null;
 }
 
+export function isWorkspaceTextPreviewPath(path: string): boolean {
+  const suffixStart = path.search(/[?#]/);
+  if (suffixStart >= 0) {
+    const pathBeforeSuffix = path.slice(0, suffixStart);
+    if (
+      isWorkspaceBrowserPreviewPath(pathBeforeSuffix) ||
+      isWorkspaceImagePreviewPath(pathBeforeSuffix)
+    )
+      return false;
+  }
+  const kind = filePreviewKind({ name: path });
+  return kind === "text" || kind === "markdown";
+}
+
 export function isWorkspacePreviewEntryPath(path: string): boolean {
-  return isWorkspaceBrowserPreviewPath(path) || isWorkspaceImagePreviewPath(path);
+  return (
+    isWorkspaceBrowserPreviewPath(path) ||
+    isWorkspaceImagePreviewPath(path) ||
+    isWorkspaceTextPreviewPath(path)
+  );
 }

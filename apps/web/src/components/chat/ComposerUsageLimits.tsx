@@ -103,6 +103,7 @@ function UsageLimitsBannerBody({
                   driver={account.driver}
                   windows={account.limits.windows}
                   now={now}
+                  accentColor={account.accentColor}
                 />
               )}
               {externalUsage ? (

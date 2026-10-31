@@ -372,6 +372,21 @@ describe("PreviewView navigation", () => {
     mocks.recordingRuntimeTabId = null;
     mocks.recordVisitForThread.mockClear();
   });
+  it.each(["mailto:alice@example.com", "http://"])(
+    "reports rejected address %s without navigating or recording it",
+    async (address) => {
+      renderToStaticMarkup(<PreviewView threadRef={TEST_THREAD_REF} tabId="tab-1" visible />);
+      await mocks.submittedUrl?.(address);
+
+      expect(toastManager.add).toHaveBeenCalledWith({
+        type: "error",
+        title: "Could not open this address",
+        description: "Enter an http or https URL.",
+      });
+      expect(mocks.navigate).not.toHaveBeenCalled();
+      expect(mocks.recordVisitForThread).not.toHaveBeenCalled();
+    },
+  );
 
   it("shows the cursor in a replacement browser while the old instance still records", async () => {
     const document = installTestDom();

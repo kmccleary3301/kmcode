@@ -13,7 +13,7 @@ layer("055_OrchestrationV2", (it) => {
     Effect.sync(() => {
       assert.deepStrictEqual(
         migrationEntries.map(([id]) => id),
-        Array.from({ length: 61 }, (_, index) => index + 1),
+        Array.from({ length: 65 }, (_, index) => index + 1),
       );
     }),
   );
@@ -33,6 +33,10 @@ layer("055_OrchestrationV2", (it) => {
         [59, "McpAppModelContext"],
         [60, "PackContextHandoffDeliveryIds"],
         [61, "TurnItemPositionRunIds"],
+        [62, "ActiveTurnItemIndexes"],
+        [63, "SubagentDeliveryState"],
+        [64, "ThreadMessageSearch"],
+        [65, "ExcludeAttachmentPlaceholdersFromSearch"],
       ]);
       assert.deepStrictEqual(yield* runMigrations(), []);
 
@@ -60,6 +64,10 @@ layer("055_OrchestrationV2", (it) => {
         { migration_id: 59, name: "McpAppModelContext" },
         { migration_id: 60, name: "PackContextHandoffDeliveryIds" },
         { migration_id: 61, name: "TurnItemPositionRunIds" },
+        { migration_id: 62, name: "ActiveTurnItemIndexes" },
+        { migration_id: 63, name: "SubagentDeliveryState" },
+        { migration_id: 64, name: "ThreadMessageSearch" },
+        { migration_id: 65, name: "ExcludeAttachmentPlaceholdersFromSearch" },
       ]);
 
       const tables = yield* sql<{ readonly name: string }>`
@@ -111,6 +119,7 @@ layer("055_OrchestrationV2", (it) => {
       assert.ok(threadColumns.some(({ name }) => name === "provider_instance_id"));
       assert.ok(subagentColumns.some(({ name }) => name === "driver"));
       assert.ok(subagentColumns.some(({ name }) => name === "provider_instance_id"));
+      assert.ok(subagentColumns.some(({ name }) => name === "completion_delivery_state"));
 
       const indexes = yield* sql<{ readonly name: string }>`
         SELECT name
@@ -119,6 +128,7 @@ layer("055_OrchestrationV2", (it) => {
           AND name IN (
             'idx_orchestration_events_application_high_water',
             'orchestration_events_v2_created_threads_idx',
+            'orchestration_v2_projection_subagents_settled_idx',
             'orchestration_v2_projection_turn_items_shell_pending_idx'
           )
         ORDER BY name
@@ -128,6 +138,7 @@ layer("055_OrchestrationV2", (it) => {
         [
           "idx_orchestration_events_application_high_water",
           "orchestration_events_v2_created_threads_idx",
+          "orchestration_v2_projection_subagents_settled_idx",
           "orchestration_v2_projection_turn_items_shell_pending_idx",
         ],
       );

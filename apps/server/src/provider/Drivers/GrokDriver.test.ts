@@ -78,6 +78,7 @@ it.layer(layerTest)("GrokDriver", (it) => {
       });
       // `grok update` installs under GROK_HOME, so it must target this instance's home.
       expect(capabilities.update?.env?.GROK_HOME).toBe(grokHome);
+      expect(capabilities.update?.env?.npm_config_allow_scripts).toBe("@xai-official/grok");
     }).pipe(
       Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, noSpawner),
       Effect.scoped,

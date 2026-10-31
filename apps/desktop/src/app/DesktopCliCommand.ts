@@ -1,3 +1,6 @@
+// @effect-diagnostics-next-line nodeBuiltinImport:off -- FileSystem.access has no execute check.
+import * as NodeFSP from "node:fs/promises";
+
 import type { DesktopCliCommandState } from "@t3tools/contracts";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
@@ -108,6 +111,28 @@ export const make = Effect.gen(function* () {
       return content.includes(DesktopCliShim.MARKER);
     }).pipe(Effect.orElseSucceed(() => false));
 
+  const isExecutableFile = Effect.fn("DesktopCliCommand.isExecutableFile")(
+    function* (target: string) {
+      if ((yield* fs.stat(target)).type !== "File") return false;
+      yield* Effect.tryPromise(() => NodeFSP.access(target, NodeFSP.constants.X_OK));
+      return true;
+    },
+    Effect.orElseSucceed(() => false),
+  );
+
+  // PATH can reach the regular launcher directly; removal still requires isOurLink.
+  const runsOurLauncher = Effect.fn("DesktopCliCommand.runsOurLauncher")(
+    function* (candidate: string) {
+      if (yield* isOurLink(candidate)) return true;
+      const [resolved, ours] = yield* Effect.all([fs.realPath(candidate), fs.realPath(launcher)]);
+      if (resolved !== ours) return false;
+      const info = yield* fs.stat(candidate);
+      if (info.type !== "File" || Number(info.size) > 16_384) return false;
+      return (yield* fs.readFileString(candidate)).includes(DesktopCliShim.MARKER);
+    },
+    Effect.orElseSucceed(() => false),
+  );
+
   const powershell = (env: Record<string, string>) =>
     Effect.scoped(
       Effect.gen(function* () {
@@ -141,7 +166,7 @@ export const make = Effect.gen(function* () {
   const firstOnPath = Effect.gen(function* () {
     for (const directory of pathEntries(process.env.PATH, ":")) {
       const candidate = path.join(directory, "t3");
-      if (yield* exists(candidate)) return Option.some(candidate);
+      if (yield* isExecutableFile(candidate)) return Option.some(candidate);
     }
     return Option.none<string>();
   });
@@ -167,12 +192,16 @@ export const make = Effect.gen(function* () {
       return { supported: false, installedPath: null, onPath: false } as const;
     }
     const installed = yield* installedAt;
-    if (Option.isNone(installed)) return { supported: true, installedPath: null, onPath: false };
-    // On Windows only terminals opened after the change see it. On Unix the
-    // first `t3` on PATH must be ours; a `t3` earlier on PATH would shadow it.
     const first = yield* firstOnPath;
-    const onPath = windows || (Option.isSome(first) && (yield* isOurLink(first.value)));
-    return { supported: true, installedPath: installed.value, onPath };
+    // A shell may reach this app's launcher directly even without an installed PATH link.
+    const onPath = windows
+      ? Option.isSome(installed)
+      : Option.isSome(first) && (yield* runsOurLauncher(first.value));
+    return {
+      supported: true,
+      installedPath: Option.isSome(installed) ? installed.value : null,
+      onPath,
+    };
   }).pipe(Effect.orElseSucceed(() => ({ supported: false, installedPath: null, onPath: false })));
 
   /** Writes the launcher if the app has not yet, e.g. when no local backend runs. */

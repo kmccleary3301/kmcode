@@ -1,5 +1,6 @@
 import type { ChatAttachment } from "@t3tools/contracts";
 import { assistantCitationsToPlainText } from "@t3tools/shared/assistantCitations";
+import { isAttachmentOnlyBootstrapPrompt } from "@t3tools/shared/composerContextReferences";
 
 export type ThreadTitleMessage = {
   readonly role: "user" | "assistant" | "system" | "reasoning";
@@ -24,7 +25,8 @@ export function limitTitleMessage(text: string, budget: number): string {
 
 /** Reserve space for user intent before adding assistant findings, in conversation order. */
 export function formatThreadTitleContext(messages: ReadonlyArray<ThreadTitleMessage>) {
-  const sections = messages.flatMap((message, index) => {
+  const sections = messages.flatMap((source, index) => {
+    const message = isAttachmentOnlyBootstrapPrompt(source.text) ? { ...source, text: "" } : source;
     // Thinking traces are working notes, not what the thread is about, and they
     // dwarf the answer they precede. Titling on them would be worse and costlier.
     if (

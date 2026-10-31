@@ -48,6 +48,7 @@ import * as Ref from "effect/Ref";
 import * as Schema from "effect/Schema";
 import * as Fiber from "effect/Fiber";
 import * as Stream from "effect/Stream";
+import * as Tracer from "effect/Tracer";
 import { McpSchema, McpServer } from "effect/ai";
 
 import { ClaudeProviderCapabilitiesV2 } from "../orchestration-v2/Adapters/ClaudeAdapterV2.ts";
@@ -145,7 +146,12 @@ const readDelegatedTaskStatusTranscript = Effect.fn("readDelegatedTaskStatusTran
     const text = yield* fs.readFileString(
       decodeURIComponent(delegatedTaskStatusTranscriptFile.pathname),
     );
-    return yield* decodeProviderReplayNdjson(text);
+    const transcript = yield* decodeProviderReplayNdjson(text);
+    // The recording closes the app-server while the parent turn is still open.
+    return {
+      ...transcript,
+      entries: transcript.entries.filter((entry) => entry.type !== "runtime_exit"),
+    };
   },
   Effect.provide(NodeServices.layer),
 );
@@ -1844,6 +1850,40 @@ describe("orchestrator MCP toolkit", () => {
             expect(followupTask.resultContextTransferId).not.toBe(
               delegatedStatus.resultContextTransferId,
             );
+
+            const parentlessTransferReadQueries: Array<string> = [];
+            const readThreadProjectionTracer = Tracer.make({
+              span(options) {
+                const span = new Tracer.NativeSpan(options);
+                const end = span.end.bind(span);
+                span.end = (endTime, exit) => {
+                  end(endTime, exit);
+                  const query = span.attributes.get("db.query.text");
+                  if (
+                    typeof query === "string" &&
+                    /SELECT[\s\S]*FROM orchestration_v2_projection_context_transfers/i.test(query)
+                  ) {
+                    parentlessTransferReadQueries.push(query);
+                  }
+                };
+                return span;
+              },
+            });
+            const parentlessRead = yield* invokeAs(
+              { ...invocation, thread: undefined },
+              "t3_thread_read",
+              { threadId: delegated.childThreadId, limit: 100 },
+            ).pipe(Effect.withTracer(readThreadProjectionTracer));
+            expect(parentlessRead.isError).not.toBe(true);
+            expect(parentlessTransferReadQueries).toHaveLength(0);
+            const parentBoundRead = yield* invoke("t3_thread_read", {
+              threadId: delegated.childThreadId,
+              limit: 100,
+            }).pipe(Effect.withTracer(readThreadProjectionTracer));
+            expect(parentBoundRead.isError).not.toBe(true);
+            expect(parentlessTransferReadQueries.length).toBeGreaterThan(0);
+            expect(parentBoundRead.structuredContent).toEqual(parentlessRead.structuredContent);
+
             const delegatedStatusAfterFollowupCall = yield* invoke("task_status", {
               taskId: delegated.taskId,
             });

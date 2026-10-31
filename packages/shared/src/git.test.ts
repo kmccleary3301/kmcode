@@ -135,6 +135,16 @@ describe("parseOriginUrlFromGitConfig", () => {
       ),
     ).toBe("https://github.com/acme/repo.git");
   });
+  it("reads a remote URL on its section header line", () => {
+    expect(
+      parseOriginUrlFromGitConfig(
+        '[remote "origin"] url = git@github.com:acme/repo.git\n[remote "upstream"] url = https://example.com/upstream.git',
+      ),
+    ).toBe("git@github.com:acme/repo.git");
+    expect(parseOriginUrlFromGitConfig("[remote.Origin]url=git@github.com:a/b.git\n")).toBe(
+      "git@github.com:a/b.git",
+    );
+  });
 
   it("falls back to the first remote when there is no origin", () => {
     const config = [

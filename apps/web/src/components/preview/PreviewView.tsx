@@ -16,7 +16,7 @@ import {
   PREVIEW_ZOOM_LEVELS,
   type PreviewAdjustInput,
 } from "@t3tools/contracts";
-import { normalizePreviewUrl } from "@t3tools/shared/preview";
+import { isPreviewUrlNormalizationError, normalizePreviewUrl } from "@t3tools/shared/preview";
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import {
@@ -189,7 +189,9 @@ export function PreviewView({
   const [serverControlledTabId, setServerControlledTabId] = useState<string | null>(null);
   const serverInputDisabled = isServerTab && serverControlledTabId !== runtimeTabId;
   const [serverFrameTabId, setServerFrameTabId] = useState<string | null>(null);
-  const desktopOverlay = tabId ? (previewState.desktopByTabId[tabId] ?? null) : null;
+  // A desktop page that mounted before its tab went headless leaves its stale state here.
+  const desktopOverlay =
+    tabId && !isServerTab ? (previewState.desktopByTabId[tabId] ?? null) : null;
   const navStatus = snapshot?.navStatus ?? { _tag: "Idle" as const };
   const url = navStatus._tag === "Idle" ? "" : navStatus.url;
   const loading = desktopOverlay?.loading ?? navStatus._tag === "Loading";
@@ -263,8 +265,16 @@ export function PreviewView({
         if (await navigateToResolvedUrl(normalized)) {
           recordVisitForThread(threadRef, normalized);
         }
-      } catch {
-        // Server-side `failed` event renders the unreachable view.
+      } catch (error) {
+        toastManager.add({
+          type: "error",
+          title: "Could not open this address",
+          description: isPreviewUrlNormalizationError(error)
+            ? "Enter an http or https URL."
+            : error instanceof Error
+              ? error.message
+              : "An error occurred.",
+        });
       }
     },
     [navigateToResolvedUrl, threadRef],
@@ -281,8 +291,16 @@ export function PreviewView({
         if (await navigateToResolvedUrl(resolved)) {
           recordVisitForThread(threadRef, next);
         }
-      } catch {
-        // Server-side `failed` event renders the unreachable view.
+      } catch (error) {
+        toastManager.add({
+          type: "error",
+          title: "Could not open this address",
+          description: isPreviewUrlNormalizationError(error)
+            ? "Enter an http or https URL."
+            : error instanceof Error
+              ? error.message
+              : "An error occurred.",
+        });
       }
     },
     [isServerTab, navigateToResolvedUrl, threadRef],

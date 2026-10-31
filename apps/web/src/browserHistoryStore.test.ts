@@ -56,6 +56,12 @@ describe("normalizeHistoryUrl", () => {
     expect(normalizeHistoryUrl("https://user:secret@example.com/")).toBe("https://example.com/");
   });
 
+  it("strips credentials without changing loopback preview URL components", () => {
+    expect(
+      normalizeHistoryUrl("http://user:secret@localhost:3773/__preview/path?tab=1#/route"),
+    ).toBe("http://localhost:3773/__preview/path?tab=1#/route");
+  });
+
   it("rejects non-http(s), unparseable, and oversized urls", () => {
     expect(normalizeHistoryUrl("ftp://example.com")).toBeNull();
     expect(normalizeHistoryUrl("")).toBeNull();

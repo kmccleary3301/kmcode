@@ -152,15 +152,26 @@ async function install(name, version, entry) {
   const hubFile = path.join(state, 'hub.json');
   const daemonFile = path.join(state, 'daemon.json');
   const agentFile = path.join(state, 'agent.json');
+  const stopAgent = () => {
+    const entry = read(agentFile)?.entryPath || path.join(root, 'tools', 'agent-device@' + agentVersion, 'node_modules', 'agent-device', 'bin', 'agent-device.mjs');
+    if (fs.existsSync(entry)) return run(process.execPath, [entry, 'daemon', 'stop', '--state-dir', state]).status === 0;
+    const pid = read(daemonFile)?.pid;
+    return Number.isSafeInteger(pid) && pid > 0 && !maintenanceAlive(pid);
+  };
   if (mode === 'stop' || mode === 'stop-agent') {
     const hub = read(hubFile);
     if (mode === 'stop' && hub && hub.owner === owner) {
       stopHub(hub);
       fs.rmSync(hubFile, { force: true });
     }
-    const entry = read(agentFile)?.entryPath || path.join(root, 'tools', 'agent-device@' + agentVersion, 'node_modules', 'agent-device', 'bin', 'agent-device.mjs');
-    if (fs.existsSync(entry)) run(process.execPath, [entry, 'daemon', 'stop', '--state-dir', state]);
+    stopAgent();
     return;
+  }
+  // Agent access can be disabled while the tunnel is down; retire any daemon
+  // left behind before starting without agent tools.
+  if (mode === 'start' && read(daemonFile)) {
+    if (!stopAgent()) throw Error('Could not stop the agent-device daemon in ' + state);
+    fs.rmSync(daemonFile, { force: true });
   }
   if (!ios && !android) throw Error(platforms.map(p => p.reason).join(' '));
   fs.mkdirSync(state, { recursive: true, mode: 0o700 });

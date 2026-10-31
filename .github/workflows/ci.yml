@@ -241,7 +241,9 @@ jobs:
   test_server:
     name: Test Server ${{ matrix.shard }}
     runs-on: ubuntu-24.04
-    timeout-minutes: 10
+    # The server test shards take 2-5 minutes; allow headroom for slow cache
+    # reads and runner stalls instead of timing out at the previous 10 minutes.
+    timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:

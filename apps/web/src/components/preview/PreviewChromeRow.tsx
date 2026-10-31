@@ -12,9 +12,12 @@ import {
   type KeyboardEvent,
   type ReactNode,
   useEffect,
+  useMemo,
   useRef,
   useState,
 } from "react";
+
+import { previewUrlWithoutCredentials } from "@t3tools/shared/preview";
 
 import { Button } from "~/components/ui/button";
 import { InputGroup, InputGroupAddon, InputGroupInput } from "~/components/ui/input-group";
@@ -93,7 +96,8 @@ export function PreviewChromeRow({
   leadingActions,
 }: Props) {
   const inputRef = useRef<HTMLInputElement | null>(null);
-  const [draft, setDraft] = useState(url);
+  const displayUrl = useMemo(() => previewUrlWithoutCredentials(url), [url]);
+  const [draft, setDraft] = useState(displayUrl);
   const [inputFocused, setInputFocused] = useState(false);
 
   useEffect(() => {
@@ -185,10 +189,10 @@ export function PreviewChromeRow({
               render={
                 <InputGroupInput
                   ref={inputRef}
-                  value={inputFocused ? draft : url}
+                  value={inputFocused ? draft : displayUrl}
                   onChange={(event) => setDraft(event.target.value)}
                   onFocus={() => {
-                    setDraft(url);
+                    setDraft(displayUrl);
                     setInputFocused(true);
                     queueMicrotask(() => inputRef.current?.select());
                   }}
@@ -199,7 +203,7 @@ export function PreviewChromeRow({
                     if (event.key === "Enter") submit(event);
                     if (event.key === "Escape") {
                       event.preventDefault();
-                      setDraft(url);
+                      setDraft(displayUrl);
                       inputRef.current?.blur();
                     }
                   }}

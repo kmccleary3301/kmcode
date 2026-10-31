@@ -11,14 +11,23 @@ import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Path from "effect/Path";
 import * as FileSystem from "effect/FileSystem";
+import * as PlatformError from "effect/PlatformError";
+import * as Ref from "effect/Ref";
+import * as Sink from "effect/Sink";
+import * as Stream from "effect/Stream";
 
 import * as LocalDeviceHost from "./LocalDeviceHost.ts";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as ChildProcessSpawner from "effect/process/ChildProcessSpawner";
-import { HttpClient } from "effect/http";
+import { HttpClient, HttpClientResponse } from "effect/http";
 import * as NetService from "@t3tools/shared/Net";
 import * as ServerConfig from "../config.ts";
 import * as ProcessRunner from "../processRunner.ts";
+import {
+  AGENT_DEVICE_VERSION,
+  agentDeviceStateDir,
+  DEVICE_HUB_VERSION,
+} from "./DeviceToolchain.ts";
 
 const diagnose = (
   files: ReadonlyArray<string>,
@@ -218,5 +227,150 @@ it.effect(
       expect(error.message).toContain("Install Node.js");
       yield* host.stop;
       expect(yield* fs.exists(`${baseDir}/tools`)).toBe(false);
+    }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+);
+
+it.effect(
+  "restarts an unhealthy agent daemon and keeps releasing sessions when hub restart fails",
+  () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const baseDir = yield* fs.makeTempDirectoryScoped({ prefix: "t3-device-agent-release-" });
+      for (const tool of [
+        {
+          name: "expo-device-hub",
+          version: DEVICE_HUB_VERSION,
+          entry: ["dist", "server", "cli.mjs"],
+        },
+        {
+          name: "agent-device",
+          version: AGENT_DEVICE_VERSION,
+          entry: ["bin", "agent-device.mjs"],
+        },
+      ] as const) {
+        const installDir = path.join(baseDir, "tools", tool.name, tool.version);
+        const entryPath = path.join(installDir, "node_modules", tool.name, ...tool.entry);
+        yield* fs.makeDirectory(path.dirname(entryPath), { recursive: true });
+        yield* fs.writeFileString(entryPath, "");
+        yield* fs.writeFileString(path.join(installDir, ".install-complete"), tool.version);
+      }
+      const stateDir = agentDeviceStateDir(path, path.join(baseDir, "userdata"));
+      yield* fs.makeDirectory(stateDir, { recursive: true });
+      yield* fs.writeFileString(
+        path.join(stateDir, "daemon.json"),
+        JSON.stringify({ httpPort: 12345, token: "test-token" }),
+      );
+
+      const hub = { running: true, spawnFails: false };
+      const daemonHealthy = yield* Ref.make(true);
+      let daemonStarts = 0;
+      let spawnCount = 0;
+      const spawner = ChildProcessSpawner.make(() => {
+        if (hub.spawnFails)
+          return Effect.fail(
+            PlatformError.systemError({
+              _tag: "NotFound",
+              module: "ChildProcess",
+              method: "spawn",
+              description: "Hub entry missing",
+            }),
+          );
+        const id = ++spawnCount;
+        return Effect.succeed(
+          ChildProcessSpawner.makeHandle({
+            pid: ChildProcessSpawner.ProcessId(123 + id),
+            stdout: Stream.empty,
+            stderr: Stream.empty,
+            all: Stream.empty,
+            exitCode: Effect.never,
+            isRunning: Effect.sync(() => (id === 1 ? hub.running : true)),
+            kill: () => Effect.void,
+            stdin: Sink.drain,
+            getInputFd: () => Sink.drain,
+            getOutputFd: () => Stream.empty,
+            unref: Effect.succeed(Effect.void),
+          }),
+        );
+      });
+      const processRunner: ProcessRunner.ProcessRunner["Service"] = {
+        run: (input) =>
+          Effect.gen(function* () {
+            if (input.args.includes("devices")) {
+              daemonStarts++;
+              yield* fs.writeFileString(
+                path.join(stateDir, "daemon.json"),
+                JSON.stringify({
+                  httpPort: 12345 + daemonStarts,
+                  token: `test-token-${daemonStarts}`,
+                }),
+              );
+            }
+            return {
+              stdout: "",
+              stderr: "",
+              code: ChildProcessSpawner.ExitCode(0),
+              timedOut: false,
+              stdoutTruncated: false,
+              stderrTruncated: false,
+              stdoutInvalidUtf8: false,
+              stderrInvalidUtf8: false,
+            };
+          }).pipe(Effect.orDie),
+      };
+      const releases: string[] = [];
+      const http = HttpClient.make((request) =>
+        request.url.endsWith("/rpc")
+          ? Effect.sync(() => {
+              releases.push(request.url);
+              return HttpClientResponse.fromWeb(request, Response.json({ result: { ok: true } }));
+            })
+          : request.url.endsWith("/health")
+            ? Ref.get(daemonHealthy).pipe(
+                Effect.map((healthy) =>
+                  HttpClientResponse.fromWeb(
+                    request,
+                    new Response("ok", { status: healthy ? 200 : 503 }),
+                  ),
+                ),
+              )
+            : Effect.succeed(HttpClientResponse.fromWeb(request, new Response("ok"))),
+      );
+      const host = yield* LocalDeviceHost.make().pipe(
+        Effect.provide(Layer.mergeAll(ServerConfig.layerTest(baseDir, baseDir), NetService.layer)),
+        Effect.provideService(HostProcessEnvironment, { ...process.env, HOME: baseDir }),
+        Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
+        Effect.provideService(ProcessRunner.ProcessRunner, processRunner),
+        Effect.provideService(HttpClient.HttpClient, http),
+      );
+      const first = yield* host.ensureAgentReady(() => Effect.void);
+      const cached = yield* host.ensureAgentReady(() => Effect.void);
+      expect(cached.agentDevice).toEqual(first.agentDevice);
+      expect(daemonStarts).toBe(0);
+      yield* Ref.set(daemonHealthy, false);
+      const restarted = yield* host.ensureAgentReady(() => Effect.void);
+      expect(daemonStarts).toBe(1);
+      expect(restarted.agentDevice).toMatchObject({
+        baseUrl: "http://127.0.0.1:12346",
+        token: "test-token-1",
+      });
+      hub.running = false;
+      hub.spawnFails = true;
+      const failed = yield* host.ensureReady(() => Effect.void).pipe(Effect.result);
+      expect(failed._tag).toBe("Failure");
+
+      const afterFailure = yield* host.current;
+      if (!afterFailure?.releaseAgentSession)
+        return yield* Effect.die("Agent session release is unavailable after hub restart failure");
+      yield* afterFailure.releaseAgentSession("fixture-session", "fixture-device");
+      expect(releases).toEqual(["http://127.0.0.1:12346/rpc"]);
+
+      hub.spawnFails = false;
+      yield* host.ensureReady(() => Effect.void);
+      const afterRestart = yield* host.current;
+      if (!afterRestart?.releaseAgentSession)
+        return yield* Effect.die("Agent session release is unavailable after hub restart");
+      yield* afterRestart.releaseAgentSession("fixture-session", "fixture-device");
+      expect(releases).toEqual(["http://127.0.0.1:12346/rpc", "http://127.0.0.1:12346/rpc"]);
     }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
 );

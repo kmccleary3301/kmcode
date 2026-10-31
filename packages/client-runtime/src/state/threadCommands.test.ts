@@ -22,6 +22,7 @@ import { Atom, AtomRegistry } from "effect/reactivity";
 
 import * as EnvironmentRegistry from "../connection/registry.ts";
 import * as EnvironmentSupervisor from "../connection/supervisor.ts";
+import * as ThreadHistoryController from "./threadHistoryController.ts";
 import type { RpcSession } from "../rpc/session.ts";
 import { createThreadEnvironmentAtoms } from "./threadCommands.ts";
 
@@ -85,6 +86,7 @@ const makeHarness = Effect.fn("TestThreadCommands.makeHarness")(function* () {
     command: OrchestrationV2Command;
     reply: Deferred.Deferred<{ sequence: number }, Error>;
   }>();
+  const historyCalls = yield* Queue.unbounded<Deferred.Deferred<void>>();
   const supervisor = EnvironmentSupervisor.EnvironmentSupervisor.of({
     target: { environmentId: ENVIRONMENT_ID },
     session: yield* SubscriptionRef.make(
@@ -113,6 +115,17 @@ const makeHarness = Effect.fn("TestThreadCommands.makeHarness")(function* () {
           digest: (_algorithm, data) => Effect.succeed(data),
         }),
       ),
+      Layer.succeed(ThreadHistoryController.ThreadHistoryController, {
+        register: () => Effect.die("unused"),
+        unregister: () => Effect.void,
+        loadEarlier: () =>
+          Effect.gen(function* () {
+            const release = yield* Deferred.make<void>();
+            yield* Queue.offer(historyCalls, release);
+            yield* Deferred.await(release);
+            return { _tag: "loaded" as const };
+          }),
+      }),
     ),
   );
   const snapshotAtom = Atom.family((_environmentId: EnvironmentId) => Atom.make(SNAPSHOT));
@@ -121,7 +134,7 @@ const makeHarness = Effect.fn("TestThreadCommands.makeHarness")(function* () {
   yield* Effect.addFinalizer(() => Effect.sync(() => registry.dispose()));
   const visibleAtom = commands.snapshotAtom(ENVIRONMENT_ID);
   registry.mount(visibleAtom);
-  return { registry, commands, snapshotAtom, visibleAtom, requests };
+  return { registry, commands, snapshotAtom, visibleAtom, requests, historyCalls };
 });
 
 describe("remote thread lifecycle commands", () => {
@@ -373,5 +386,27 @@ describe("remote thread lifecycle commands", () => {
         expect(h.registry.get(h.visibleAtom)?.threads[0]?.pendingRuntimeRequest).toBeNull();
         expect(h.registry.get(h.snapshotAtom(ENVIRONMENT_ID))).toBe(stale);
       }),
+  );
+  it.effect("keeps history loads independent from thread command serialization", () =>
+    Effect.gen(function* () {
+      const h = yield* makeHarness();
+      const history = h.commands.loadEarlierHistory.run(h.registry, {
+        environmentId: ENVIRONMENT_ID,
+        input: { threadId: THREAD_ID },
+      });
+      const releaseHistory = yield* Queue.take(h.historyCalls);
+      const settle = h.commands.settle.run(h.registry, {
+        environmentId: ENVIRONMENT_ID,
+        input: { threadId: THREAD_ID },
+      });
+
+      const request = yield* Queue.take(h.requests);
+      expect(request.command.type).toBe("thread.settle");
+      yield* Deferred.succeed(request.reply, { sequence: 2 });
+      expect((yield* Effect.promise(() => settle))._tag).toBe("Success");
+
+      yield* Deferred.succeed(releaseHistory, undefined);
+      expect((yield* Effect.promise(() => history))._tag).toBe("Success");
+    }),
   );
 });

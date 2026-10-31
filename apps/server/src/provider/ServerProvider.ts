@@ -1,4 +1,8 @@
-import type { ProviderUsageLimitsUpdate, ServerProvider } from "@t3tools/contracts";
+import type {
+  ProviderUsageLimitsUpdate,
+  ServerProvider,
+  ServerSettingsError,
+} from "@t3tools/contracts";
 import type * as Effect from "effect/Effect";
 import type * as Stream from "effect/Stream";
 import type { ProviderMaintenanceCapabilities } from "./providerMaintenance.ts";
@@ -13,6 +17,8 @@ export interface ServerProviderShape {
     readonly fresh?: boolean;
   }) => Effect.Effect<ProviderMaintenanceCapabilities>;
   readonly getSnapshot: Effect.Effect<ServerProvider>;
+  /** Refresh account usage without resolving or refreshing maintenance data. */
+  readonly refreshUsage?: Effect.Effect<void, ServerSettingsError>;
   readonly refresh: Effect.Effect<ServerProvider>;
   readonly streamChanges: Stream.Stream<ServerProvider>;
   /**

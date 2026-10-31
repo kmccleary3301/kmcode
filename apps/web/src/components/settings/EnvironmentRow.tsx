@@ -8,6 +8,7 @@ import type { DesktopSshEnvironmentTarget, EnvironmentMachineKind } from "@t3too
 import * as Option from "effect/Option";
 import type { ReactNode } from "react";
 
+import { usePreparedConnection } from "~/state/session";
 import { cn } from "~/lib/utils";
 import type { EnvironmentPresentation } from "~/state/environments";
 import { isDesktopLocalConnectionTarget } from "~/connection/desktopLocal";
@@ -51,6 +52,24 @@ export function environmentTransportLabel(
     return `SSH ${formatDesktopSshTarget(entry.profile.value.target)}`;
   }
   return environment.displayUrl ?? "Remote link";
+}
+
+export function useEnvironmentTransportLabel(environment: EnvironmentPresentation): string {
+  const prepared = usePreparedConnection(environment.environmentId);
+  return environmentTransportLabel(
+    environment,
+    environment.connection.phase === "connected" && prepared._tag === "Some"
+      ? prepared.value.target
+      : null,
+  );
+}
+
+export function EnvironmentTransportLabel({
+  environment,
+}: {
+  readonly environment: EnvironmentPresentation;
+}) {
+  return useEnvironmentTransportLabel(environment);
 }
 
 /**

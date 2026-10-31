@@ -13,7 +13,7 @@ import { MorphIcon } from "~/components/MorphIcon";
 import { ScrollArea } from "~/components/ui/scroll-area";
 import { toastManager } from "~/components/ui/toast";
 import { useCopyToClipboard } from "~/hooks/useCopyToClipboard";
-import { useClientSettings, useUpdateClientSettings } from "~/hooks/useSettings";
+import { useClientSettings } from "~/hooks/useSettings";
 import { cn } from "~/lib/utils";
 
 import { AudioPreview } from "./AudioPreview";
@@ -28,12 +28,13 @@ import {
 } from "./fileSurfaceChrome";
 
 const SourcePreview = lazy(() => import("./ReadOnlySourcePreview"));
+const LargeTextViewer = lazy(() => import("./LargeTextViewer"));
 
 /** Signed asset URLs live for an hour; treat anything older than this as worth re-minting. */
 const STALE_URL_MS = 5 * 60_000;
 
 /** Highlighted read-only source, loaded on demand so message rendering never waits on the highlighter. */
-export function ReadOnlySourcePreview(props: { name: string; text: string }) {
+export function ReadOnlySourcePreview(props: { name: string; text: string; wordWrap?: boolean }) {
   return (
     <Suspense fallback={<FileSurfaceLoading className="p-4" />}>
       <SourcePreview {...props} />
@@ -104,6 +105,7 @@ export function AttachmentFilePreview(props: {
   // Reading source is a separate failure from loading the file: a rendered HTML page can be
   // fine while its bytes are not UTF-8, and switching back to the page must not stay stuck.
   const [contentError, setContentError] = useState<string | null>(null);
+  const copyContents = useRef<(() => Promise<string>) | null>(null);
   const authorizedAt = useRef(0);
   useEffect(() => {
     if (!props.file) return;
@@ -136,9 +138,13 @@ export function AttachmentFilePreview(props: {
     // oxlint-disable-next-line react/exhaustive-effect-dependencies -- Retry must reauthorize the remote file.
   }, [props.file, refresh, revision]);
   const url = props.file ? localUrl : remoteUrl;
+  const streamsText =
+    kind === "text" &&
+    (props.sizeBytes > FILE_TEXT_PREVIEW_MAX_BYTES ||
+      (props.sizeBytes === 0 && (!resource || resource._tag === "attachment")));
   const needsText = kind === "text" || kind === "markdown" || (kind === "html" && !rendered);
   useEffect(() => {
-    if (!needsText || !url) return;
+    if (!needsText || streamsText || !url) return;
     const controller = new AbortController();
     // oxlint-disable-next-line react/set-state-in-effect -- A new external resource must clear the previous response before loading.
     setContent(null);
@@ -174,16 +180,17 @@ export function AttachmentFilePreview(props: {
         setContentError(cause instanceof Error ? cause.message : "Could not load this file.");
     });
     return () => controller.abort();
-  }, [url, needsText, revision, props.sizeBytes, props.file, refresh]);
+  }, [url, needsText, streamsText, revision, props.sizeBytes, props.file, refresh]);
   const failure = error ?? (needsText ? contentError : null);
-  const wordWrap = useClientSettings((settings) => settings.wordWrap);
-  const updateClientSettings = useUpdateClientSettings();
+  const defaultWordWrap = useClientSettings((settings) => settings.wordWrap);
+  const [wordWrapOverride, setWordWrapOverride] = useState<boolean | null>(null);
+  const wordWrap = wordWrapOverride ?? defaultWordWrap;
   // Only the raw-text body honours word wrap. A rendered table or Markdown lays itself out,
   // so offering the toggle there would be a control that visibly does nothing.
   const showsRawText =
     failure === null &&
     needsText &&
-    content !== null &&
+    (content !== null || streamsText) &&
     !(delimiter && rendered) &&
     !(kind === "markdown" && rendered);
 
@@ -232,6 +239,19 @@ export function AttachmentFilePreview(props: {
         setRevision((value) => value + 1);
       }}
     />
+  ) : streamsText && url ? (
+    <Suspense fallback={<FileSurfaceLoading />}>
+      <LargeTextViewer
+        key={`${url}:${rendered}:${revision}`}
+        name={props.name}
+        src={url}
+        sizeBytes={props.sizeBytes}
+        onRetry={() => setRevision((value) => value + 1)}
+        delimiter={rendered ? delimiter : null}
+        copyContents={copyContents}
+        wordWrap={wordWrap}
+      />
+    </Suspense>
   ) : !url || (needsText && !content) ? (
     <FileSurfaceLoading />
   ) : needsText && content ? (
@@ -242,7 +262,7 @@ export function AttachmentFilePreview(props: {
         <ChatMarkdown text={content.text} cwd={undefined} className="mx-auto max-w-4xl px-6 py-5" />
       </ScrollArea>
     ) : (
-      <ReadOnlySourcePreview name={props.name} text={content.text} />
+      <ReadOnlySourcePreview name={props.name} text={content.text} wordWrap={wordWrap} />
     )
   ) : kind === "pdf" || kind === "html" ? (
     <BrowserDocumentFrame
@@ -316,15 +336,38 @@ export function AttachmentFilePreview(props: {
           <FileSurfaceAction
             label={wordWrap ? "Disable word wrap" : "Enable word wrap"}
             pressed={wordWrap}
-            onPress={() => updateClientSettings({ wordWrap: !wordWrap })}
+            onPress={() => setWordWrapOverride(!wordWrap)}
           >
             <WrapTextIcon className="size-3.5" />
           </FileSurfaceAction>
         ) : null}
-        {content ? (
+        {content || streamsText ? (
           <FileSurfaceAction
-            label={isCopied ? "Copied" : content.truncated ? "Copy preview" : "Copy contents"}
-            onPress={() => copyToClipboard(content.text, undefined)}
+            label={isCopied ? "Copied" : content?.truncated ? "Copy preview" : "Copy contents"}
+            onPress={() => {
+              if (content) {
+                void copyToClipboard(content.text, undefined);
+                return;
+              }
+              const copy = copyContents.current;
+              if (!copy) {
+                toastManager.add({
+                  type: "error",
+                  title: "Could not copy file",
+                  description: "Wait for the file to finish loading before copying.",
+                });
+                return;
+              }
+              void copy()
+                .then((text) => copyToClipboard(text, undefined))
+                .catch((cause: unknown) =>
+                  toastManager.add({
+                    type: "error",
+                    title: "Could not copy file",
+                    description: cause instanceof Error ? cause.message : "Try again.",
+                  }),
+                );
+            }}
           >
             <MorphIcon className="size-3.5" icon={isCopied ? Check : Copy} />
           </FileSurfaceAction>

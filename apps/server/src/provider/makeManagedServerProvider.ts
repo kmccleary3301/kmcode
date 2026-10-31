@@ -45,6 +45,7 @@ export const makeManagedServerProvider = Effect.fn("makeManagedServerProvider")(
   readonly haveSettingsChanged: (previous: Settings, next: Settings) => boolean;
   readonly initialSnapshot: (settings: Settings) => Effect.Effect<ServerProvider>;
   readonly checkProvider: Effect.Effect<ServerProvider, ServerSettingsError>;
+  readonly invalidateUsageCache?: Effect.Effect<void>;
   readonly enrichSnapshot?: (input: {
     readonly settings: Settings;
     readonly snapshot: ServerProvider;
@@ -62,6 +63,7 @@ export const makeManagedServerProvider = Effect.fn("makeManagedServerProvider")(
   const backgroundPolicy = yield* BackgroundPolicy.BackgroundPolicy;
   const serverSettings = yield* ServerSettings.ServerSettingsService;
   const refreshSemaphore = yield* Semaphore.make(1);
+  const usageRefreshQueued = yield* Ref.make<symbol | null>(null);
   const changesPubSub = yield* Effect.acquireRelease(
     PubSub.unbounded<ServerProvider>(),
     PubSub.shutdown,
@@ -79,7 +81,7 @@ export const makeManagedServerProvider = Effect.fn("makeManagedServerProvider")(
   const publishEnrichedSnapshot = Effect.fn("publishEnrichedSnapshot")(function* (
     generation: number,
     nextSnapshot: ServerProvider,
-  ) {
+  ): Effect.fn.Return<void> {
     const snapshotToPublish = yield* Ref.modify(snapshotStateRef, (state) => {
       if (state.enrichmentGeneration !== generation) {
         return [null, state] as const;
@@ -102,7 +104,7 @@ export const makeManagedServerProvider = Effect.fn("makeManagedServerProvider")(
     settings: Settings,
     snapshot: ServerProvider,
     generation: number,
-  ) {
+  ): Effect.fn.Return<void> {
     const previousFiber = yield* Ref.getAndSet(enrichmentFiberRef, null);
     if (previousFiber) {
       yield* Fiber.interrupt(previousFiber).pipe(Effect.ignore);
@@ -127,7 +129,7 @@ export const makeManagedServerProvider = Effect.fn("makeManagedServerProvider")(
   const applySnapshotBase = Effect.fn("applySnapshot")(function* (
     nextSettings: Settings,
     options?: { readonly forceRefresh?: boolean },
-  ) {
+  ): Effect.fn.Return<ServerProvider, ServerSettingsError> {
     const forceRefresh = options?.forceRefresh === true;
     const previousSettings = yield* Ref.get(settingsRef);
     if (!forceRefresh && !input.haveSettingsChanged(previousSettings, nextSettings)) {
@@ -175,7 +177,10 @@ export const makeManagedServerProvider = Effect.fn("makeManagedServerProvider")(
     yield* restartSnapshotEnrichment(nextSettings, nextSnapshot, nextGeneration);
     return nextSnapshot;
   });
-  const applySnapshot = (nextSettings: Settings, options?: { readonly forceRefresh?: boolean }) =>
+  const applySnapshot = (
+    nextSettings: Settings,
+    options?: { readonly forceRefresh?: boolean },
+  ): Effect.Effect<ServerProvider, ServerSettingsError> =>
     refreshSemaphore.withPermits(1)(applySnapshotBase(nextSettings, options));
 
   /**
@@ -204,10 +209,48 @@ export const makeManagedServerProvider = Effect.fn("makeManagedServerProvider")(
       }
     });
 
-  const refreshSnapshot = Effect.fn("refreshSnapshot")(function* () {
+  const refreshSnapshot = Effect.fn("refreshSnapshot")(function* (): Effect.fn.Return<
+    ServerProvider,
+    ServerSettingsError
+  > {
     const nextSettings = yield* input.getSettings;
     return yield* applySnapshot(nextSettings, { forceRefresh: true });
   });
+  const refreshUsage = Effect.fn("ManagedServerProvider.refreshUsage")(
+    function* (): Effect.fn.Return<void, ServerSettingsError> {
+      const { snapshot } = yield* Ref.get(snapshotStateRef);
+      if (
+        !snapshot.enabled ||
+        !snapshot.usageLimits ||
+        snapshot.usageLimits.unavailable?.reason === "unsupported"
+      )
+        return;
+      // A refresh already in flight may have read cached usage, so one refresh waits behind it.
+      const claim = Symbol();
+      const release = Ref.update(usageRefreshQueued, (queued) =>
+        queued === claim ? null : queued,
+      );
+      yield* Effect.uninterruptibleMask((restore) =>
+        Ref.modify(usageRefreshQueued, (queued) => [queued !== null, queued ?? claim]).pipe(
+          Effect.flatMap((held) =>
+            held
+              ? Effect.void
+              : restore(
+                  refreshSemaphore.withPermits(1)(
+                    release.pipe(
+                      Effect.andThen(input.invalidateUsageCache ?? Effect.void),
+                      Effect.andThen(input.getSettings),
+                      Effect.flatMap((settings) =>
+                        applySnapshotBase(settings, { forceRefresh: true }),
+                      ),
+                    ),
+                  ),
+                ).pipe(Effect.onInterrupt(() => release)),
+          ),
+        ),
+      );
+    },
+  );
 
   const hasProviderStatusDemand = Effect.gen(function* () {
     const state = yield* Ref.get(snapshotStateRef);
@@ -246,7 +289,7 @@ export const makeManagedServerProvider = Effect.fn("makeManagedServerProvider")(
   }
 
   yield* Stream.runForEach(input.streamSettings, (nextSettings) =>
-    Effect.asVoid(applySnapshot(nextSettings)),
+    Effect.asVoid(applySnapshot(nextSettings)).pipe(Effect.ignoreCause({ log: true })),
   ).pipe(Effect.forkScoped);
 
   yield* Effect.forever(
@@ -286,7 +329,10 @@ export const makeManagedServerProvider = Effect.fn("makeManagedServerProvider")(
   return {
     resolveMaintenance: input.resolveMaintenance,
     getSnapshot: Ref.get(snapshotStateRef).pipe(Effect.map((state) => state.snapshot)),
-    refresh: refreshSnapshot().pipe(Effect.tapError(Effect.logError), Effect.orDie),
+    refresh: input
+      .resolveMaintenance({ fresh: true })
+      .pipe(Effect.andThen(refreshSnapshot), Effect.tapError(Effect.logError), Effect.orDie),
+    refreshUsage: refreshUsage(),
     applyUsageLimits,
     get streamChanges() {
       return Stream.fromPubSub(changesPubSub);

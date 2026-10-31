@@ -122,6 +122,18 @@ export const make = Effect.gen(function* () {
           emit({ type: "cdp", ...tab.key, message });
         }
       },
+      // An oversized event cannot be dropped and then replayed when the server reconnects.
+      () => {
+        if (tab.relay !== relay || tabs.get(keyOf(tab.key)) !== tab) return;
+        void debuggee
+          .sendCommand("Target.setAutoAttach", {
+            autoAttach: false,
+            waitForDebuggerOnStart: false,
+            flatten: true,
+          })
+          .catch(() => {});
+        detach(tab.key);
+      },
     );
     tab.relay = relay;
     return relay;

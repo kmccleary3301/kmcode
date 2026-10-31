@@ -20,6 +20,8 @@ import {
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
+import * as TestClock from "effect/testing/TestClock";
+import * as Result from "effect/Result";
 import * as SqlClient from "effect/sql/SqlClient";
 import * as SqlitePersistence from "../persistence/Sqlite.ts";
 import { CodexProviderCapabilitiesV2 } from "./Adapters/CodexAdapterV2.ts";
@@ -49,6 +51,140 @@ const layerTest = Layer.mergeAll(
     ProviderAdapterRegistry.layerFromAdapters([adapter]),
     { databaseLayer: layerDatabase, runEffectWorker: false },
   ),
+);
+
+it.effect("records approval feedback on its request without dispatching a parent turn", () =>
+  Effect.gen(function* () {
+    const orchestrator = yield* Orchestrator.OrchestratorV2;
+    const projections = yield* ProjectionStore.ProjectionStoreV2;
+    const outbox = yield* EffectOutbox.EffectOutboxV2;
+    const threadId = ThreadId.make("thread:approval-feedback");
+    const sessionId = ProviderSessionId.make("session:approval-feedback");
+    const now = yield* DateTime.now;
+    yield* orchestrator.dispatch({
+      type: "thread.create",
+      commandId: CommandId.make("create-approval-feedback"),
+      threadId,
+      projectId: ProjectId.make("project:approval-feedback"),
+      title: "Parent",
+      modelSelection,
+      runtimeMode: "full-access",
+      interactionMode: "default",
+      branch: null,
+      worktreePath: null,
+      createdBy: "user",
+      creationSource: "web",
+    });
+    yield* projections.apply({
+      id: EventId.make("session:approval-feedback"),
+      type: "provider-session.attached",
+      threadId,
+      occurredAt: now,
+      payload: {
+        id: sessionId,
+        driver: adapter.driver,
+        providerInstanceId: instanceId,
+        status: "ready",
+        cwd: "/repo",
+        model: modelSelection.model,
+        capabilities: CodexProviderCapabilitiesV2,
+        createdAt: now,
+        updatedAt: now,
+        lastError: null,
+      },
+    });
+    for (const name of ["child", "other"]) {
+      yield* projections.apply({
+        id: EventId.make(`request:${name}`),
+        type: "runtime-request.updated",
+        threadId,
+        occurredAt: now,
+        payload: {
+          id: RuntimeRequestId.make(name),
+          nodeId: NodeId.make(`node:${name}`),
+          providerTurnId: null,
+          nativeRequestRef: null,
+          kind: "command",
+          status: "pending",
+          responseCapability: {
+            type: "live",
+            providerSessionId: sessionId,
+            supportsFeedback: name === "child",
+          },
+          createdAt: now,
+          resolvedAt: null,
+        },
+      });
+    }
+    const commandId = CommandId.make("respond-approval-feedback");
+    const feedback = "Run it in a safer manner.";
+    for (const [index, invalid] of [
+      { requestId: RuntimeRequestId.make("other"), decision: "decline" as const, feedback },
+      { requestId: RuntimeRequestId.make("child"), decision: "accept" as const, feedback },
+      { requestId: RuntimeRequestId.make("child"), decision: "decline" as const, feedback: "  " },
+    ].entries()) {
+      const rejectedId = CommandId.make(`invalid-feedback:${index}`);
+      const rejected = yield* orchestrator
+        .dispatch({
+          type: "runtime-request.respond",
+          commandId: rejectedId,
+          threadId,
+          ...invalid,
+        })
+        .pipe(Effect.result);
+      assert.isTrue(Result.isFailure(rejected));
+      assert.deepEqual(yield* outbox.listByCommandId(rejectedId), []);
+    }
+    yield* orchestrator.dispatch({
+      type: "runtime-request.respond",
+      commandId,
+      threadId,
+      requestId: RuntimeRequestId.make("child"),
+      decision: "decline",
+      feedback,
+    });
+    const projection = yield* projections.getThreadProjection(threadId);
+    assert.equal(
+      projection.runtimeRequests.find((request) => request.id === "child")?.feedback,
+      feedback,
+    );
+    assert.equal(
+      projection.runtimeRequests.find((request) => request.id === "other")?.status,
+      "pending",
+    );
+    assert.equal(projection.messages.at(-1)?.text, feedback);
+    const feedbackMessageId = MessageId.make("approval-feedback:child");
+    assert.ok(
+      projection.visibleTurnItems.some(
+        ({ item }) =>
+          item.type === "user_message" &&
+          item.messageId === feedbackMessageId &&
+          item.text === feedback,
+      ),
+    );
+    const history = yield* projections.getTimelinePage(threadId, { limit: 20, view: "messages" });
+    assert.ok(
+      history.items.some(
+        ({ item }) =>
+          item.type === "user_message" &&
+          item.messageId === feedbackMessageId &&
+          item.text === feedback,
+      ),
+    );
+    assert.equal(projection.runs.length, 0);
+    assert.deepEqual(
+      (yield* outbox.listByCommandId(commandId)).map((effect) => effect.request),
+      [
+        {
+          type: "runtime-request.respond",
+          providerSessionId: sessionId,
+          requestId: RuntimeRequestId.make("child"),
+          decision: "decline",
+          feedback,
+        },
+      ],
+    );
+  }).pipe(Effect.provide(layerTest)),
 );
 
 it.effect(
@@ -280,6 +416,120 @@ it.effect(
       });
       assert.isNotNull((yield* projections.getThread(threadId)).deletedAt);
     }).pipe(Effect.provide(layerTest)),
+);
+const completeAndSnoozeThread = Effect.fn("test.completeAndSnoozeThread")(function* (
+  name: string,
+  snoozeMinutes: number,
+) {
+  const orchestrator = yield* Orchestrator.OrchestratorV2;
+  const projections = yield* ProjectionStore.ProjectionStoreV2;
+  const threadId = ThreadId.make(`thread:${name}`);
+  yield* orchestrator.dispatch({
+    type: "thread.create",
+    commandId: CommandId.make(`create-${name}`),
+    threadId,
+    projectId: ProjectId.make(`project:${name}`),
+    title: "Snoozed completion",
+    modelSelection,
+    runtimeMode: "full-access",
+    interactionMode: "default",
+    branch: null,
+    worktreePath: null,
+    createdBy: "user",
+    creationSource: "web",
+  });
+  yield* orchestrator.dispatch({
+    type: "message.dispatch",
+    commandId: CommandId.make(`dispatch-${name}`),
+    threadId,
+    messageId: MessageId.make(`dispatch-${name}`),
+    text: "Run in the background",
+    attachments: [],
+    dispatchMode: { type: "defer_start" },
+    createdBy: "agent",
+    creationSource: "mcp",
+  });
+  yield* orchestrator.dispatch({
+    type: "run.interrupt",
+    commandId: CommandId.make(`interrupt-${name}`),
+    threadId,
+    runId: (yield* projections.getThreadProjection(threadId)).runs[0]!.id,
+  });
+  const completedAt = (yield* projections.getThreadProjection(threadId)).runs.at(-1)?.completedAt;
+  assert.ok(completedAt);
+  yield* TestClock.adjust("1 second");
+  const snoozedUntil = DateTime.add(yield* DateTime.now, { minutes: snoozeMinutes });
+  yield* orchestrator.dispatch({
+    type: "thread.snooze",
+    commandId: CommandId.make(`snooze-${name}`),
+    threadId,
+    snoozedUntil: DateTime.formatIso(snoozedUntil),
+  });
+  return { threadId, completedAt, snoozedUntil };
+});
+
+it.effect("mark unread retires an expired snooze so a dismissed wake stays dismissed", () =>
+  Effect.gen(function* () {
+    const orchestrator = yield* Orchestrator.OrchestratorV2;
+    const projections = yield* ProjectionStore.ProjectionStoreV2;
+    const { threadId, completedAt, snoozedUntil } = yield* completeAndSnoozeThread(
+      "mark-unread-expired-snooze",
+      1,
+    );
+    yield* TestClock.adjust("2 minutes");
+    yield* orchestrator.dispatch({
+      type: "thread.visit",
+      commandId: CommandId.make("dismiss-woke"),
+      threadId,
+      visitedAt: DateTime.formatIso(snoozedUntil),
+    });
+    const dismissed = yield* projections.getThread(threadId);
+    assert.deepEqual(dismissed.lastVisitedAt, snoozedUntil);
+
+    yield* orchestrator.dispatch({
+      type: "thread.mark-unread",
+      commandId: CommandId.make("mark-unread-expired-snooze"),
+      threadId,
+    });
+    const markedUnread = yield* projections.getThread(threadId);
+    assert.deepEqual(
+      markedUnread.lastVisitedAt,
+      DateTime.subtract(completedAt, { milliseconds: 1 }),
+    );
+    assert.isNull(markedUnread.snoozedUntil);
+    assert.isNull(markedUnread.snoozedAt);
+    assert.deepEqual(markedUnread.lastSnoozeWakeAt, snoozedUntil);
+  }).pipe(Effect.provide(layerTest)),
+);
+
+it.effect("mark unread leaves a future snooze untouched", () =>
+  Effect.gen(function* () {
+    const orchestrator = yield* Orchestrator.OrchestratorV2;
+    const projections = yield* ProjectionStore.ProjectionStoreV2;
+    const { threadId, completedAt } = yield* completeAndSnoozeThread(
+      "mark-unread-future-snooze",
+      60,
+    );
+    yield* TestClock.adjust("1 minute");
+    yield* orchestrator.dispatch({
+      type: "thread.visit",
+      commandId: CommandId.make("visit-snoozed"),
+      threadId,
+      visitedAt: DateTime.formatIso(yield* DateTime.now),
+    });
+    const visited = yield* projections.getThread(threadId);
+    assert.isNotNull(visited.snoozedUntil);
+
+    yield* orchestrator.dispatch({
+      type: "thread.mark-unread",
+      commandId: CommandId.make("mark-unread-future-snooze"),
+      threadId,
+    });
+    assert.deepEqual(yield* projections.getThread(threadId), {
+      ...visited,
+      lastVisitedAt: DateTime.subtract(completedAt, { milliseconds: 1 }),
+    });
+  }).pipe(Effect.provide(layerTest)),
 );
 
 it.effect("implements a proposed plan that the command projection leaves out", () =>
@@ -735,8 +985,7 @@ it.effect("finalizes a follow-up continuation without replacing the original res
     assert.isTrue(
       afterOriginalCompletion.contextTransfers.some(
         (transfer) =>
-          transfer.type === "subagent_result" &&
-          transfer.sourcePoint.runId === originalChildRun.id,
+          transfer.type === "subagent_result" && transfer.sourcePoint.runId === originalChildRun.id,
       ),
     );
 
@@ -927,9 +1176,7 @@ it.effect("finalizes a follow-up continuation without replacing the original res
     assert.equal(backgroundTask?.completionWake, "always");
     const childAfterBackgroundFollowup = yield* projections.getThreadProjection(childThreadId);
     assert.isTrue(
-      childAfterBackgroundFollowup.runs.some(
-        (run) => run.delegatedTaskId === backgroundTask?.id,
-      ),
+      childAfterBackgroundFollowup.runs.some((run) => run.delegatedTaskId === backgroundTask?.id),
     );
   }).pipe(Effect.provide(layerTest)),
 );

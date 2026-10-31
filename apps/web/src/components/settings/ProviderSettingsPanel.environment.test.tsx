@@ -175,6 +175,7 @@ function provider(): ServerProvider {
 function renderPanel(options?: {
   readonly readOnly?: boolean;
   readonly targetInstanceId?: ProviderInstanceId;
+  readonly permissionMessage?: string;
 }): ReactElement<Record<string, unknown>> {
   hooks.beginRender();
   return EnvironmentProviderSettings({
@@ -184,6 +185,9 @@ function renderPanel(options?: {
     ...(options?.targetInstanceId === undefined
       ? {}
       : { targetInstanceId: options.targetInstanceId }),
+    ...(options?.permissionMessage === undefined
+      ? {}
+      : { permissionMessage: options.permissionMessage }),
   }) as ReactElement<Record<string, unknown>>;
 }
 
@@ -410,6 +414,16 @@ describe("EnvironmentProviderSettings routing", () => {
 
     expect(visitElements(panel, isRefreshButton)).not.toBeNull();
     expect(visitElements(panel, isAddProviderButton)).toBeNull();
+  });
+  it("explains when session permissions could not be verified", () => {
+    atoms.providers = [provider()];
+    const message = "Could not verify your permissions. Retrying automatically.";
+    const panel = renderPanel({ readOnly: true, permissionMessage: message });
+    const notice = visitElements(
+      panel,
+      (element) => element.props.title === "Session permissions unavailable",
+    );
+    expect(notice?.props.description).toBe(message);
   });
 
   it("keeps the editable layout interactive when not read only", () => {
@@ -654,5 +668,50 @@ describe("EnvironmentProviderSettings routing", () => {
       environmentId,
       input: { instanceId, elicitationId: action.elicitationId },
     });
+  });
+
+  it("persists a switch from managed Codex to the existing CLI", async () => {
+    const codex = ProviderDriverKind.make("codex");
+    settingsState.value = {
+      ...DEFAULT_UNIFIED_SETTINGS,
+      providerInstances: {
+        [codexId]: {
+          driver: codex,
+          enabled: true,
+          config: { enabled: true, setupMode: "managed" },
+        },
+      },
+    };
+    atoms.providers = [
+      {
+        ...provider(),
+        auth: { status: "unauthenticated" },
+        setup: { canAuthenticate: true, canInstall: true },
+      },
+    ];
+
+    const panel = renderPanel({ targetInstanceId: codexId });
+    const setup = visitElements(
+      panel,
+      (element) =>
+        element.props.mode === "managed" && typeof element.props.onModeChange === "function",
+    );
+    expect(setup).not.toBeNull();
+    if (!setup) throw new Error("Managed Codex setup was not rendered.");
+    (setup.props.onModeChange as (mode: "managed" | "existing") => void)("existing");
+    await flushPromises();
+
+    expect(settingsState.mutateProviderInstance).toHaveBeenCalledWith(
+      {
+        operation: "upsert",
+        instanceId: codexId,
+        instance: {
+          driver: codex,
+          enabled: true,
+          config: { enabled: true, setupMode: "existing" },
+        },
+      },
+      expect.any(Object),
+    );
   });
 });

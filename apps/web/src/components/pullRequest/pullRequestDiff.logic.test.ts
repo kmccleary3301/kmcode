@@ -2,6 +2,7 @@ import type { FileDiffMetadata } from "@pierre/diffs";
 import { describe, expect, it } from "vite-plus/test";
 
 import {
+  getFileViewedRange,
   isFileDiffCollapsed,
   isLineInFileDiff,
   toggleFileDiffFoldForViewed,
@@ -108,5 +109,21 @@ describe("toggleFileDiffFoldForViewed", () => {
   it("touches only the file that was ticked", () => {
     const toggled = new Set(["a.ts", "b.ts"]);
     expect([...toggleFileDiffFoldForViewed("a.ts", false, null, toggled)]).toEqual(["b.ts"]);
+  });
+});
+
+describe("getFileViewedRange", () => {
+  const files = ["c.ts", "a.ts", "b.ts", "d.ts"].map((fileKey) => ({ fileKey }));
+
+  it("includes both endpoints in displayed order in either direction", () => {
+    expect(getFileViewedRange(files, "b.ts", "c.ts")).toEqual(files.slice(0, 3));
+    expect(getFileViewedRange(files, "c.ts", "b.ts")).toEqual(files.slice(0, 3));
+    expect(getFileViewedRange(files, "a.ts", "a.ts")).toEqual([files[1]]);
+  });
+
+  it("changes only the clicked file without a current anchor", () => {
+    expect(getFileViewedRange(files, "a.ts", null)).toEqual([files[1]]);
+    expect(getFileViewedRange(files, "a.ts", "removed.ts")).toEqual([files[1]]);
+    expect(getFileViewedRange(files, "removed.ts", "a.ts")).toEqual([]);
   });
 });

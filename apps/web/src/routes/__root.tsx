@@ -28,7 +28,9 @@ import { RelayClientInstallDialog } from "../components/cloud/RelayClientInstall
 import { SshPasswordPromptDialog } from "../components/desktop/SshPasswordPromptDialog";
 import { SnapShotCoordinator } from "../components/desktop/SnapShotCoordinator";
 import { DesktopAppActivationCoordinator } from "../components/desktop/DesktopAppActivationCoordinator";
+import { DesktopPairingLinkCoordinator } from "../components/desktop/DesktopPairingLinkCoordinator";
 import { RunningThreadKeepAlive } from "../components/desktop/RunningThreadKeepAlive";
+import { DevReplayHost } from "../components/DevReplayHost";
 import { ProviderUpdateLaunchNotification } from "../components/ProviderUpdateLaunchNotification";
 import { NightlyMobileBetaNotice } from "../components/NightlyMobileBeta";
 import { LegacyThreadMigrationToast } from "../components/LegacyThreadMigrationToast";
@@ -181,6 +183,8 @@ function RootRouteView() {
           <GlassAppearanceSync />
           <FontAppearanceSync />
           <ProviderAuthCallbackCoordinator />
+          {isElectron ? <DesktopPairingLinkCoordinator /> : null}
+          <ConfirmDialogHost />
           <CustomSnoozeDialogHost />
           <CommandPalette>
             <AppSidebarLayout>
@@ -230,6 +234,7 @@ function RootRouteView() {
           >
             {primaryEnvironmentAuthenticated ? <AuthenticatedTracingBootstrap /> : null}
             {primaryEnvironmentAuthenticated ? <DesktopAppActivationCoordinator /> : null}
+            {isElectron ? <DesktopPairingLinkCoordinator /> : null}
             <HostHealthSubscriptionKeeper />
             {isElectron ? <RunningThreadKeepAlive /> : null}
             <RelayClientInstallDialog />
@@ -249,6 +254,7 @@ function RootRouteView() {
               <EventRouter skipInitialBootstrapNavigation={returningFromWelcomeRef.current} />
             ) : null}
             {primaryEnvironmentAuthenticated ? <ProviderUpdateLaunchNotification /> : null}
+            {import.meta.env.DEV && primaryEnvironmentAuthenticated ? <DevReplayHost /> : null}
             {/* Hosted Nightly is "hosted-static", not authenticated, and needs it too. */}
             <NightlyMobileBetaNotice />
             {appShell}

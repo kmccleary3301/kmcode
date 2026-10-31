@@ -24,6 +24,7 @@ import * as Scheduler from "effect/Scheduler";
 import * as Stream from "effect/Stream";
 import * as TestClock from "effect/testing/TestClock";
 
+import { PreviewBrowserRootError } from "../preview/PreviewBrowserHost.ts";
 import * as PreviewAutomationBroker from "./PreviewAutomationBroker.ts";
 
 const makeBroker = PreviewAutomationBroker.make.pipe(Effect.provide(NodeServices.layer));
@@ -514,9 +515,22 @@ it.effect.each([
 );
 
 it.effect.each([
-  { clientId: SERVER_BROWSER_AUTOMATION_CLIENT_ID, shown: true },
-  { clientId: "client-1", shown: false },
-])("tells the agent why its own server browser failed ($clientId)", ({ clientId, shown }) =>
+  {
+    clientId: SERVER_BROWSER_AUTOMATION_CLIENT_ID,
+    shown: true,
+    message: "page.goto: net::ERR_CONNECTION_REFUSED at http://localhost:4719/",
+  },
+  {
+    clientId: "client-1",
+    shown: false,
+    message: "page.goto: net::ERR_CONNECTION_REFUSED at http://localhost:4719/",
+  },
+  {
+    clientId: SERVER_BROWSER_AUTOMATION_CLIENT_ID,
+    shown: true,
+    message: new PreviewBrowserRootError().message,
+  },
+])("preserves server browser failure guidance ($clientId)", ({ clientId, shown, message }) =>
   Effect.scoped(
     Effect.gen(function* () {
       const broker = yield* makeBroker;
@@ -529,7 +543,7 @@ it.effect.each([
           ok: false,
           error: {
             _tag: "PreviewAutomationExecutionError",
-            message: "page.goto: net::ERR_CONNECTION_REFUSED at http://localhost:4719/",
+            message,
           },
         }),
       ).pipe(Effect.forkScoped);
@@ -539,7 +553,7 @@ it.effect.each([
         .pipe(Effect.flip);
       expect(error._tag).toBe("PreviewAutomationExecutionError");
       // A desktop or other remote host's text stays out of the agent's context.
-      expect(error.message.includes("ERR_CONNECTION_REFUSED")).toBe(shown);
+      expect(error.message.includes(message)).toBe(shown);
     }),
   ),
 );

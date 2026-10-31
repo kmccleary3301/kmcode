@@ -33,6 +33,9 @@ vi.mock("react", async (importOriginal) => {
   const { reactHookHarness } = await import("../../test/reactHookHarness");
   return {
     ...actual,
+    useCallback: reactHookHarness.useCallback,
+    useEffect: () => undefined,
+    useId: () => "test-id",
     useRef: reactHookHarness.useRef,
     useState: reactHookHarness.useState,
   };
@@ -71,15 +74,23 @@ vi.mock("../../state/query", () => ({
   }),
 }));
 
+vi.mock("../../state/environments", () => ({
+  useEnvironment: () => null,
+  useEnvironmentHttpBaseUrl: () => null,
+  usePrimaryEnvironmentId: () => null,
+}));
+
 vi.mock("../../localApi", () => ({
   ensureLocalApi: () => ({ dialogs: { confirm: setup.confirm } }),
 }));
 
+import { CodexSetupSection } from "./CodexSetupSection";
 import { ProviderAuthenticationSection } from "./ProviderAuthenticationSection";
 import { ProviderSetupSection } from "./ProviderSetupSection";
 
 const environmentId = EnvironmentId.make("remote-google");
 const instanceId = ProviderInstanceId.make("antigravity_work");
+const codexInstanceId = ProviderInstanceId.make("codex");
 const provider: ServerProvider = {
   instanceId,
   driver: ProviderDriverKind.make("antigravity"),
@@ -148,6 +159,32 @@ function renderSetup(
     );
   }
   return expand(Actions(actions.props));
+}
+
+function renderCodexSetup(options: {
+  readonly instanceId: ProviderInstanceId;
+  readonly provider: ServerProvider;
+  readonly onModeChange: (mode: "managed" | "existing") => void;
+}) {
+  hooks.beginRender();
+  const view = CodexSetupSection({
+    environmentId,
+    instanceId: options.instanceId,
+    provider: options.provider,
+    mode: "managed",
+    enabled: true,
+    onModeChange: options.onModeChange,
+  });
+  const setupElement = visitElements(
+    view,
+    (element) =>
+      typeof element.type === "function" &&
+      element.props.instanceId === options.instanceId &&
+      element.props.mode === "managed",
+  );
+  if (!setupElement) throw new Error("Managed Codex setup was not rendered.");
+  const ManagedCodexSetup = setupElement.type as FunctionComponent<Record<string, unknown>>;
+  return ManagedCodexSetup(setupElement.props);
 }
 
 function button(view: unknown, label: string) {
@@ -234,6 +271,60 @@ describe("Antigravity setup", () => {
       command.mockReset().mockResolvedValue({ _tag: "Success", value: undefined });
     }
     setup.confirm.mockReset().mockResolvedValue(false);
+  });
+
+  it("can start installation before the first install snapshot arrives", async () => {
+    setup.auth = authState({ phase: "idle", flowId: null, authorizationUrl: null });
+    const idleInstallation = setup.installation!;
+    setup.installation = null;
+    let resolveStart!: (value: { _tag: "Success"; value: undefined }) => void;
+    const command = new Promise<{ _tag: "Success"; value: undefined }>((resolve) => {
+      resolveStart = resolve;
+    });
+    setup.startInstall.mockReturnValueOnce(command);
+    let view = renderSetup({ provider: { ...provider, installed: false } });
+
+    expect(button(view, "Install Antigravity")?.props.disabled).toBeFalsy();
+    expect(
+      countElements(
+        view,
+        (element) =>
+          element.props.role === "status" &&
+          element.props.children === "Checking the Antigravity runtime.",
+      ),
+    ).toBe(1);
+    click(view, "Install Antigravity");
+    view = renderSetup({ provider: { ...provider, installed: false } });
+    expect(
+      countElements(
+        view,
+        (element) =>
+          element.props.role === "status" && element.props.children === "Starting installation.",
+      ),
+    ).toBe(1);
+
+    setup.installation = {
+      ...idleInstallation,
+      operationId: "install-1",
+      phase: "downloading",
+      downloadedBytes: 1_000_000,
+      totalBytes: 2_000_000,
+    };
+    view = renderSetup({ provider: { ...provider, installed: false } });
+    expect(button(view, "Cancel installation")?.props.disabled).toBe(true);
+    resolveStart({ _tag: "Success", value: undefined });
+    await flushPromises();
+
+    view = renderSetup({ provider: { ...provider, installed: false } });
+    expect(button(view, "Cancel installation")?.props.disabled).toBeFalsy();
+    expect(
+      countElements(
+        view,
+        (element) =>
+          element.props.role === "status" &&
+          element.props.children === "Downloading 1.0 MB of 2.0 MB.",
+      ),
+    ).toBe(1);
   });
 
   it("waits for verified auth after submitting a callback to the selected environment", async () => {
@@ -423,4 +514,57 @@ describe("Antigravity setup", () => {
       expect(setup.startAuth).not.toHaveBeenCalled();
     },
   );
+});
+
+describe("Managed Codex setup", () => {
+  beforeEach(() => {
+    hooks.reset();
+    vi.clearAllMocks();
+    setup.auth = authState({
+      instanceId: codexInstanceId,
+      phase: "idle",
+      flowId: null,
+      authorizationUrl: null,
+      methods: [{ id: "chatgpt-profile:work", name: "Work", description: null, type: "agent" }],
+    });
+    setup.installation = {
+      driver: ProviderDriverKind.make("codex"),
+      operationId: null,
+      phase: "idle",
+      downloadedBytes: 0,
+      totalBytes: null,
+      version: null,
+      installedVersion: null,
+      canRemove: false,
+      message: null,
+    };
+  });
+
+  it("lets a signed-out managed account switch to the existing CLI", () => {
+    vi.stubGlobal("window", {
+      location: {
+        href: "http://localhost/settings/providers",
+        hostname: "localhost",
+        pathname: "/settings/providers",
+      },
+    });
+    const codexProvider: ServerProvider = {
+      ...provider,
+      instanceId: codexInstanceId,
+      driver: ProviderDriverKind.make("codex"),
+      status: "ready",
+      auth: { status: "unauthenticated" },
+      setup: { canAuthenticate: true, canInstall: true },
+    };
+    const onModeChange = vi.fn();
+    const view = renderCodexSetup({
+      instanceId: codexInstanceId,
+      provider: codexProvider,
+      onModeChange,
+    });
+
+    expect(button(view, "Reconnect account")).not.toBeNull();
+    click(view, "Use existing CLI");
+    expect(onModeChange).toHaveBeenCalledWith("existing");
+  });
 });

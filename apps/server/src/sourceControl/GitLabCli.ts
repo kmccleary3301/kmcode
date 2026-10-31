@@ -265,6 +265,7 @@ export class GitLabCli extends Context.Service<
   {
     readonly execute: (input: {
       readonly cwd: string;
+      readonly host?: string | undefined;
       readonly args: ReadonlyArray<string>;
       readonly timeoutMs?: number;
       /** Piped to the child's stdin, for payloads that must never appear in argv. */
@@ -422,6 +423,8 @@ export const make = Effect.gen(function* () {
         command: "glab",
         args: input.args,
         cwd: input.cwd,
+        // glab may otherwise prefer a different checkout remote.
+        ...(input.host === undefined ? {} : { env: { GITLAB_HOST: input.host } }),
         timeoutMs: input.timeoutMs ?? DEFAULT_TIMEOUT_MS,
         ...(input.stdin === undefined ? {} : { stdin: input.stdin }),
         ...(input.maxOutputBytes === undefined ? {} : { maxOutputBytes: input.maxOutputBytes }),

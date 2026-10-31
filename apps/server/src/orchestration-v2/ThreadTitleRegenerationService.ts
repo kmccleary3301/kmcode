@@ -1,3 +1,4 @@
+import { isAttachmentOnlyBootstrapPrompt } from "@t3tools/shared/composerContextReferences";
 import { resolveProjectSettings } from "@t3tools/shared/projectSettings";
 import {
   CommandId,
@@ -15,6 +16,7 @@ import * as Schedule from "effect/Schedule";
 
 import * as ServerSettings from "../serverSettings.ts";
 import * as TextGeneration from "../textGeneration/TextGeneration.ts";
+import { customTextGenerationPolicy } from "../textGeneration/TextGenerationPresets.ts";
 import type { OrchestratorV2Error } from "./Orchestrator.ts";
 import * as ProjectStore from "./ProjectStore.ts";
 import * as ThreadManagementService from "./ThreadManagementService.ts";
@@ -33,10 +35,10 @@ export class ThreadTitleRegenerationService extends Context.Service<
         | { readonly type: "regenerate" };
     }) => Effect.Effect<
       void,
-      OrchestratorV2Error |
-        ProjectStore.ProjectStoreV2Error |
-        ServerSettingsError |
-        ThreadManagementService.ThreadManagementProviderInstanceDisabledError
+      | OrchestratorV2Error
+      | ProjectStore.ProjectStoreV2Error
+      | ServerSettingsError
+      | ThreadManagementService.ThreadManagementProviderInstanceDisabledError
     >;
   }
 >()("t3/orchestration-v2/ThreadTitleRegenerationService") {}
@@ -96,7 +98,10 @@ const make = Effect.gen(function* () {
         context =
           message === undefined
             ? { message: "", attachments: [] }
-            : { message: message.text, attachments: message.attachments };
+            : {
+                message: isAttachmentOnlyBootstrapPrompt(message.text) ? "" : message.text,
+                attachments: message.attachments,
+              };
       } else {
         context = formatThreadTitleContext(
           projection.messages.filter((message) => !message.streaming),
@@ -115,6 +120,13 @@ const make = Effect.gen(function* () {
         message: context.message,
         attachments: context.attachments,
         ...(input.kind.type === "regenerate" ? { previousTitle: projection.thread.title } : {}),
+        ...(settings.threadTitleInstructions.length === 0
+          ? {}
+          : {
+              policy: customTextGenerationPolicy({
+                threadTitleInstructions: settings.threadTitleInstructions,
+              }),
+            }),
         modelSelection: settings.textGenerationModelSelection,
       });
       const generatedTitle = result.title.trim();

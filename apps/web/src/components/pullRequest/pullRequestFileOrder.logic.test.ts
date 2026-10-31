@@ -37,6 +37,17 @@ describe("orderDiffFiles", () => {
     ).toEqual([...source, ...tests, ...generated]);
   });
 
+  it("keeps eval files in the test tier and underscore-generated output last", () => {
+    expect(
+      order([
+        file("_generated/registry.ts"),
+        file("src/app.eval.ts"),
+        file("evals/run.ts"),
+        file("src/app.ts"),
+      ]),
+    ).toEqual(["src/app.ts", "src/app.eval.ts", "evals/run.ts", "_generated/registry.ts"]);
+  });
+
   it("answers an empty diff with an empty order", () => {
     expect(order([])).toEqual([]);
   });

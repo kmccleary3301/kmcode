@@ -15,6 +15,7 @@ import type {
 import { ConnectionTransientError } from "./model.ts";
 import * as ConnectionResolver from "./resolver.ts";
 import { connectionRoutes, routeEntry, routeHttpBaseUrl } from "./routes.ts";
+import * as RemoteEnvironmentAuthorization from "../authorization/service.ts";
 import * as RpcSession from "../rpc/session.ts";
 import { fetchRemoteEnvironmentDescriptor } from "../environment/descriptor.ts";
 
@@ -37,6 +38,8 @@ export interface EnvironmentConnectionLease {
  * routes have no cheap check, so they are "unchecked".
  */
 export type RouteCheck = "answered" | "silent" | "unchecked";
+/** "unprepared" means a route answered its check but could not be prepared. */
+export type RoutePreflight = "ready" | "unprepared" | "silent" | "unchecked";
 
 /** How long a direct route has to answer before it counts as unreachable from here. */
 const ROUTE_CHECK_TIMEOUT_MS = 2_500;
@@ -61,7 +64,7 @@ export class ConnectionDriver extends Context.Service<
     readonly preflight: (
       entry: ConnectionCatalogEntry,
       route: ConnectionRoute,
-    ) => Effect.Effect<boolean>;
+    ) => Effect.Effect<RoutePreflight>;
   }
 >()("@t3tools/client-runtime/connection/driver/ConnectionDriver") {}
 
@@ -139,6 +142,7 @@ export const connectOverRoutes = Effect.fn("ConnectionDriver.connectOverRoutes")
 export const make = Effect.gen(function* () {
   const resolver = yield* ConnectionResolver.ConnectionResolver;
   const sessions = yield* RpcSession.RpcSessionFactory;
+  const remote = yield* RemoteEnvironmentAuthorization.RemoteEnvironmentAuthorization;
   const httpClient = yield* HttpClient.HttpClient;
 
   const checkRoute = (entry: ConnectionCatalogEntry, route: ConnectionRoute) => {
@@ -181,6 +185,19 @@ export const make = Effect.gen(function* () {
         const session = yield* sessions.connect(prepared);
         yield* reportProgress({ stage: "synchronizing", prepared });
         yield* session.ready;
+        if (prepared.httpAuthorization?._tag === "Dpop") {
+          yield* remote
+            .renewDpopBeforeExpiry({
+              expectedEnvironmentId: prepared.environmentId,
+              expiresAtEpochMs: prepared.httpAuthorization.expiresAtEpochMs,
+            })
+            .pipe(
+              Effect.catch((error) =>
+                Effect.logWarning("Could not renew the connection's credential.", { error }),
+              ),
+              Effect.forkScoped,
+            );
+        }
         return { prepared, session } satisfies EnvironmentConnectionLease;
       }),
     );
@@ -191,10 +208,10 @@ export const make = Effect.gen(function* () {
       Effect.flatMap((check) =>
         check === "answered"
           ? resolver.prepare(routeEntry(entry, route)).pipe(
-              Effect.as(true),
-              Effect.orElseSucceed(() => false),
+              Effect.as<RoutePreflight>("ready"),
+              Effect.orElseSucceed((): RoutePreflight => "unprepared"),
             )
-          : Effect.succeed(false),
+          : Effect.succeed<RoutePreflight>(check),
       ),
       Effect.withSpan("ConnectionDriver.preflight"),
     );

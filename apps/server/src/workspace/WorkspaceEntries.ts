@@ -131,6 +131,8 @@ const resolveBrowseTarget = Effect.fn("WorkspaceEntries.resolveBrowseTarget")(fu
   return path.resolve(expandHomePathWith(input.cwd, path), input.partialPath);
 });
 
+const SYMLINK_RESOLVE_BATCH_SIZE = 64;
+
 /** @public Service construction is part of the canonical Effect module API. */
 export const make = Effect.gen(function* () {
   const path = yield* Path.Path;
@@ -288,7 +290,7 @@ export const make = Effect.gen(function* () {
                   relativePath: directoryPath,
                 })
                 .pipe(Effect.mapError(toError));
-        const entries = yield* Effect.tryPromise({
+        const { entries } = yield* Effect.tryPromise({
           try: async () => {
             const root = await NodeFSP.realpath(normalizedCwd);
             const directory = await NodeFSP.realpath(target.absolutePath);
@@ -303,15 +305,73 @@ export const make = Effect.gen(function* () {
               throw new Error("Directory must be inside the workspace and outside .git.");
             }
             const children = await NodeFSP.readdir(directory, { withFileTypes: true });
-            return children.flatMap((child): ProjectEntry[] => {
-              if (child.name === ".git" || (!child.isDirectory() && !child.isFile())) return [];
-              return [
-                {
-                  path: target.relativePath ? `${target.relativePath}/${child.name}` : child.name,
-                  kind: child.isDirectory() ? "directory" : "file",
-                },
-              ];
-            });
+            const isSameOrInside = (parent: string, child: string) => {
+              const relativeChild = path.relative(parent, child);
+              return (
+                relativeChild !== ".." &&
+                !relativeChild.startsWith(`..${path.sep}`) &&
+                !path.isAbsolute(relativeChild)
+              );
+            };
+            // Reject canonical ancestors so "Expand all folders" cannot follow a cycle.
+            let visitedFolders: Promise<ReadonlyArray<string>> | undefined;
+            const kinds: Array<ProjectEntry["kind"] | undefined> = [];
+            const resolveSymlinkKind = async (
+              name: string,
+            ): Promise<ProjectEntry["kind"] | undefined> => {
+              const resolved = await NodeFSP.realpath(path.join(directory, name)).catch(
+                () => undefined,
+              );
+              if (
+                resolved === undefined ||
+                !isSameOrInside(root, resolved) ||
+                path.relative(root, resolved).split(path.sep).includes(".git")
+              ) {
+                return undefined;
+              }
+              const stat = await NodeFSP.stat(resolved).catch(() => undefined);
+              if (stat?.isFile()) return "file";
+              if (!stat?.isDirectory()) return undefined;
+              const folders = await (visitedFolders ??= (async () => {
+                const result = [root];
+                let current = normalizedCwd;
+                for (const segment of target.relativePath.split("/").filter(Boolean)) {
+                  current = path.join(current, segment);
+                  result.push(await NodeFSP.realpath(current));
+                }
+                return result;
+              })());
+              return folders.some((folder) => isSameOrInside(resolved, folder))
+                ? undefined
+                : "directory";
+            };
+            // Bound filesystem work for directories such as pnpm node_modules.
+            for (let offset = 0; offset < children.length; offset += SYMLINK_RESOLVE_BATCH_SIZE) {
+              kinds.push(
+                ...(await Promise.all(
+                  children
+                    .slice(offset, offset + SYMLINK_RESOLVE_BATCH_SIZE)
+                    .map(async (child): Promise<ProjectEntry["kind"] | undefined> => {
+                      if (child.name === ".git") return undefined;
+                      if (child.isDirectory()) return "directory";
+                      if (child.isFile()) return "file";
+                      return child.isSymbolicLink() ? resolveSymlinkKind(child.name) : undefined;
+                    }),
+                )),
+              );
+            }
+            return {
+              entries: children.flatMap((child, index): ProjectEntry[] => {
+                const kind = kinds[index];
+                if (kind === undefined) return [];
+                return [
+                  {
+                    path: target.relativePath ? `${target.relativePath}/${child.name}` : child.name,
+                    kind,
+                  },
+                ];
+              }),
+            };
           },
           catch: toError,
         });

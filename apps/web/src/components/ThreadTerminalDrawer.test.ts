@@ -158,7 +158,13 @@ describe("terminal selection actions", () => {
 });
 
 it("retains visible output and selection until a replacement subscription receives its snapshot", () => {
-  const terminal = { resetAndWrite: vi.fn(), write: vi.fn(), clearSelection: vi.fn() };
+  const terminal = {
+    resetAndWrite: vi.fn(),
+    write: vi.fn(),
+    getSelection: vi.fn(() => "selected"),
+    getSelectionCellCount: vi.fn(() => 8),
+    clearSelection: vi.fn(),
+  };
   const snapshot = {
     threadId: "thread",
     terminalId: "term-1",
@@ -180,6 +186,11 @@ it("retains visible output and selection until a replacement subscription receiv
   expect(terminal.resetAndWrite).toHaveBeenLastCalledWith("host output");
   terminal.resetAndWrite.mockClear();
   terminal.clearSelection.mockClear();
+  terminal.getSelection.mockClear();
+  terminal.getSelectionCellCount.mockClear();
+  expect(synchronizeTerminalOutput(terminal, attached, cursor)).toBe(cursor);
+  expect(terminal.getSelection).not.toHaveBeenCalled();
+  expect(terminal.getSelectionCellCount).not.toHaveBeenCalled();
 
   const pending = combineTerminalSessionState(
     { ...snapshot, hasRunningSubprocess: false },

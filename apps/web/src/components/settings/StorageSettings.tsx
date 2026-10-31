@@ -1,6 +1,8 @@
 import type { StorageCleanupSettings, WorktreeCleanupRules } from "@t3tools/contracts";
 import { resolveWorktreeCleanup } from "@t3tools/shared/projectSettings";
 import { useRef, useState } from "react";
+import { useDebouncedValue } from "../../state/queries";
+import { AnimatedHeight } from "../AnimatedHeight";
 
 import { Input } from "../ui/input";
 import { Select, SelectItem, SelectPopup, SelectTrigger, SelectValue } from "../ui/select";
@@ -123,8 +125,8 @@ function RetentionControl({
             <NumberFieldDecrement aria-label={`Decrease ${label}`} />
             <NumberFieldInput
               aria-label={`${label} in days`}
-              size={new Intl.NumberFormat().format(draft ?? value).length}
-              className="field-sizing-content w-auto min-w-[1ch] grow-0 text-right"
+              size={5}
+              className="w-auto grow-0 text-right"
             />
             <span aria-hidden="true" className="self-center pr-2 text-xs">
               days
@@ -167,6 +169,30 @@ export function StorageSettingsPanel() {
           key
         ] !== settings[key],
     )
+      ? "Mixed across selected machines"
+      : undefined;
+
+  const targetIdsKey = targets
+    .map((entry) => entry.environmentId)
+    .sort()
+    .join(",");
+  const worktreeDaysMixed = targets.length > 1 && ruleStatus("worktreeAfterDays") !== undefined;
+  const settledWorktreeDaysStatus = useDebouncedValue(`${targetIdsKey}:${worktreeDaysMixed}`, 300);
+  const worktreeDaysStatus =
+    targets.length > 1 && settledWorktreeDaysStatus === `${targetIdsKey}:true`
+      ? "Mixed across selected machines"
+      : undefined;
+  const artifactsMixed =
+    targets.length > 1 && ruleStatus("browserArtifactsAfterDays") !== undefined;
+  const settledArtifactsStatus = useDebouncedValue(`${targetIdsKey}:${artifactsMixed}`, 300);
+  const artifactsStatus =
+    targets.length > 1 && settledArtifactsStatus === `${targetIdsKey}:true`
+      ? "Mixed across selected machines"
+      : undefined;
+  const logsMixed = targets.length > 1 && ruleStatus("logsAfterDays") !== undefined;
+  const settledLogsStatus = useDebouncedValue(`${targetIdsKey}:${logsMixed}`, 300);
+  const logsStatus =
+    targets.length > 1 && settledLogsStatus === `${targetIdsKey}:true`
       ? "Mixed across selected machines"
       : undefined;
   const update = (patch: Partial<StorageCleanupSettings>) =>
@@ -273,19 +299,21 @@ export function StorageSettingsPanel() {
                 />
               }
             />
-            <SettingsRow
-              title="Delete inactive worktrees"
-              status={ruleStatus("worktreeAfterDays")}
-              description="Remove worktrees after their threads have been inactive for this many days. Branches and thread history are kept."
-              serverScoped={!isProjectScope}
-              control={
-                <RetentionControl
-                  label="Delete inactive worktrees"
-                  value={settings.worktreeAfterDays}
-                  onChange={(worktreeAfterDays) => updateWorktree({ worktreeAfterDays })}
-                />
-              }
-            />
+            <AnimatedHeight>
+              <SettingsRow
+                title="Delete inactive worktrees"
+                status={worktreeDaysStatus}
+                description="Remove worktrees after their threads have been inactive for this many days. Branches and thread history are kept."
+                serverScoped={!isProjectScope}
+                control={
+                  <RetentionControl
+                    label="Delete inactive worktrees"
+                    value={settings.worktreeAfterDays}
+                    onChange={(worktreeAfterDays) => updateWorktree({ worktreeAfterDays })}
+                  />
+                }
+              />
+            </AnimatedHeight>
             <SettingsRow
               title="Delete merged worktrees"
               status={ruleStatus("worktreeOnMerge")}
@@ -318,32 +346,36 @@ export function StorageSettingsPanel() {
 
       {!isProjectScope && (
         <SettingsSection id="storage-artifacts" title="Artifacts and logs">
-          <SettingsRow
-            title="Delete old browser artifacts"
-            status={ruleStatus("browserArtifactsAfterDays")}
-            description="Delete saved browser captures after this many days. Older capture links will no longer open."
-            serverScoped
-            control={
-              <RetentionControl
-                label="Delete old browser artifacts"
-                value={settings.browserArtifactsAfterDays}
-                onChange={(browserArtifactsAfterDays) => update({ browserArtifactsAfterDays })}
-              />
-            }
-          />
-          <SettingsRow
-            title="Delete old rotated logs"
-            status={ruleStatus("logsAfterDays")}
-            description="Delete inactive rotated log files after this many days. Current logs are kept."
-            serverScoped
-            control={
-              <RetentionControl
-                label="Delete old rotated logs"
-                value={settings.logsAfterDays}
-                onChange={(logsAfterDays) => update({ logsAfterDays })}
-              />
-            }
-          />
+          <AnimatedHeight>
+            <SettingsRow
+              title="Delete old browser artifacts"
+              status={artifactsStatus}
+              description="Delete saved browser captures after this many days. Older capture links will no longer open."
+              serverScoped
+              control={
+                <RetentionControl
+                  label="Delete old browser artifacts"
+                  value={settings.browserArtifactsAfterDays}
+                  onChange={(browserArtifactsAfterDays) => update({ browserArtifactsAfterDays })}
+                />
+              }
+            />
+          </AnimatedHeight>
+          <AnimatedHeight>
+            <SettingsRow
+              title="Delete old rotated logs"
+              status={logsStatus}
+              description="Delete inactive rotated log files after this many days. Current logs are kept."
+              serverScoped
+              control={
+                <RetentionControl
+                  label="Delete old rotated logs"
+                  value={settings.logsAfterDays}
+                  onChange={(logsAfterDays) => update({ logsAfterDays })}
+                />
+              }
+            />
+          </AnimatedHeight>
         </SettingsSection>
       )}
     </SettingsPageContainer>

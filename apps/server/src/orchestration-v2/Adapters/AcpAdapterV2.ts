@@ -35,6 +35,7 @@ import {
 import { modelSelectionsEqual } from "@t3tools/shared/model";
 import { type SelfInvocation, selfInvocationArgs } from "@t3tools/shared/nodeRuntime";
 import { FILE_HEADERS_ONLY, formatPatch, structuredPatch } from "diff";
+import * as Equal from "effect/Equal";
 import * as Cause from "effect/Cause";
 import * as Crypto from "effect/Crypto";
 import * as DateTime from "effect/DateTime";
@@ -242,6 +243,7 @@ export interface AcpAdapterV2Flavor {
     EffectAcpErrors.AcpError,
     Crypto.Crypto | Scope.Scope
   >;
+  readonly customModels?: ReadonlyArray<string>;
   readonly resolveModelId?: (selection: ModelSelection) => string | undefined;
   /**
    * Replaces the default model application on session setup. Returns the model
@@ -1149,6 +1151,8 @@ interface ActiveAcpTurn {
   // Root item ordinals allocated in this turn. Subagent child items keep
   // theirs on the subagent, which carries over into later turns.
   readonly itemOrdinals: Map<string, number>;
+  readonly outgoingPrompt?: ReadonlyArray<EffectAcpSchema.ContentBlock>;
+  consumedPromptMessageId?: string;
   readonly user: ActiveTextStream;
   readonly assistant: ActiveTextStream;
   readonly reasoning: ActiveTextStream;
@@ -1462,6 +1466,9 @@ interface SnapshotMessageState {
   loadingMessageId: string | null;
   loadingIndex: number;
 }
+
+/** How long an ACP Stop waits for confirmation before Force stop is offered. */
+const ACP_STOP_CONFIRM_TIMEOUT_MS = 10_000;
 
 const TOOL_UPDATE_PERSIST_EVERY = 10;
 
@@ -4106,6 +4113,23 @@ export function makeAcpAdapterV2(
         ) {
           const context = yield* Ref.get(activeTurn);
           const update = notification.update;
+          if (
+            context?.outgoingPrompt !== undefined &&
+            update.sessionUpdate === "user_message" &&
+            Equal.equals(update.content, context.outgoingPrompt)
+          ) {
+            if (update.messageId !== undefined) {
+              context.consumedPromptMessageId = update.messageId;
+            }
+            return;
+          }
+          if (
+            context?.consumedPromptMessageId !== undefined &&
+            update.sessionUpdate === "user_message_chunk" &&
+            update.messageId === context.consumedPromptMessageId
+          ) {
+            return;
+          }
           if (yield* projectAgentTerminalUpdate(notification, context)) return;
           if (
             update.sessionUpdate === "usage_update" ||
@@ -5649,8 +5673,37 @@ export function makeAcpAdapterV2(
               projectAcpRuntimeSessionUpdate(handlerGeneration, rawNotification),
             );
           }
-          yield* targetRuntime.handleRequestPermission((params, requestContext) =>
+          yield* targetRuntime.handleRequestPermission((nativeParams, requestContext) =>
             Effect.gen(function* () {
+              const activeSession = yield* Ref.get(activeSessionId);
+              const trackedTurn = yield* Ref.get(activeTurn);
+              const trackedTool =
+                trackedTurn !== null && nativeParams.sessionId === activeSession
+                  ? trackedTurn.tools.get(nativeParams.toolCall.toolCallId)
+                  : undefined;
+              const params =
+                trackedTool === undefined
+                  ? nativeParams
+                  : {
+                      ...nativeParams,
+                      toolCall: {
+                        ...nativeParams.toolCall,
+                        ...(nativeParams.toolCall.title === undefined &&
+                        typeof trackedTool.data.title === "string"
+                          ? { title: trackedTool.data.title }
+                          : {}),
+                        // Only tracked execute calls may grant terminal access; unknown kinds
+                        // also map to command requests.
+                        ...(nativeParams.toolCall.kind === undefined &&
+                        trackedTool.kind === "execute"
+                          ? { kind: trackedTool.kind }
+                          : {}),
+                        ...(nativeParams.toolCall.rawInput === undefined &&
+                        trackedTool.data.rawInput !== undefined
+                          ? { rawInput: trackedTool.data.rawInput }
+                          : {}),
+                      },
+                    };
               const transportRequestId = requestContext.requestId;
               const permissionQuestion = flavor.extractPermissionQuestion?.(params);
               if (permissionQuestion !== undefined) {
@@ -6259,6 +6312,43 @@ export function makeAcpAdapterV2(
           return activated;
         });
 
+        const validateModelSelection = (
+          modelSelection: ModelSelection,
+          sessionSetup?: AcpSessionRuntime.AcpSessionRuntimeStartResult,
+        ) =>
+          Effect.gen(function* () {
+            const model = flavor.resolveModelId?.(modelSelection) ?? modelSelection.model;
+            if (
+              flavor.applyModelSelection !== undefined ||
+              flavor.customModels?.includes(model) === true ||
+              model.length === 0 ||
+              model === "auto" ||
+              model === "default"
+            ) {
+              return;
+            }
+            const modelOption = (yield* runtime.getConfigOptions).find(
+              (option) => option.category === "model",
+            );
+            let available: boolean | undefined;
+            if (modelOption?.type === "select") {
+              const choices = modelOption.options.flatMap((entry) =>
+                "value" in entry ? [entry.value] : entry.options.map((choice) => choice.value),
+              );
+              available = choices.includes(model);
+            } else {
+              const setup = sessionSetup ?? (yield* Ref.get(activeSessionSetup));
+              available = setup?.sessionSetupResult.models?.availableModels?.some(
+                (choice) => choice.modelId === model,
+              );
+            }
+            if (available === false) {
+              return yield* EffectAcpErrors.AcpRequestError.invalidParams(
+                "The requested model is not available in this session.",
+              );
+            }
+          });
+
         const configureSession = Effect.fnUntraced(function* (
           startResult: AcpSessionRuntime.AcpSessionRuntimeStartResult,
           modelSelection: ModelSelection,
@@ -6454,6 +6544,7 @@ export function makeAcpAdapterV2(
               nativeBuildConfigurationBySessionId.delete(startResult.sessionId);
             }
           }
+          yield* validateModelSelection(modelSelection, startResult);
           yield* (
             flavor.onSessionConfigurationUpdate?.(
               yield* runtime.getConfigOptions,
@@ -6909,6 +7000,7 @@ export function makeAcpAdapterV2(
                 yield* Ref.set(activeInteractionMode, turnInput.runtimePolicy.interactionMode);
               }
             }
+            yield* validateModelSelection(turnInput.modelSelection);
             yield* Ref.set(lastTurnRoute, {
               threadId: turnInput.threadId,
               providerThreadId: turnInput.providerThread.id,
@@ -6980,6 +7072,11 @@ export function makeAcpAdapterV2(
                 new Map(current).set(requestedSessionId, initialNativeMetadata),
               );
             }
+            const outgoingPrompt =
+              promptParts !== null &&
+              (yield* Ref.get(activeSessionSetup))?.initializeResult.protocolVersion === 2
+                ? promptParts.prompt
+                : undefined;
             const context: ActiveAcpTurn = {
               input: turnInput,
               providerTurnId,
@@ -6987,6 +7084,7 @@ export function makeAcpAdapterV2(
               nativeTurnId,
               startedAt,
               completed,
+              ...(outgoingPrompt === undefined ? {} : { outgoingPrompt }),
               itemOrdinals: new Map(),
               user: { current: null, nextSegment: 0 },
               assistant: { current: null, nextSegment: 0 },
@@ -7453,7 +7551,7 @@ export function makeAcpAdapterV2(
               return yield* Effect.uninterruptibleMask((restore) =>
                 Effect.gen(function* () {
                   yield* restore(runtimeTransitionPermit.take(1));
-                  return yield* Effect.gen(function* () {
+                  const transitionFiber = yield* Effect.gen(function* () {
                     const transition = yield* Effect.gen(function* () {
                       const interruptContext = yield* Ref.get(activeTurn);
                       // Settled steering restart: the native prompt already
@@ -7701,15 +7799,14 @@ export function makeAcpAdapterV2(
                         }
                       }
                       const stopped = yield* Deferred.await(context.completed).pipe(
-                        Effect.timeoutOption("10 seconds"),
+                        Effect.timeoutOption(ACP_STOP_CONFIRM_TIMEOUT_MS),
                       );
                       if (Option.isNone(stopped)) {
-                        if (!context.finalized) {
-                          yield* finalizeTurn(context, "interrupted");
-                        }
-                        return yield* new ProviderAdapter.ProviderAdapterProtocolError({
+                        return yield* new ProviderAdapter.ProviderAdapterInterruptTimeoutError({
                           driver,
-                          detail: `ACP provider turn ${turnInput.providerTurnId} did not acknowledge cancellation before the interrupt timeout`,
+                          providerThreadId: turnInput.providerThread.id,
+                          providerTurnId: turnInput.providerTurnId,
+                          timeoutMs: ACP_STOP_CONFIRM_TIMEOUT_MS,
                         });
                       }
                     });
@@ -7730,20 +7827,26 @@ export function makeAcpAdapterV2(
                         }),
                       ),
                     );
-                  }).pipe(Effect.ensuring(runtimeTransitionPermit.release(1)));
+                  }).pipe(
+                    Effect.ensuring(runtimeTransitionPermit.release(1)),
+                    Effect.forkIn(sessionScope, { startImmediately: true, uninterruptible: true }),
+                  );
+                  // Stop timeouts may abandon this wait; the session-scoped transition continues.
+                  return yield* restore(Fiber.join(transitionFiber));
                 }),
               );
             },
             (effect, turnInput) =>
               effect.pipe(
-                Effect.mapError(
-                  (cause) =>
-                    new ProviderAdapter.ProviderAdapterInterruptError({
-                      driver,
-                      providerThreadId: turnInput.providerThread.id,
-                      providerTurnId: turnInput.providerTurnId,
-                      cause,
-                    }),
+                Effect.mapError((cause) =>
+                  cause._tag === "ProviderAdapterInterruptTimeoutError"
+                    ? cause
+                    : new ProviderAdapter.ProviderAdapterInterruptError({
+                        driver,
+                        providerThreadId: turnInput.providerThread.id,
+                        providerTurnId: turnInput.providerTurnId,
+                        cause,
+                      }),
                 ),
               ),
           ),

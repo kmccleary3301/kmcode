@@ -407,6 +407,11 @@ export class SessionStore extends Context.Service<
       SessionCredentialInternalError
     >;
     readonly streamChanges: Stream.Stream<SessionCredentialChange>;
+    /** Completes when a live socket's session is revoked or expires without a renewal for its DPoP key. */
+    readonly awaitInvalidation: (
+      sessionId: AuthSessionId,
+      proofKeyThumbprint?: string,
+    ) => Effect.Effect<void, SessionCredentialVerificationError>;
     readonly revoke: (
       sessionId: AuthSessionId,
     ) => Effect.Effect<boolean, SessionCredentialInternalError>;
@@ -495,6 +500,8 @@ export const make = Effect.gen(function* () {
   const signingSecret = yield* secretStore.getOrCreateRandom(SIGNING_SECRET_NAME, 32);
   const connectedSessionsRef = yield* Ref.make(new Map<AuthSessionId, number>());
   const changesPubSub = yield* PubSub.unbounded<SessionCredentialChange>();
+  // Newest session per DPoP key. Live sockets can follow it when their token expires.
+  const latestSessionByProofKey = new Map<string, AuthSessionId>();
   const cookieInput = {
     mode: serverConfig.mode,
     port: serverConfig.port,
@@ -721,6 +728,7 @@ export const make = Effect.gen(function* () {
             })
           : authSessions.create(sessionRecord).pipe(Effect.as([] as ReadonlyArray<AuthSessionId>))
       ).pipe(Effect.mapError((cause) => new SessionCredentialIssueError({ sessionId, cause })));
+      if (claims.jkt) latestSessionByProofKey.set(claims.jkt, sessionId);
       if (replacedSessionIds.length > 0) {
         yield* Ref.update(connectedSessionsRef, (current) => {
           const next = new Map(current);
@@ -852,7 +860,7 @@ export const make = Effect.gen(function* () {
         client: toClientMetadata(row.value.client),
         expiresAt: expiresAt.value,
         subject: claims.sub,
-        scopes: claims.scopes,
+        scopes: row.value.scopes,
         ...(claims.jkt ? { proofKeyThumbprint: claims.jkt } : {}),
         ...(claims.rtc ? { runtimeModeCeiling: claims.rtc } : {}),
       } satisfies VerifiedSession;
@@ -1046,6 +1054,62 @@ export const make = Effect.gen(function* () {
     }
     return revokedSessionIds.length;
   });
+  const awaitInvalidation = Effect.fn("SessionStore.awaitInvalidation")(function* (
+    sessionId: AuthSessionId,
+    proofKeyThumbprint?: string,
+  ) {
+    return yield* Effect.scoped(
+      Effect.gen(function* () {
+        // Subscribe before reading: revocation can race with the WebSocket upgrade.
+        const subscription = yield* PubSub.subscribe(changesPubSub);
+        const readRow = (id: AuthSessionId) =>
+          authSessions
+            .getById({ sessionId: id })
+            .pipe(
+              Effect.mapError(
+                (cause) => new SessionCredentialVerificationError({ sessionId: id, cause }),
+              ),
+            );
+        const original = yield* readRow(sessionId);
+        if (Option.isNone(original)) return;
+        // Revocation events wake this loop; repository state decides if the socket is invalid.
+        const chain = [sessionId];
+        const nextRemoval = Effect.gen(function* () {
+          while (true) {
+            const change = yield* PubSub.take(subscription);
+            if (change.type === "clientRemoved" && chain.includes(change.sessionId)) return;
+          }
+        });
+        let current = original.value;
+        while (true) {
+          const rows = yield* Effect.forEach(chain, readRow);
+          if (rows.some((row) => Option.isNone(row) || row.value.revokedAt !== null)) return;
+          const now = yield* DateTime.now;
+          const remaining = current.expiresAt.epochMilliseconds - now.epochMilliseconds;
+          if (remaining > 0) {
+            yield* Effect.raceFirst(nextRemoval, Effect.sleep(Duration.millis(remaining)));
+            continue;
+          }
+          const successorId =
+            proofKeyThumbprint === undefined
+              ? undefined
+              : latestSessionByProofKey.get(proofKeyThumbprint);
+          if (successorId === undefined || successorId === current.sessionId) return;
+          const successor = yield* readRow(successorId);
+          // The socket keeps its original scopes, so a renewal must still grant all of them.
+          if (
+            Option.isNone(successor) ||
+            successor.value.subject !== original.value.subject ||
+            !original.value.scopes.every((scope) => successor.value.scopes.includes(scope))
+          ) {
+            return;
+          }
+          chain.push(successorId);
+          current = successor.value;
+        }
+      }),
+    );
+  });
 
   return SessionStore.of({
     cookieName,
@@ -1058,6 +1122,7 @@ export const make = Effect.gen(function* () {
     get streamChanges() {
       return Stream.fromPubSub(changesPubSub);
     },
+    awaitInvalidation,
     revoke,
     revokeAllExcept,
     markConnected,

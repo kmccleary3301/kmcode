@@ -20,6 +20,8 @@ import {
 import { GaugeIcon, TrendingDownIcon, TrendingUpIcon } from "lucide-react";
 import { Fragment, type ReactNode, useState } from "react";
 
+import { normalizeProviderAccentColor } from "../../providerInstances";
+
 import { usePrimarySettings } from "../../hooks/useSettings";
 import { environmentPresentations } from "../../state/presentation";
 import { useEnvironmentScope, readEnvironmentScope } from "../../state/session";
@@ -158,13 +160,15 @@ export function LimitWindows({
   windows,
   now,
   compact = false,
+  accentColor,
 }: {
   readonly driver: ServerProvider["driver"];
   readonly windows: ReadonlyArray<ServerProviderUsageWindow>;
   readonly now: number;
   readonly compact?: boolean;
+  readonly accentColor?: string | undefined;
 }) {
-  const color = barColor(driver);
+  const color = normalizeProviderAccentColor(accentColor) ?? barColor(driver);
   return (
     <div
       className={

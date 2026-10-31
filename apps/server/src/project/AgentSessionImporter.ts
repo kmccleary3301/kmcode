@@ -266,10 +266,13 @@ const make = Effect.gen(function* () {
           }
 
           const driver = ProviderDriverKind.make(thread.source);
+          // Pi resumes by session file path; its session UUID only names the thread.
+          const nativeThreadId =
+            thread.source === "pi" ? source.filePath : thread.providerSessionId;
           const model = thread.model ?? DEFAULT_MODEL_BY_PROVIDER[driver] ?? DEFAULT_MODEL;
           const providerThreadId = idAllocator.derive.providerThread({
             driver,
-            nativeThreadId: thread.providerSessionId,
+            nativeThreadId,
           });
           const createdAt = dateTime(thread.createdAt);
           const updatedAt = dateTime(thread.updatedAt);
@@ -318,7 +321,7 @@ const make = Effect.gen(function* () {
             ownerNodeId: null,
             nativeThreadRef: {
               driver,
-              nativeId: thread.providerSessionId,
+              nativeId: nativeThreadId,
               strength: "strong",
             },
             nativeConversationHeadRef: null,
@@ -342,9 +345,9 @@ const make = Effect.gen(function* () {
               status: "stopped",
               lastSeenAt: thread.updatedAt,
               resumeCursor:
-                thread.source === "codex"
-                  ? { threadId: thread.providerSessionId }
-                  : { threadId, resume: thread.providerSessionId },
+                thread.source === "claudeAgent"
+                  ? { threadId, resume: thread.providerSessionId }
+                  : { threadId: nativeThreadId },
               runtimePayload: { cwd: project.workspaceRoot },
             },
             { onConflict: "ignore" },

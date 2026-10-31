@@ -26,4 +26,10 @@ describe("videoMimeType", () => {
     expect(videoMimeType({ name: "recording.mp4", mimeType: "application/pdf" })).toBeNull();
     expect(videoMimeType({ name: "recording.mp4", mimeType: "image/png" })).toBeNull();
   });
+  it.each(["video/mp2t", "video/vnd.dlna.mpeg-tts"])(
+    "does not treat generic transport type %s as a video when the filename is TypeScript",
+    (mimeType) => {
+      expect(videoMimeType({ name: "component.ts", mimeType })).toBeNull();
+    },
+  );
 });

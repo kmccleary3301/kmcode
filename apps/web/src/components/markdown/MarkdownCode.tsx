@@ -58,7 +58,10 @@ function inspectFenceSource(source: string): FenceSource {
   const firstLineEnd = source.indexOf("\n", afterOpening);
   const bodyStart = firstLineEnd < 0 ? source.length : firstLineEnd + 1;
   const marker = fence[0] === "`" ? "`" : "~";
-  const closingLine = new RegExp(`^[\\t ]*(?:>[\\t ]?)*[\\t ]*${marker}{${fence.length},}[\\t ]*$`, "u");
+  const closingLine = new RegExp(
+    `^[\\t ]*(?:>[\\t ]?)*[\\t ]*${marker}{${fence.length},}[\\t ]*$`,
+    "u",
+  );
   let lineStart = bodyStart;
   while (lineStart <= source.length) {
     const lineFeed = source.indexOf("\n", lineStart);
@@ -98,7 +101,11 @@ export function MarkdownInlineCodePresentation({ node, children }: InlineNodeVie
     }
   }
   return (
-    <code data-inline-code="" data-t3-part="code">
+    <code
+      data-inline-code=""
+      data-t3-part="code"
+      onDoubleClick={(e) => window.getSelection()?.selectAllChildren(e.currentTarget)}
+    >
       {children ?? codeText}
     </code>
   );
@@ -246,7 +253,13 @@ function MarkdownCodeBlock({
     <Tooltip>
       <TooltipTrigger
         render={
-          <Button type="button" variant="ghost-muted" size="icon-xs" onClick={handleCopy} aria-label={copyLabel} />
+          <Button
+            type="button"
+            variant="ghost-muted"
+            size="icon-xs"
+            onClick={handleCopy}
+            aria-label={copyLabel}
+          />
         }
       >
         <MorphIcon className="size-3" icon={copied ? Check : Copy} />
@@ -350,7 +363,10 @@ function SvgCodeBlockPresentation({
   const sourceBody = !isClosed || isStreaming ? plainCodeBody(code) : children;
   const showGraphic = !showCode && !isStreaming && isClosed && code.trim().length > 0;
   const expandGraphic = () => {
-    const source = typeof XMLSerializer === "undefined" ? null : document.querySelector(".chat-markdown-svg-graphic svg");
+    const source =
+      typeof XMLSerializer === "undefined"
+        ? null
+        : document.querySelector(".chat-markdown-svg-graphic svg");
     if (source) onExpand(standaloneSvgImageUrl(new XMLSerializer().serializeToString(source)));
   };
   return (
@@ -406,7 +422,13 @@ function SvgCodeBlockPresentation({
     >
       {showGraphic ? (
         <RenderErrorBoundary resetKeys={[code, theme]} fallback={sourceBody}>
-          <Suspense fallback={<div className="flex min-h-36 items-center justify-center text-xs text-muted-foreground">Rendering graphic</div>}>
+          <Suspense
+            fallback={
+              <div className="flex min-h-36 items-center justify-center text-xs text-muted-foreground">
+                Rendering graphic
+              </div>
+            }
+          >
             <SvgGraphic source={code} onExpand={onExpand} />
           </Suspense>
         </RenderErrorBoundary>
@@ -457,7 +479,10 @@ export function MarkdownCodeBlockPresentation({ children, metadata, actions }: N
   const fenceTitle = extractFenceTitle(fenceMeta(fence.info));
   const expandMedia = state.expandMedia;
   const expandSvg = (src: string) =>
-    expandMedia({ images: [{ src, name: language === "mermaid" ? "Mermaid diagram" : "SVG graphic" }], index: 0 });
+    expandMedia({
+      images: [{ src, name: language === "mermaid" ? "Mermaid diagram" : "SVG graphic" }],
+      index: 0,
+    });
 
   if (language.toLowerCase() === "mermaid") {
     const showDiagram = fence.isClosed && !showMermaidCode;
@@ -508,7 +533,10 @@ export function MarkdownCodeBlockPresentation({ children, metadata, actions }: N
                         size="icon-xs"
                         onClick={() => {
                           const svg = document.querySelector(".stream-mdx-mermaid-diagram svg");
-                          if (svg) expandSvg(standaloneSvgImageUrl(new XMLSerializer().serializeToString(svg)));
+                          if (svg)
+                            expandSvg(
+                              standaloneSvgImageUrl(new XMLSerializer().serializeToString(svg)),
+                            );
                         }}
                         aria-label="Expand diagram"
                       />
@@ -530,13 +558,17 @@ export function MarkdownCodeBlockPresentation({ children, metadata, actions }: N
 
   if (language.toLowerCase() === "svg" || rawSvg || fence.rawSvg) {
     const svgSource = rawSvg
-      ? [authoredSource, fullSource, state.text].find((source) => /^\s*<svg(?:\s|>)/iu.test(source)) ??
-        authoredSource
+      ? ([authoredSource, fullSource, state.text].find((source) =>
+          /^\s*<svg(?:\s|>)/iu.test(source),
+        ) ?? authoredSource)
       : fence.rawSvg
         ? fence.body
         : code;
-    const isClosed =
-      rawSvg ? codeMetadata.sourceComplete === true : fence.rawSvg ? /<\/svg\s*>\s*$/iu.test(svgSource) : fence.isClosed;
+    const isClosed = rawSvg
+      ? codeMetadata.sourceComplete === true
+      : fence.rawSvg
+        ? /<\/svg\s*>\s*$/iu.test(svgSource)
+        : fence.isClosed;
     return (
       <SvgCodeBlockPresentation
         code={svgSource}

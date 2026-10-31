@@ -1,6 +1,7 @@
 import { afterEach, assert, expect, it, vi } from "@effect/vitest";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
+import * as Schema from "effect/Schema";
 import { ChildProcessSpawner } from "effect/process";
 
 import * as GitLabCli from "../sourceControl/GitLabCli.ts";
@@ -28,6 +29,17 @@ function output(stdout: string, stdoutTruncated = false, stdoutInvalidUtf8 = fal
     stdoutInvalidUtf8,
   };
 }
+
+const decodeStatsRequest = Schema.decodeUnknownSync(
+  Schema.fromJsonString(
+    Schema.Struct({
+      variables: Schema.Struct({
+        fullPath: Schema.String,
+        iids: Schema.Array(Schema.String),
+      }),
+    }),
+  ),
+);
 
 function mergeRequests(count: number, firstNumber: number): string {
   return JSON.stringify(
@@ -536,6 +548,73 @@ layer("GitLabPullRequestCli.layer", (it) => {
       // A full page means more files, not a slice with something missing from it.
       assert.isFalse(diff.truncated);
       expect(argsOfCall(0)[1]).toContain("merge_requests/7/diffs?per_page=100&page=1");
+    }),
+  );
+
+  it.effect("fills withheld GitLab file hunks with GraphQL line counts", () =>
+    Effect.gen(function* () {
+      mockedExecute
+        .mockReturnValueOnce(
+          Effect.succeed(
+            output(
+              JSON.stringify([
+                { old_path: "src/big.ts", new_path: "src/big.ts", diff: "", too_large: true },
+              ]),
+            ),
+          ),
+        )
+        .mockReturnValueOnce(
+          Effect.succeed(
+            output(
+              JSON.stringify({
+                data: {
+                  project: {
+                    mergeRequest: {
+                      diffStatsSummary: { fileCount: 1 },
+                      diffStats: [{ path: "src/big.ts", additions: 12, deletions: 4 }],
+                    },
+                  },
+                },
+              }),
+            ),
+          ),
+        );
+      const cli = yield* GitLabPullRequestCli.GitLabPullRequestCli;
+
+      const diff = yield* cli.getMergeRequestDiff({
+        cwd: "/w",
+        repository: "acme/web",
+        number: 7,
+      });
+
+      expect(diff.omittedFileStats).toEqual([{ path: "src/big.ts", additions: 12, deletions: 4 }]);
+      expect(argsOfCall(1)[1]).toBe("graphql");
+      expect(mockedExecute.mock.calls[1]?.[0].stdin).toContain("diffStatsSummary");
+    }),
+  );
+
+  it.effect("does not use whole-request file counts for a commit diff", () =>
+    Effect.gen(function* () {
+      mockedExecute.mockReturnValueOnce(
+        Effect.succeed(
+          output(
+            JSON.stringify([
+              { old_path: "src/big.ts", new_path: "src/big.ts", diff: "", too_large: true },
+            ]),
+          ),
+        ),
+      );
+      const cli = yield* GitLabPullRequestCli.GitLabPullRequestCli;
+
+      const diff = yield* cli.getMergeRequestDiff({
+        cwd: "/w",
+        repository: "acme/web",
+        number: 7,
+        commit: "a".repeat(40),
+      });
+
+      expect(diff.omittedFileStats).toBeUndefined();
+      expect(mockedExecute.mock.calls).toHaveLength(1);
     }),
   );
 
@@ -1531,6 +1610,80 @@ layer("GitLabPullRequestCli.layer", (it) => {
       assert.strictEqual(revisions.get("src/149.ts"), "oid-src/149.ts");
       // The diff refs, then two batches: a hundred paths and the fifty left over.
       assert.strictEqual(mockedExecute.mock.calls.length, 3);
+    }),
+  );
+  it.effect("reads line counts in one hundred-id batches per project", () =>
+    Effect.gen(function* () {
+      const variablesOf = (stdin: string | undefined) =>
+        decodeStatsRequest(stdin ?? "{}").variables;
+      mockedExecute.mockImplementation((request) => {
+        const { fullPath, iids } = variablesOf(request.stdin);
+        const nodes = iids
+          .filter((iid) => iid !== "3")
+          .map((iid) => ({ iid, diffStatsSummary: { additions: Number(iid), deletions: 1 } }));
+        return Effect.succeed(
+          output(
+            JSON.stringify(
+              fullPath === "acme/web"
+                ? { data: { project: { mergeRequests: { nodes } } } }
+                : { data: { project: null } },
+            ),
+          ),
+        );
+      });
+      const cli = yield* GitLabPullRequestCli.GitLabPullRequestCli;
+
+      const stats = yield* cli.listMergeRequestStats({
+        cwd: "/w",
+        changeRequests: [
+          ...Array.from({ length: 150 }, (_, index) => ({
+            repository: "acme/web",
+            number: index + 1,
+          })),
+          { repository: "acme/api", number: 9 },
+        ],
+      });
+
+      expect(stats).toHaveLength(149);
+      expect(stats).toContainEqual({
+        repository: "acme/web",
+        number: 150,
+        additions: 150,
+        deletions: 1,
+      });
+      expect(stats.some((stat) => stat.number === 3 || stat.repository === "acme/api")).toBe(false);
+      expect(
+        mockedExecute.mock.calls.map(([request]) => {
+          const { fullPath, iids } = variablesOf(request.stdin);
+          return [fullPath, iids.length];
+        }),
+      ).toEqual([
+        ["acme/web", 100],
+        ["acme/web", 50],
+        ["acme/api", 1],
+      ]);
+    }),
+  );
+
+  it.effect("propagates auth failures from line count reads", () =>
+    Effect.gen(function* () {
+      const error = new GitLabCli.GitLabCliAuthenticationError({
+        operation: "execute",
+        command: "glab",
+        cwd: "/w",
+        cause: new Error("unauthenticated"),
+      });
+      mockedExecute.mockReturnValueOnce(Effect.fail(error));
+      const cli = yield* GitLabPullRequestCli.GitLabPullRequestCli;
+
+      const result = yield* Effect.result(
+        cli.listMergeRequestStats({
+          cwd: "/w",
+          changeRequests: [{ repository: "acme/web", number: 7 }],
+        }),
+      );
+
+      expect(result).toMatchObject({ _tag: "Failure", failure: error });
     }),
   );
 });

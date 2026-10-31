@@ -249,6 +249,8 @@ export function ComposerBannerStack({ className, items, attachedAbove }: Compose
   );
 }
 
+const SUBPIXEL_ROUNDING = 0.001;
+
 /** Keep full descriptions reachable only when their inline copy is clipped. */
 function NoticeDescription({ children, compact }: { children: ReactNode; compact?: boolean }) {
   const descriptionRef = useRef<HTMLSpanElement>(null);
@@ -258,6 +260,7 @@ function NoticeDescription({ children, compact }: { children: ReactNode; compact
   useLayoutEffect(() => {
     const description = descriptionRef.current;
     if (!description) return;
+    const range = document.createRange();
     const measure = () => {
       // Ignore the space taken by the details button itself so it cannot
       // sustain its own overflow after the description would otherwise fit.
@@ -265,9 +268,17 @@ function NoticeDescription({ children, compact }: { children: ReactNode; compact
       const hidden = getComputedStyle(description).position === "absolute";
       setShowDetails(
         hidden ||
-          [description, ...description.querySelectorAll("*")].some(
-            (element) => element.scrollWidth > element.clientWidth + recoveredWidth,
-          ),
+          [description, ...description.querySelectorAll("*")].some((element) => {
+            // A range spans laid-out content only; scrollWidth also counts positioned layers
+            // such as a link's touch hit area, which overflow without cutting any text.
+            // The two rects can disagree by float rounding (~0.00001px on phones); real
+            // overflow is at least one layout unit, 1/64 of a device pixel.
+            range.selectNodeContents(element);
+            return (
+              range.getBoundingClientRect().width >
+              element.getBoundingClientRect().width + recoveredWidth + SUBPIXEL_ROUNDING
+            );
+          }),
       );
     };
     measure();
@@ -367,7 +378,7 @@ function ComposerBannerStackAlert({
           ) : null}
         </ComposerBanner.Content>
         {item.actions || item.onDismiss ? (
-          <ComposerBanner.Actions>
+          <ComposerBanner.Actions className="min-w-14 sm:min-w-12">
             {item.actions}
             {item.onDismiss ? (
               <ComposerBanner.Dismiss

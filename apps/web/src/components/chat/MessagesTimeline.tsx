@@ -1,5 +1,10 @@
 import { ComputerUseAppIcon } from "~/components/Icons";
 import { useChatCanvas } from "./ChatCanvasContext";
+import { ThreadFindTimelineContext } from "./ThreadFindProvider";
+import { MarkdownFindContext, useFindRevealRef } from "./markdownFindContext";
+import { type ThreadFindMatch, type ThreadFindPositionReader } from "./threadFind";
+import { readThreadFindPosition } from "./threadFindPosition";
+import { useThreadFindNavigation } from "./useThreadFindNavigation";
 import { WorkLogBlock, WorkLogButton, WorkLogDetails, WorkLogList, WorkLogRow } from "./WorkLog";
 import { PullRequestGlyph } from "../pullRequest/pullRequestIcons";
 import type { WorktreeSetupSnapshot } from "@t3tools/contracts";
@@ -25,11 +30,13 @@ import {
   type MessageId,
   type OrchestrationV2TurnItem,
   type OrchestrationV2Run,
+  type ProviderApprovalDecision,
   type RunAttemptId,
   type ScopedThreadRef,
   type ServerProvider,
   type ServerProviderSkill,
   type RunId,
+  type RuntimeRequestId,
   ThreadId,
   type ToolActivityIcon,
 } from "@t3tools/contracts";
@@ -95,6 +102,7 @@ import {
   workEntryDisplayIndicatesToolFailure,
   workEntrySignalsSevereFailure,
   workLogEntryIsToolLike,
+  type PendingApproval,
   type WorkLogEntry,
 } from "../../session-logic";
 const NOOP_OPEN_NATIVE_TERMINAL = (
@@ -117,10 +125,7 @@ import {
 } from "../../lib/diffRendering";
 import { PREFERRED_HIGHLIGHTER } from "../../lib/syntaxHighlighting";
 import ChatMarkdown from "../ChatMarkdown";
-import {
-  compileKmMarkdownSnapshot,
-  useKmMarkdownRenderConfig,
-} from "../markdown/markdownRuntime";
+import { compileKmMarkdownSnapshot, useKmMarkdownRenderConfig } from "../markdown/markdownRuntime";
 import { ChatMarkdownAssetImage } from "../markdown/MarkdownMedia";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
@@ -216,6 +221,8 @@ import {
   liveWorkEntryLabel,
   resolveAssistantMessageCopyState,
   resolveTimelineIsAtEnd,
+  timelineEntryTurnFoldRunId,
+  timelineEntryTurnFoldRunIdsByEntryId,
   timelineRowKey,
   resolveTimelineMinimapHasPersistentGutter,
   resolveTimelineMinimapCurrentIndex,
@@ -330,6 +337,7 @@ import { readNativeTodoPlan, type TodoPlanChange } from "./todoPlan";
 import { isNativeWaitTool, isT3ThreadWait } from "./NativeWaitingPane.logic";
 import { SecretRequestCard } from "./SecretRequestCard";
 import { TimelineSystemDivider } from "./TimelineSystemDivider";
+import { TimelinePendingApprovalRow } from "./TimelinePendingApprovalRow";
 
 import { SkillChipIcon, SkillInlineText } from "./SkillInlineText";
 import * as DateTime from "effect/DateTime";
@@ -374,6 +382,7 @@ interface TimelineRowSharedState {
    */
   onAppFullscreenChange: (rowId: string, fullscreen: boolean) => void;
   onRunShellCommand: ((command: string) => void) | undefined;
+  findActive: boolean;
   onImageExpand: (preview: ExpandedImagePreview) => void;
   displayThreadKey?: string;
   onOpenTurnDiff: (runId: RunId, filePath?: string) => void;
@@ -400,6 +409,12 @@ interface TimelineRowSharedState {
   onWorktreeSetupWorkLocally: (() => void) | null;
   onOpenWorktreeSetupTerminal: ((terminalId: string) => void) | null;
   workGroupViewState: WorkGroupViewState;
+  pendingApprovals: ReadonlyMap<RuntimeRequestId, PendingApproval>;
+  respondingRequestIds: ReadonlyArray<RuntimeRequestId>;
+  canOperateThread: boolean;
+  onRespondToApproval:
+    | ((requestId: RuntimeRequestId, decision: ProviderApprovalDecision) => Promise<unknown>)
+    | undefined;
 }
 
 interface TimelineRowActivityState {
@@ -500,6 +515,8 @@ const EMPTY_TIMELINE_RUN_TIMINGS_BY_ID: ReadonlyMap<RunId, TimelineRunTiming> = 
   TimelineRunTiming
 >();
 const EMPTY_RUN_IDS: ReadonlySet<RunId> = new Set();
+const EMPTY_PENDING_APPROVALS: ReadonlyArray<PendingApproval> = [];
+const EMPTY_RESPONDING_REQUEST_IDS: ReadonlyArray<RuntimeRequestId> = [];
 const EMPTY_SUBAGENT_SOURCES: ReadonlyMap<string, ReadonlyArray<TimelineLiveSubagent> | undefined> =
   new Map();
 // Timeline maintenance is instant so streamed growth cannot pull a reader
@@ -513,7 +530,7 @@ export interface MessagesTimelineHistoryControls {
   readonly hasMoreHistory: boolean;
   readonly loading: boolean;
   readonly error: string | null;
-  readonly onLoadEarlier: () => void;
+  readonly onLoadEarlier: (throughEntryId?: string) => void;
 }
 
 type TimelineProjectionRun = HandoffTimelineRun &
@@ -551,6 +568,13 @@ interface MessagesTimelineProps {
   isCompacting?: boolean;
   /** The agent waits on an approval or an answer from the user. */
   awaitingUser?: boolean;
+  pendingApprovals?: ReadonlyArray<PendingApproval>;
+  respondingRequestIds?: ReadonlyArray<RuntimeRequestId>;
+  canOperateThread?: boolean;
+  onRespondToApproval?: (
+    requestId: RuntimeRequestId,
+    decision: ProviderApprovalDecision,
+  ) => Promise<unknown>;
   /** Thread state shown after the last message, such as a settled or snoozed line. */
   footer?: ReactNode;
 
@@ -644,6 +668,10 @@ export const MessagesTimeline = memo(function MessagesTimeline({
   isPreparingWorktree = false,
   isCompacting = false,
   awaitingUser = false,
+  pendingApprovals = EMPTY_PENDING_APPROVALS,
+  respondingRequestIds = EMPTY_RESPONDING_REQUEST_IDS,
+  canOperateThread = false,
+  onRespondToApproval,
   onOpenNativeTerminal = NOOP_OPEN_NATIVE_TERMINAL,
   listRef,
   timelineEntries,
@@ -690,7 +718,24 @@ export const MessagesTimeline = memo(function MessagesTimeline({
   loadEarlier = null,
   transcriptStyle: transcriptStyleOverride,
 }: MessagesTimelineProps) {
+  const find = use(ThreadFindTimelineContext);
+  const findOpen = find?.findOpen ?? false;
+  const findExpanded = find?.findExpanded ?? false;
+  const findQuery = find?.findQuery ?? "";
+  const activeFindMatch = find?.activeFindMatch ?? null;
+  const findNavigationId = find?.findNavigationId ?? 0;
+  const findPositionReaderRef = find?.findPositionReaderRef ?? null;
+  const normalizedFindQuery = findQuery.trim();
+  const findActive = findExpanded;
   const listIdentityKey = displayThreadKey ?? routeThreadKey;
+  const previousFindNavigationRef = useRef({ identity: listIdentityKey, open: false });
+  useEffect(() => {
+    const previous = previousFindNavigationRef.current;
+    previousFindNavigationRef.current = { identity: listIdentityKey, open: findOpen };
+    if (findOpen && (!previous.open || previous.identity !== listIdentityKey)) {
+      onManualNavigation();
+    }
+  }, [findOpen, listIdentityKey, onManualNavigation]);
   const markdownWarmupSkillNames = useMemo(() => skills.map((skill) => skill.name), [skills]);
   const markdownWarmupConfig = useKmMarkdownRenderConfig({
     lineBreaks: false,
@@ -1022,11 +1067,23 @@ export const MessagesTimeline = memo(function MessagesTimeline({
     readonly workspaceRoot: string | undefined;
     readonly projection: MessagesTimelineRowsProjection;
   } | null>(null);
+  const pendingApprovalsByRequestId = useMemo(() => {
+    const approvals = new Map<RuntimeRequestId, PendingApproval>();
+    for (const approval of pendingApprovals) {
+      approvals.set(approval.requestId, approval);
+    }
+    return approvals;
+  }, [pendingApprovals]);
+  const pendingApprovalRequestIds = useMemo(
+    () => new Set(pendingApprovalsByRequestId.keys()),
+    [pendingApprovalsByRequestId],
+  );
   const rawRows = useMemo(() => {
     const previous = rowsProjectionRef.current;
     const projection = deriveMessagesTimelineRowsWithState(
       {
         timelineEntries,
+        pendingApprovalRequestIds,
         latestRun,
         runTimingsById,
         runningRunId,
@@ -1059,6 +1116,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
     listIdentityKey,
     workspaceRoot,
     timelineEntries,
+    pendingApprovalRequestIds,
     latestRun,
     runTimingsById,
     runningRunId,
@@ -1081,6 +1139,48 @@ export const MessagesTimeline = memo(function MessagesTimeline({
     transcriptStyle,
   ]);
   const rows = useStableRows(rawRows, listIdentityKey);
+  const unmatchedPendingApprovals = useMemo(() => {
+    if (pendingApprovalsByRequestId.size === 0) return pendingApprovalsByRequestId;
+    const unmatched = new Map(pendingApprovalsByRequestId);
+    for (const row of rows) {
+      if (row.kind !== "work") continue;
+      for (const entry of row.groupedEntries) {
+        const item = entry.projectedItem?.item;
+        if (item?.type === "approval_request") unmatched.delete(item.requestId);
+      }
+    }
+    return unmatched;
+  }, [pendingApprovalsByRequestId, rows]);
+  const selectedFindEntryIsVisible =
+    activeFindMatch !== null && rows.some((row) => row.id === activeFindMatch.entryId);
+  const activeFindRunId =
+    activeFindMatch && !selectedFindEntryIsVisible
+      ? timelineEntryTurnFoldRunId(timelineEntries, activeFindMatch.entryId)
+      : null;
+  useEffect(() => {
+    if (
+      activeFindRunId === null ||
+      !rows.some((row) => row.kind === "turn-fold" && row.runId === activeFindRunId)
+    )
+      return;
+    setExpandedRunIds((existing) =>
+      existing.has(activeFindRunId) ? existing : new Set([...existing, activeFindRunId]),
+    );
+  }, [activeFindRunId, rows]);
+  const activeFindAttemptId =
+    activeFindMatch && !selectedFindEntryIsVisible
+      ? timelineEntries.find((entry) => entry.id === activeFindMatch.entryId)?.attempt?.id
+      : undefined;
+  useEffect(() => {
+    if (
+      !activeFindAttemptId ||
+      !rows.some((row) => row.kind === "attempt-fold" && row.attemptId === activeFindAttemptId)
+    )
+      return;
+    setExpandedAttemptIds((existing) =>
+      existing.has(activeFindAttemptId) ? existing : new Set([...existing, activeFindAttemptId]),
+    );
+  }, [activeFindAttemptId, rows]);
   const openExcerptIds = useMemo(() => {
     const ids = new Set<string>();
     if (autoOpen !== "live-excerpts") return ids;
@@ -1411,9 +1511,30 @@ export const MessagesTimeline = memo(function MessagesTimeline({
         footerRef={setEndFooter}
       >
         {footer}
+        {unmatchedPendingApprovals.size > 0 ? (
+          <WorkLogBlock>
+            {[...unmatchedPendingApprovals.values()].map((approval) => (
+              <TimelinePendingApprovalRow
+                key={approval.requestId}
+                approval={approval}
+                canOperateThread={canOperateThread}
+                isResponding={respondingRequestIds.includes(approval.requestId)}
+                onRespondToApproval={onRespondToApproval}
+              />
+            ))}
+          </WorkLogBlock>
+        ) : null}
       </TimelineListFooter>
     ),
-    [anchoredEndSpace, contentInsetEndAdjustment, footer],
+    [
+      anchoredEndSpace,
+      canOperateThread,
+      contentInsetEndAdjustment,
+      footer,
+      onRespondToApproval,
+      respondingRequestIds,
+      unmatchedPendingApprovals,
+    ],
   );
 
   const measureContentOverflow = useCallback(
@@ -1584,6 +1705,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
       resolvedTheme,
       workspaceRoot,
       skills,
+      findActive,
       providerStatuses,
       runs,
       activeThreadEnvironmentId,
@@ -1611,6 +1733,10 @@ export const MessagesTimeline = memo(function MessagesTimeline({
       onWorktreeSetupWorkLocally: onWorktreeSetupWorkLocally ?? null,
       onOpenWorktreeSetupTerminal: onOpenWorktreeSetupTerminal ?? null,
       workGroupViewState,
+      pendingApprovals: pendingApprovalsByRequestId,
+      respondingRequestIds,
+      canOperateThread,
+      onRespondToApproval,
     }),
     [
       readyCitationRequest,
@@ -1624,6 +1750,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
       skills,
       providerStatuses,
       runs,
+      findActive,
       activeThreadEnvironmentId,
       onRevertToTurnCount,
       onRunShellCommand,
@@ -1649,6 +1776,10 @@ export const MessagesTimeline = memo(function MessagesTimeline({
       onWorktreeSetupWorkLocally,
       onOpenWorktreeSetupTerminal,
       workGroupViewState,
+      pendingApprovalsByRequestId,
+      respondingRequestIds,
+      canOperateThread,
+      onRespondToApproval,
     ],
   );
   const compactionAwaitingRow =
@@ -1708,6 +1839,46 @@ export const MessagesTimeline = memo(function MessagesTimeline({
   const canvas = useChatCanvas();
   const registerTimeline = canvas?.registerTimeline;
   const [timelineScroller, setTimelineScroller] = useState<HTMLElement | null>(null);
+  const timelineEntryIds = useMemo(
+    () => new Set(timelineEntries.map((entry) => entry.id)),
+    [timelineEntries],
+  );
+  const readVisibleFindPosition = useCallback(
+    (query: string) =>
+      timelineScroller
+        ? readThreadFindPosition(
+            timelineScroller,
+            query,
+            (rowId) => (timelineEntryIds.has(rowId) ? rowId : undefined),
+            contentInsetEndAdjustment,
+          )
+        : undefined,
+    [contentInsetEndAdjustment, timelineEntryIds, timelineScroller],
+  );
+  useLayoutEffect(() => {
+    if (!findPositionReaderRef) return;
+    findPositionReaderRef.current = readVisibleFindPosition;
+    return () => {
+      if (findPositionReaderRef.current === readVisibleFindPosition) {
+        findPositionReaderRef.current = null;
+      }
+    };
+  }, [findPositionReaderRef, readVisibleFindPosition]);
+  useThreadFindNavigation({
+    container: timelineScroller,
+    query: normalizedFindQuery,
+    match: activeFindMatch,
+    navigationId: findNavigationId,
+    rowIndex:
+      activeFindMatch === null
+        ? -1
+        : timelineData.findIndex((row) => row.id === activeFindMatch.entryId),
+    entries: timelineEntries,
+    listRef,
+    contentInsetEndAdjustment,
+    listReady: timelineScroller !== null && !restoringThreadPosition,
+    historyControls,
+  });
   const setTimelineList = useCallback(
     (list: LegendListRef | null) => {
       listRef.current = list;
@@ -1761,6 +1932,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
 
   if (
     rows.length === 0 &&
+    unmatchedPendingApprovals.size === 0 &&
     !isWorking &&
     parentThreadLink === null &&
     historyControls === undefined &&
@@ -1880,7 +2052,7 @@ function TimelineHistoryControl(props: MessagesTimelineHistoryControls) {
             type="button"
             disabled={props.loading}
             aria-label="Load earlier turns"
-            onClick={props.onLoadEarlier}
+            onClick={() => props.onLoadEarlier()}
             className="w-full py-1.5 text-xs text-muted-foreground/60 hover:text-foreground disabled:cursor-default"
           >
             {props.loading ? "Loading earlier turns…" : "Load earlier turns"}
@@ -2252,10 +2424,7 @@ const TimelineRowFrame = memo(function TimelineRowFrame({ row }: { row: Timeline
   }, [reshaping]);
   // Live content grows naturally; retain the smooth-height path for exits.
   const { outerRef, contentRef } = useSmoothHeight<HTMLDivElement, HTMLDivElement>(
-    !live ||
-      scrollAnchor ||
-      (row.kind === "work-live" && !exiting) ||
-      !(reshaping || exiting),
+    !live || scrollAnchor || (row.kind === "work-live" && !exiting) || !(reshaping || exiting),
     { collapsed: exiting },
   );
 
@@ -2603,6 +2772,10 @@ function UserVideoAttachment({ file }: { readonly file: ChatFileAttachment }) {
   );
 }
 
+// Drawn inside the media so dark screenshots keep an edge on the dark background.
+const MEDIA_EDGE_CLASS_NAME =
+  "relative after:pointer-events-none after:absolute after:inset-0 after:z-10 after:rounded-[inherit] after:ring-1 after:ring-inset after:ring-black/9 dark:after:ring-white/12";
+
 // Screen readers skim a transcript by heading, so every message announces its
 // author as one. The thread title in ChatHeader is an <h2>; headings written
 // inside a message are exposed below this level. Visually hidden and excluded
@@ -2649,7 +2822,10 @@ function UserTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "message" 
     (attachment) => !isImageAttachment(attachment) && !isFileAttachment(attachment),
   );
   const userMessage = resolveUserMessagePresentation(row.message);
-  const resolvedContext = useMemo(() => resolveUserMessageContext(row.message), [row.message]);
+  const resolvedContext = useMemo(
+    () => resolveUserMessageContext({ ...row.message, text: userMessage.text }),
+    [row.message, userMessage.text],
+  );
   const isAgentMessage =
     row.message.createdBy === "agent" &&
     row.message.creationSource !== "server" &&
@@ -2669,12 +2845,12 @@ function UserTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "message" 
         })
       : null,
   );
-  const automationTitle = automationTasksQuery.data?.tasks.find(
-    (task) => task.id === userMessage.scheduledTaskId,
-  )?.title.trim();
+  const automationTitle = automationTasksQuery.data?.tasks
+    .find((task) => task.id === userMessage.scheduledTaskId)
+    ?.title.trim();
   const senderLabel = userMessage.isAutomation
     ? automationTitle || "Automation"
-    : threadReadTargetTitle(senderShell) ?? "Agent";
+    : (threadReadTargetTitle(senderShell) ?? "Agent");
   const plainText = replaceComposerContextReferences(
     resolvedContext.text,
     (reference) => reference.label,
@@ -2699,6 +2875,25 @@ function UserTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "message" 
   );
   const regularImages = userImages.filter((image) => !image.name.startsWith("preview-annotation-"));
   const unchippedFiles = otherUserFiles.filter((file) => !chippedAttachmentIds.has(file.id));
+  // Images and videos sent without words are shown without an empty message bubble.
+  const mediaOnly =
+    !folded &&
+    resolvedContext.text.trim() === "" &&
+    unchippedFiles.length === 0 &&
+    unknownAttachments.length === 0 &&
+    regularImages.length + userVideos.length > 0;
+  // A lone image keeps its own shape; a 4:3 crop hides most of a wide screenshot.
+  const loneImage =
+    mediaOnly &&
+    userVideos.length === 0 &&
+    regularImages.length === 1 &&
+    regularImages[0]!.source?.kind !== "snap-shot";
+  // Several images sent without words share one rounded shape, split by hairlines.
+  const collage =
+    mediaOnly &&
+    userVideos.length === 0 &&
+    regularImages.length > 1 &&
+    regularImages.every((image) => image.source?.kind !== "snap-shot");
   const annotationRecordIds = useMemo(
     () =>
       resolvedContext.records
@@ -2840,7 +3035,10 @@ function UserTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "message" 
           <span className="user-message-folded-label min-w-0 max-w-[36%] shrink truncate text-muted-foreground">
             {senderLabel}
           </span>
-          <span className="user-message-folded-separator shrink-0 text-muted-foreground/60" aria-hidden="true">
+          <span
+            className="user-message-folded-separator shrink-0 text-muted-foreground/60"
+            aria-hidden="true"
+          >
             ·
           </span>
           <span className="user-message-folded-summary min-w-0 flex-1 truncate text-muted-foreground">
@@ -2860,132 +3058,183 @@ function UserTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "message" 
       ) : null}
       {!folded || expanded ? (
         <>
-      {/* The turn's to-dos dock under the prompt; the column keeps both one width. */}
-      <div
-        className="flex max-w-[80%] flex-col"
-        data-terminal-user-content={isTerminal ? "true" : undefined}
-      >
-        <div
-          className={cn(
-            "relative w-full rounded-2xl bg-message p-3 text-message-foreground",
-            folded && "max-h-96 overflow-auto",
-          )}
-        >
-          {isTerminal ? null : <MessageAuthorHeading>You</MessageAuthorHeading>}
-          {(regularImages.length > 0 || userVideos.length > 0) && (
-            <div className="mb-2 grid max-w-[210px] grid-cols-2 gap-2">
-              {regularImages.map((image) => (
+          {/* The turn's to-dos dock under the prompt; the column keeps both one width. */}
+          <div
+            className="flex max-w-[80%] flex-col"
+            data-terminal-user-content={isTerminal ? "true" : undefined}
+          >
+            <div
+              className={cn(
+                "relative w-full rounded-2xl",
+                !mediaOnly && "bg-message p-3",
+                "text-message-foreground",
+                folded && "max-h-96 overflow-auto",
+              )}
+            >
+              {isTerminal ? null : <MessageAuthorHeading>You</MessageAuthorHeading>}
+              {(regularImages.length > 0 || userVideos.length > 0) && (
                 <div
-                  key={image.id}
                   className={cn(
-                    "bg-background/70",
-                    image.source?.kind === "snap-shot" && image.previewUrl
-                      ? cn(SNAP_SHOT_ATTACHMENT_FRAME_CLASS, "col-span-2")
-                      : "aspect-[4/3] overflow-hidden rounded-lg border border-border/80",
+                    "grid",
+                    !mediaOnly
+                      ? "mb-2 max-w-[210px] grid-cols-2 gap-2"
+                      : loneImage
+                        ? "max-w-full"
+                        : collage
+                          ? cn(
+                              MEDIA_EDGE_CLASS_NAME,
+                              "w-80 max-w-full gap-px overflow-hidden rounded-2xl bg-black/9 dark:bg-white/12",
+                              regularImages.length === 2
+                                ? "auto-rows-[12rem] grid-cols-2"
+                                : regularImages.length === 3
+                                  ? "auto-rows-[calc(6rem-0.5px)] grid-cols-[3fr_2fr]"
+                                  : "auto-rows-[6rem] grid-cols-2",
+                            )
+                          : "w-80 max-w-full grid-cols-2 gap-2",
                   )}
                 >
-                  {image.previewUrl ? (
-                    <button
-                      type="button"
-                      className="block h-full w-full cursor-zoom-in"
-                      aria-label={`Preview ${image.name}`}
-                      onClick={() => {
-                        const preview = buildExpandedImagePreview(regularImages, image.id);
-                        if (!preview) return;
-                        ctx.onImageExpand(preview);
-                      }}
+                  {regularImages.map((image, index) => (
+                    <div
+                      key={image.id}
+                      className={cn(
+                        "bg-background/70",
+                        image.source?.kind === "snap-shot" && image.previewUrl
+                          ? cn(SNAP_SHOT_ATTACHMENT_FRAME_CLASS, "col-span-2")
+                          : loneImage
+                            ? cn(MEDIA_EDGE_CLASS_NAME, "overflow-hidden rounded-2xl")
+                            : collage
+                              ? cn(
+                                  "overflow-hidden bg-background",
+                                  regularImages.length === 3 && index === 0 && "row-span-2",
+                                  regularImages.length > 3 &&
+                                    regularImages.length % 2 === 1 &&
+                                    index === regularImages.length - 1 &&
+                                    "col-span-2",
+                                )
+                              : "aspect-[4/3] overflow-hidden rounded-lg border border-border/80",
+                      )}
                     >
-                      <img
-                        src={image.previewUrl}
-                        alt={image.name}
-                        className="block size-full object-cover"
-                      />
-                    </button>
-                  ) : (
-                    <div className="flex min-h-[72px] items-center justify-center px-2 py-3 text-center text-2xs text-muted-foreground/70">
-                      {image.name}
-                    </div>
-                  )}
-                  {image.previewUrl && image.source?.kind === "snap-shot" ? (
-                    <SnapShotAttachmentDetails source={image.source} />
-                  ) : null}
-                </div>
-              ))}
-              {userVideos.map((file) => (
-                <UserVideoAttachment key={file.id} file={file} />
-              ))}
-            </div>
-          )}
-          {unchippedFiles.length > 0 || unknownAttachments.length > 0 ? (
-            <div className="mb-2 flex flex-col gap-1">
-              {unchippedFiles.map((file) => {
-                const fileIdentity = (
-                  <>
-                    <PierreEntryIcon pathValue={file.name} kind="file" theme={ctx.resolvedTheme} />
-                    <span className="min-w-0 flex-1 truncate">{file.name}</span>
-                  </>
-                );
-                if (file.downloadable !== false) {
-                  return (
-                    <div key={file.id} className="flex min-w-0 items-center gap-1">
-                      <button
-                        type="button"
-                        aria-label={`Preview ${file.name}`}
-                        onClick={() => ctx.onFileOpen(file)}
-                        className="focus-visible:ring-ring/70 flex min-w-0 flex-1 cursor-pointer items-center gap-2 rounded-md py-1 text-left text-sm hover:underline focus-visible:ring-2 focus-visible:outline-none focus-visible:ring-inset"
-                      >
-                        {fileIdentity}
-                        <EyeIcon className="size-4 shrink-0" />
-                      </button>
-                      <Tooltip>
-                        <TooltipTrigger
-                          render={
-                            <Button
-                              size="icon-xs"
-                              variant="ghost-muted"
-                              aria-label={`Download ${file.name}`}
-                              onClick={() => ctx.onFileDownload(file)}
-                            />
-                          }
+                      {image.previewUrl ? (
+                        <button
+                          type="button"
+                          className="block h-full w-full cursor-zoom-in"
+                          aria-label={`Preview ${image.name}`}
+                          onClick={() => {
+                            const preview = buildExpandedImagePreview(regularImages, image.id);
+                            if (!preview) return;
+                            ctx.onImageExpand(preview);
+                          }}
                         >
-                          <DownloadIcon />
-                        </TooltipTrigger>
-                        <TooltipPopup side="top">Download {file.name}</TooltipPopup>
-                      </Tooltip>
+                          <img
+                            src={image.previewUrl}
+                            alt={image.name}
+                            className={cn(
+                              "block transform-gpu",
+                              // A fixed height keeps the row from growing when the image loads.
+                              loneImage
+                                ? "h-48 w-auto min-w-24 max-w-full object-cover"
+                                : "size-full object-cover",
+                            )}
+                          />
+                        </button>
+                      ) : (
+                        <div
+                          className={cn(
+                            "flex min-h-[72px] items-center justify-center px-2 py-3 text-center text-2xs text-muted-foreground/70",
+                            loneImage && "h-48 w-64 max-w-full",
+                            collage && "h-full",
+                          )}
+                        >
+                          {image.name}
+                        </div>
+                      )}
+                      {image.previewUrl && image.source?.kind === "snap-shot" ? (
+                        <SnapShotAttachmentDetails source={image.source} />
+                      ) : null}
                     </div>
-                  );
-                }
-
-                return (
-                  <div key={file.id} className="flex min-w-0 items-center gap-2 py-1 text-sm">
-                    {fileIdentity}
-                  </div>
-                );
-              })}
-              {unknownAttachments.map((attachment) => (
-                <div key={attachment.id} className="flex min-w-0 items-center gap-2 py-1 text-sm">
-                  <PierreEntryIcon
-                    pathValue={attachment.name}
-                    kind="file"
-                    theme={ctx.resolvedTheme}
-                  />
-                  <span className="min-w-0 flex-1 truncate">{attachment.name}</span>
+                  ))}
+                  {userVideos.map((file) => (
+                    <UserVideoAttachment key={file.id} file={file} />
+                  ))}
                 </div>
-              ))}
+              )}
+              {unchippedFiles.length > 0 || unknownAttachments.length > 0 ? (
+                <div className="mb-2 flex flex-col gap-1">
+                  {unchippedFiles.map((file) => {
+                    const fileIdentity = (
+                      <>
+                        <PierreEntryIcon
+                          pathValue={file.name}
+                          kind="file"
+                          theme={ctx.resolvedTheme}
+                        />
+                        <span className="min-w-0 flex-1 truncate">{file.name}</span>
+                      </>
+                    );
+                    if (file.downloadable !== false) {
+                      return (
+                        <div key={file.id} className="flex min-w-0 items-center gap-1">
+                          <button
+                            type="button"
+                            aria-label={`Preview ${file.name}`}
+                            onClick={() => ctx.onFileOpen(file)}
+                            className="focus-visible:ring-ring/70 flex min-w-0 flex-1 cursor-pointer items-center gap-2 rounded-md py-1 text-left text-sm hover:underline focus-visible:ring-2 focus-visible:outline-none focus-visible:ring-inset"
+                          >
+                            {fileIdentity}
+                            <EyeIcon className="size-4 shrink-0" />
+                          </button>
+                          <Tooltip>
+                            <TooltipTrigger
+                              render={
+                                <Button
+                                  size="icon-xs"
+                                  variant="ghost-muted"
+                                  aria-label={`Download ${file.name}`}
+                                  onClick={() => ctx.onFileDownload(file)}
+                                />
+                              }
+                            >
+                              <DownloadIcon />
+                            </TooltipTrigger>
+                            <TooltipPopup side="top">Download {file.name}</TooltipPopup>
+                          </Tooltip>
+                        </div>
+                      );
+                    }
+
+                    return (
+                      <div key={file.id} className="flex min-w-0 items-center gap-2 py-1 text-sm">
+                        {fileIdentity}
+                      </div>
+                    );
+                  })}
+                  {unknownAttachments.map((attachment) => (
+                    <div
+                      key={attachment.id}
+                      className="flex min-w-0 items-center gap-2 py-1 text-sm"
+                    >
+                      <PierreEntryIcon
+                        pathValue={attachment.name}
+                        kind="file"
+                        theme={ctx.resolvedTheme}
+                      />
+                      <span className="min-w-0 flex-1 truncate">{attachment.name}</span>
+                    </div>
+                  ))}
+                </div>
+              ) : null}
+              <div onCopyCapture={onBodyCopyCapture}>
+                <CollapsibleUserMessageBody
+                  text={resolvedContext.text}
+                  renderContextReference={renderContextReference}
+                  skills={ctx.skills}
+                  markdownCwd={ctx.markdownCwd}
+                  collapsible={!folded}
+                />
+              </div>
             </div>
-          ) : null}
-          <div onCopyCapture={onBodyCopyCapture}>
-            <CollapsibleUserMessageBody
-              text={resolvedContext.text}
-              renderContextReference={renderContextReference}
-              skills={ctx.skills}
-              markdownCwd={ctx.markdownCwd}
-              collapsible={!folded}
-            />
+            <DockedTodoPlan plan={row.plan} live={row.planRunLive === true} />
           </div>
-        </div>
-        <DockedTodoPlan plan={row.plan} live={row.planRunLive === true} />
-      </div>
         </>
       ) : null}
       {row.projectedItem &&
@@ -3051,7 +3300,9 @@ function UserTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "message" 
                   }
                   {...(contextClipboardFragment
                     ? {
-                        extraFlavors: { [COMPOSER_CONTEXT_CLIPBOARD_MIME]: contextClipboardFragment },
+                        extraFlavors: {
+                          [COMPOSER_CONTEXT_CLIPBOARD_MIME]: contextClipboardFragment,
+                        },
                       }
                     : {})}
                   variant="ghost"
@@ -3505,6 +3756,11 @@ function ProposedPlanTimelineRow({
 
 function HtmlRenderTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "html-render" }> }) {
   const ctx = use(TimelineRowCtx);
+  const { onAppFullscreenChange } = ctx;
+  const onFullscreenChange = useCallback(
+    (fullscreen: boolean) => onAppFullscreenChange(row.id, fullscreen),
+    [onAppFullscreenChange, row.id],
+  );
 
   return (
     <div className="min-w-0 px-1">
@@ -3513,7 +3769,7 @@ function HtmlRenderTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "htm
         key={row.htmlRender.attachmentId}
         environmentId={ctx.activeThreadEnvironmentId}
         htmlRender={row.htmlRender}
-        onOpen={ctx.onFileOpen}
+        onFullscreenChange={onFullscreenChange}
       />
     </div>
   );
@@ -3946,17 +4202,22 @@ const WorkGroupSection = memo(function WorkGroupSection({
   isExpandedToolGroup: boolean;
   displayLabel?: string | undefined;
 }) {
-  const { workspaceRoot, routeThreadKey, onToggleWorkEntry } = use(TimelineRowCtx);
+  const { workspaceRoot, routeThreadKey, onToggleWorkEntry, pendingApprovals } =
+    use(TimelineRowCtx);
   const onToggleStandaloneEntry = useCallback(
     (collapsed: boolean) => onToggleWorkEntry(disclosureAnchorKey, collapsed),
     [disclosureAnchorKey, onToggleWorkEntry],
   );
   const nonEmptyEntries = useMemo(
     () =>
-      groupedEntries.filter((entry) =>
-        workEntryIsVisibleInGroup(entry, isExpandedToolGroup),
-      ),
-    [groupedEntries, isExpandedToolGroup],
+      groupedEntries.filter((entry) => {
+        const item = entry.projectedItem?.item;
+        return (
+          (item?.type === "approval_request" && pendingApprovals.has(item.requestId)) ||
+          workEntryIsVisibleInGroup(entry, isExpandedToolGroup)
+        );
+      }),
+    [groupedEntries, isExpandedToolGroup, pendingApprovals],
   );
 
   if (nonEmptyEntries.length === 0) return null;
@@ -4202,9 +4463,7 @@ function ExpandedWorkGroupEntries({
   return (
     <WorkGroupViewCtx value={groupView}>
       <WorkLogList>
-        <div
-          className="relative min-w-0"
-        >
+        <div className="relative min-w-0">
           <LegendList
             ref={listRef}
             data={entries}
@@ -4238,7 +4497,10 @@ function ExpandedWorkGroupEntries({
             )}
           />
           {!isReasoningTraceOnly ? (
-            <BottomStickJumpButton visible={bottomStick.canJump} onJump={bottomStick.jumpToBottom} />
+            <BottomStickJumpButton
+              visible={bottomStick.canJump}
+              onJump={bottomStick.jumpToBottom}
+            />
           ) : null}
         </div>
       </WorkLogList>
@@ -4298,18 +4560,18 @@ function WorkingTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "workin
     row.status === "monitoring" ? (
       statusLabel
     ) : isPreparingWorktree ? (
-    "Setting up worktree…"
-  ) : isCompacting ? (
-    <CompactingLabel />
-  ) : row.createdAt ? (
-    <>
-      {statusLabel}
-      {elapsedPrefix}
-      <WorkingTimer createdAt={row.createdAt} workCompletedAt={row.workCompletedAt} />
-    </>
-  ) : (
-    `${statusLabel}...`
-  );
+      "Setting up worktree…"
+    ) : isCompacting ? (
+      <CompactingLabel />
+    ) : row.createdAt ? (
+      <>
+        {statusLabel}
+        {elapsedPrefix}
+        <WorkingTimer createdAt={row.createdAt} workCompletedAt={row.workCompletedAt} />
+      </>
+    ) : (
+      `${statusLabel}...`
+    );
   return (
     <div
       className="border-b border-border/60 pb-2 pt-1"
@@ -4636,8 +4898,8 @@ function LiveWorkEntryTimelineRow({
       : toolGroupSummaryIconName(toolGroupSummaryKind(row.groupedEntries));
   const toolIcon =
     groupLabel === null
-      ? row.entry.toolIcon ?? row.entry.toolSource?.icon
-      : groupIconEntry?.toolIcon ?? groupIconEntry?.toolSource?.icon;
+      ? (row.entry.toolIcon ?? row.entry.toolSource?.icon)
+      : (groupIconEntry?.toolIcon ?? groupIconEntry?.toolSource?.icon);
 
   const failed = workEntryDisplayIndicatesToolFailure(row.entry);
   const thoughtLine =
@@ -4708,11 +4970,15 @@ function LiveWorkEntryTimelineRow({
               </span>
             </span>
           ) : row.entry.itemType === "reasoning" && groupLabel === null ? (
-            terminalThoughtIsStable && !thoughtIsStatus
-              ? row.active
-                ? "Thinking"
-                : "Thought"
-              : reasoningTrace
+            terminalThoughtIsStable && !thoughtIsStatus ? (
+              row.active ? (
+                "Thinking"
+              ) : (
+                "Thought"
+              )
+            ) : (
+              reasoningTrace
+            )
           ) : threadLabel ? (
             <ThreadReadLabel
               label={threadLabel}
@@ -5434,16 +5700,20 @@ function UserMessageContextReferenceChip(props: {
     contextId: props.reference.contextId as ComposerContextId,
     label: props.reference.label,
   });
-  return userMessageContextPresentationRegistry.render(props.reference.kind, props.record, {
-    reference: props.reference,
-    annotationImage: props.annotationImage,
-    attachment: props.attachment,
-    resolvedTheme,
-    copyMarkdown,
-    onExpandImage: props.onExpandImage,
-    onExpandVideo: props.onExpandVideo,
-    onOpenFile: props.onOpenFile,
-  });
+  return (
+    <span className="contents" data-thread-find-ignore>
+      {userMessageContextPresentationRegistry.render(props.reference.kind, props.record, {
+        reference: props.reference,
+        annotationImage: props.annotationImage,
+        attachment: props.attachment,
+        resolvedTheme,
+        copyMarkdown,
+        onExpandImage: props.onExpandImage,
+        onExpandVideo: props.onExpandVideo,
+        onOpenFile: props.onOpenFile,
+      })}
+    </span>
+  );
 }
 
 const MAX_COLLAPSED_USER_MESSAGE_LINES = 8;
@@ -6349,6 +6619,19 @@ function TimelineToolWorkEntryCard(props: {
 const SimpleWorkEntryRow = memo(function SimpleWorkEntryRow(props: WorkEntryRowProps) {
   const ctx = use(TimelineRowCtx);
   const item = props.workEntry.projectedItem?.item;
+  if (item?.type === "approval_request") {
+    const approval = ctx.pendingApprovals.get(item.requestId);
+    if (approval) {
+      return (
+        <TimelinePendingApprovalRow
+          approval={approval}
+          canOperateThread={ctx.canOperateThread}
+          isResponding={ctx.respondingRequestIds.includes(approval.requestId)}
+          onRespondToApproval={ctx.onRespondToApproval}
+        />
+      );
+    }
+  }
   const notification = item?.type === "notification" ? item : undefined;
   const taskIds =
     notification?.source.kind === "delegated_task" ? notification.source.taskIds : undefined;

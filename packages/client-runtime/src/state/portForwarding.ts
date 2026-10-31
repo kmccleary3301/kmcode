@@ -5,6 +5,7 @@ import type { RemoteEnvironmentRequestError } from "../rpc/http.ts";
 
 import { LISTENING_PORTS_ROUTE, PORT_FORWARD_ROUTE } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
+import * as Redacted from "effect/Redacted";
 
 import * as RemoteEnvironmentAuthorization from "../authorization/service.ts";
 import { environmentEndpointUrl } from "../environment/endpoint.ts";
@@ -50,7 +51,7 @@ export const resolvePortForwardWebSocketUrl = Effect.fn(
   const wsUrl = new URL(httpUrl.replace(/^http/, "ws"));
   wsUrl.searchParams.set("port", String(input.remotePort));
   wsUrl.searchParams.set("host", input.remoteHost);
-  wsUrl.searchParams.set("wsTicket", ticket.ticket);
+  wsUrl.searchParams.set("wsTicket", Redacted.value(ticket.ticket));
 
   return wsUrl.toString();
 });

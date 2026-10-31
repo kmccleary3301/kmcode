@@ -20,6 +20,7 @@ import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
+import { tokenizeCliArgs } from "@t3tools/shared/cliArgs";
 import { HostProcessPlatform } from "@t3tools/shared/hostProcess";
 import { fromLenientJson } from "@t3tools/shared/schemaJson";
 import { parse as parseYamlDocument } from "yaml";
@@ -311,6 +312,65 @@ const resolveClaudeConfigDirPath = Effect.fn("resolveClaudeConfigDirPath")(funct
   }
   return path.join(NodeOS.homedir(), ".claude");
 });
+const SettingsBaseUrl = fromLenientJson(
+  Schema.Struct({
+    env: Schema.optional(Schema.Struct({ ANTHROPIC_BASE_URL: Schema.optional(Schema.String) })),
+  }),
+);
+const decodeSettingsBaseUrl = Schema.decodeUnknownEffect(SettingsBaseUrl);
+
+/** ANTHROPIC_BASE_URL from Claude's settings `env`, which Claude Code applies over the process env. */
+export const readClaudeSettingsBaseUrl = Effect.fn("readClaudeSettingsBaseUrl")(function* (
+  config: Pick<ClaudeSettings, "homePath">,
+  cwd: string | undefined,
+  environment: NodeJS.ProcessEnv,
+): Effect.fn.Return<string | undefined, never, FileSystem.FileSystem | Path.Path> {
+  const fileSystem = yield* FileSystem.FileSystem;
+  const path = yield* Path.Path;
+  const platform = yield* HostProcessPlatform;
+  const configDirPath = yield* resolveClaudeConfigDirPath(config, environment, cwd);
+  let baseUrl: string | undefined;
+  for (const settingsPath of skillOverrideSettingsPaths(
+    path,
+    configDirPath,
+    undefined,
+    platform,
+    environment,
+  )) {
+    const contents = yield* fileSystem
+      .readFileString(settingsPath)
+      .pipe(Effect.orElseSucceed(() => undefined));
+    if (contents === undefined) continue;
+    const parsed = yield* decodeSettingsBaseUrl(contents).pipe(
+      Effect.orElseSucceed(() => undefined),
+    );
+    baseUrl = parsed?.env?.ANTHROPIC_BASE_URL ?? baseUrl;
+  }
+  return baseUrl;
+});
+
+/**
+ * Claude's --add-dir is repeatable and variadic; collect every directory while
+ * leaving unrelated launch arguments for the SDK.
+ */
+export function claudeLaunchArgDirectories(launchArgs?: string): ReadonlyArray<string> {
+  const directories: string[] = [];
+  let collecting = false;
+  for (const token of tokenizeCliArgs(launchArgs)) {
+    if (token === "--") break;
+    if (token === "--add-dir") {
+      collecting = true;
+    } else if (token.startsWith("--add-dir=")) {
+      directories.push(token.slice("--add-dir=".length));
+      collecting = false;
+    } else if (token.startsWith("-")) {
+      collecting = false;
+    } else if (collecting) {
+      directories.push(token);
+    }
+  }
+  return directories;
+}
 
 /**
  * Enumerate Claude Code skills from the user config dir and the workspace
@@ -323,7 +383,7 @@ const resolveClaudeConfigDirPath = Effect.fn("resolveClaudeConfigDirPath")(funct
  * Claude Code resolves elsewhere.
  */
 export const discoverClaudeSkills = Effect.fn("discoverClaudeSkills")(function* (
-  config: Pick<ClaudeSettings, "homePath">,
+  config: Pick<ClaudeSettings, "homePath"> & Partial<Pick<ClaudeSettings, "launchArgs">>,
   cwd?: string,
   environment?: NodeJS.ProcessEnv,
 ): Effect.fn.Return<ReadonlyArray<ServerProviderSkill>, never, FileSystem.FileSystem | Path.Path> {
@@ -335,6 +395,12 @@ export const discoverClaudeSkills = Effect.fn("discoverClaudeSkills")(function* 
   const roots: ReadonlyArray<{ directory: string; scope: ClaudeSkillScope }> = [
     { directory: path.join(configDirPath, "skills"), scope: "user" },
     ...(cwd ? [{ directory: path.join(cwd, ".claude", "skills"), scope: "project" as const }] : []),
+    ...claudeLaunchArgDirectories(config.launchArgs)
+      .filter((directory) => directory && (cwd || path.isAbsolute(directory)))
+      .map((directory) => ({
+        directory: path.join(path.resolve(cwd ?? ".", directory), ".claude", "skills"),
+        scope: "project" as const,
+      })),
   ];
 
   const skillsByName = new Map<string, ServerProviderSkill>();

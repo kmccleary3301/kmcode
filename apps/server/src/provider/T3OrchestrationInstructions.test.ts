@@ -9,21 +9,31 @@ import {
 
 describe("T3 orchestration provider instructions", () => {
   it("distinguishes delegated subagents from ordinary top-level threads", () => {
-    assert.include(T3_CODE_ORCHESTRATION_INSTRUCTIONS, "Use `delegate_task`");
-    assert.include(T3_CODE_ORCHESTRATION_INSTRUCTIONS, "ordinary top-level T3 conversations");
-    assert.include(T3_CODE_ORCHESTRATION_INSTRUCTIONS, "Never use them merely");
-    assert.include(T3_CODE_ORCHESTRATION_INSTRUCTIONS, "cross-provider");
-    assert.include(T3_CODE_ORCHESTRATION_INSTRUCTIONS, "call `delegate_task` again");
     assert.include(
       T3_CODE_ORCHESTRATION_INSTRUCTIONS,
-      "Do not use `t3_thread_send` on `childThreadId`",
+      "Use `delegate_task` for another provider or model",
     );
+    assert.include(T3_CODE_ORCHESTRATION_INSTRUCTIONS, "Ordinary coding tasks need no KM tools");
+    assert.include(
+      T3_CODE_ORCHESTRATION_INSTRUCTIONS,
+      "top-level threads only when the user asks for a new thread",
+    );
+    assert.include(
+      T3_CODE_ORCHESTRATION_INSTRUCTIONS,
+      "use your native tool for same-provider work",
+    );
+    assert.include(
+      T3_CODE_ORCHESTRATION_INSTRUCTIONS,
+      "Every new delegate review or re-check is a new `delegate_task`",
+    );
+    assert.include(T3_CODE_ORCHESTRATION_INSTRUCTIONS, "never `t3_thread_send`");
   });
 
-  it("documents structured schedules instead of JSON strings", () => {
-    assert.include(T3_CODE_ORCHESTRATION_INSTRUCTIONS, "structured object, never as JSON text");
-    assert.include(T3_CODE_ORCHESTRATION_INSTRUCTIONS, '"everyMs":3600000');
-    assert.include(T3_CODE_ORCHESTRATION_INSTRUCTIONS, "bindToCurrentThread=false");
+  it("documents schedule-only requests without executing their prompts", () => {
+    assert.include(
+      T3_CODE_ORCHESTRATION_INSTRUCTIONS,
+      "When asked only to schedule, use `schedule_task` without running its prompt.",
+    );
   });
 
   it("injects prompt fallback only for an MCP-enabled first run", () => {
@@ -58,9 +68,10 @@ describe("T3 orchestration provider instructions", () => {
     });
 
     assert.include(injected, "KM Code interaction mode: Default");
-    assert.include(injected, "KM Code collaborative browser");
+    assert.include(injected, "## KM Code browser");
     assert.include(injected, "KM Code orchestration");
     assert.include(injected, "<user_request>\nInspect the repository.\n</user_request>");
+    assert.include(injected, "T3_ACP_MCP_NODE");
   });
 
   it("reinjects ACP guidance only when mode or tool availability changes", () => {
@@ -84,7 +95,7 @@ describe("T3 orchestration provider instructions", () => {
       state: { interactionMode: "default", hasT3Mcp: false },
     });
     assert.include(withoutMcp, "KM Code interaction mode: Default");
-    assert.notInclude(withoutMcp, "KM Code collaborative browser");
+    assert.notInclude(withoutMcp, "## KM Code browser");
     assert.notInclude(withoutMcp, "KM Code orchestration");
   });
 });

@@ -251,11 +251,11 @@ const launchBrowser = Effect.fnUntraced(function* (input: {
   let nextId = 0;
 
   // A command whose reply nobody awaits; `receive` drops replies without a waiter.
-  const post = (method: string, params: Record<string, unknown>, sessionId: string) =>
+  const post = (method: string, params: Record<string, unknown>, sessionId?: string) =>
     Queue.offer(
       outgoing,
       new TextEncoder().encode(
-        `${encodeCdpCommand({ id: ++nextId, method, params, sessionId })}\0`,
+        `${encodeCdpCommand({ id: ++nextId, method, params, ...(sessionId ? { sessionId } : {}) })}\0`,
       ),
     ).pipe(Effect.asVoid);
 
@@ -369,6 +369,17 @@ const launchBrowser = Effect.fnUntraced(function* (input: {
     // Interruption means the scope is closing on purpose; only an exit disconnects.
     Effect.andThen(disconnect),
     Effect.forkScoped,
+  );
+  // Signals can miss a confined browser (AppArmor in LXC), so ask it to quit first.
+  // Runs before the spawn's release, which still signals a browser that stays up.
+  yield* Effect.addFinalizer(() =>
+    disconnected
+      ? Effect.void
+      : post("Browser.close", {}).pipe(
+          Effect.andThen(child.exitCode),
+          Effect.timeout("2 seconds"),
+          Effect.ignore,
+        ),
   );
 
   const send = <A>(

@@ -39,9 +39,15 @@ describe("RPC authorization scopes", () => {
   });
 
   it("requires operate scope to stop a native workflow", () => {
-    expect(
-      requiredScopeForRpcMethod(ORCHESTRATION_V2_WS_METHODS.stopWorkflow),
-    ).toBe(AuthOrchestrationOperateScope);
+    expect(requiredScopeForRpcMethod(ORCHESTRATION_V2_WS_METHODS.stopWorkflow)).toBe(
+      AuthOrchestrationOperateScope,
+    );
+  });
+
+  it("requires terminal operate scope to stop a local server", () => {
+    expect(requiredScopeForRpcMethod(WS_METHODS.previewStopLocalServer)).toBe(
+      AuthTerminalOperateScope,
+    );
   });
 
   it("requires read scope for thread live streams", () => {
@@ -342,12 +348,8 @@ it.effect("requires settings-write for project script mutations", () =>
   Effect.gen(function* () {
     const group = WsRpcGroup.omit(
       ...[...WsRpcGroup.requests.keys()].filter(
-        (
-          tag,
-        ): tag is Exclude<
-          keyof typeof RPC_REQUIRED_SCOPES,
-          typeof WS_METHODS.projectsMutate
-        > => tag !== WS_METHODS.projectsMutate,
+        (tag): tag is Exclude<keyof typeof RPC_REQUIRED_SCOPES, typeof WS_METHODS.projectsMutate> =>
+          tag !== WS_METHODS.projectsMutate,
       ),
     );
     let handled = 0;

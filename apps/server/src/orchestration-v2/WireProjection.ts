@@ -1,6 +1,7 @@
 import type {
   OrchestrationV2DomainEvent,
   OrchestrationV2ContextHandoff,
+  OrchestrationV2Checkpoint,
   OrchestrationV2ThreadProjection,
   OrchestrationV2TurnItem,
 } from "@t3tools/contracts";
@@ -12,6 +13,8 @@ import {
 } from "@t3tools/shared/toolOutput";
 import { parseToolDeviceArguments, parseToolDeviceName } from "@t3tools/shared/toolDevice";
 
+// Keep large checkpoint metadata from bloating snapshots and live event payloads.
+const MAX_WIRE_CHECKPOINT_FILES = 200;
 const MAX_DETAIL_STRING_BYTES = 32_768;
 const MAX_DYNAMIC_VALUE_BYTES = 16_384;
 const MAX_ON_DEMAND_BYTES = 256 * 1024;
@@ -74,8 +77,49 @@ function summarizeDynamicValue(value: unknown): unknown {
   };
 }
 
+type CheckpointFiles = Pick<OrchestrationV2Checkpoint, "files" | "filesTotal">;
+type CheckpointTurnItem = Extract<OrchestrationV2TurnItem, { readonly type: "checkpoint" }>;
+
+const cappedCheckpoints = new WeakMap<OrchestrationV2Checkpoint, OrchestrationV2Checkpoint>();
+const cappedCheckpointItems = new WeakMap<CheckpointTurnItem, CheckpointTurnItem>();
+
+function capCheckpointFiles<T extends CheckpointFiles>(value: T): T {
+  if (value.files.length <= MAX_WIRE_CHECKPOINT_FILES || value.filesTotal !== undefined) {
+    return value;
+  }
+  let additions = 0;
+  let deletions = 0;
+  for (const file of value.files) {
+    additions += file.additions;
+    deletions += file.deletions;
+  }
+  return {
+    ...value,
+    files: value.files.slice(0, MAX_WIRE_CHECKPOINT_FILES),
+    filesTotal: { count: value.files.length, additions, deletions },
+  };
+}
+
+function capCheckpoint(checkpoint: OrchestrationV2Checkpoint): OrchestrationV2Checkpoint {
+  const cached = cappedCheckpoints.get(checkpoint);
+  if (cached !== undefined) return cached;
+  const capped = capCheckpointFiles(checkpoint);
+  if (capped !== checkpoint) cappedCheckpoints.set(checkpoint, capped);
+  return capped;
+}
+
+function capCheckpointItem(item: CheckpointTurnItem): CheckpointTurnItem {
+  const cached = cappedCheckpointItems.get(item);
+  if (cached !== undefined) return cached;
+  const capped = capCheckpointFiles(item);
+  if (capped !== item) cappedCheckpointItems.set(item, capped);
+  return capped;
+}
+
 export function projectTurnItemForWire(item: OrchestrationV2TurnItem): OrchestrationV2TurnItem {
   switch (item.type) {
+    case "checkpoint":
+      return capCheckpointItem(item);
     case "handoff": {
       const { summary: _summary, ...projected } = item;
       return projected;
@@ -84,11 +128,14 @@ export function projectTurnItemForWire(item: OrchestrationV2TurnItem): Orchestra
       const { output, ...projected } = item;
       // Clients used this preview to recognize provider-reported failures. Keep
       // the outcome without retaining or serializing the output that proved it.
+      // A successful command can print "ENOENT" or "exit code 2", so output text
+      // decides only when the provider reported no exit code.
       const failed =
-        item.outputIndicatesFailure === true ||
-        (item.exitCode !== undefined && item.exitCode !== 0) ||
-        (output !== undefined &&
-          toolOutputIndicatesFailure(output.slice(0, MAX_DETAIL_STRING_BYTES)));
+        item.exitCode === undefined
+          ? item.outputIndicatesFailure === true ||
+            (output !== undefined &&
+              toolOutputIndicatesFailure(output.slice(0, MAX_DETAIL_STRING_BYTES)))
+          : item.exitCode !== 0;
       return {
         ...projected,
         ...(failed ? { outputIndicatesFailure: true } : {}),
@@ -239,6 +286,7 @@ export function projectThreadProjectionForWire(
   };
   return {
     ...projection,
+    checkpoints: projection.checkpoints.map(capCheckpoint),
     contextHandoffs: projection.contextHandoffs.map(projectContextHandoffForWire),
     turnItems: projection.turnItems.map(project),
     visibleTurnItems: projection.visibleTurnItems.map((row) => ({
@@ -255,5 +303,7 @@ export function projectDomainEventForWire(
     ? { ...event, payload: projectTurnItemForWire(event.payload) }
     : event.type === "context-handoff.updated"
       ? { ...event, payload: projectContextHandoffForWire(event.payload) }
-      : event;
+      : event.type === "checkpoint.captured"
+        ? { ...event, payload: capCheckpoint(event.payload) }
+        : event;
 }

@@ -132,9 +132,18 @@ function PreviewPanelShellFrame(
       data-preview-panel-maximized={maximized ? "true" : "false"}
     >
       {isInline && !maximized ? <RightPanelResizeHandle handlers={handlers} /> : null}
-      <div className={cn("h-full min-h-0 w-full", collapsible && "overflow-clip")}>
+      <div
+        className={cn(
+          "h-full min-h-0 w-full",
+          collapsible && "overflow-clip",
+          collapsible && !maximized && "flex justify-end",
+        )}
+      >
         <div
-          className="flex h-full min-h-0 min-w-0 flex-col"
+          className={cn(
+            "flex h-full min-h-0 min-w-0 flex-col",
+            collapsible && !maximized && "shrink-0",
+          )}
           style={collapsible && !maximized ? { width: `calc(${width}px - 1px)` } : undefined}
         >
           {props.children}

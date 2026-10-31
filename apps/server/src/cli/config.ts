@@ -14,6 +14,7 @@ import * as FileSystem from "effect/FileSystem";
 import * as LogLevel from "effect/LogLevel";
 import * as Option from "effect/Option";
 import * as Path from "effect/Path";
+import * as References from "effect/References";
 import * as Redacted from "effect/Redacted";
 import * as Schema from "effect/Schema";
 import * as SchemaIssue from "effect/SchemaIssue";
@@ -485,8 +486,9 @@ export const resolveServerConfig = (
 export const resolveCliAuthConfig = (
   flags: CliAuthLocationFlags,
   cliLogLevel: Option.Option<LogLevel.LogLevel>,
-) =>
-  resolveServerConfig(
+  options?: { readonly quietLogs?: boolean },
+) => {
+  const config = resolveServerConfig(
     {
       mode: Option.none(),
       port: Option.none(),
@@ -503,6 +505,10 @@ export const resolveCliAuthConfig = (
     },
     cliLogLevel,
   );
+  return options?.quietLogs
+    ? config.pipe(Effect.provideService(References.MinimumLogLevel, "Error"))
+    : config;
+};
 
 const DurationShorthandPattern = /^(?<value>\d+)(?<unit>ms|s|m|h|d|w)$/i;
 

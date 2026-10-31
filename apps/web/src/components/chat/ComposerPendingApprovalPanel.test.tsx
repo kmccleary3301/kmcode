@@ -80,4 +80,24 @@ describe("ComposerPendingApprovalPanel", () => {
     expect(markup).toContain(appName);
     expect(markup).toContain(detail);
   });
+
+  it("shows the request reason and full-access explanation control", () => {
+    const reason = "This command matched an ask rule.";
+    const markup = renderToStaticMarkup(
+      <ComposerPendingApprovalPanel
+        approval={{
+          requestId: RuntimeRequestId.make("approval-reason"),
+          requestKind: "command",
+          createdAt: "2026-10-31T00:00:00.000Z",
+          reason,
+          fullAccessOverride: "ask_rule",
+          responseCapability: "live",
+        }}
+        pendingCount={1}
+      />,
+    );
+
+    expect(markup).toContain(reason);
+    expect(markup).toContain("Why am I being asked this?");
+  });
 });

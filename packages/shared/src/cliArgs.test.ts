@@ -130,6 +130,12 @@ describe("parseCliArgs", () => {
   it("ignores bare -- with no flag name", () => {
     expect(parseCliArgs("--")).toEqual({ flags: {}, positionals: [] });
   });
+  it("treats tokens after -- as positional arguments", () => {
+    expect(parseCliArgs(["--verbose", "--", "--not-a-flag", "value"])).toEqual({
+      flags: { verbose: null },
+      positionals: ["--not-a-flag", "value"],
+    });
+  });
 
   it("boolean flag does not consume next token as value", () => {
     expect(parseCliArgs(["--github-output", "1.2.3"], { booleanFlags: ["github-output"] })).toEqual(

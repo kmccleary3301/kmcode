@@ -48,6 +48,26 @@ const isCommand = (value: unknown): value is CdpCommand =>
   value !== null &&
   typeof (value as { id?: unknown }).id === "number" &&
   typeof (value as { method?: unknown }).method === "string";
+// CDP replies and events must be bounded before JSON.stringify allocates their serialized copy.
+const MAX_CDP_PAYLOAD_SIZE = 64 * 1024 * 1024;
+const MAY_ESCAPE = /[^\x20\x21\x23-\x5b\x5d-\ud7ff\ue000-\uffff]/;
+const serializedSize = (text: string) =>
+  (MAY_ESCAPE.test(text) ? text.length * 6 : text.length) + 3;
+
+const fitsPayloadBudget = (message: unknown) => {
+  let remaining = MAX_CDP_PAYLOAD_SIZE;
+  const visit = (value: unknown): boolean => {
+    remaining -= typeof value === "string" ? serializedSize(value) : 26;
+    if (remaining < 0) return false;
+    if (typeof value !== "object" || value === null) return true;
+    if (Array.isArray(value)) return value.every(visit);
+    return Object.entries(value).every(([key, item]) => {
+      remaining -= serializedSize(key);
+      return visit(item);
+    });
+  };
+  return visit(message);
+};
 
 const BROWSER_CONTEXT_ID = "t3-preview";
 /** Marks an event to send right after a command's reply. */
@@ -66,8 +86,28 @@ const ACKNOWLEDGED = new Set([
 export function createCdpRelayConnection(
   target: CdpRelayTarget,
   write: (message: string) => void,
+  close: () => void,
 ): CdpRelayConnection {
-  const send = (message: Record<string, unknown>) => write(JSON.stringify(message));
+  let closed = false;
+  const send = (message: Record<string, unknown>) => {
+    if (closed) return;
+    if (fitsPayloadBudget(message)) {
+      write(JSON.stringify(message));
+      return;
+    }
+    if (typeof message["id"] === "number") {
+      write(
+        JSON.stringify({
+          id: message["id"],
+          error: { code: -32000, message: "CDP payload too large" },
+          ...(message["sessionId"] === undefined ? {} : { sessionId: message["sessionId"] }),
+        }),
+      );
+      return;
+    }
+    closed = true;
+    close();
+  };
   let attached = false;
   /**
    * Sessions this relay invented. Extra page sessions (Playwright's
@@ -171,6 +211,7 @@ export function createCdpRelayConnection(
 
   return {
     receive: (raw) => {
+      if (closed) return;
       let command: unknown;
       try {
         command = JSON.parse(raw);

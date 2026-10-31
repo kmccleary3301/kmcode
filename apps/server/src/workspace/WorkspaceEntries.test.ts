@@ -159,6 +159,50 @@ it.layer(layerTest, { excludeTestServices: true })("WorkspaceEntries", (it) => {
         }),
     );
 
+    it.effect.skipIf(HostProcessPlatform.defaultValue() === "win32")(
+      "lists in-workspace symlinks as their targets and hides broken or escaping links",
+      () =>
+        Effect.gen(function* () {
+          const cwd = yield* makeTempDir();
+          const outside = yield* makeTempDir();
+          const fileSystem = yield* FileSystem.FileSystem;
+          const path = yield* Path.Path;
+          yield* writeTextFile(cwd, "target.txt");
+          yield* writeTextFile(cwd, "target-dir/index.ts");
+          yield* writeTextFile(outside, "outside.txt");
+          yield* writeTextFile(outside, "outside-dir/index.ts");
+          yield* fileSystem.symlink(path.join(cwd, "target.txt"), path.join(cwd, "linked-file"));
+          yield* fileSystem.symlink(
+            path.join(cwd, "target-dir"),
+            path.join(cwd, "linked-directory"),
+          );
+          yield* fileSystem.symlink(
+            path.join(outside, "outside.txt"),
+            path.join(cwd, "external-file"),
+          );
+          yield* fileSystem.symlink(
+            path.join(outside, "outside-dir"),
+            path.join(cwd, "external-directory"),
+          );
+          yield* fileSystem.symlink(path.join(cwd, "missing.txt"), path.join(cwd, "broken"));
+          yield* fileSystem.symlink(cwd, path.join(cwd, "cycle"));
+
+          const workspaceEntries = yield* WorkspaceEntries.WorkspaceEntries;
+          const result = yield* workspaceEntries.list({ cwd, directoryPath: "" });
+          const paths = result.entries.map((entry) => entry.path);
+
+          expect(result.entries).toEqual(
+            expect.arrayContaining([
+              { path: "linked-file", kind: "file" },
+              { path: "linked-directory", kind: "directory" },
+            ]),
+          );
+          for (const entryPath of ["external-file", "external-directory", "broken", "cycle"]) {
+            expect(paths).not.toContain(entryPath);
+          }
+        }),
+    );
+
     it.effect(
       "browses a workspace with more than 25,000 entries without truncation",
       () =>

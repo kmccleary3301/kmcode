@@ -1,3 +1,4 @@
+import * as NodeServices from "@effect/platform-node/NodeServices";
 import { describe, expect, it } from "vite-plus/test";
 import {
   ProjectId,
@@ -8,9 +9,15 @@ import {
   type OrchestrationV2ThreadShell,
 } from "@t3tools/contracts";
 import * as DateTime from "effect/DateTime";
+import * as Effect from "effect/Effect";
+import * as FileSystem from "effect/FileSystem";
+import * as Path from "effect/Path";
+import { symlinksSupported } from "@t3tools/shared/testing/symlinks";
 import {
+  resolveCleanFilesRoot,
   storageCleanupActivityAt,
   storageCleanupPullRequestMerged,
+  storageCleanupSessionStopShouldSweep,
   storageCleanupThreadIdle,
 } from "./storageCleanup.ts";
 
@@ -196,3 +203,78 @@ describe("merged pull request cleanup", () => {
     expect(storageCleanupPullRequestMerged(pullRequest({ state: "open" }), integrated)).toBe(false);
   });
 });
+
+describe("session-stop worktree cleanup scheduling", () => {
+  const matchesWorktree = (root: string, target: string) => target.startsWith(`${root}/`);
+  const pathKey = (value: string) => value.toLowerCase();
+  const base = {
+    waitingForStop: false,
+    deletionsSinceSweep: false,
+    cwd: "/elsewhere",
+    keptDeletedWorktrees: ["/worktrees/deleted"],
+    pathKey,
+    inside: matchesWorktree,
+  };
+
+  it("does not sweep for unrelated session stops when no deleted worktree is waiting", () => {
+    expect(storageCleanupSessionStopShouldSweep(base)).toBe(false);
+  });
+
+  it("retries a kept deleted worktree when a stopped session is inside it", () => {
+    expect(
+      storageCleanupSessionStopShouldSweep({
+        ...base,
+        cwd: "/WORKTREES/DELETED/nested",
+      }),
+    ).toBe(true);
+  });
+  it.each(["win32", "linux"] as const)(
+    "uses host path casing rules when matching a stopped session (%s)",
+    (platform) => {
+      const pathKeyForHost = (value: string) =>
+        platform === "win32" ? value.toLowerCase() : value;
+      expect(
+        storageCleanupSessionStopShouldSweep({
+          ...base,
+          cwd: "/WORKTREES/DELETED/nested",
+          pathKey: pathKeyForHost,
+        }),
+      ).toBe(platform === "win32");
+    },
+  );
+
+  it("sweeps when a worktree or deletion is pending even if the session stops elsewhere", () => {
+    expect(storageCleanupSessionStopShouldSweep({ ...base, waitingForStop: true })).toBe(true);
+    expect(storageCleanupSessionStopShouldSweep({ ...base, deletionsSinceSweep: true })).toBe(true);
+  });
+
+  it("does not retry a failed deletion effect when no worktree is waiting", () => {
+    expect(
+      storageCleanupSessionStopShouldSweep({
+        ...base,
+        keptDeletedWorktrees: [],
+        cwd: "/worktrees/deleted",
+      }),
+    ).toBe(false);
+  });
+});
+
+it.skipIf(!symlinksSupported)("allows symlinked parents but rejects a symlinked cleanup root", () =>
+  Effect.runPromise(
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const root = yield* fs.makeTempDirectoryScoped({ prefix: "t3-clean-files-root-" });
+      const realHome = path.join(root, "real");
+      const realLogs = path.join(realHome, "logs");
+      const linkedHome = path.join(root, "home");
+      const linkedLogs = path.join(root, "linked-logs");
+      yield* fs.makeDirectory(realLogs, { recursive: true });
+      yield* fs.symlink(realHome, linkedHome);
+      const realLogsPath = yield* fs.realPath(realLogs);
+      yield* fs.symlink(realLogs, linkedLogs);
+      expect(yield* resolveCleanFilesRoot(path.join(linkedHome, "logs"))).toBe(realLogsPath);
+      expect(yield* resolveCleanFilesRoot(linkedLogs)).toBeNull();
+    }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
+  ),
+);

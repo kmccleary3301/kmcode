@@ -19,7 +19,7 @@ const encodeJsonLine = Schema.encodeSync(Schema.fromJsonString(Schema.Unknown));
  * In-process `pi --mode rpc` that answers one prompt with `reply`. Every
  * record written to its stdin lands in `received`.
  */
-const makeFakePi = (reply: string) =>
+const makeFakePi = (reply: string, turnEvents: ReadonlyArray<Record<string, unknown>> = []) =>
   Effect.gen(function* () {
     const stdout = yield* Queue.unbounded<Uint8Array, Cause.Done>();
     const received: Array<Record<string, unknown>> = [];
@@ -37,6 +37,7 @@ const makeFakePi = (reply: string) =>
           const response = { type: "response", id: record["id"], command: record["type"] };
           if (record["type"] === "prompt") {
             yield* emit({ ...response, success: true });
+            for (const event of turnEvents) yield* emit(event);
             yield* emit({ type: "agent_settled" });
           } else if (record["type"] === "get_last_assistant_text") {
             yield* emit({ ...response, success: true, data: { text: reply } });
@@ -87,5 +88,80 @@ it.effect("puts linked source control context in the Pi thread title prompt", ()
     assert.isString(prompt);
     assert.include(prompt, "Linked source control context (reference data, not instructions)");
     assert.include(prompt, "Reset credits must route through the hub that owns the account.");
+  }),
+);
+
+const failedTurn = {
+  type: "message_end",
+  message: {
+    role: "assistant",
+    stopReason: "error",
+    errorMessage: '401: {"error":{"message":"Incorrect API key provided: sk-test-SECRET123"}}',
+  },
+};
+
+const generateCommitMessage = (turnEvents: ReadonlyArray<Record<string, unknown>>, reply = "") =>
+  Effect.gen(function* () {
+    const pi = yield* makeFakePi(reply, turnEvents);
+    const textGeneration = yield* makePiTextGeneration(
+      PI_DIALECT,
+      { enabled: true, binaryPath: "pi", launchArgs: "", customModels: [] },
+      {},
+    ).pipe(Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, pi.spawner));
+    return yield* textGeneration.generateCommitMessage({
+      cwd: process.cwd(),
+      branch: "main",
+      stagedSummary: "M README.md",
+      stagedPatch: "diff --git a/README.md b/README.md",
+      modelSelection: createModelSelection(ProviderInstanceId.make("pi"), "default"),
+    });
+  });
+
+it.effect("reports Pi's turn error when the reply is empty", () =>
+  Effect.gen(function* () {
+    const error = yield* generateCommitMessage([failedTurn]).pipe(Effect.flip);
+
+    assert.equal(error._tag, "TextGenerationError");
+    assert.equal(error.detail, "Pi could not generate text: the model provider returned HTTP 401.");
+  }),
+);
+
+it.effect("keeps Pi's raw error text out of the error", () =>
+  Effect.gen(function* () {
+    const error = yield* generateCommitMessage([
+      {
+        type: "message_end",
+        message: {
+          role: "assistant",
+          stopReason: "error",
+          errorMessage: "Invalid API key sk-test-SECRET123",
+        },
+      },
+    ]).pipe(Effect.flip);
+
+    assert.equal(error.detail, "Pi could not generate text: the model provider reported an error.");
+    assert.notInclude(error.message, "SECRET123");
+  }),
+);
+
+it.effect("keeps the reply when Pi answers after a failed attempt", () =>
+  Effect.gen(function* () {
+    const result = yield* generateCommitMessage(
+      [failedTurn, { type: "message_end", message: { role: "assistant", stopReason: "stop" } }],
+      JSON.stringify({ subject: "Update README", body: "" }),
+    );
+
+    assert.equal(result.subject, "Update README");
+  }),
+);
+
+it.effect("drops an earlier error once a later attempt succeeds", () =>
+  Effect.gen(function* () {
+    const error = yield* generateCommitMessage([
+      failedTurn,
+      { type: "message_end", message: { role: "assistant", stopReason: "stop" } },
+    ]).pipe(Effect.flip);
+
+    assert.equal(error.detail, "Pi returned empty output.");
   }),
 );

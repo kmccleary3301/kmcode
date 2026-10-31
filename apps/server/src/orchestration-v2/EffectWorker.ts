@@ -162,46 +162,56 @@ export const layerExecutor: Layer.Layer<
                     }),
                 ),
               );
-          case "provider-turn.interrupt":
+          case "provider-turn.interrupt": {
+            const request = effect.request;
             return providerTurnControl
               .interrupt({
                 threadId: effect.threadId,
-                providerSessionId: effect.request.providerSessionId,
-                providerThreadId: effect.request.providerThreadId,
-                providerTurnId: effect.request.providerTurnId,
+                providerSessionId: request.providerSessionId,
+                providerThreadId: request.providerThreadId,
+                providerTurnId: request.providerTurnId,
               })
               .pipe(
-                Effect.catch((cause) =>
-                  isNonRetryableProviderTurnControlFailure(
-                    effect.request.type,
-                    Cause.pretty(Cause.fail(cause)),
-                  )
-                    ? Effect.void
-                    : Effect.fail(cause),
+                Effect.map(() => false),
+                Effect.catchIf(
+                  (cause) => cause.unresponsive === true,
+                  () => Effect.succeed(true),
                 ),
-                // The provider has stopped what it still ran and reported it.
-                // Whatever the thread still shows on that provider thread is
-                // work no process will report on, so the Stop ends it too.
-                // One Stop can interrupt several provider threads, so the
-                // settle is keyed by effect, not by the Stop command.
-                Effect.andThen(
-                  threads.dispatch({
-                    type: "thread.background-work.settle",
-                    commandId: CommandId.make(`${effect.id}:background-work-settled`),
-                    threadId: effect.threadId,
-                    providerThreadId: effect.request.providerThreadId,
-                    providerTurnId: effect.request.providerTurnId,
-                  }),
+                Effect.catchIf(
+                  (cause) =>
+                    isNonRetryableProviderTurnControlFailure(
+                      request.type,
+                      Cause.pretty(Cause.fail(cause)),
+                    ),
+                  () => Effect.succeed(false),
+                ),
+                Effect.andThen((unresponsive) =>
+                  unresponsive
+                    ? threads.dispatch({
+                        type: "thread.interrupt.unresponsive",
+                        commandId: CommandId.make(`${effect.id}:unresponsive`),
+                        threadId: effect.threadId,
+                        providerThreadId: request.providerThreadId,
+                        providerTurnId: request.providerTurnId,
+                      })
+                    : threads.dispatch({
+                        type: "thread.background-work.settle",
+                        commandId: CommandId.make(`${effect.id}:background-work-settled`),
+                        threadId: effect.threadId,
+                        providerThreadId: request.providerThreadId,
+                        providerTurnId: request.providerTurnId,
+                      }),
                 ),
                 Effect.mapError(
                   (cause) =>
                     new OrchestrationEffectExecutionError({
                       effectId: effect.id,
-                      effectType: effect.request.type,
+                      effectType: request.type,
                       cause,
                     }),
                 ),
               );
+          }
           case "provider-turn.steer":
             return providerTurnControl
               .steer({
@@ -353,6 +363,9 @@ export const layerExecutor: Layer.Layer<
                 ...(effect.request.decision === undefined
                   ? {}
                   : { decision: effect.request.decision }),
+                ...(effect.request.feedback === undefined
+                  ? {}
+                  : { feedback: effect.request.feedback }),
                 ...(effect.request.answers === undefined
                   ? {}
                   : { answers: effect.request.answers }),
@@ -493,8 +506,6 @@ export const layerExecutor: Layer.Layer<
 // A running effect blocks later work on its thread and its lease is never reclaimed in-process,
 // so a stop that hangs must give up and fall through to the normal retry/fail path.
 const DELEGATED_TASKS_STOP_TIMEOUT = Duration.seconds(30);
-
-
 
 export class OrchestrationEffectWorkerError extends Schema.TaggedError<OrchestrationEffectWorkerError>()(
   "OrchestrationEffectWorkerError",
@@ -705,9 +716,7 @@ export const layerWithOptions = (
               : execution;
           const exit = yield* Effect.exit(
             Effect.raceFirst(boundedExecution.pipe(Effect.as("executed" as const)), cancellation),
-          ).pipe(
-            Effect.ensuring(outbox.clearCancellation(effect.id)),
-          );
+          ).pipe(Effect.ensuring(outbox.clearCancellation(effect.id)));
           if (Exit.isSuccess(exit) && exit.value === "cancelled") {
             return true;
           }

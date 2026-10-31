@@ -1,6 +1,7 @@
 import {
   CheckpointScopeId,
   CommandId,
+  type OrchestrationV2DomainEvent,
   type OrchestrationV2Checkpoint,
   type OrchestrationV2ExecutionNode,
   type OrchestrationV2ProviderThread,
@@ -19,6 +20,7 @@ import * as CheckpointService from "./CheckpointService.ts";
 import * as EventSink from "./EventSink.ts";
 import * as IdAllocator from "./IdAllocator.ts";
 import * as ProjectionStore from "./ProjectionStore.ts";
+import * as RunExecutionService from "./RunExecutionService.ts";
 
 export class CheckpointCaptureExecutionError extends Schema.TaggedError<CheckpointCaptureExecutionError>()(
   "CheckpointCaptureExecutionError",
@@ -128,12 +130,40 @@ export const layer: Layer.Layer<
         appRunOrdinal: run.ordinal,
         capturedAt,
       });
+      const commandId = CommandId.make(`command:effect:checkpoint.capture:${run.id}`);
+      const interruptedItemEvents: Array<OrchestrationV2DomainEvent> = [];
+      if (!stopped) {
+        const completionProjection = yield* projections.getThreadRecords(
+          input.threadId,
+          ["turnItems", "runtimeRequests", "subagents", "providerThreads"],
+          {
+            turnItemRunIds: [run.id],
+            turnItemStatuses: ["pending", "running", "waiting"],
+          },
+        );
+        const interruptedItems = RunExecutionService.interruptLeftoverTurnItemsOnRunCompletion({
+          run,
+          projection: completionProjection,
+          completedAt: capturedAt,
+        });
+        for (const item of interruptedItems) {
+          interruptedItemEvents.push({
+            id: yield* ids.allocate.event({ threadId: input.threadId, commandId }),
+            type: "turn-item.updated",
+            threadId: input.threadId,
+            runId: run.id,
+            ...(item.nodeId === null ? {} : { nodeId: item.nodeId }),
+            providerInstanceId: run.providerInstanceId,
+            occurredAt: capturedAt,
+            payload: item,
+          });
+        }
+      }
       // Match RunExecutionService: capture loaded the waiting run before
       // materializing baselines. Omit delegatedCompletion so a newer cohort
       // write during capture is not overwritten by this stale snapshot
       // (ProjectionStore preserves the field when absent from the payload).
       const { delegatedCompletion: _delegatedCompletion, ...runWithoutDelegatedCompletion } = run;
-      const commandId = CommandId.make(`command:effect:checkpoint.capture:${run.id}`);
       yield* eventSink.commitCommand({
         commandId,
         threadId: input.threadId,
@@ -198,6 +228,7 @@ export const layer: Layer.Layer<
               completedAt: capturedAt,
             }),
           },
+          ...interruptedItemEvents,
           {
             id: yield* ids.allocate.event({ threadId: input.threadId, commandId }),
             type: "run.updated",

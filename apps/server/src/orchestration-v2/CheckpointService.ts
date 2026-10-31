@@ -394,23 +394,22 @@ export const layer: Layer.Layer<
             });
           }
 
-          const captured = yield* checkpointStore
+          const outcome = yield* checkpointStore
             .captureCheckpoint({
               cwd: input.scope.cwd,
               checkpointRef,
             })
             .pipe(
-              Effect.as(true),
               Effect.catch((cause) =>
                 Effect.logWarning("orchestration V2 checkpoint capture failed", {
                   scopeId: input.scope.id,
                   checkpointRef,
                   cause: String(cause),
-                }).pipe(Effect.as(false)),
+                }).pipe(Effect.as("failed" as const)),
               ),
             );
 
-          if (!captured) {
+          if (outcome !== "captured") {
             return makeCheckpoint({
               id: checkpointId,
               scope: input.scope,
@@ -420,7 +419,8 @@ export const layer: Layer.Layer<
               ordinalWithinScope: input.ordinalWithinScope,
               appRunOrdinal: input.appRunOrdinal,
               ref: checkpointRef,
-              status: "error",
+              // An oversized workspace is not checkpointable, like a non-Git one.
+              status: outcome === "skipped" ? "missing" : "error",
               files: [],
               capturedAt: input.capturedAt,
             });

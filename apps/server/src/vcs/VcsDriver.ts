@@ -19,6 +19,9 @@ export interface VcsCaptureCheckpointInput {
   readonly checkpointRef: CheckpointRef;
 }
 
+/** `skipped`: the workspace is too large to snapshot within the capture timeout. */
+export type VcsCheckpointCaptureOutcome = "captured" | "skipped";
+
 export interface VcsRestoreCheckpointInput {
   readonly cwd: string;
   readonly checkpointRef: CheckpointRef;
@@ -40,7 +43,9 @@ export interface VcsDeleteCheckpointRefsInput {
 }
 
 export interface VcsCheckpointOps {
-  readonly captureCheckpoint: (input: VcsCaptureCheckpointInput) => Effect.Effect<void, VcsError>;
+  readonly captureCheckpoint: (
+    input: VcsCaptureCheckpointInput,
+  ) => Effect.Effect<VcsCheckpointCaptureOutcome, VcsError>;
   readonly hasCheckpointRef: (
     input: Omit<VcsRestoreCheckpointInput, "fallbackToHead">,
   ) => Effect.Effect<boolean, VcsError>;

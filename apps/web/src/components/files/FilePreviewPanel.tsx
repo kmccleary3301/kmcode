@@ -338,6 +338,7 @@ function WorkspaceVideoPreview(props: {
         revision={props.workspaceMutationId}
         preload="metadata"
         className="flex h-full min-h-0 w-full max-w-5xl items-center justify-center"
+        videoClassName="aspect-auto max-h-full w-auto max-w-full"
         onRetry={refreshAssetUrl}
         actionsSource={{
           kind: "video",

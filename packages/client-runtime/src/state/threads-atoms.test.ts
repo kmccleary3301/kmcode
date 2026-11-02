@@ -62,6 +62,8 @@ const SNAPSHOT: OrchestrationV2ThreadDetailSnapshot = { snapshotSequence: 7, pro
 const makeHarness = Effect.fn("TestThreadAtoms.makeHarness")(function* (options?: {
   readonly snapshot?: OrchestrationV2ThreadDetailSnapshot;
   readonly snapshotUnavailable?: boolean;
+  /** The first N HTTP loads answer 404, as a load that races thread creation. */
+  readonly missingLoads?: number;
 }) {
   const subscriptions = yield* Queue.unbounded<{
     readonly afterSequence: number | undefined;
@@ -231,6 +233,9 @@ const makeHarness = Effect.fn("TestThreadAtoms.makeHarness")(function* (options?
               if (options?.snapshotUnavailable === true) {
                 return { _tag: "unavailable" as const };
               }
+              if (httpLoads <= (options?.missingLoads ?? 0)) {
+                return { _tag: "missing" as const };
+              }
               return {
                 _tag: "present" as const,
                 snapshot,
@@ -392,6 +397,28 @@ describe("createEnvironmentThreadStateAtoms", () => {
       expect(h.counts()).toEqual({ httpLoads: 1, diskLoads: 1, opened: 2, active: 1 });
       remount();
       yield* Deferred.await(next.closed);
+    }),
+  );
+
+  it.effect("revives a thread parked as deleted by a snapshot load that raced its creation", () =>
+    Effect.gen(function* () {
+      const h = yield* makeHarness({ missingLoads: 1 });
+      const unmount = h.registry.mount(h.stateAtom);
+      yield* observeState(h.registry, h.stateAtom, (state) => state.status === "deleted");
+      expect(h.counts().opened).toBe(0);
+
+      h.rawAtoms.reviveDeleted(h.registry, TARGET.environmentId, THREAD_ID);
+      const subscription = yield* Queue.take(h.subscriptions);
+      yield* Queue.offer(subscription.events, { kind: "synchronized" });
+      const live = yield* observeState(h.registry, h.stateAtom, (state) => state.status === "live");
+      expect(Option.getOrThrow(live.data).thread.id).toBe(THREAD_ID);
+      expect(h.counts()).toMatchObject({ httpLoads: 2, opened: 1, active: 1 });
+
+      // A live thread is left alone.
+      h.rawAtoms.reviveDeleted(h.registry, TARGET.environmentId, THREAD_ID);
+      expect(h.counts()).toMatchObject({ httpLoads: 2, opened: 1, active: 1 });
+      unmount();
+      yield* Deferred.await(subscription.closed);
     }),
   );
 

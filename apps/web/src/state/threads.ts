@@ -10,11 +10,17 @@ import {
   createThreadEnvironmentAtoms,
   environmentThreadLiveOverlayAtom,
 } from "@t3tools/client-runtime/state/threads";
-import type { EnvironmentId, OrchestrationV2ThreadShell, ThreadId } from "@t3tools/contracts";
+import type {
+  EnvironmentId,
+  OrchestrationV2ThreadShell,
+  ScopedThreadRef,
+  ThreadId,
+} from "@t3tools/contracts";
 import * as Option from "effect/Option";
 import { AsyncResult, Atom } from "effect/reactivity";
 
 import { environmentCatalog } from "../connection/catalog";
+import { appAtomRegistry } from "../rpc/atomRegistry";
 import { connectionAtomRuntime } from "../connection/runtime";
 import { environmentSnapshotAtom } from "./shell";
 
@@ -66,6 +72,11 @@ export function useEnvironmentThread(
     () => EMPTY_ENVIRONMENT_THREAD_STATE,
   ) as EnvironmentThreadState;
   return state;
+}
+
+/** Restarts a thread detail parked on "deleted" while the shell still lists the thread. */
+export function reviveDeletedThreadDetail(ref: ScopedThreadRef): void {
+  environmentThreads.reviveDeleted(appAtomRegistry, ref.environmentId, ref.threadId);
 }
 
 const isRunning = (status: string) =>

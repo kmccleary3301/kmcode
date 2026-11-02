@@ -18,7 +18,7 @@ import * as Semaphore from "effect/Semaphore";
 import * as Stream from "effect/Stream";
 import * as SubscriptionRef from "effect/SubscriptionRef";
 import { HttpClient } from "effect/http";
-import { Atom } from "effect/reactivity";
+import { AsyncResult, Atom, type AtomRegistry } from "effect/reactivity";
 
 import * as RemoteEnvironmentAuthorization from "../authorization/service.ts";
 import * as EnvironmentRegistry from "../connection/registry.ts";
@@ -1038,6 +1038,25 @@ export function createEnvironmentThreadStateAtoms<R, E>(
       family(threadKey({ environmentId, threadId })),
     liveOverlaySubscriptionAtom: (environmentId: EnvironmentIdType, threadId: ThreadIdType) =>
       liveOverlaySubscriptionFamily(threadKey({ environmentId, threadId })),
+    /**
+     * Restarts a detail stream parked on "deleted" for a thread the shell still
+     * lists: a snapshot read that raced the thread's creation got a 404. The
+     * retained "deleted" would otherwise park every remount too.
+     */
+    reviveDeleted: (
+      registry: AtomRegistry.AtomRegistry,
+      environmentId: EnvironmentIdType,
+      threadId: ThreadIdType,
+    ) => {
+      const key = threadKey({ environmentId, threadId });
+      const current = AsyncResult.value(registry.get(family(key)));
+      if (!Option.exists(current, (state) => state.status === "deleted")) return;
+      const resume = registry.get(resumeFamily(key));
+      // Clearing the owner keeps the parked stream from re-saving "deleted".
+      resume.snapshot = undefined;
+      resume.owner = undefined;
+      registry.refresh(family(key));
+    },
   };
 }
 

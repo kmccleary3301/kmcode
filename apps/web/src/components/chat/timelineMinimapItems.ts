@@ -1,4 +1,4 @@
-import { isAttachmentOnlyBootstrapPrompt } from "@t3tools/shared/composerContextReferences";
+import { resolveUserMessagePresentation } from "@t3tools/client-runtime/user-message";
 import type { MessagesTimelineRow } from "./MessagesTimeline.logic";
 
 export interface TimelineMinimapItem {
@@ -8,21 +8,34 @@ export interface TimelineMinimapItem {
   readonly assistantText: string | null;
 }
 
-/** Keep full source text untouched until a minimap preview is opened. */
+/**
+ * Index only prompts the user wrote. Agent relays, delegated prompts, and
+ * automations stay in the timeline but off the rail. Legacy rows lack
+ * `createdBy` and count as the user's.
+ * Keep full source text untouched until a minimap preview is opened.
+ */
 export function deriveTimelineMinimapItems(
   rows: ReadonlyArray<MessagesTimelineRow>,
 ): TimelineMinimapItem[] {
   const items: TimelineMinimapItem[] = [];
   for (let index = 0; index < rows.length; index += 1) {
     const row = rows[index];
-    if (row?.kind !== "message" || row.message.role !== "user") {
+    if (
+      row?.kind !== "message" ||
+      row.message.role !== "user" ||
+      (row.message.createdBy ?? "user") !== "user"
+    ) {
+      continue;
+    }
+    const presentation = resolveUserMessagePresentation(row.message);
+    if (presentation.isAutomation) {
       continue;
     }
 
     items.push({
       id: row.id,
       rowIndex: index,
-      userText: isAttachmentOnlyBootstrapPrompt(row.message.text) ? "" : row.message.text,
+      userText: presentation.text,
       assistantText: resolveFinalAssistantTextForTurn(rows, index),
     });
   }

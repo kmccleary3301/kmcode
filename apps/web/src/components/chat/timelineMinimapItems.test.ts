@@ -1,14 +1,16 @@
 import { describe, expect, it } from "vite-plus/test";
-import { MessageId } from "@t3tools/contracts";
+import { MessageId, ScheduledTaskId, ThreadId } from "@t3tools/contracts";
 import { ATTACHMENT_ONLY_BOOTSTRAP_PROMPT } from "@t3tools/shared/composerContextReferences";
 import type { MessagesTimelineRow } from "./MessagesTimeline.logic";
 import { deriveTimelineMinimapItems, resolveTimelineMinimapPreview } from "./timelineMinimapItems";
 import type { ChatMessage } from "../../types";
 
 function rows(
-  entries: ReadonlyArray<readonly ["user" | "assistant", string]>,
+  entries: ReadonlyArray<
+    readonly ["user" | "assistant", string, Partial<Omit<ChatMessage, "role" | "text">>?]
+  >,
 ): MessagesTimelineRow[] {
-  const messages: ChatMessage[] = entries.map(([role, text], index) => ({
+  const messages: ChatMessage[] = entries.map(([role, text, overrides], index) => ({
     id: MessageId.make(`message-${index}`),
     role,
     text,
@@ -16,6 +18,7 @@ function rows(
     runId: null,
     createdAt: new Date(index * 1000).toISOString(),
     updatedAt: new Date(index * 1000).toISOString(),
+    ...overrides,
   }));
   return messages.map((message) => ({
     kind: "message",
@@ -89,5 +92,35 @@ describe("timeline minimap previews", () => {
       assistantText: "First second",
     });
     expect(resolveTimelineMinimapPreview(first)?.assistantText).toBe("First");
+  });
+
+  it("indexes only the user's own prompts, not agent relays or automations", () => {
+    const source = rows([
+      ["user", "Legacy prompt"],
+      [
+        "user",
+        "TUI 3 → S2: gate passed",
+        {
+          createdBy: "agent",
+          creationSource: "mcp",
+          senderThreadId: ThreadId.make("thread-tui-3"),
+        },
+      ],
+      ["user", "Delegated task", { createdBy: "agent", creationSource: "server" }],
+      ["user", "System notice", { createdBy: "system", creationSource: "server" }],
+      [
+        "user",
+        "Nightly check",
+        {
+          createdBy: "user",
+          scheduledTaskId: ScheduledTaskId.make("task-1"),
+        },
+      ],
+      ["user", "My follow-up", { createdBy: "user", creationSource: "web" }],
+    ]);
+    expect(deriveTimelineMinimapItems(source).map((item) => item.userText)).toEqual([
+      "Legacy prompt",
+      "My follow-up",
+    ]);
   });
 });

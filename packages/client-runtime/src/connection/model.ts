@@ -144,6 +144,8 @@ export interface SupervisorConnectionState {
   readonly stage: ConnectionAttemptStage | null;
   readonly attempt: number;
   readonly generation: number;
+  /** Whether the last transport failure happened before or after the WebSocket opened. */
+  readonly lastFailureConnection?: "before-open" | "open" | null;
   readonly lastFailure: ConnectionAttemptError | null;
   readonly retryAt: number | null;
 }

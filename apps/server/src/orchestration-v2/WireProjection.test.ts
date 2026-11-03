@@ -214,6 +214,20 @@ describe("orchestration V2 wire projection", () => {
     });
   });
 
+  it("keeps intent when summarizing a large dynamic input", () => {
+    const intent = "Inspect remote result";
+    const item = {
+      ...base,
+      intent,
+      input: "x".repeat(100_000),
+    } satisfies OrchestrationV2TurnItem;
+    const projected = projectTurnItemForWire(item);
+    expect(projected).toMatchObject({ intent });
+    expect(projected.type === "dynamic_tool" ? projected.input : null).toMatchObject({
+      truncated: true,
+    });
+  });
+
   it("serializes an oversized structured input only once for its summary", () => {
     let serializations = 0;
     const input = {
@@ -367,6 +381,23 @@ describe("orchestration V2 wire projection", () => {
     });
     expect(failed).toMatchObject({ diffStr: "String to replace not found" });
     expect(failed).not.toHaveProperty("newStr");
+  });
+
+  it("preserves tool arguments for historical xd-device writes", () => {
+    const args = { threadId: "thread-agent" };
+    const input = JSON.stringify(args);
+    const projected = projectTurnItemForWire({
+      ...base,
+      type: "file_change" as const,
+      fileName: "xd://mcp__t3-code__t3_thread_wait",
+      additions: 12,
+      newStr: input,
+    });
+    expect(projected).toMatchObject({
+      fileName: "xd://mcp__t3-code__t3_thread_wait",
+      additions: 12,
+      newStr: input,
+    });
   });
 
   it("retains only result identities and failure metadata in live tool events", () => {

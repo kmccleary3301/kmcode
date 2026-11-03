@@ -12,6 +12,7 @@ import { discardComposerDraft } from "../lib/discardComposerDraft";
 import { requestCustomSnooze } from "./CustomSnoozeDialog";
 import { useSupportsMultiplePullRequests } from "~/hooks/useSupportsMultiplePullRequests";
 import { resolveThreadCurrentPullRequestLink } from "@t3tools/shared/threadPullRequests";
+import { backgroundWorkHoldsCompletion } from "@t3tools/shared/orchestrationV2PendingBackgroundWork";
 import { useAtomValue } from "@effect/atom-react";
 import { replaceComposerContextReferences } from "@t3tools/shared/composerContextReferences";
 import * as Schema from "effect/Schema";
@@ -67,17 +68,14 @@ import {
   CheckIcon,
   CircleAlertIcon,
   CircleCheckIcon,
-  CircleDashedIcon,
   ClockIcon,
   EyeIcon,
   FolderIcon,
   GitBranchIcon,
-  MessageCircleQuestionIcon,
   PinIcon,
   PinOffIcon,
   PlusIcon,
   SettingsIcon,
-  ShieldQuestionIcon,
   SquarePenIcon,
   TerminalIcon,
   Undo2Icon,
@@ -171,7 +169,9 @@ import { formatRelativeTimeLabel, parseTimestampDate } from "../timestampFormat"
 import type { SidebarThreadSummary } from "../types";
 import type { EnvironmentProject } from "@t3tools/client-runtime/state/shell";
 import { cn } from "~/lib/utils";
+import { observeVisibleAnimation } from "~/lib/visibleAnimation";
 import { EnvironmentMachineIcon } from "./EnvironmentMachineIcon";
+import { AsciiLoader } from "./ui/ascii-loader";
 import { ProjectEnvironmentBadge } from "./ProjectEnvironmentBadge";
 import {
   buildDraftActionMenuItems,
@@ -191,6 +191,7 @@ import {
   hasUnseenCompletion,
   isSidebarNestedLinkClick,
   isSidebarThreadWorking,
+  isSidebarActivityFinishing,
   isTrailingDoubleClick,
   orderItemsByPreferredIds,
   planSidebarThreadDrop,
@@ -359,16 +360,22 @@ function JumpHintBadge(props: { label: string }) {
 }
 
 // Self-ticking so only this span re-renders each second, not the whole row.
-function WorkingDuration(props: { startedAt: string | null }) {
+function WorkingDuration(props: { startedAt: string | null; workCompletedAt?: string | null }) {
   const startedMs = props.startedAt !== null ? Date.parse(props.startedAt) : Number.NaN;
+  const endMs =
+    props.workCompletedAt != null ? Date.parse(props.workCompletedAt) : Date.now();
   const [, setTick] = useState(0);
   useEffect(() => {
-    if (Number.isNaN(startedMs)) return;
+    if (!Number.isFinite(startedMs) || props.workCompletedAt != null) return;
     const id = window.setInterval(() => setTick((tick) => tick + 1), 1_000);
     return () => window.clearInterval(id);
-  }, [startedMs]);
-  if (Number.isNaN(startedMs)) return null;
-  return <span className="tabular-nums">{formatWorkingDurationLabel(Date.now() - startedMs)}</span>;
+  }, [startedMs, props.workCompletedAt]);
+  if (!Number.isFinite(startedMs) || !Number.isFinite(endMs)) return null;
+  return (
+    <span className="inline-block min-w-[6ch] whitespace-nowrap text-right tabular-nums">
+      {formatWorkingDurationLabel(endMs - startedMs)}
+    </span>
+  );
 }
 
 function terminalProcessLabel(count: number): string {
@@ -1288,58 +1295,83 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
   // Status hues follow the system-wide convention set by sidebar v1 and the
   // mobile Live Activity/widgets (amber approval, indigo input, sky working)
   // so a thread reads the same color everywhere it surfaces.
+  const activityRunWorkCompletedAt = thread.runtime?.activityRunWorkCompletedAt ?? null;
+  const activityRunStartedAt = thread.runtime?.activityStartedAt ?? null;
+  const nativeWorkEnded = isSidebarActivityFinishing(thread);
+  const waitingOnBackgroundJob = thread.runtime?.waitingOnBackgroundJob === true;
   const topStatus =
     status === "working"
       ? {
-          // A native /goal keeps the agent going across turns until it is met.
-          label: thread.goal?.status === "active" ? "Goal" : "Working",
-          icon: "working" as const,
-          // No shimmer: a label that animates forever is noise in a sidebar
-          // full of them (and repaints every vsync on high-refresh displays).
-          className: "text-info",
+          label: waitingOnBackgroundJob
+            ? "Monitoring"
+            : nativeWorkEnded
+              ? "Finishing"
+              : thread.goal?.status === "active"
+                ? "Goal"
+                : "Working",
+          icon: waitingOnBackgroundJob
+            ? ("waiting" as const)
+            : nativeWorkEnded
+              ? null
+              : ("working" as const),
+          glyph: waitingOnBackgroundJob ? "…" : nativeWorkEnded ? "·" : null,
+          className: waitingOnBackgroundJob
+            ? "text-muted-foreground"
+            : nativeWorkEnded
+              ? "text-muted-foreground"
+              : "text-info",
         }
       : status === "waiting"
         ? {
-            // Waiting is calm background presence (post-settle background
-            // roster), not active progress, so the label keeps full strength.
-            label: "Waiting",
-            icon: null,
+            // Monitoring is calm presence: background work that will wake the
+            // agent, without suggesting active progress.
+            label: backgroundWorkHoldsCompletion(thread.pendingBackgroundTasks ?? [])
+              ? "Monitoring"
+              : "Waiting",
+            icon: "waiting" as const,
+            glyph: "…",
             className: "text-muted-foreground",
           }
         : status === "approval"
           ? {
               label: "Approval",
               icon: "approval" as const,
+              glyph: "!",
               className: "text-warning-foreground",
             }
           : status === "input"
             ? {
                 label: "Input",
                 icon: "input" as const,
+                glyph: "?",
                 className: "text-indigo-600 dark:text-indigo-300",
               }
             : status === "limited"
               ? {
                   label: "Limited",
-                  icon: "failed" as const,
+                  icon: "limited" as const,
+                  glyph: "~",
                   className: "text-warning",
                 }
               : status === "failed"
                 ? {
                     label: "Failed",
                     icon: "failed" as const,
+                    glyph: "×",
                     className: "text-error",
                   }
                 : isWoke
                   ? {
                       label: "Woke",
                       icon: "woke" as const,
+                      glyph: "↗",
                       className: "text-warning",
                     }
                   : isUnread
                     ? {
                         label: "Done",
                         icon: "done" as const,
+                        glyph: "✓",
                         className: "text-success",
                       }
                     : null;
@@ -2042,7 +2074,12 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
                                   topStatus.className,
                                 )}
                               >
-                                <AlarmClockIcon aria-hidden className="size-4 shrink-0" />
+                                <span
+                                  aria-hidden
+                                  className="inline-flex size-4 shrink-0 items-center justify-center font-mono text-xs leading-none"
+                                >
+                                  {topStatus.glyph}
+                                </span>
                                 <span role="status">{topStatus.label}</span>
                               </button>
                             }
@@ -2051,29 +2088,55 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
                         </Tooltip>
                       ) : (
                         <span
+                          ref={
+                            topStatus.icon === "working" ? observeVisibleAnimation : undefined
+                          }
                           className={cn(
                             "inline-flex items-center gap-1 font-medium",
                             topStatus.className,
                           )}
                         >
                           {topStatus.icon === "working" ? (
-                            <CircleDashedIcon aria-hidden className="size-4 shrink-0" />
-                          ) : topStatus.icon === "input" ? (
-                            <MessageCircleQuestionIcon aria-hidden className="size-4 shrink-0" />
-                          ) : topStatus.icon === "approval" ? (
-                            <ShieldQuestionIcon aria-hidden className="size-4 shrink-0" />
-                          ) : topStatus.icon === "failed" ? (
-                            <CircleAlertIcon aria-hidden className="size-4 shrink-0" />
-                          ) : topStatus.icon === "done" ? (
-                            <CircleCheckIcon aria-hidden className="size-4 shrink-0" />
-                          ) : null}
+                            <AsciiLoader className="size-4 shrink-0 text-info" />
+                          ) : topStatus.glyph === null ? null : (
+                            <span
+                              aria-hidden
+                              className="inline-flex size-4 shrink-0 items-center justify-center font-mono text-xs leading-none"
+                            >
+                              {topStatus.glyph}
+                            </span>
+                          )}
                           {/* The label alone is the live region: a role="status"
                             wrapper around the ticking duration would make
                             screen readers announce every second. */}
-                          <span role="status">{topStatus.label}</span>
-                          {status === "working" ? (
+                          <span
+                            role="status"
+                            className={cn(topStatus.icon === "working" && "minimal-text-shimmer")}
+                          >
+                            {topStatus.label}
+                          </span>
+                          {status === "working" && !waitingOnBackgroundJob ? (
+                            nativeWorkEnded ? (
+                              activityRunStartedAt !== null ? (
+                                <span aria-hidden={!nativeWorkEnded}>
+                                  Worked{" "}
+                                  <WorkingDuration
+                                    startedAt={activityRunStartedAt}
+                                    workCompletedAt={activityRunWorkCompletedAt}
+                                  />
+                                </span>
+                              ) : null
+                            ) : (
+                              <span aria-hidden>
+                                <WorkingDuration startedAt={resolveWorkingStartedAt(thread)} />
+                              </span>
+                            )
+                          ) : status === "waiting" &&
+                            thread.runtime?.waitingOnBackgroundJob !== true ? (
+                            // Waiting starts when the turn ends and background
+                            // work keeps the thread held.
                             <span aria-hidden>
-                              <WorkingDuration startedAt={resolveWorkingStartedAt(thread)} />
+                              <WorkingDuration startedAt={thread.latestRun?.completedAt ?? null} />
                             </span>
                           ) : null}
                         </span>

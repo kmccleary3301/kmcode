@@ -1,10 +1,14 @@
 import { assert, describe, it } from "@effect/vitest";
 import {
   AuthEnvironmentMaintainScope,
+  AuthOrchestrationOperateScope,
   AuthOrchestrationReadScope,
   type AuthEnvironmentScope,
+  NodeId,
+  ORCHESTRATION_V2_WS_METHODS,
   ScheduledTaskError,
   ScheduledTaskId,
+  ThreadId,
   WS_METHODS,
   WsRpcGroup,
 } from "@t3tools/contracts";
@@ -300,6 +304,40 @@ describe("WS RPC instrumentation middleware", () => {
         const duration = requestDuration(snapshots, WS_METHODS.pullRequestsSubscribeRefreshes);
         assert.equal(duration?.count, 1);
         assert.equal(duration?.sum, 250);
+      }),
+    ),
+  );
+
+  it.effect("traces workflow stopping as an orchestration operation", () =>
+    withTelemetry((ended) =>
+      Effect.gen(function* () {
+        const method = ORCHESTRATION_V2_WS_METHODS.stopWorkflow;
+        const group = groupOf(method);
+        const client = yield* RpcTest.makeClient(group).pipe(
+          Effect.provide(
+            Layer.mergeAll(
+              group.toLayerHandler(method, (input) =>
+                Effect.annotateCurrentSpan({
+                  "orchestration_v2.thread_id": input.threadId,
+                  "orchestration_v2.subagent_id": input.subagentId,
+                }).pipe(Effect.andThen(Effect.void)),
+              ),
+              connectionMiddleware([AuthOrchestrationOperateScope]),
+            ),
+          ),
+        );
+        const threadId = ThreadId.make("thread:workflow");
+        const subagentId = NodeId.make("node:workflow");
+        yield* client[method]({ threadId, subagentId });
+
+        const span = rpcSpans(ended).find(
+          (candidate) => candidate.attributes.get("rpc.method") === method,
+        );
+        assert.isDefined(span);
+        const attributes = Object.fromEntries(span.attributes);
+        assert.equal(attributes["rpc.aggregate"], "orchestration");
+        assert.equal(attributes["orchestration_v2.thread_id"], threadId);
+        assert.equal(attributes["orchestration_v2.subagent_id"], subagentId);
       }),
     ),
   );

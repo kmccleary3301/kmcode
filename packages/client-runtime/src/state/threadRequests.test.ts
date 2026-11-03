@@ -5,12 +5,75 @@ import {
   TurnItemId,
   type OrchestrationV2ThreadProjection,
 } from "@t3tools/contracts";
-import { describe, expect, it } from "vite-plus/test";
+import { describe, expect, it, vi } from "vite-plus/test";
+import { AsyncResult } from "effect/reactivity";
+import * as Cause from "effect/Cause";
 import { v2Now, v2Projection } from "./orchestrationV2TestFixtures.ts";
-import { createQuestionHistoryProjector, derivePendingThreadRequests } from "./threadRequests.ts";
+import {
+  createQuestionHistoryProjector,
+  declinePendingApprovals,
+  derivePendingThreadRequests,
+  type ApprovalResponse,
+  type ApprovalResponder,
+  type ThreadPendingApproval,
+} from "./threadRequests.ts";
 
 const requestId = RuntimeRequestId.make("async-question");
 const nodeId = NodeId.make("async-question-node");
+
+const approval: ThreadPendingApproval = {
+  requestId,
+  requestKind: "command",
+  createdAt: "2026-10-19T00:00:00Z",
+  responseCapability: "live",
+};
+const secondApproval: ThreadPendingApproval = {
+  ...approval,
+  requestId: RuntimeRequestId.make("second-approval"),
+};
+
+describe("declining approvals before sending", () => {
+  it("declines every approval before the send continues", async () => {
+    let resolve!: (value: ApprovalResponse) => void;
+    const firstResponse = new Promise<ApprovalResponse>((done) => {
+      resolve = done;
+    });
+    const respond = vi.fn<ApprovalResponder>(async (id) =>
+      id === requestId ? firstResponse : AsyncResult.success(undefined),
+    );
+    const send = vi.fn();
+    const submission = (async () => {
+      if (await declinePendingApprovals([approval, secondApproval], respond)) send();
+    })();
+    expect(respond).toHaveBeenCalledWith(requestId, "decline");
+    expect(send).not.toHaveBeenCalled();
+    resolve(AsyncResult.success(undefined));
+    await submission;
+    expect(respond).toHaveBeenCalledWith(secondApproval.requestId, "decline");
+    expect(send).toHaveBeenCalledOnce();
+  });
+
+  it.each([AsyncResult.failure(Cause.fail("decline failed")), undefined])(
+    "does not send when a decline is unsuccessful: %s",
+    async (response) => {
+      const send = vi.fn();
+      if (await declinePendingApprovals([approval], async () => response)) send();
+      expect(send).not.toHaveBeenCalled();
+    },
+  );
+
+  it("skips approvals the provider can no longer answer", async () => {
+    const respond = vi.fn(async () => AsyncResult.success(undefined));
+    expect(
+      await declinePendingApprovals(
+        [{ ...approval, responseCapability: "not_resumable" }],
+        respond,
+      ),
+    ).toBe(true);
+    expect(respond).not.toHaveBeenCalled();
+  });
+});
+
 const projection: OrchestrationV2ThreadProjection = {
   ...v2Projection,
   runtimeRequests: [

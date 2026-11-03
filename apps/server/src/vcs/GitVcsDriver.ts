@@ -1,5 +1,6 @@
 import * as NodeBuffer from "node:buffer";
 
+import * as Clock from "effect/Clock";
 import * as Context from "effect/Context";
 import * as Crypto from "effect/Crypto";
 import * as DateTime from "effect/DateTime";
@@ -423,6 +424,11 @@ export class GitVcsDriver extends Context.Service<
 const WORKSPACE_FILES_MAX_OUTPUT_BYTES = 16 * 1024 * 1024;
 const CHECKPOINT_RECOVERY_MAX_CANDIDATES = 64;
 const CHECKPOINT_RECOVERY_TIMEOUT = "5 seconds";
+// A checkpoint stages every untracked path; beyond these bounds `git add -A` cannot finish
+// within its process timeout, so capture pauses for the workspace instead.
+const CHECKPOINT_MAX_UNTRACKED_PATHS = 20_000;
+const CHECKPOINT_UNTRACKED_MAX_OUTPUT_BYTES = 4 * 1024 * 1024;
+const CHECKPOINT_OVERSIZED_PAUSE_MS = 15 * 60 * 1_000;
 const GIT_CHECK_IGNORE_MAX_STDIN_BYTES = 256 * 1024;
 const CHECKPOINT_DIFF_MAX_OUTPUT_BYTES = 10_000_000;
 const WORKSPACE_GIT_HARDENED_CONFIG_ARGS = [
@@ -807,8 +813,28 @@ export const makeVcsDriverShape = Effect.fn("makeGitVcsDriverShape")(function* (
     "core.fsyncMethod=fsync",
   ] as const;
 
+  // Workspaces whose checkpoint would stage too much, mapped to when capture may resume.
+  const pausedCheckpointWorkspaces = new Map<string, number>();
+  const pauseCheckpointCapture = (cwd: string, reason: string) =>
+    Effect.gen(function* () {
+      pausedCheckpointWorkspaces.set(
+        cwd,
+        (yield* Clock.currentTimeMillis) + CHECKPOINT_OVERSIZED_PAUSE_MS,
+      );
+      yield* Effect.logWarning("checkpoint capture paused for an oversized workspace", {
+        cwd,
+        reason,
+        pauseMs: CHECKPOINT_OVERSIZED_PAUSE_MS,
+      });
+    });
+
   const checkpoints: VcsDriver.VcsCheckpointOps = {
     captureCheckpoint: Effect.fn("GitVcsDriver.checkpoints.captureCheckpoint")(function* (input) {
+      const pausedUntil = pausedCheckpointWorkspaces.get(input.cwd);
+      if (pausedUntil !== undefined) {
+        if ((yield* Clock.currentTimeMillis) < pausedUntil) return "skipped";
+        pausedCheckpointWorkspaces.delete(input.cwd);
+      }
       const operation = VcsProcess.CHECKPOINT_CAPTURE_OPERATION;
       const indexConfig = [
         "-c",
@@ -835,7 +861,7 @@ export const makeVcsDriverShape = Effect.fn("makeGitVcsDriverShape")(function* (
         { discard: true },
       );
 
-      yield* Effect.gen(function* () {
+      return yield* Effect.gen(function* () {
         const headExists = yield* hasHeadCommit(input.cwd);
         const sparseConfig = yield* execute({
           operation,
@@ -961,6 +987,29 @@ export const makeVcsDriverShape = Effect.fn("makeGitVcsDriverShape")(function* (
           }
         }
 
+        // `git add -A` over a huge untracked tree outlives its timeout and strands partially
+        // written objects in .git. List what it would stage first; the listing stops at its cap.
+        const untracked = yield* execute({
+          operation,
+          cwd: input.cwd,
+          args: ["ls-files", "--others", "--exclude-standard", "-z", "--", "."],
+          env: commitEnv,
+          maxOutputBytes: CHECKPOINT_UNTRACKED_MAX_OUTPUT_BYTES,
+          outputMode: "error",
+        }).pipe(
+          Effect.map((result) => splitNullSeparatedGitStdoutPaths(result)),
+          Effect.catchTags({ VcsProcessOutputLimitError: () => Effect.succeed(null) }),
+        );
+        if (untracked === null || untracked.length > CHECKPOINT_MAX_UNTRACKED_PATHS) {
+          yield* pauseCheckpointCapture(
+            input.cwd,
+            untracked === null
+              ? `untracked listing exceeded ${CHECKPOINT_UNTRACKED_MAX_OUTPUT_BYTES} bytes`
+              : `${untracked.length} untracked paths`,
+          );
+          return "skipped";
+        }
+
         const stageFiles = (exclusions: ReadonlyArray<string>) =>
           execute({
             operation,
@@ -982,19 +1031,9 @@ export const makeVcsDriverShape = Effect.fn("makeGitVcsDriverShape")(function* (
           Effect.catchTags({
             VcsProcessExitError: (error) =>
               Effect.gen(function* () {
-                // Git cannot stage an embedded repository until it has a commit. Discover these
-                // only after staging fails so ordinary checkpoints do not need another file scan.
-                const untracked = yield* execute({
-                  operation,
-                  cwd: input.cwd,
-                  args: ["ls-files", "--others", "--exclude-standard", "-z", "--", "."],
-                  env: commitEnv,
-                  maxOutputBytes: WORKSPACE_FILES_MAX_OUTPUT_BYTES,
-                });
-                if (untracked.stdoutTruncated) return yield* error;
-                const candidates = splitNullSeparatedGitStdoutPaths(untracked).filter((entry) =>
-                  entry.endsWith("/"),
-                );
+                // Git cannot stage an embedded repository until it has a commit; the preflight
+                // listing names each as a directory entry.
+                const candidates = untracked.filter((entry) => entry.endsWith("/"));
                 // Refuse excessive recovery work before probing any nested repositories.
                 if (candidates.length > CHECKPOINT_RECOVERY_MAX_CANDIDATES) return yield* error;
                 // Discover each child's repository instead of inheriting the server's Git bindings.
@@ -1071,7 +1110,15 @@ export const makeVcsDriverShape = Effect.fn("makeGitVcsDriverShape")(function* (
           cwd: input.cwd,
           args: [...durableWrite, "update-ref", input.checkpointRef, commitOid],
         });
-      }).pipe(Effect.ensuring(cleanupTempIndex));
+        return "captured";
+      }).pipe(
+        Effect.tapError((error) =>
+          error._tag === "VcsProcessTimeoutError"
+            ? pauseCheckpointCapture(input.cwd, "a checkpoint Git command timed out")
+            : Effect.void,
+        ),
+        Effect.ensuring(cleanupTempIndex),
+      );
     }),
 
     hasCheckpointRef: (input) =>

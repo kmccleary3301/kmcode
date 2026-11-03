@@ -256,8 +256,8 @@ describe("EventNdjsonLogger", () => {
 
         assert.equal(NodeFS.existsSync(threadPath), false);
         yield* TestClock.adjust(1_000);
-        assert.equal(NodeFS.existsSync(threadPath), true);
         yield* store.close();
+        assert.equal(NodeFS.existsSync(threadPath), true);
       } finally {
         NodeFS.rmSync(tempDir, { recursive: true, force: true });
       }
@@ -281,10 +281,9 @@ describe("EventNdjsonLogger", () => {
         yield* logger.write({ id: "accepted" }, ThreadId.make("thread-interrupted"));
 
         yield* TestClock.adjust(1_000);
-
+        yield* store.close();
         assert.equal(NodeFS.existsSync(threadPath), true);
         assert.include(NodeFS.readFileSync(threadPath, "utf8"), '{"id":"accepted"}');
-        yield* store.close();
       } finally {
         NodeFS.rmSync(tempDir, { recursive: true, force: true });
       }
@@ -709,6 +708,17 @@ describe("EventNdjsonLogger", () => {
           matchingFiles.some((entry) => entry === `${fileStem}.3`),
           false,
         );
+        for (const entry of matchingFiles) {
+          const lines = NodeFS.readFileSync(NodePath.join(tempDir, entry), "utf8")
+            .trim()
+            .split("\n")
+            .map(parseLogLine);
+          assert.isAbove(lines.length, 0);
+          for (const { observedAt, stream } of lines) {
+            assert.equal(Number.isNaN(Date.parse(observedAt)), false);
+            assert.include(["NTIVE", "CANON"], stream);
+          }
+        }
       } finally {
         NodeFS.rmSync(tempDir, { recursive: true, force: true });
       }
@@ -775,10 +785,12 @@ describe("EventNdjsonLogger", () => {
         const logger = store.logger("native");
 
         yield* logger.write({ id: "active-before-retention" }, ThreadId.make("active"));
+        yield* store.flush();
         assert.equal(NodeFS.existsSync(activePath), true);
 
         yield* TestClock.adjust("2 millis");
         yield* logger.write({ id: "retention-trigger" }, ThreadId.make("other"));
+        yield* store.flush();
 
         assert.equal(NodeFS.existsSync(activePath), true);
         yield* store.close();
@@ -788,7 +800,7 @@ describe("EventNdjsonLogger", () => {
     }),
   );
 
-  it("attributes batches that were written before a later chunk fails", () => {
+  it("attributes accepted batches before a later chunk is dropped", () => {
     const records: ReadonlyArray<PendingRecord> = [
       {
         stream: "native",
@@ -806,19 +818,19 @@ describe("EventNdjsonLogger", () => {
     const attributed: Array<PendingRecord> = [];
     let writes = 0;
 
-    assert.throws(() =>
-      writeBatchedMessages(
-        {
-          write: () => {
-            writes += 1;
-            if (writes === 2) throw new Error("simulated disk exhaustion");
-          },
+    writeBatchedMessages(
+      {
+        write: () => {
+          writes += 1;
+          return writes !== 2;
         },
-        records,
-        5,
-        (written) => attributed.push(...written),
-      ),
+      },
+      records,
+      5,
+      (written) => attributed.push(...written),
     );
+
+    assert.equal(writes, 2);
     assert.deepEqual(attributed, [records[0]]);
   });
 

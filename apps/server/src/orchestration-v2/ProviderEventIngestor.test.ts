@@ -318,6 +318,65 @@ layer("ProviderEventIngestorV2", (it) => {
     }),
   );
 
+  it.effect("skips only node updates that still match the stored projection", () =>
+    Effect.gen(function* () {
+      const now = yield* DateTime.now;
+      const eventSink = yield* EventSink.EventSinkV2;
+      const projectionStore = yield* ProjectionStore.ProjectionStoreV2;
+      const ingestor = yield* ProviderEventIngestor.ProviderEventIngestorV2;
+      const idAllocator = yield* IdAllocator.IdAllocatorV2;
+      const threadEvent = yield* threadCreatedEvent(now);
+      const threadId = threadEvent.threadId;
+      yield* eventSink.write({ events: [threadEvent] });
+      const providerSessionId = yield* idAllocator.allocate.providerSession({
+        providerInstanceId: modelSelection.instanceId,
+        threadId,
+      });
+      const nodeId = NodeId.make(`${threadId}:approval`);
+      const node: OrchestrationV2ExecutionNode = {
+        id: nodeId,
+        threadId,
+        runId: null,
+        parentNodeId: null,
+        rootNodeId: nodeId,
+        kind: "approval_request",
+        status: "waiting",
+        countsForRun: false,
+        providerThreadId: null,
+        providerTurnId: null,
+        nativeItemRef: null,
+        runtimeRequestId: null,
+        checkpointScopeId: null,
+        startedAt: now,
+        completedAt: null,
+      };
+      const ingestNode = (sent: OrchestrationV2ExecutionNode) =>
+        ingestor.ingestNormalized({
+          providerSessionId,
+          providerInstanceId: modelSelection.instanceId,
+          threadId,
+          event: { type: "node.updated", driver: CODEX_DRIVER, node: sent },
+        });
+
+      assert.lengthOf(yield* ingestNode(node), 1);
+      assert.isEmpty(yield* ingestNode({ ...node }));
+      yield* eventSink.write({
+        events: [
+          {
+            id: yield* idAllocator.allocate.event({ threadId }),
+            type: "node.updated",
+            threadId,
+            occurredAt: now,
+            payload: { ...node, status: "completed", completedAt: now },
+          },
+        ],
+      });
+      assert.lengthOf(yield* ingestNode(node), 1);
+      const projection = yield* projectionStore.getThreadProjection(threadId);
+      assert.equal(projection.nodes.find((entry) => entry.id === nodeId)?.status, "waiting");
+    }),
+  );
+
   it.effect("carries plan-step durations through consecutive and restarted ingestion", () =>
     Effect.gen(function* () {
       yield* TestClock.setTime(Date.parse("2026-09-07T00:00:00.000Z"));
@@ -1420,10 +1479,8 @@ layer("ProviderEventIngestorV2", (it) => {
           ["thread.model-selection-updated", childThreadId],
         ],
       );
-      assert.deepEqual(
-        repeated.map((stored) => stored.event.type),
-        ["subagent.updated"],
-      );
+      // An identical re-send is withheld and must not re-run the model sync.
+      assert.deepEqual(repeated, []);
       assert.deepEqual(childThread.modelSelection, {
         instanceId: modelSelection.instanceId,
         model: "gpt-6.1-sol",

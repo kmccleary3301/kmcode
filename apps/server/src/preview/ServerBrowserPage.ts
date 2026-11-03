@@ -18,7 +18,7 @@ import {
   type PreviewAutomationWaitForInput,
 } from "@t3tools/contracts";
 import { constVoid } from "effect/Function";
-import type { CDPSession, Locator, Page } from "playwright-core";
+import type { CDPSession, ConsoleMessage, Locator, Page } from "playwright-core";
 import * as NodeCrypto from "node:crypto";
 import { BrowserControlInterrupted } from "./SessionControl.ts";
 
@@ -145,10 +145,152 @@ const SNAPSHOT_SCRIPT = `(() => {
     url: location.href,
     title: document.title,
     loading: document.readyState !== "complete",
-    visibleText: (document.body?.innerText || "").slice(0, ${MAX_VISIBLE_TEXT_LENGTH}),
+    visibleText: document.body?.innerText || "",
     interactiveElements: [],
   };
 })()`;
+
+const MASKED_VALUE = "••••••••";
+
+const DOTTED_SCRIPT = `(() => {
+  const values = [];
+  const visit = (root) => {
+    for (const element of root.querySelectorAll("*")) {
+      if (element.shadowRoot) visit(element.shadowRoot);
+      const field = element.localName === "input" || element.localName === "textarea";
+      if (!field && !element.isContentEditable) continue;
+      const dots = getComputedStyle(element).getPropertyValue("-webkit-text-security");
+      if (element.type !== "password" && (dots === "none" || dots === "")) continue;
+      for (const value of field ? [element.value, element.defaultValue] : [element.textContent ?? ""]) {
+        values.push(value, value.replace(/[\\u200b\\u00ad]/g, "").trim().replace(/\\s+/g, " "));
+      }
+    }
+  };
+  visit(document);
+  return [...new Set(values.filter((value) => value.trim()))];
+})()`;
+
+const readDottedValues = async (cdp: CDPSession): Promise<ReadonlyArray<string>> => {
+  const { frameTree } = await cdp.send("Page.getFrameTree");
+  const ids = (node: typeof frameTree): Array<string> => [
+    node.frame.id,
+    ...(node.childFrames ?? []).flatMap(ids),
+  ];
+  const values = await Promise.all(
+    ids(frameTree).map(async (frameId) => {
+      const world = await cdp.send("Page.createIsolatedWorld", {
+        frameId,
+        worldName: "km-preview-password-mask",
+      });
+      const { result, exceptionDetails } = await cdp.send("Runtime.evaluate", {
+        contextId: world.executionContextId,
+        expression: DOTTED_SCRIPT,
+        returnByValue: true,
+      });
+      if (exceptionDetails) {
+        throw new ServerBrowserOperationError(
+          "PreviewAutomationExecutionError",
+          "Could not safely read password fields for the page snapshot.",
+        );
+      }
+      return result.value as Array<string>;
+    }),
+  );
+  return values.flat();
+};
+
+const dottedPattern = (values: ReadonlyArray<string>): RegExp | undefined => {
+  const sources = values
+    .flatMap((value) => {
+      const json = JSON.stringify(value).slice(1, -1);
+      const quoted = value.replace(/[\\"\p{Cc}]/gu, (char) =>
+        '\\"\b\f\n\r\t'.includes(char)
+          ? JSON.stringify(char).slice(1, -1)
+          : `\\x${char.charCodeAt(0).toString(16).padStart(2, "0")}`,
+      );
+      return [...new Set([value, json, quoted].flatMap((form) => [form, form.replaceAll("'", "''")]))]
+        .map((form) => ({ form, word: value.length < 4 }));
+    })
+    .toSorted((left, right) => right.form.length - left.form.length)
+    .map(({ form, word }) => {
+      const literal = form.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+      return word ? `(?<![\\p{L}\\p{N}_])${literal}(?![\\p{L}\\p{N}_])` : literal;
+    });
+  if (sources.length === 0) return undefined;
+  try {
+    return new RegExp(sources.join("|"), "gu");
+  } catch {
+    throw new ServerBrowserOperationError(
+      "PreviewAutomationExecutionError",
+      "A password field holds a value too long to hide, so no snapshot was taken.",
+    );
+  }
+};
+
+const TREE_LINE =
+  /^(\s*- '?[^\s"':]+)( "(?:[^"\\]|\\.)*"| \/(?:.*?\/)?)?((?: \[(?:active|checked(?:=mixed)?|disabled|expanded|level=\d+|pressed(?:=mixed)?|selected|ref=(?:f\d+)?e\d+|cursor=pointer|box=-?\d+,-?\d+,\d+,\d+)\])*'?)(:.*)?$/;
+
+const maskTree = (tree: string, dotted: RegExp): string =>
+  tree
+    .split("\n")
+    .map((line) => {
+      const node = TREE_LINE.exec(line);
+      const name = node?.[1]?.length ?? 0;
+      const attributes = name + (node?.[2]?.length ?? 0);
+      const end = attributes + (node?.[3]?.length ?? 0);
+      const kept = (from: number, to: number) => to <= name || (from >= attributes && to <= end);
+      return line.replace(dotted, (match: string, offset: number) =>
+        kept(offset, offset + match.length) ? match : MASKED_VALUE,
+      );
+    })
+    .join("\n");
+
+/**
+ * A `data:` URL carries its content, which can be a whole file, and URLs and diagnostics
+ * reach tool results and provider logs. Keeps only the media type: the payload can hold any
+ * character and parameters are page-chosen too.
+ */
+export const withoutDataPayload = (url: string) => {
+  // Read the scheme as a browser would: it ignores leading controls and spaces, and tabs and
+  // newlines anywhere. A snapshot's YAML value may be quoted and escaped; an escape that isn't a
+  // tab or newline still decodes to something that can't start a scheme.
+  const value = url
+    .replace(/^["']/, "")
+    .replace(/\\(x[\da-f]{2}|u[\da-f]{4}|.)/gi, (_escape, code: string) =>
+      code.length > 1
+        ? String.fromCharCode(Number.parseInt(code.slice(1), 16))
+        : ({ t: "\t", n: "\n", r: "\r", '"': '"', "\\": "\\" }[code] ?? "\u0001"),
+    )
+    .replace(/[\t\n\r]/g, "")
+    // eslint-disable-next-line no-control-regex -- URL parsing ignores these controls.
+    .replace(/^[\u0000-\u0020]+/, "");
+  const parsed = /^data:([^,;]*)/i.exec(value);
+  if (!parsed) return url;
+  const type = parsed[1]!.trim();
+  const mediaType = /^[\w.+-]{1,64}\/[\w.+-]{1,64}$/.test(type) ? type : "";
+  return `data:${mediaType},…`;
+};
+
+/**
+ * Chromium's own console messages, which carry no arguments, quote `data:` URLs whole, as in a
+ * blocked navigation or a CSP violation. Everything after the first one goes, since Chromium
+ * accepts any type and a payload can hold any character. What a page logs itself is its own
+ * text, like anything else it shows, so it stays.
+ */
+export const consoleText = (message: ConsoleMessage) =>
+  message.args().length > 0
+    ? message.text()
+    : message.text().replace(/(?<![a-z\d])data:[^,;]*[,;][\s\S]*/i, withoutDataPayload);
+
+// Split on LF alone: a value keeps any U+2028 that a multiline regex would treat as a line end.
+const withoutTreeDataPayloads = (tree: string) =>
+  tree
+    .split("\n")
+    .map((line) => {
+      const url = /^(\s*- \/url: )(.*)$/s.exec(line);
+      return url ? url[1] + withoutDataPayload(url[2]!) : line;
+    })
+    .join("\n");
 
 // Scaled captures repaint live screencasts, so callers pause them. Clips use document offsets.
 export const captureViewport = async (
@@ -188,6 +330,7 @@ export const snapshot = async (input: {
   const state = refsFor(input.page);
   invalidateRefs(input.page);
   const generation = state.generation;
+  const before = await readDottedValues(input.cdp);
   const [page, tree, data] = await Promise.all([
     input.page.evaluate(SNAPSHOT_SCRIPT) as Promise<
       Pick<
@@ -198,13 +341,23 @@ export const snapshot = async (input: {
     input.page.ariaSnapshot({ mode: "ai", boxes: true, timeout: DEFAULT_TIMEOUT_MS }),
     captureViewport(input.page, input.cdp, { format: "png", scale }),
   ]);
+  const after = await readDottedValues(input.cdp);
+  if (JSON.stringify(before) !== JSON.stringify(after)) {
+    throw new ServerBrowserOperationError(
+      "PreviewAutomationExecutionError",
+      "The page changed while capturing its snapshot. Take another snapshot.",
+    );
+  }
   if (state.generation !== generation) {
     throw new ServerBrowserOperationError(
       "PreviewAutomationExecutionError",
       "The page changed while capturing its snapshot. Take another snapshot.",
     );
   }
-  const accessibilityTree = tree
+  const dotted = dottedPattern(after);
+  const redacted = withoutTreeDataPayloads(tree);
+  const maskedTree = dotted ? maskTree(redacted, dotted) : redacted;
+  const accessibilityTree = maskedTree
     .slice(0, MAX_VISIBLE_TEXT_LENGTH)
     .replace(/\[ref=((?:f\d+)?e\d+)\]/g, (_match, nativeRef: string) => {
       const ref = `t3-${generation}-${nativeRef}`;
@@ -213,6 +366,11 @@ export const snapshot = async (input: {
     });
   return {
     ...page,
+    visibleText: (dotted ? page.visibleText.replace(dotted, MASKED_VALUE) : page.visibleText).slice(
+      0,
+      MAX_VISIBLE_TEXT_LENGTH,
+    ),
+    url: withoutDataPayload(page.url),
     accessibilityTree,
     consoleEntries: [...input.consoleEntries],
     networkEntries: [...input.networkEntries],

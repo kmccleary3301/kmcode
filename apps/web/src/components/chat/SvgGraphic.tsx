@@ -1,7 +1,29 @@
 import DOMPurify, { type DOMPurify as DOMPurifyInstance } from "dompurify";
 import { useMemo } from "react";
 
-import { standaloneSvgImageUrl } from "./MermaidDiagram";
+let expandedImageUrl: string | null = null;
+
+/**
+ * Converts an SVG to a standalone image with fixed dimensions and a theme
+ * background. Only one graphic is expanded at a time, so release its URL.
+ */
+export function standaloneSvgImageUrl(svg: string): string {
+  const svgDocument = new DOMParser().parseFromString(svg, "image/svg+xml");
+  const element = svgDocument.documentElement;
+  const viewBox = element.getAttribute("viewBox")?.trim().split(/\s+/).map(Number);
+  if (viewBox?.length === 4 && viewBox.every(Number.isFinite)) {
+    element.setAttribute("width", String(viewBox[2]));
+    element.setAttribute("height", String(viewBox[3]));
+  }
+  element.setAttribute("xmlns", "http://www.w3.org/2000/svg");
+  element.style.maxWidth = "none";
+  element.style.backgroundColor = getComputedStyle(document.body).backgroundColor;
+  if (expandedImageUrl) URL.revokeObjectURL(expandedImageUrl);
+  expandedImageUrl = URL.createObjectURL(
+    new Blob([new XMLSerializer().serializeToString(element)], { type: "image/svg+xml" }),
+  );
+  return expandedImageUrl;
+}
 
 type SvgGraphicResult =
   | {

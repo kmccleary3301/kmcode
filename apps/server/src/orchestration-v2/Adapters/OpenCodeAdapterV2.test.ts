@@ -810,8 +810,9 @@ describe("OpenCodeAdapterV2", () => {
     }).pipe(Effect.provide(IdAllocator.layer), Effect.scoped),
   );
 
-  it.effect("titles OpenCode reads and searches from their input", () =>
-    Effect.gen(function* () {
+  it.effect(
+    "projects OpenCode descriptions as intent while titling reads and searches from input",
+    () => Effect.gen(function* () {
       const nativeEvents = asyncEventStream();
       const nativeSessionId = "native-opencode-search";
       const harness = yield* makeOpenCodeRuntimeHarness("search-projection", nativeSessionId, {
@@ -837,11 +838,33 @@ describe("OpenCodeAdapterV2", () => {
         Effect.forkScoped,
       );
       for (const [tool, input, output] of [
-        ["read", { filePath: "src/env.ts" }, "---\nfile body"],
+        [
+          "read",
+          { filePath: "src/env.ts", description: "  Inspect source file  " },
+          "---\nfile body",
+        ],
         ["grep", { pattern: "TODO", path: "apps/web" }, "---\nfile body"],
         ["websearch", { query: "OpenCode documentation" }, "---\nfile body"],
         ["glob", { pattern: "missing", path: "apps/web" }, ""],
         ["codesearch", {}, " \n\t"],
+        [
+          "bash",
+          {
+            command: "git status",
+            description: "  Inspect repository status  ",
+          },
+          "clean",
+        ],
+        [
+          "edit",
+          {
+            filePath: "src/env.ts",
+            oldString: "before",
+            newString: "after",
+            description: "  Update environment settings  ",
+          },
+          "",
+        ],
       ] as const) {
         yield* Effect.promise(() =>
           nativeEvents.push({
@@ -879,6 +902,11 @@ describe("OpenCodeAdapterV2", () => {
       );
       const read = items.find((item) => item.type === "dynamic_tool");
       assert.equal(read?.title, "Read src/env.ts");
+      assert.equal(read?.intent, "Inspect source file");
+      const bash = items.find((item) => item.type === "command_execution");
+      assert.equal(bash?.intent, "Inspect repository status");
+      const edit = items.find((item) => item.type === "file_change");
+      assert.equal(edit?.intent, "Update environment settings");
       const grep = items.find((item) => item.type === "file_search");
       assert.equal(grep?.title, "Searched TODO in web");
       assert.equal(grep?.type === "file_search" ? grep.pattern : null, "TODO");

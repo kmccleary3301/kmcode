@@ -10,7 +10,9 @@ import * as SchemaTransformation from "effect/SchemaTransformation";
 import * as Tracer from "effect/Tracer";
 import { OtlpResource, OtlpTracer, OtlpSerialization } from "effect/observability";
 
-import { RotatingFileSink } from "./logging.ts";
+import { RotatingFileSink, RotatingFileSinkError } from "./logging.ts";
+
+const isRotatingFileSinkError = Schema.is(RotatingFileSinkError);
 
 export const OtlpProtocol = Schema.Literals(["http/json", "http/protobuf"]);
 export type OtlpProtocol = typeof OtlpProtocol.Type;
@@ -37,6 +39,9 @@ export const DEFAULT_SIGNAL_EXPORT: SignalExport = {
 };
 
 const FLUSH_BUFFER_THRESHOLD = 256;
+const MAX_TRACE_BUFFERED_BYTES = 1024 * 1024;
+const MAX_TRACE_SINK_BUFFERED_BYTES = 10 * 1024 * 1024;
+const MAX_TRACE_BUFFERED_RECORDS = 4_096;
 const textEncoder = new TextEncoder();
 
 export type TraceAttributes = Readonly<Record<string, unknown>>;
@@ -368,13 +373,26 @@ export const makeTraceSink = Effect.fn("makeTraceSink")(function* (options: Trac
     filePath: options.filePath,
     maxBytes: options.maxBytes,
     maxFiles: options.maxFiles,
+    maxBufferedBytes: MAX_TRACE_SINK_BUFFERED_BYTES,
+    maxBufferedRecords: MAX_TRACE_BUFFERED_RECORDS,
     throwOnError: true,
+  });
+  yield* Effect.tryPromise({
+    try: () => sink.initialize(),
+    catch: (cause) =>
+      isRotatingFileSinkError(cause)
+        ? cause
+        : new RotatingFileSinkError({
+            operation: "initialize",
+            filePath: options.filePath,
+            cause,
+          }),
   });
 
   let buffer: Array<string> = [];
-  // A failure episode starts at the first dropped record and ends when a flush
-  // sees that the latest write succeeded. Flush checks once per window, so a
-  // disk that flaps inside one window stays one episode.
+  let bufferBytes = 0;
+  let pendingDropCount = 0;
+  let observedSinkDropCount = sink.droppedCount;
   let writeFailing = false;
   let droppedCount = 0;
   let failureReported = false;
@@ -385,17 +403,17 @@ export const makeTraceSink = Effect.fn("makeTraceSink")(function* (options: Trac
   };
 
   const flushUnsafe = () => {
-    if (buffer.length === 0) {
-      return;
-    }
+    if (buffer.length === 0) return;
 
     const records = buffer;
     buffer = [];
+    bufferBytes = 0;
     let persistedCount = 0;
 
     while (persistedCount < records.length) {
-      const firstRecordBytes = textEncoder.encode(records[persistedCount]).byteLength;
+      const firstRecordBytes = textEncoder.encode(records[persistedCount] ?? "").byteLength;
       if (firstRecordBytes > options.maxBytes) {
+        pendingDropCount += 1;
         persistedCount += 1;
         continue;
       }
@@ -403,46 +421,69 @@ export const makeTraceSink = Effect.fn("makeTraceSink")(function* (options: Trac
       let nextIndex = persistedCount + 1;
       let chunkBytes = firstRecordBytes;
       while (nextIndex < records.length) {
-        const nextRecordBytes = textEncoder.encode(records[nextIndex]).byteLength;
+        const nextRecordBytes = textEncoder.encode(records[nextIndex] ?? "").byteLength;
         if (chunkBytes + nextRecordBytes > options.maxBytes) break;
         chunkBytes += nextRecordBytes;
         nextIndex += 1;
       }
 
+      const recordCount = nextIndex - persistedCount;
       const chunk = records.slice(persistedCount, nextIndex).join("");
-      const startedAt = performance.now();
-      try {
-        sink.write(chunk);
-      } catch {
-        // A failing disk (ENOSPC, EACCES, EIO) drops the rest of the batch.
-        // Retrying it would grow the backlog, and every later push would
-        // retry all of it.
-        writeFailing = true;
-        droppedCount += records.length - persistedCount;
+      if (!sink.write(chunk, recordCount)) {
+        pendingDropCount += records.length - nextIndex;
         return;
       }
-      writeFailing = false;
       pendingFlushStats = {
         logicalWriteBytes: pendingFlushStats.logicalWriteBytes + chunkBytes,
-        count: pendingFlushStats.count + nextIndex - persistedCount,
-        durationMs: pendingFlushStats.durationMs + Math.max(0, performance.now() - startedAt),
+        count: pendingFlushStats.count + recordCount,
+        durationMs: pendingFlushStats.durationMs,
       };
       persistedCount = nextIndex;
     }
   };
 
-  // Logs once when writes start failing and once when they recover, so a disk
-  // that stays broken costs one line, not one per flush.
   const flush = Effect.gen(function* () {
     flushUnsafe();
+    const startedAt = performance.now();
+    const writeResult = yield* Effect.result(
+      Effect.tryPromise({
+        try: () => sink.flush(),
+        catch: (cause) =>
+          isRotatingFileSinkError(cause)
+            ? cause
+            : new RotatingFileSinkError({
+                operation: "write",
+                filePath: options.filePath,
+                cause,
+              }),
+      }),
+    );
+    const sinkDroppedCount = sink.droppedCount;
+    const droppedSinceFlush =
+      pendingDropCount + Math.max(0, sinkDroppedCount - observedSinkDropCount);
+    pendingDropCount = 0;
+    observedSinkDropCount = sinkDroppedCount;
     const stats = pendingFlushStats;
+    const failed = writeResult._tag === "Failure" || droppedSinceFlush > 0;
+    if (failed) {
+      writeFailing = true;
+      droppedCount += droppedSinceFlush;
+    } else if (stats.count > 0) {
+      writeFailing = false;
+    }
+
     pendingFlushStats = {
       logicalWriteBytes: 0,
       count: 0,
       durationMs: 0,
     };
-    if (stats.count > 0 && options.onFlush) {
-      yield* options.onFlush(stats).pipe(Effect.ignore);
+    if (stats.count > 0 && !failed && options.onFlush) {
+      yield* options
+        .onFlush({
+          ...stats,
+          durationMs: Math.max(stats.durationMs, performance.now() - startedAt),
+        })
+        .pipe(Effect.ignore);
     }
     if (droppedCount > 0 && !failureReported) {
       failureReported = true;
@@ -460,12 +501,15 @@ export const makeTraceSink = Effect.fn("makeTraceSink")(function* (options: Trac
     }
   }).pipe(
     Effect.withTracerEnabled(false),
-    // The timed fiber inherits the makeTraceSink span. That span has ended but
-    // lives as long as the sink, so the tracer logger must not add logs to it.
     Effect.updateContext(Context.omit(Tracer.ParentSpan)<never>),
   );
 
-  yield* Effect.addFinalizer(() => flush.pipe(Effect.ignore));
+  yield* Effect.addFinalizer(() =>
+    flush.pipe(
+      Effect.andThen(Effect.tryPromise({ try: () => sink.close(), catch: () => undefined })),
+      Effect.ignore,
+    ),
+  );
   yield* Effect.forkScoped(
     Effect.sleep(`${options.batchWindowMs} millis`).pipe(Effect.andThen(flush), Effect.forever),
   );
@@ -474,16 +518,37 @@ export const makeTraceSink = Effect.fn("makeTraceSink")(function* (options: Trac
     filePath: options.filePath,
     push(record) {
       try {
-        buffer.push(`${JSON.stringify(record)}\n`);
-        if (buffer.length >= FLUSH_BUFFER_THRESHOLD) {
+        const line = `${JSON.stringify(record)}\n`;
+        const bytes = textEncoder.encode(line).byteLength;
+        if (bytes > options.maxBytes || bytes > MAX_TRACE_BUFFERED_BYTES) {
+          pendingDropCount += 1;
+          return;
+        }
+        if (
+          buffer.length > 0 &&
+          (buffer.length >= MAX_TRACE_BUFFERED_RECORDS || bufferBytes + bytes > MAX_TRACE_BUFFERED_BYTES)
+        ) {
+          flushUnsafe();
+        }
+        buffer.push(line);
+        bufferBytes += bytes;
+        if (
+          buffer.length >= FLUSH_BUFFER_THRESHOLD ||
+          buffer.length >= MAX_TRACE_BUFFERED_RECORDS ||
+          bufferBytes >= MAX_TRACE_BUFFERED_BYTES
+        ) {
           flushUnsafe();
         }
       } catch {
-        return;
+        pendingDropCount += 1;
       }
     },
     flush,
-    close: () => flush,
+    close: () =>
+      flush.pipe(
+        Effect.andThen(Effect.tryPromise({ try: () => sink.close(), catch: () => undefined })),
+        Effect.ignore,
+      ),
   } satisfies TraceSink;
 });
 

@@ -35,6 +35,7 @@ import * as DesktopUpdates from "../updates/DesktopUpdates.ts";
 import * as DesktopSnapShot from "../snapShot/DesktopSnapShot.ts";
 import * as DesktopWslBackend from "../wsl/DesktopWslBackend.ts";
 import * as DesktopRendererHistory from "../telemetry/DesktopRendererHistory.ts";
+import * as PortForwardManager from "../ports/PortForwardManager.ts";
 
 const DESKTOP_PRODUCT_NAME = resolveProductIdentity(
   parseProductProfile(process.env.T3_PRODUCT_PROFILE),
@@ -353,6 +354,7 @@ const scopedProgram = Effect.scoped(
     const shutdown = yield* DesktopShutdown.DesktopShutdown;
     const rendererHistory = yield* DesktopRendererHistory.DesktopRendererHistory;
 
+    const portForwardManager = yield* PortForwardManager.PortForwardManager;
     yield* Effect.addFinalizer(() =>
       // Stop every backend in the pool, not just the primary. The
       // electronApp.quit() path can race ahead of the layer-scope
@@ -360,6 +362,7 @@ const scopedProgram = Effect.scoped(
       // finalizer means it gets hard-killed by the OS instead of
       // receiving SIGTERM + grace.
       stopAllPoolInstances().pipe(
+        Effect.ensuring(portForwardManager.dispose),
         Effect.ensuring(rendererHistory.shutdown),
         Effect.ensuring(shutdown.markComplete),
       ),

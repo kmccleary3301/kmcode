@@ -297,11 +297,15 @@ interface ServerTab {
   readonly openerTabId: string | undefined;
   /** Finished downloads, newest last; files live until the tab closes. */
   readonly downloads: Array<ServerDownload>;
-  /** A page's open file picker, waiting for the controlling viewer's files. */
+  /**
+   * A page's open file picker, waiting for the controlling viewer's files. Its
+   * id is reissued for each viewer it is offered to, so only that viewer can answer.
+   */
   fileChooser: {
     readonly id: string;
     readonly chooser: FileChooser;
     readonly accept: string;
+    readonly offeredTo: string | null;
   } | null;
   dialog: Dialog | null;
   setting: PreviewViewportSetting;
@@ -543,7 +547,11 @@ const make = Effect.gen(function* () {
     const title = (await tab.page.title().catch(() => "")).slice(0, 512);
     // A navigation that started while reading the title owns the status now.
     if (tab.loading || tab.page.url() !== url) return;
-    report(tab, { _tag: "Success", url: url.slice(0, 2048), title });
+    report(tab, {
+      _tag: "Success",
+      url: ServerBrowserPage.withoutDataPayload(url).slice(0, 2048),
+      title,
+    });
   };
 
   const reportLiveTabs = () => {
@@ -767,7 +775,11 @@ const make = Effect.gen(function* () {
     page.on("request", (request) => {
       if (!isMainNavigation(request)) return;
       tab.loading = true;
-      report(tab, { _tag: "Loading", url: request.url().slice(0, 2048), title: "" });
+      report(tab, {
+        _tag: "Loading",
+        url: ServerBrowserPage.withoutDataPayload(request.url()).slice(0, 2048),
+        title: "",
+      });
     });
     page.on("load", () => {
       tab.loading = false;
@@ -780,7 +792,7 @@ const make = Effect.gen(function* () {
     page.on("requestfailed", (request) => {
       const errorText = request.failure()?.errorText ?? "";
       pushBounded(tab.networkEntries, {
-        url: request.url(),
+        url: ServerBrowserPage.withoutDataPayload(request.url()),
         method: request.method(),
         status: null,
         failed: true,
@@ -792,7 +804,7 @@ const make = Effect.gen(function* () {
       const { code, description } = ServerBrowserPage.parseNetError(errorText);
       report(tab, {
         _tag: "LoadFailed",
-        url: request.url().slice(0, 2048),
+        url: ServerBrowserPage.withoutDataPayload(request.url()).slice(0, 2048),
         title: "",
         code,
         description,
@@ -800,7 +812,7 @@ const make = Effect.gen(function* () {
     });
     page.on("response", (response) => {
       pushBounded(tab.networkEntries, {
-        url: response.url(),
+        url: ServerBrowserPage.withoutDataPayload(response.url()),
         method: response.request().method(),
         status: response.status(),
         failed: false,
@@ -810,7 +822,7 @@ const make = Effect.gen(function* () {
     page.on("console", (message) => {
       pushBounded(tab.consoleEntries, {
         level: message.type(),
-        text: message.text().slice(0, 2_000),
+        text: ServerBrowserPage.consoleText(message).slice(0, 2_000),
         timestamp: new Date().toISOString(),
       });
     });
@@ -859,8 +871,12 @@ const make = Effect.gen(function* () {
     const path = NodePath.join(downloadDir(tab), id);
     try {
       if (await download.failure()) return;
-      await NodeFSP.mkdir(downloadDir(tab), { recursive: true });
+      await NodeFSP.mkdir(downloadDir(tab), { recursive: true, mode: 0o700 });
+      // mkdir leaves the mode of a folder that already exists, such as one an older build made.
+      await NodeFSP.chmod(downloadDir(tab), 0o700);
       await download.saveAs(path);
+      // saveAs copies with the process umask; a download should stay readable by its owner only.
+      await NodeFSP.chmod(path, 0o600);
       const { size } = await NodeFSP.stat(path);
       if (tab.closing || size > DOWNLOAD_MAX_BYTES) {
         await NodeFSP.rm(path, { force: true });
@@ -871,7 +887,7 @@ const make = Effect.gen(function* () {
         fileName: download.suggestedFilename().slice(0, 255) || "download",
         path,
         sizeBytes: size,
-        url: download.url().slice(0, 2048),
+        url: ServerBrowserPage.withoutDataPayload(download.url()).slice(0, 2048),
         completedAt: new Date().toISOString(),
       };
       tab.downloads.push(saved);
@@ -911,14 +927,27 @@ const make = Effect.gen(function* () {
         .catch(() => null)) ?? "";
     // A newer picker replaces an unanswered one, as a real browser allows only one.
     if (previous) closeFileChooser(tab);
-    tab.fileChooser = { id: NodeCrypto.randomUUID(), chooser, accept: accept.slice(0, 1024) };
+    tab.fileChooser = {
+      id: NodeCrypto.randomUUID(),
+      chooser,
+      accept: accept.slice(0, 1024),
+      offeredTo: null,
+    };
     pushFileChooser(tab);
   };
 
   const pushFileChooser = (tab: ServerTab) => {
-    const message = fileChooserMessage(tab);
+    const open = tab.fileChooser;
     const controller = [...tab.viewers].find((viewer) => viewer.id === tab.control.controller);
-    if (message) controller?.push(message);
+    if (!open || !controller) return;
+    if (open.offeredTo !== controller.id) {
+      // A new controller gets a fresh id; the previous one can no longer answer.
+      tab.fileChooser = { ...open, id: NodeCrypto.randomUUID(), offeredTo: controller.id };
+      if (open.offeredTo !== null)
+        for (const viewer of tab.viewers) viewer.push({ _tag: "fileChooserClosed", id: open.id });
+    }
+    const message = fileChooserMessage(tab);
+    if (message) controller.push(message);
   };
 
   const closeFileChooser = (tab: ServerTab) => {
@@ -934,7 +963,14 @@ const make = Effect.gen(function* () {
   ) => {
     const tab = tabs.get(tabKey(input.threadId, input.tabId));
     const open = tab?.fileChooser;
-    if (!tab || !open || open.id !== input.chooserId) return false;
+    if (
+      !tab ||
+      !open ||
+      open.id !== input.chooserId ||
+      open.offeredTo === null ||
+      open.offeredTo !== tab.control.controller
+    )
+      return false;
     if (input.files.length > 0) {
       await open.chooser.setFiles(
         open.chooser.isMultiple() ? [...input.files] : input.files.slice(0, 1),
@@ -1116,7 +1152,8 @@ const make = Effect.gen(function* () {
       available: true,
       visible: tab.viewers.size > 0,
       tabId: tab.tabId,
-      url: url === "about:blank" ? null : url,
+      url:
+        url === "about:blank" ? null : ServerBrowserPage.withoutDataPayload(url),
       title: null,
       loading: tab.loading,
       control: {
@@ -1140,11 +1177,19 @@ const make = Effect.gen(function* () {
           (candidate) =>
             candidate.threadId === tab.threadId && candidate.control.agentId === agentSessionId,
         )
-        .map((candidate) => ({
-          tabId: candidate.tabId,
-          url: candidate.page.url() === "about:blank" ? null : candidate.page.url(),
-          ...(candidate.openerTabId === undefined ? {} : { openerTabId: candidate.openerTabId }),
-        })),
+        .map((candidate) => {
+          const candidateUrl = candidate.page.url();
+          return {
+            tabId: candidate.tabId,
+            url:
+              candidateUrl === "about:blank"
+                ? null
+                : ServerBrowserPage.withoutDataPayload(candidateUrl),
+            ...(candidate.openerTabId === undefined
+              ? {}
+              : { openerTabId: candidate.openerTabId }),
+          };
+        }),
       downloads: tab.downloads.map(({ fileName, path, sizeBytes, url, completedAt }) => ({
         fileName,
         path,

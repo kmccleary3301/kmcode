@@ -148,6 +148,7 @@ describe("derivePendingBackgroundWork", () => {
       {
         taskId: "cmd-new",
         description: "still pending",
+        command: "npm test",
         kind: "command",
       },
     ]);
@@ -410,6 +411,7 @@ describe("derivePendingBackgroundWork", () => {
       {
         taskId: "cmd-new",
         description: "still pending",
+        command: "npm test",
         kind: "command",
       },
     ]);
@@ -465,6 +467,7 @@ describe("derivePendingBackgroundWork", () => {
       {
         taskId: "cmd-null",
         description: "orphan item",
+        command: "echo orphan",
         kind: "command",
       },
     ]);

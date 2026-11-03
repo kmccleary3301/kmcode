@@ -6,6 +6,7 @@ import { T3_MCP_TOOL_NAMES } from "@t3tools/shared/t3McpToolPresentation";
 
 import {
   commandDetailRepeatsCommand,
+  deriveToolVerbObject,
   extractCommandOutputText,
   liveThoughtLine,
   resolveViewedImageAsset,
@@ -13,6 +14,7 @@ import {
   summarizeToolGroup,
   toolGroupAction,
   toolGroupSummaryKind,
+  turnItemDiffStats,
   toolItemForDisplay,
   type WorkLogPresentationEntry,
   type WorkLogToolLifecycleStatus,
@@ -21,6 +23,7 @@ import {
   workEntryIndicatesToolSuccess,
   workEntryViewedImagePath,
   workLogEntryIsLocalCodeSearch,
+  workEntryCoalesceCategory,
 } from "./presentation.ts";
 
 function commandItem(
@@ -518,6 +521,94 @@ describe("resolveWorkEntryToolPresentation", () => {
         toolData: { server: "another-server", tool: "preview_click" },
       }),
     ).toBeNull();
+  });
+});
+
+describe("xd tool devices", () => {
+  const base = {
+    threadId: ThreadId.make("thread"),
+    runId: null,
+    nodeId: null,
+    providerThreadId: null,
+    providerTurnId: null,
+    nativeItemRef: null,
+    parentItemId: null,
+    ordinal: 1,
+    status: "completed" as const,
+    title: null,
+    startedAt: null,
+    completedAt: null,
+    updatedAt: DateTime.makeUnsafe("2026-10-23T00:00:00.000Z"),
+  };
+
+  it("presents a persisted xd write as its MCP tool, not an edit", () => {
+    const item: OrchestrationV2TurnItem = {
+      ...base,
+      id: TurnItemId.make("device-write"),
+      type: "file_change",
+      title: "write",
+      fileName: "xd://mcp__t3-code__delegate_task",
+      newStr: JSON.stringify({ title: "Child", task: "Run checks", mode: "async" }),
+      additions: 12,
+    };
+    const entry: WorkLogPresentationEntry = {
+      id: "device-write",
+      createdAt: "2026-10-23T00:00:00.000Z",
+      label: "Wrote xd://mcp__t3-code__delegate_task",
+      tone: "tool",
+      itemType: "file_change",
+      toolLifecycleStatus: "completed",
+      structuredPayload: item,
+    };
+
+    expect(resolveWorkEntryToolPresentation(entry)).toEqual({
+      displayName: "Delegated a child task",
+      icon: "t3-code",
+    });
+    expect(toolGroupAction(entry)).toBe("other");
+    expect(workEntryCoalesceCategory(entry)).toBe("other");
+    expect(summarizeToolGroup([entry]).summary).toMatch(/^Delegated/u);
+    expect(toolGroupSummaryKind([entry])).toBe("dynamic-tool");
+    expect(turnItemDiffStats(item)).toBeNull();
+  });
+
+  it("presents an xd read as a quiet tool-usage lookup, not a file read", () => {
+    const item: OrchestrationV2TurnItem = {
+      ...base,
+      id: TurnItemId.make("device-lookup"),
+      type: "dynamic_tool",
+      title: "read",
+      toolName: "read",
+      input: { path: "xd://mcp__t3-code__delegate_task" },
+      output: "Usage: delegate_task(...)",
+    };
+    const entry: WorkLogPresentationEntry = {
+      id: "device-lookup",
+      createdAt: "2026-10-23T00:00:00.000Z",
+      label: "Read xd://mcp__t3-code__delegate_task",
+      tone: "tool",
+      itemType: "dynamic_tool",
+      toolLifecycleStatus: "completed",
+      structuredPayload: item,
+    };
+
+    expect(resolveWorkEntryToolPresentation(entry)).toEqual({
+      displayName: "Checked usage for Delegate a child task",
+      icon: "t3-code",
+    });
+    expect(toolGroupAction(entry)).toBe("other");
+    expect(workEntryCoalesceCategory(entry)).toBe("other");
+    expect(
+      deriveToolVerbObject({
+        toolName: "read",
+        args: item.type === "dynamic_tool" ? item.input : {},
+        running: false,
+      }),
+    ).toMatchObject({
+      verb: "Checked usage for",
+      object: "Delegate a child task",
+      objectIsPath: false,
+    });
   });
 });
 
@@ -1038,5 +1129,67 @@ describe("liveThoughtLine", () => {
       "This is really not fine in snake_case_names.",
     );
     expect(liveThoughtLine("   ")).toBe("");
+  });
+});
+
+describe("tool step headlines", () => {
+  const grep = (result: Parameters<typeof deriveToolVerbObject>[0]["result"]) =>
+    deriveToolVerbObject({
+      toolName: "grep",
+      args: { pattern: "staleSnapshotOverride", path: "src/chat", i: "Searching overrides" },
+      running: false,
+      result,
+    });
+
+  it("reads a no-match search from wire details even though the text output was dropped", () => {
+    expect(grep({ details: { matchCount: 0, fileCount: 0 }, outputOmitted: true })).toMatchObject({
+      verb: "Searched",
+      intent: "Searching overrides",
+      noMatch: true,
+    });
+  });
+
+  it("does not call an omitted-but-present result empty", () => {
+    // The wire omits large text output; omission is not evidence of zero matches.
+    expect(grep({ outputOmitted: true }).noMatch).toBe(false);
+    expect(grep({ details: { matchCount: 3, fileCount: 2 }, outputOmitted: true }).noMatch).toBe(
+      false,
+    );
+  });
+
+  it("puts verb tense on status and prefers a curated name for unknown tools", () => {
+    expect(deriveToolVerbObject({ toolName: "read", args: { path: "a/b.ts" }, running: true }))
+      .toMatchObject({ verb: "Reading", object: "a/b.ts", objectIsPath: true });
+    expect(
+      deriveToolVerbObject({
+        toolName: "mcp__t3-code__t3_thread_read",
+        args: {},
+        running: false,
+        displayName: "Read a T3 thread",
+      }).verb,
+    ).toBe("Read a T3 thread");
+  });
+});
+
+describe("workEntryCoalesceCategory", () => {
+  const entry = (fields: Partial<WorkLogPresentationEntry>): WorkLogPresentationEntry => ({
+    id: "entry",
+    createdAt: "2026-01-01T00:00:00.000Z",
+    label: "tool",
+    tone: "tool",
+    ...fields,
+  });
+
+  it("merges exploration and edits, keeps commands alone, and pools generic tools", () => {
+    expect(workEntryCoalesceCategory(entry({ requestKind: "file-read" }))).toBe("explore");
+    expect(workEntryCoalesceCategory(entry({ itemType: "file_change", changedFiles: ["a.ts"] }))).toBe(
+      "edit",
+    );
+    expect(
+      workEntryCoalesceCategory(entry({ itemType: "command_execution", command: "pnpm test" })),
+    ).toBe("individual");
+    expect(workEntryCoalesceCategory(entry({ itemType: "dynamic_tool", label: "preview" }))).toBe(
+      "other",
+    );
   });
 });

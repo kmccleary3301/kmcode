@@ -86,11 +86,13 @@ export const claimPendingAttachments = Effect.fn("AttachmentClaims.claimPendingA
           if (!attachmentIsPendingUpload(attachment)) {
             return attachment;
           }
-          const claim = planAttachmentClaim({
-            attachmentsDir: serverConfig.attachmentsDir,
-            threadId: input.threadId,
-            attachmentId: attachment.id,
-          });
+          const claim = yield* Effect.promise(() =>
+            planAttachmentClaim({
+              attachmentsDir: serverConfig.attachmentsDir,
+              threadId: input.threadId,
+              attachmentId: attachment.id,
+            }),
+          );
           if (!claim.ok) {
             return yield* new AttachmentClaimError({
               message: `Attachment '${attachment.name}' cannot be sent: ${claim.reason}.`,

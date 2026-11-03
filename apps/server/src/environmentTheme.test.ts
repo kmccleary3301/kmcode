@@ -204,6 +204,25 @@ it.layer(NodeServices.layer)("environment theme", (it) => {
     ),
   );
 
+  it.effect("skips non-file and oversized theme entries", () =>
+    withEnvironmentThemes(
+      {
+        "nightfall.json": encodeThemeFile(NIGHTFALL_THEME),
+        "oversized.json": " ".repeat(EnvironmentTheme.MAX_THEME_FILE_BYTES + 1),
+      },
+      Effect.gen(function* () {
+        const { environmentThemesDir } = yield* ServerConfig.ServerConfig;
+        const fs = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        yield* fs.makeDirectory(path.join(environmentThemesDir, "folder.json"));
+        assert.deepEqual(
+          (yield* currentThemes).map((theme) => theme.id),
+          ["nightfall"],
+        );
+      }),
+    ),
+  );
+
   // The aggregate size cap charges only accepted themes, so a pile of
   // malformed files cannot spend the budget and hide a valid theme sorted
   // after them.

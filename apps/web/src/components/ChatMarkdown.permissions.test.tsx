@@ -170,6 +170,10 @@ async function renderMarkdown(text: string) {
   await act(async () => {
     renderer = create(<ChatMarkdown cwd="/work" threadRef={threadRef} text={text} />);
   });
+  await vi.waitFor(() => {
+    expect(renderer!.root.findAllByProps({ "data-markdown-pending": "" })).toHaveLength(0);
+    expect(renderer!.root.findAllByProps({ "data-markdown-error": "" })).toHaveLength(0);
+  });
 }
 
 function menuEvent() {

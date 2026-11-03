@@ -9,6 +9,7 @@ describe("tool-group scroll anchors", () => {
   it("returns to the top after a fast flick even when the cached start is five rows behind", () => {
     const snapshot = { ...state, scroll: 0, start: 5 };
     expect(resolveWorkGroupScrollAnchor(snapshot)).toEqual({
+      index: 0,
       rowId: "call-0",
       offsetWithinRow: 0,
       scrollOffset: 0,
@@ -16,12 +17,13 @@ describe("tool-group scroll anchors", () => {
   });
 
   it.each([
-    { scroll: 302, start: 0, rowId: "call-9", offsetWithinRow: 5 },
-    { scroll: 40, start: 12, rowId: "call-1", offsetWithinRow: 7 },
-    { scroll: 165, start: 4, rowId: "call-5", offsetWithinRow: 0 },
+    { scroll: 302, start: 0, index: 9, offsetWithinRow: 5 },
+    { scroll: 40, start: 12, index: 1, offsetWithinRow: 7 },
+    { scroll: 165, start: 4, index: 5, offsetWithinRow: 0 },
   ])("uses the measured position at $scroll rather than cached row $start", (example) => {
     expect(resolveWorkGroupScrollAnchor({ ...state, ...example })).toEqual({
-      rowId: example.rowId,
+      index: example.index,
+      rowId: `call-${example.index}`,
       offsetWithinRow: example.offsetWithinRow,
       scrollOffset: example.scroll,
     });
@@ -35,11 +37,12 @@ describe("tool-group scroll anchors", () => {
         scroll: 153,
         positionAtIndex: (index) => positions[index],
       }),
-    ).toEqual({ rowId: "output", offsetWithinRow: 120, scrollOffset: 153 });
+    ).toEqual({ index: 1, rowId: "output", offsetWithinRow: 120, scrollOffset: 153 });
   });
 
   it("does not preserve overscroll before the first row", () => {
     expect(resolveWorkGroupScrollAnchor({ ...state, scroll: -20 })).toEqual({
+      index: 0,
       rowId: "call-0",
       offsetWithinRow: 0,
       scrollOffset: 0,

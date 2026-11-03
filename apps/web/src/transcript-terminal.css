@@ -1,0 +1,838 @@
+/* Oh My Pi terminal transcript presentation; all selectors stay inside the terminal style. */
+.km-transcript[data-transcript-style="terminal"] {
+  --omp-teal: #5a8080;
+  --omp-blue: #547da7;
+  --omp-green: #588458;
+  --omp-red: #aa5555;
+  --omp-yellow: #9a7326;
+  --omp-medium-gray: #6c6c6c;
+  --omp-dim-gray: #767676;
+  --omp-light-gray: #b0b0b0;
+  --omp-accent: var(--omp-teal);
+  --omp-border: var(--omp-blue);
+  --omp-border-accent: var(--omp-teal);
+  --omp-border-muted: var(--omp-light-gray);
+  --omp-success: var(--omp-green);
+  --omp-error: var(--omp-red);
+  --omp-warning: var(--omp-yellow);
+  --omp-muted: var(--omp-medium-gray);
+  --omp-dim: var(--omp-dim-gray);
+  --omp-text: var(--foreground, #222222);
+  --omp-thinking-text: var(--omp-medium-gray);
+  --omp-selected-bg: #d0d0e0;
+  --omp-user-message-bg: #e8e8e8;
+  --omp-user-message-text: var(--omp-text);
+  --omp-custom-message-bg: #ede7f6;
+  --omp-custom-message-label: #7e57c2;
+  --omp-tool-pending-bg: #e8e8f0;
+  --omp-tool-success-bg: #e8f0e8;
+  --omp-tool-error-bg: #f0e8e8;
+  --omp-tool-title: var(--omp-text);
+  --omp-tool-output: var(--omp-medium-gray);
+  --omp-md-heading: var(--omp-yellow);
+  --omp-md-link: var(--omp-blue);
+  --omp-md-link-url: var(--omp-dim-gray);
+  --omp-md-code: var(--omp-teal);
+  --omp-md-code-block: var(--omp-green);
+  --omp-md-code-block-border: var(--omp-medium-gray);
+  --omp-md-quote: var(--omp-medium-gray);
+  --omp-md-quote-border: var(--omp-medium-gray);
+  --omp-md-hr: var(--omp-medium-gray);
+  --omp-md-list-bullet: var(--omp-green);
+  --omp-tool-diff-added: var(--omp-green);
+  --omp-tool-diff-removed: var(--omp-red);
+  --omp-tool-diff-context: var(--omp-medium-gray);
+  --omp-bash-mode: var(--omp-green);
+  --omp-python-mode: var(--omp-yellow);
+  color: var(--omp-text);
+  font-family: var(
+    --font-mono,
+    ui-monospace,
+    SFMono-Regular,
+    Menlo,
+    Monaco,
+    Consolas,
+    "Liberation Mono",
+    monospace
+  );
+  font-size: 0.8125rem;
+  line-height: 1.5;
+}
+
+.dark .km-transcript[data-transcript-style="terminal"] {
+  --omp-cyan: #0088fa;
+  --omp-blue: #178fb9;
+  --omp-green: #89d281;
+  --omp-red: #fc3a4b;
+  --omp-yellow: #e4c00f;
+  --omp-gray: #777d88;
+  --omp-dim-gray: #5f6673;
+  --omp-dark-gray: #3d424a;
+  --omp-accent: #febc38;
+  --omp-border: var(--omp-blue);
+  --omp-border-accent: var(--omp-cyan);
+  --omp-border-muted: var(--omp-dark-gray);
+  --omp-success: var(--omp-green);
+  --omp-error: var(--omp-red);
+  --omp-warning: var(--omp-yellow);
+  --omp-muted: var(--omp-gray);
+  --omp-dim: var(--omp-dim-gray);
+  --omp-text: var(--foreground, #ececec);
+  --omp-thinking-text: var(--omp-gray);
+  --omp-selected-bg: #31363f;
+  --omp-user-message-bg: #221d1a;
+  --omp-custom-message-bg: #2a2530;
+  --omp-custom-message-label: #b281d6;
+  --omp-tool-pending-bg: #1d2129;
+  --omp-tool-success-bg: #161a1f;
+  --omp-tool-error-bg: #291d1d;
+  --omp-tool-output: var(--omp-gray);
+  --omp-md-heading: #febc38;
+  --omp-md-link: #0088fa;
+  --omp-md-link-url: var(--omp-dim-gray);
+  --omp-md-code: #e5c1ff;
+  --omp-md-code-block: #9cdcfe;
+  --omp-md-code-block-border: var(--omp-dark-gray);
+  --omp-md-quote: var(--omp-gray);
+  --omp-md-quote-border: var(--omp-dark-gray);
+  --omp-md-hr: var(--omp-dark-gray);
+  --omp-md-list-bullet: var(--omp-accent);
+  --omp-tool-diff-added: var(--omp-green);
+  --omp-tool-diff-removed: var(--omp-red);
+  --omp-tool-diff-context: var(--omp-gray);
+  --omp-bash-mode: var(--omp-cyan);
+  --omp-python-mode: var(--omp-yellow);
+}
+
+.km-transcript[data-transcript-style="terminal"] * {
+  font-family: inherit;
+}
+
+.km-transcript[data-transcript-style="terminal"] .km-transcript-row {
+  margin-block: 0;
+  padding-block: 0 1lh;
+}
+
+.km-transcript[data-transcript-style="terminal"] .km-transcript-row[data-work-log] {
+  padding-block: 0;
+}
+
+.km-transcript[data-transcript-style="terminal"] .km-transcript-row[data-work-log="end"] {
+  padding-bottom: 1lh;
+}
+
+.km-transcript[data-transcript-style="terminal"] .km-transcript-row[data-open-group-header="true"] {
+  padding-bottom: 0;
+}
+
+.km-transcript[data-transcript-style="terminal"] [data-t3-part="timeline-markdown"] {
+  padding: 0 1ch;
+}
+
+/* User turns are full-width terminal blocks rather than right-aligned bubbles. */
+.km-transcript[data-transcript-style="terminal"]
+  .km-transcript-row:has([data-user-message-body])
+  .chat-content-lane {
+  width: 100%;
+  max-width: none;
+  align-items: stretch;
+}
+
+.km-transcript[data-transcript-style="terminal"]
+  .km-transcript-row:has([data-user-message-body])
+  .bg-message {
+  width: 100%;
+  max-width: none;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: var(--omp-user-message-bg);
+  box-shadow: none;
+  color: var(--omp-user-message-text);
+  text-align: left;
+}
+
+.km-transcript[data-transcript-style="terminal"] [data-user-message-body] {
+  width: 100%;
+  max-width: none;
+  padding: 1lh 1ch;
+  border: 0;
+  border-radius: 0;
+  background: var(--omp-user-message-bg);
+  color: var(--omp-user-message-text);
+  text-align: left;
+}
+.km-transcript[data-transcript-style="terminal"] [data-terminal-user-block] {
+  width: 100%;
+  align-items: stretch;
+  gap: 0;
+}
+
+.km-transcript[data-transcript-style="terminal"] [data-terminal-user-content] {
+  width: 100%;
+  max-width: none;
+}
+
+.km-transcript[data-transcript-style="terminal"] [data-terminal-user-actions] {
+  display: none;
+}
+
+.km-transcript[data-transcript-style="terminal"] [data-user-message-footer] {
+  margin-top: 0.25lh;
+  opacity: 0.72;
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .km-transcript[data-transcript-style="terminal"]
+    .km-transcript-row:has([data-user-message-body]):hover
+    [data-user-message-footer],
+  .km-transcript[data-transcript-style="terminal"] [data-user-message-footer]:focus-within {
+    opacity: 1;
+  }
+}
+
+.km-transcript[data-transcript-style="terminal"] [data-terminal-user-folded-header] {
+  display: flex;
+  align-items: center;
+  gap: 1ch;
+  width: 100%;
+  min-width: 0;
+  padding: 0 1ch;
+  border: 0;
+  background: transparent;
+  color: var(--omp-muted);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.km-transcript[data-transcript-style="terminal"] [data-terminal-user-folded-header]::before {
+  content: ">";
+  flex: 0 0 auto;
+  color: var(--omp-accent);
+}
+
+.km-transcript[data-transcript-style="terminal"] .user-message-folded-icon {
+  display: inline-flex;
+  flex: 0 0 2ch;
+  align-items: center;
+  color: var(--omp-muted);
+}
+
+.km-transcript[data-transcript-style="terminal"] .user-message-folded-icon svg {
+  width: 0.875rem;
+  height: 0.875rem;
+}
+
+.km-transcript[data-transcript-style="terminal"] .user-message-folded-label {
+  min-width: 0;
+  max-width: 28ch;
+  overflow: hidden;
+  flex: 0 1 auto;
+  color: var(--omp-text);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.km-transcript[data-transcript-style="terminal"] .user-message-folded-separator,
+.km-transcript[data-transcript-style="terminal"] .user-message-folded-summary {
+  color: var(--omp-muted);
+}
+
+.km-transcript[data-transcript-style="terminal"] .user-message-folded-summary {
+  min-width: 0;
+  overflow: hidden;
+  flex: 1;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.km-transcript[data-transcript-style="terminal"] .user-message-folded-chevron {
+  flex-shrink: 0;
+  color: var(--omp-muted);
+}
+
+.km-transcript[data-transcript-style="terminal"]
+  [data-terminal-user-folded-header]:hover {
+  background: transparent;
+  color: var(--omp-text);
+}
+
+/* ChatMarkdown and streamed markdown use OMP's text-first terminal rhythm. */
+.km-transcript[data-transcript-style="terminal"] :is(.chat-markdown, .markdown-renderer) {
+  color: var(--omp-text);
+  line-height: 1.5;
+}
+
+.km-transcript[data-transcript-style="terminal"] :is(.chat-markdown, .markdown-renderer) p {
+  margin-block: 0 1lh;
+}
+
+.km-transcript[data-transcript-style="terminal"]
+  :is(.chat-markdown, .markdown-renderer)
+  :is(h1, h2, h3, h4, h5, h6) {
+  margin-block: 1lh 0.5lh;
+  color: var(--omp-md-heading);
+  font-size: 1em;
+  font-weight: 700;
+  line-height: 1.5;
+}
+
+.km-transcript[data-transcript-style="terminal"] :is(.chat-markdown, .markdown-renderer) h1 {
+  text-decoration: underline;
+  text-decoration-color: var(--omp-md-heading);
+  text-underline-offset: 0.2em;
+}
+
+.km-transcript[data-transcript-style="terminal"]
+  :is(.chat-markdown, .markdown-renderer)
+  h3::before {
+  content: "### ";
+}
+
+.km-transcript[data-transcript-style="terminal"]
+  :is(.chat-markdown, .markdown-renderer)
+  h4::before {
+  content: "#### ";
+}
+
+.km-transcript[data-transcript-style="terminal"]
+  :is(.chat-markdown, .markdown-renderer)
+  h5::before {
+  content: "##### ";
+}
+
+.km-transcript[data-transcript-style="terminal"]
+  :is(.chat-markdown, .markdown-renderer)
+  h6::before {
+  content: "###### ";
+}
+
+.km-transcript[data-transcript-style="terminal"] :is(.chat-markdown, .markdown-renderer) ul {
+  margin-block: 0 1lh;
+  padding-inline-start: 2ch;
+  list-style: none;
+}
+
+.km-transcript[data-transcript-style="terminal"] :is(.chat-markdown, .markdown-renderer) ul > li {
+  position: relative;
+}
+
+.km-transcript[data-transcript-style="terminal"]
+  :is(.chat-markdown, .markdown-renderer)
+  ul
+  > li::before {
+  position: absolute;
+  left: -2ch;
+  color: var(--omp-md-list-bullet);
+  content: "-";
+}
+
+.km-transcript[data-transcript-style="terminal"] :is(.chat-markdown, .markdown-renderer) ol {
+  margin-block: 0 1lh;
+  padding-inline-start: 3ch;
+}
+
+.km-transcript[data-transcript-style="terminal"]
+  :is(.chat-markdown, .markdown-renderer)
+  :not(pre)
+  > code,
+.km-transcript[data-transcript-style="terminal"] :is(.chat-markdown, .markdown-renderer) p code {
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  color: var(--omp-md-code);
+  font-size: inherit;
+}
+
+.km-transcript[data-transcript-style="terminal"] :is(.chat-markdown, .markdown-renderer) pre {
+  position: relative;
+  margin-block: 1lh;
+  padding: 1.5lh 1ch;
+  overflow: auto;
+  border: 1px solid var(--omp-md-code-block-border);
+  border-radius: 0;
+  background: transparent;
+  color: var(--omp-md-code-block);
+  line-height: 1.5;
+}
+
+.km-transcript[data-transcript-style="terminal"]
+  :is(.chat-markdown, .markdown-renderer)
+  pre::before,
+.km-transcript[data-transcript-style="terminal"]
+  :is(.chat-markdown, .markdown-renderer)
+  pre::after {
+  position: absolute;
+  left: 1ch;
+  color: var(--omp-dim);
+  line-height: 1.5;
+  pointer-events: none;
+}
+
+.km-transcript[data-transcript-style="terminal"]
+  :is(.chat-markdown, .markdown-renderer)
+  pre::before {
+  top: 0;
+  content: "```" attr(data-language);
+}
+
+.km-transcript[data-transcript-style="terminal"]
+  :is(.chat-markdown, .markdown-renderer)
+  pre::after {
+  bottom: 0;
+  content: "```";
+}
+
+.km-transcript[data-transcript-style="terminal"] :is(.chat-markdown, .markdown-renderer) pre code {
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font-size: inherit;
+}
+
+.km-transcript[data-transcript-style="terminal"]
+  :is(.chat-markdown, .markdown-renderer)
+  blockquote {
+  position: relative;
+  margin: 1lh 0;
+  padding-inline: 1.5ch 0;
+  border: 0;
+  color: var(--omp-md-quote);
+  font-style: italic;
+}
+
+.km-transcript[data-transcript-style="terminal"]
+  :is(.chat-markdown, .markdown-renderer)
+  blockquote::before {
+  position: absolute;
+  inset-block: 0;
+  left: 0;
+  color: var(--omp-md-quote-border);
+  content: "▏";
+  font-style: normal;
+}
+
+.km-transcript[data-transcript-style="terminal"] :is(.chat-markdown, .markdown-renderer) a {
+  color: var(--omp-md-link);
+  text-decoration: underline;
+  text-underline-offset: 0.15em;
+}
+
+.km-transcript[data-transcript-style="terminal"] :is(.chat-markdown, .markdown-renderer) hr {
+  height: 1lh;
+  margin-block: 1lh;
+  overflow: hidden;
+  border: 0;
+  color: var(--omp-md-hr);
+  white-space: nowrap;
+}
+
+.km-transcript[data-transcript-style="terminal"]
+  :is(.chat-markdown, .markdown-renderer)
+  hr::before {
+  content: "────────────────────────────────────────────────────────────────";
+}
+
+.km-transcript[data-transcript-style="terminal"] .terminal-live-status-glyph {
+  display: inline-flex;
+  flex: 0 0 2ch;
+  align-items: center;
+  justify-content: center;
+  color: var(--omp-accent);
+}
+
+.km-transcript[data-transcript-style="terminal"] .terminal-preview-more {
+  display: block;
+  margin: 0 0.75rem 0.5rem;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--omp-dim);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.km-transcript[data-transcript-style="terminal"] .terminal-preview-more:hover {
+  color: var(--omp-text);
+  text-decoration: underline;
+}
+
+/* A step is only its pane: no status line, no rail. The pane frame carries
+   the state, and each pane leaves half a line before the next. */
+.km-transcript[data-transcript-style="terminal"]
+  [data-cell][data-terminal-status]
+  .tool-body
+  .activity-disclosure-content {
+  margin-left: 0;
+  padding: 0 0 0.5lh;
+  border-left: 0;
+}
+
+.km-transcript[data-transcript-style="terminal"] [data-cell][data-terminal-status] .tool-body {
+  margin: 0;
+  padding: 0.5lh 1ch;
+  border: 1px solid var(--omp-border-muted);
+  border-radius: 6px;
+  background: var(--omp-tool-success-bg);
+  color: var(--omp-tool-output);
+}
+
+.km-transcript[data-transcript-style="terminal"] [data-cell] [data-tool-failure-line] {
+  margin: 0;
+  color: var(--omp-error);
+}
+
+.km-transcript[data-transcript-style="terminal"]
+  [data-cell][data-terminal-status="queued"]
+  .tool-body,
+.km-transcript[data-transcript-style="terminal"]
+  [data-cell][data-terminal-status="running"]
+  .tool-body {
+  border-color: var(--omp-border-accent);
+  background: var(--omp-tool-pending-bg);
+}
+
+.km-transcript[data-transcript-style="terminal"]
+  [data-cell][data-terminal-status="failed"]
+  .tool-body {
+  border-color: var(--omp-error);
+  background: var(--omp-tool-error-bg);
+}
+
+.km-transcript[data-transcript-style="terminal"]
+  [data-cell][data-terminal-status="success"]
+  .tool-body {
+  border-color: var(--omp-border-muted);
+  background: var(--omp-tool-success-bg);
+}
+
+.km-transcript[data-transcript-style="terminal"]
+  [data-cell][data-terminal-status]
+  .tool-body:has(.omp-pane) {
+  padding: 0;
+  border: 0;
+  background: transparent;
+}
+
+.km-transcript[data-transcript-style="terminal"] [data-cell][data-terminal-status] .omp-pane {
+  margin: 0;
+  border: 1px solid var(--omp-border-muted);
+  border-radius: 6px;
+  background: var(--omp-tool-success-bg);
+  color: var(--omp-tool-output);
+}
+
+.km-transcript[data-transcript-style="terminal"]
+  [data-cell][data-terminal-status="queued"]
+  .omp-pane,
+.km-transcript[data-transcript-style="terminal"]
+  [data-cell][data-terminal-status="running"]
+  .omp-pane {
+  border-color: var(--omp-border-accent);
+  background: var(--omp-tool-pending-bg);
+}
+
+.km-transcript[data-transcript-style="terminal"]
+  [data-cell][data-terminal-status="failed"]
+  .omp-pane {
+  border-color: var(--omp-error);
+  background: var(--omp-tool-error-bg);
+}
+
+.km-transcript[data-transcript-style="terminal"] [data-terminal-bash="true"] .tool-body,
+.km-transcript[data-transcript-style="terminal"] [data-terminal-bash="true"] .omp-pane {
+  border-block-color: var(--omp-bash-mode);
+  border-inline: 0;
+  border-radius: 0;
+  background: transparent;
+}
+
+.km-transcript[data-transcript-style="terminal"] [data-terminal-bash="true"] .omp-pane-divider {
+  color: var(--omp-bash-mode);
+}
+
+/* `╭─ ✓ Reading the globe ───╮`: OMP's pane title, the step's intent (or its
+   verb and target) set into the top border like the Output rule below it. */
+.km-transcript[data-transcript-style="terminal"] fieldset.omp-pane {
+  min-inline-size: 0;
+  padding: 0;
+}
+
+.km-transcript[data-transcript-style="terminal"] .omp-pane-legend {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  max-width: calc(100% - 1.5rem);
+  margin-inline-start: 0.75rem;
+  padding-inline: 0.5rem;
+  color: var(--omp-tool-title);
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+.km-transcript[data-transcript-style="terminal"] .omp-pane-legend .tool-status-gutter {
+  margin-top: 0;
+}
+
+.km-transcript[data-transcript-style="terminal"] .omp-pane-legend-text {
+  display: flex;
+  align-items: baseline;
+  gap: 1ch;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+}
+
+.km-transcript[data-transcript-style="terminal"] .tool-diff-row--added,
+.km-transcript[data-transcript-style="terminal"] .tool-diff-row--added > *,
+.km-transcript[data-transcript-style="terminal"] .omp-code-row[data-kind="add"] {
+  color: var(--omp-tool-diff-added);
+}
+
+.km-transcript[data-transcript-style="terminal"] .tool-diff-row--removed,
+.km-transcript[data-transcript-style="terminal"] .tool-diff-row--removed > *,
+.km-transcript[data-transcript-style="terminal"] .omp-code-row[data-kind="remove"] {
+  color: var(--omp-tool-diff-removed);
+}
+
+.km-transcript[data-transcript-style="terminal"] .tool-diff-row--context,
+.km-transcript[data-transcript-style="terminal"] .omp-code-row[data-kind="context"] {
+  color: var(--omp-tool-diff-context);
+}
+
+.km-transcript[data-transcript-style="terminal"] .tool-diff-gutter::after {
+  color: var(--omp-dim);
+  content: "│";
+}
+
+.km-transcript[data-transcript-style="terminal"] .terminal-live-work-row {
+  display: flex;
+  width: 100%;
+  min-width: 0;
+  flex-direction: column;
+  align-items: flex-start;
+}
+
+.km-transcript[data-transcript-style="terminal"] .terminal-live-work-row > .relative {
+  width: 100%;
+  min-height: 1.5lh;
+  overflow: visible;
+  border-radius: 0;
+}
+
+.km-transcript[data-transcript-style="terminal"] .terminal-live-elapsed {
+  margin-inline-start: 2ch;
+  color: var(--omp-dim);
+  font-size: 0.9em;
+}
+
+.km-transcript[data-transcript-style="terminal"] [data-terminal-working] {
+  color: var(--omp-muted);
+}
+
+.km-transcript[data-transcript-style="terminal"] [data-terminal-working] [data-terminal-spinner] {
+  color: var(--omp-accent);
+}
+
+.km-transcript[data-transcript-style="terminal"] .terminal-live-status-glyph [data-thinking-pulse] {
+  color: var(--omp-thinking-text);
+}
+
+.km-transcript[data-transcript-style="terminal"] .terminal-live-activity-label {
+  color: var(--omp-muted);
+}
+
+.km-transcript[data-transcript-style="terminal"] .terminal-wait-completed,
+.km-transcript[data-transcript-style="terminal"] .terminal-subagent-success,
+.km-transcript[data-transcript-style="terminal"] .terminal-todo-done {
+  color: var(--omp-success);
+}
+
+.km-transcript[data-transcript-style="terminal"] .terminal-wait-failed,
+.km-transcript[data-transcript-style="terminal"] .terminal-subagent-failed {
+  color: var(--omp-error);
+}
+
+.km-transcript[data-transcript-style="terminal"] .terminal-wait-muted,
+.km-transcript[data-transcript-style="terminal"] .terminal-subagent-muted,
+.km-transcript[data-transcript-style="terminal"] .terminal-todo-open {
+  color: var(--omp-dim);
+}
+
+.km-transcript[data-transcript-style="terminal"]
+  [data-terminal-waiting]
+  .wait-tree-row[data-terminal-wait-row="true"] {
+  position: relative;
+  min-width: 0;
+  padding-inline-start: 4ch;
+  color: var(--omp-muted);
+}
+
+.km-transcript[data-transcript-style="terminal"]
+  [data-terminal-waiting]
+  .wait-tree-row[data-terminal-wait-row="true"]::before {
+  position: absolute;
+  left: 0;
+  color: var(--omp-dim);
+  content: "├─ ";
+  white-space: pre;
+}
+
+.km-transcript[data-transcript-style="terminal"]
+  [data-terminal-waiting]
+  .wait-tree-row[data-terminal-wait-last="true"]::before {
+  content: "└─ ";
+}
+
+.km-transcript[data-transcript-style="terminal"]
+  [data-native-todo-pane][data-terminal-native-todo="true"],
+.km-transcript[data-transcript-style="terminal"] .cursor-todo-panel[data-terminal-todos="true"] {
+  margin-block: 1lh;
+  overflow: visible;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  color: var(--omp-text);
+}
+
+.km-transcript[data-transcript-style="terminal"]
+  [data-terminal-native-todo="true"]
+  > :is(button, div),
+.km-transcript[data-transcript-style="terminal"]
+  .cursor-todo-panel[data-terminal-todos="true"]
+  .cursor-todo-header {
+  min-height: 1.5lh;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  color: var(--omp-accent);
+  font: inherit;
+  text-align: left;
+}
+
+.km-transcript[data-transcript-style="terminal"] [data-terminal-todo-row="true"],
+.km-transcript[data-transcript-style="terminal"]
+  .cursor-todo-panel[data-terminal-todos="true"]
+  .cursor-todo-row {
+  min-height: 1.5lh;
+  padding-inline: 0;
+  color: var(--omp-text);
+}
+
+.km-transcript[data-transcript-style="terminal"] [data-todo-status="completed"] .terminal-todo-done,
+.km-transcript[data-transcript-style="terminal"]
+  .cursor-todo-row[data-status="completed"]
+  .terminal-todo-done {
+  color: var(--omp-success);
+}
+
+.km-transcript[data-transcript-style="terminal"] [data-todo-status="current"] .terminal-todo-open,
+.km-transcript[data-transcript-style="terminal"]
+  .cursor-todo-row[data-status="current"]
+  .terminal-todo-open,
+.km-transcript[data-transcript-style="terminal"] .terminal-todo-current {
+  color: var(--omp-accent);
+}
+
+.km-transcript[data-transcript-style="terminal"] [data-todo-status="blocked"] .terminal-todo-open,
+.km-transcript[data-transcript-style="terminal"]
+  .cursor-todo-row[data-status="blocked"]
+  .terminal-todo-open {
+  color: var(--omp-warning);
+}
+
+.km-transcript[data-transcript-style="terminal"] .terminal-todo-dropped {
+  color: var(--omp-error);
+}
+
+.km-transcript[data-transcript-style="terminal"] [data-terminal-subagent-tracker="true"] {
+  margin-block: 1lh;
+  overflow: visible;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+}
+
+.km-transcript[data-transcript-style="terminal"]
+  [data-terminal-subagent-tracker="true"]
+  > :is(button, div) {
+  padding-inline: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  color: var(--omp-accent);
+  font: inherit;
+  text-align: left;
+}
+
+.km-transcript[data-transcript-style="terminal"]
+  [data-terminal-subagent-tracker="true"]
+  .relative.inline-flex.rounded-full {
+  display: none;
+}
+
+.km-transcript[data-transcript-style="terminal"] [data-terminal-subagent-row="true"] {
+  padding: 0.5lh 0;
+  border-top: 1px solid var(--omp-border-muted);
+  color: var(--omp-text);
+}
+
+.km-transcript[data-transcript-style="terminal"]
+  [data-terminal-subagent-row="true"]
+  [data-native-current-tool],
+.km-transcript[data-transcript-style="terminal"]
+  [data-terminal-subagent-row="true"]
+  .text-muted-foreground {
+  color: var(--omp-muted);
+}
+
+.km-transcript[data-transcript-style="terminal"] [data-terminal-subagent-step="true"] {
+  min-height: 1.5lh;
+  color: var(--omp-muted);
+}
+.km-transcript[data-transcript-style="terminal"] [data-terminal-thinking-trace] {
+  color: var(--omp-thinking-text);
+  font-style: italic;
+}
+
+.km-transcript[data-transcript-style="terminal"] [data-terminal-thinking-trace] * {
+  color: inherit;
+  font-style: inherit;
+}
+.km-transcript[data-transcript-style="terminal"] [data-terminal-thinking-trace] > .cursor-auto {
+  display: block;
+  max-height: none;
+  margin-inline-start: 0;
+  overflow: visible;
+  padding: 0;
+}
+
+.km-transcript[data-transcript-style="terminal"]
+  [data-terminal-thinking-trace]
+  .cursor-thinking-scroller,
+.km-transcript[data-transcript-style="terminal"]
+  [data-terminal-thinking-trace]
+  [data-bottom-stick-viewport] {
+  max-height: none;
+  overflow: visible;
+}
+.km-transcript[data-transcript-style="terminal"]
+  .terminal-live-status-glyph[data-terminal-status="failed"] {
+  color: var(--omp-error);
+}
+
+.km-transcript[data-transcript-style="terminal"]
+  :is(.terminal-live-activity-label, .terminal-work-group-label)
+  .live-tool-shine,
+.km-transcript[data-transcript-style="terminal"] .terminal-live-activity-label.live-tool-shine {
+  color: var(--omp-muted);
+  background: none;
+  background-image: none;
+  background-clip: border-box;
+  animation: none;
+}

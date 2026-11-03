@@ -30,6 +30,16 @@ import {
   ServerSettings,
   ServerSettingsError,
   type ServerSettingsPatch,
+  AcpRegistrySettings,
+  AntigravitySettings,
+  ClaudeSettings,
+  CodexSettings,
+  CursorSettings,
+  GrokSettings,
+  isSecretSetting,
+  OmpSettings,
+  OpenCodeSettings,
+  PiSettings,
 } from "@t3tools/contracts";
 import * as Cache from "effect/Cache";
 import * as Cause from "effect/Cause";
@@ -151,6 +161,18 @@ function providerEnvironmentSecretName(input: {
  */
 const SECRET_REDACTED = "\u2022\u2022\u2022\u2022\u2022\u2022";
 
+const PROVIDER_SETTINGS_SCHEMAS = {
+  codex: CodexSettings,
+  claudeAgent: ClaudeSettings,
+  cursor: CursorSettings,
+  grok: GrokSettings,
+  pi: PiSettings,
+  opencode: OpenCodeSettings,
+  antigravity: AntigravitySettings,
+  omp: OmpSettings,
+  acpRegistry: AcpRegistrySettings,
+} as const;
+
 function usageLimitSourceSecretName(sourceId: string): string {
   return `usage-limit-source-${Buffer.from(sourceId, "utf8").toString("base64url")}`;
 }
@@ -182,17 +204,114 @@ function redactProviderEnvironmentVariable(
   };
 }
 
+function redactProviderSettingsConfig<Value>(
+  config: Value,
+  fields: Schema.Struct.Fields,
+): Value {
+  if (typeof config !== "object" || config === null || Array.isArray(config)) return config;
+  const values = config as Record<string, unknown>;
+  let redacted: Record<string, unknown> | undefined;
+  for (const [key, fieldSchema] of Object.entries(fields)) {
+    const value = values[key];
+    if (isSecretSetting(fieldSchema) && typeof value === "string" && value.length > 0) {
+      (redacted ??= { ...values })[key] = SECRET_REDACTED;
+    }
+  }
+  return (redacted ?? config) as Value;
+}
+
+function restoreProviderSettingsConfig<Value>(
+  currentConfig: Value,
+  nextConfig: Value,
+  fields: Schema.Struct.Fields,
+): Value {
+  if (
+    typeof currentConfig !== "object" ||
+    currentConfig === null ||
+    Array.isArray(currentConfig) ||
+    typeof nextConfig !== "object" ||
+    nextConfig === null ||
+    Array.isArray(nextConfig)
+  ) {
+    return nextConfig;
+  }
+  const currentValues = currentConfig as Record<string, unknown>;
+  const nextValues = nextConfig as Record<string, unknown>;
+  let restored: Record<string, unknown> | undefined;
+  for (const [key, fieldSchema] of Object.entries(fields)) {
+    if (
+      isSecretSetting(fieldSchema) &&
+      nextValues[key] === SECRET_REDACTED &&
+      typeof currentValues[key] === "string"
+    ) {
+      (restored ??= { ...nextValues })[key] = currentValues[key];
+    }
+  }
+  return (restored ?? nextConfig) as Value;
+}
+
+function restoreProviderSettingsSecrets(
+  current: ServerSettings,
+  next: ServerSettings,
+): ServerSettings {
+  const providers = {
+    codex: restoreProviderSettingsConfig(current.providers.codex, next.providers.codex, CodexSettings.fields),
+    claudeAgent: restoreProviderSettingsConfig(current.providers.claudeAgent, next.providers.claudeAgent, ClaudeSettings.fields),
+    cursor: restoreProviderSettingsConfig(current.providers.cursor, next.providers.cursor, CursorSettings.fields),
+    grok: restoreProviderSettingsConfig(current.providers.grok, next.providers.grok, GrokSettings.fields),
+    pi: restoreProviderSettingsConfig(current.providers.pi, next.providers.pi, PiSettings.fields),
+    opencode: restoreProviderSettingsConfig(current.providers.opencode, next.providers.opencode, OpenCodeSettings.fields),
+    antigravity: restoreProviderSettingsConfig(current.providers.antigravity, next.providers.antigravity, AntigravitySettings.fields),
+    omp: restoreProviderSettingsConfig(current.providers.omp, next.providers.omp, OmpSettings.fields),
+  };
+  const providerInstances: Record<ProviderInstanceId, ProviderInstanceConfig> = {
+    ...next.providerInstances,
+  };
+  for (const [rawInstanceId, instance] of Object.entries(next.providerInstances)) {
+    const instanceId = ProviderInstanceId.make(rawInstanceId);
+    const previous = current.providerInstances[instanceId];
+    if (previous === undefined || previous.driver !== instance.driver) continue;
+    const schema = Object.hasOwn(PROVIDER_SETTINGS_SCHEMAS, instance.driver)
+      ? PROVIDER_SETTINGS_SCHEMAS[instance.driver as keyof typeof PROVIDER_SETTINGS_SCHEMAS]
+      : undefined;
+    if (schema === undefined) continue;
+    providerInstances[instanceId] = {
+      ...instance,
+      config: restoreProviderSettingsConfig(previous.config, instance.config, schema.fields),
+    };
+  }
+  return { ...next, providers, providerInstances };
+}
+
 export function redactServerSettingsForClient(settings: ServerSettings): ServerSettings {
+  const providers = {
+    codex: redactProviderSettingsConfig(settings.providers.codex, CodexSettings.fields),
+    claudeAgent: redactProviderSettingsConfig(settings.providers.claudeAgent, ClaudeSettings.fields),
+    cursor: redactProviderSettingsConfig(settings.providers.cursor, CursorSettings.fields),
+    grok: redactProviderSettingsConfig(settings.providers.grok, GrokSettings.fields),
+    pi: redactProviderSettingsConfig(settings.providers.pi, PiSettings.fields),
+    opencode: redactProviderSettingsConfig(settings.providers.opencode, OpenCodeSettings.fields),
+    antigravity: redactProviderSettingsConfig(settings.providers.antigravity, AntigravitySettings.fields),
+    omp: redactProviderSettingsConfig(settings.providers.omp, OmpSettings.fields),
+  };
   const providerInstances = Object.fromEntries(
-    Object.entries(settings.providerInstances).map(([instanceId, instance]) => [
-      instanceId,
-      instance.environment
-        ? {
-            ...instance,
-            environment: instance.environment.map(redactProviderEnvironmentVariable),
-          }
-        : instance,
-    ]),
+    Object.entries(settings.providerInstances).map(([instanceId, instance]) => {
+      const schema = Object.hasOwn(PROVIDER_SETTINGS_SCHEMAS, instance.driver)
+        ? PROVIDER_SETTINGS_SCHEMAS[instance.driver as keyof typeof PROVIDER_SETTINGS_SCHEMAS]
+        : undefined;
+      return [
+        instanceId,
+        {
+          ...instance,
+          ...(schema === undefined
+            ? {}
+            : { config: redactProviderSettingsConfig(instance.config, schema.fields) }),
+          ...(instance.environment
+            ? { environment: instance.environment.map(redactProviderEnvironmentVariable) }
+            : {}),
+        },
+      ];
+    }),
   );
   // The hub key is a bearer secret; clients only need to know one is set.
   const usageLimitSources = Object.fromEntries(
@@ -215,7 +334,7 @@ export function redactServerSettingsForClient(settings: ServerSettings): ServerS
       Object.entries(settings.github.tokens).map(([host, token]) => [host, redactSecret(token)]),
     ),
   };
-  return { ...settings, providerInstances, usageLimitSources, bitbucket, github };
+  return { ...settings, providers, providerInstances, usageLimitSources, bitbucket, github };
 }
 
 export function applyProviderInstanceMutation(
@@ -317,7 +436,11 @@ const makeTest = (overrides: DeepPartial<ServerSettings> = {}) =>
     ): Effect.Effect<ServerSettings, ServerSettingsError> =>
       writeSemaphore.withPermits(1)(
         Ref.get(currentSettingsRef).pipe(
-          Effect.flatMap(update),
+          Effect.flatMap((current) =>
+            update(current).pipe(
+              Effect.map((updated) => restoreProviderSettingsSecrets(current, updated)),
+            ),
+          ),
           Effect.flatMap(normalizeServerSettings),
           Effect.tap((nextSettings) => Ref.set(currentSettingsRef, nextSettings)),
           Effect.map(resolveTextGenerationProvider),
@@ -1218,7 +1341,7 @@ const make = Effect.gen(function* () {
     writeSemaphore.withPermits(1)(
       Effect.gen(function* () {
         const current = yield* getSettingsFromCache;
-        const updated = yield* update(current);
+        const updated = restoreProviderSettingsSecrets(current, yield* update(current));
         const persisted = yield* persistProviderEnvironmentSecrets(current, updated);
         const next = yield* normalizeServerSettings(persisted.settings);
         const materialized = yield* Effect.uninterruptibleMask(() =>

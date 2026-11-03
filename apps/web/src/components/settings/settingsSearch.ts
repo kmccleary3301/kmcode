@@ -230,6 +230,24 @@ export const SETTINGS_SEARCH_ITEMS = [
     searchTerms: ["wide full width column layout messages composer monitor"],
   },
   {
+    id: "transcript-style",
+    title: "Transcript style",
+    to: "/settings/appearance",
+    searchTerms: ["terminal omp minimal plus cursor codex km look chat steps tools preview"],
+  },
+  {
+    id: "live-steps-kept-open",
+    title: "Steps kept open",
+    to: "/settings/appearance",
+    searchTerms: ["minimal+ plus expanded open collapse fold recent latest tool calls edits commands"],
+  },
+  {
+    id: "transcript-loaders",
+    title: "Loaders",
+    to: "/settings/appearance",
+    searchTerms: ["spinner globe favicon search loading working animation preview"],
+  },
+  {
     id: "panel-animations",
     title: "Panel animations",
     to: "/settings/appearance",
@@ -362,6 +380,14 @@ export const SETTINGS_SEARCH_ITEMS = [
     title: "Time format",
     to: "/settings/general",
     searchTerms: ["timestamp clock locale system browser os 12 hour 24 hour"],
+  },
+  {
+    id: "tool-detail",
+    title: "Tool detail",
+    to: "/settings/general",
+    searchTerms: [
+      "tools steps compact rich minimal auto open expand cursor omp pane file reads hunk headers edits",
+    ],
   },
   {
     id: "response-streaming",
@@ -920,6 +946,12 @@ export const SETTINGS_SEARCH_ITEMS = [
     title: "GitHub sharing",
     to: "/settings/connections",
     searchTerms: ["pull request trusted environments shared credentials permissions read actions"],
+  },
+  {
+    id: "port-auto-forward-limit",
+    title: "Auto-forward limit",
+    to: "/settings/connections",
+    searchTerms: ["port forwarding forwarded ports tunnel listeners maximum cap advanced"],
   },
   {
     id: "archive",

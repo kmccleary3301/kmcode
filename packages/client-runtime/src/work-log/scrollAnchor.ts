@@ -26,6 +26,7 @@ export function resolveWorkGroupScrollAnchor(state: {
   }
 
   return {
+    index,
     rowId: state.data[index]!.id,
     offsetWithinRow: Math.max(0, scrollOffset - rowTop),
     scrollOffset,

@@ -22,6 +22,7 @@ import {
   expandCollapsedComposerCursor,
   formatAssistantCitationForComposer,
   isCollapsedCursorAdjacentToInlineToken,
+  parseComposerGoalCommand,
   parseStandaloneComposerSlashCommand,
   replaceTextRange,
   resolveComposerSlashCommandDispatch,
@@ -870,5 +871,31 @@ describe("parseStandaloneComposerSlashCommand", () => {
   it("leaves native provider commands for provider dispatch", () => {
     expect(parseStandaloneComposerSlashCommand("/todo")).toBeNull();
     expect(parseStandaloneComposerSlashCommand("/skill:anti-slop arguments")).toBeNull();
+  });
+});
+
+describe("parseComposerGoalCommand", () => {
+  it("reads `set <objective>` and a bare objective as setting the goal", () => {
+    expect(parseComposerGoalCommand("/goal set Ship the\nrelease ")).toEqual({
+      kind: "set",
+      objective: "Ship the\nrelease",
+    });
+    expect(parseComposerGoalCommand("/goal Ship it")).toEqual({ kind: "set", objective: "Ship it" });
+  });
+
+  it("has nothing to set until `/goal set` gets an objective", () => {
+    expect(parseComposerGoalCommand("/goal set ")).toBeNull();
+  });
+
+  it("reads control words as acting on the current goal", () => {
+    expect(parseComposerGoalCommand("/goal")).toEqual({ kind: "show" });
+    expect(parseComposerGoalCommand("/goal Pause")).toEqual({ kind: "pause" });
+    expect(parseComposerGoalCommand("/goal drop")).toEqual({ kind: "clear" });
+    expect(parseComposerGoalCommand("/goal budget 50000")).toEqual({ kind: "budget" });
+  });
+
+  it("leaves messages that only mention goals alone", () => {
+    expect(parseComposerGoalCommand("/goals")).toBeNull();
+    expect(parseComposerGoalCommand("set a /goal for me")).toBeNull();
   });
 });

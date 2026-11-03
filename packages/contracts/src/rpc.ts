@@ -222,6 +222,7 @@ import {
   OrchestrationV2DispatchCommandError,
   OrchestrationV2GetShellSnapshotError,
   OrchestrationV2GetThreadProjectionError,
+  OrchestrationV2StopWorkflowError,
   OrchestrationV2GetSubagentTranscriptError,
   OrchestrationV2RpcSchemas,
   OrchestrationV2ThreadLaunchError,
@@ -326,6 +327,7 @@ import {
   ResourceTelemetryRetryResult,
   ResourceTelemetrySnapshot,
 } from "./resourceTelemetry.ts";
+import { ServerHostHealthSnapshot } from "./hostHealth.ts";
 import {
   UsageLimitSourceError,
   ProviderConsumeResetCreditInput,
@@ -587,6 +589,7 @@ export const WS_METHODS = {
   subscribeAuthAccess: "subscribeAuthAccess",
   subscribeBackgroundPolicy: "subscribeBackgroundPolicy",
   subscribeResourceTelemetry: "subscribeResourceTelemetry",
+  serverSubscribeHostHealth: "server.subscribeHostHealth",
 } as const;
 
 const WsServerUpsertKeybindingRpc = Rpc.make(WS_METHODS.serverUpsertKeybinding, {
@@ -1666,6 +1669,12 @@ const WsOrchestrationV2GetThreadProjectionRpc = Rpc.make(
   },
 );
 
+const WsOrchestrationV2StopWorkflowRpc = Rpc.make(ORCHESTRATION_V2_WS_METHODS.stopWorkflow, {
+  payload: OrchestrationV2RpcSchemas.stopWorkflow.input,
+  success: OrchestrationV2RpcSchemas.stopWorkflow.output,
+  error: Schema.Union([OrchestrationV2StopWorkflowError, EnvironmentAuthorizationError]),
+});
+
 const WsOrchestrationV2GetWorkflowScriptRpc = Rpc.make(
   ORCHESTRATION_V2_WS_METHODS.getWorkflowScript,
   {
@@ -1719,6 +1728,15 @@ const WsOrchestrationV2SubscribeThreadRpc = Rpc.make(ORCHESTRATION_V2_WS_METHODS
   error: Schema.Union([OrchestrationV2GetThreadProjectionError, EnvironmentAuthorizationError]),
   stream: true,
 });
+const WsOrchestrationV2SubscribeThreadLiveRpc = Rpc.make(
+  ORCHESTRATION_V2_WS_METHODS.subscribeThreadLive,
+  {
+    payload: OrchestrationV2RpcSchemas.subscribeThreadLive.input,
+    success: OrchestrationV2RpcSchemas.subscribeThreadLive.output,
+    error: EnvironmentAuthorizationError,
+    stream: true,
+  },
+);
 
 const WsSubscribeTerminalEventsRpc = Rpc.make(WS_METHODS.subscribeTerminalEvents, {
   payload: Schema.Struct({}),
@@ -1855,6 +1873,12 @@ const WsSubscribeResourceTelemetryRpc = Rpc.make(WS_METHODS.subscribeResourceTel
   error: EnvironmentAuthorizationError,
   stream: true,
 });
+const WsServerSubscribeHostHealthRpc = Rpc.make(WS_METHODS.serverSubscribeHostHealth, {
+  payload: Schema.Struct({}),
+  success: ServerHostHealthSnapshot,
+  error: EnvironmentAuthorizationError,
+  stream: true,
+});
 
 /**
  * Checks the connection's scopes against the scope each RPC declares, before
@@ -1919,6 +1943,7 @@ export const WsRpcGroup = RpcGroup.make(
   WsServerGetProcessResourceHistoryRpc,
   WsServerGetResourceTelemetryHistoryRpc,
   WsServerRetryResourceTelemetryRpc,
+  WsServerSubscribeHostHealthRpc,
   WsServerGetUsageSummaryRpc,
   WsServerRefreshUsageRatesRpc,
   WsServerSignalProcessRpc,
@@ -2045,6 +2070,7 @@ export const WsRpcGroup = RpcGroup.make(
   WsSubscribeAuthAccessRpc,
   WsSubscribeBackgroundPolicyRpc,
   WsSubscribeResourceTelemetryRpc,
+  WsServerSubscribeHostHealthRpc,
   WsOrchestrationV2DispatchCommandRpc,
   WsOrchestrationV2GetWorkflowScriptRpc,
   WsOrchestrationV2GetTurnItemRpc,
@@ -2054,8 +2080,10 @@ export const WsRpcGroup = RpcGroup.make(
   WsOrchestrationV2SearchThreadsRpc,
   WsOrchestrationV2GetArchivedShellSnapshotRpc,
   WsOrchestrationV2GetThreadProjectionRpc,
+  WsOrchestrationV2StopWorkflowRpc,
   WsOrchestrationV2LaunchThreadRpc,
   WsOrchestrationV2SubscribeArchivedShellRpc,
   WsOrchestrationV2SubscribeShellRpc,
   WsOrchestrationV2SubscribeThreadRpc,
+  WsOrchestrationV2SubscribeThreadLiveRpc,
 ).middleware(RpcScopeAuthorization);

@@ -5,7 +5,31 @@ import {
   subagentGroupSummary,
   resolveSubagentMetadata,
   subagentDetailPreview,
+  subagentDisplayName,
 } from "./subagentDisplay.js";
+
+describe("subagentDisplayName", () => {
+  it("names an OMP agent by its id when the title is its type or its task", () => {
+    expect(subagentDisplayName({ driver: "omp", nativeAgentId: "PcFinish4", title: "task" })).toBe(
+      "PcFinish4",
+    );
+    expect(
+      subagentDisplayName({
+        driver: "omp",
+        nativeAgentId: "0-SeedReattach",
+        title: "Complete assignment thoroughly",
+      }),
+    ).toBe("SeedReattach");
+  });
+
+  it("keeps other providers' titles and falls back to the title without an id", () => {
+    expect(
+      subagentDisplayName({ driver: "codex", nativeAgentId: "agent-7", title: "/root/run/fix_bug" }),
+    ).toBe("Fix Bug");
+    expect(subagentDisplayName({ driver: "omp", nativeAgentId: " ", title: "Scout" })).toBe("Scout");
+    expect(subagentDisplayName({ driver: "omp", title: "  " })).toBeNull();
+  });
+});
 
 describe("subagentGroupSummary", () => {
   it.each(["pending", "running", "waiting"] as const)(

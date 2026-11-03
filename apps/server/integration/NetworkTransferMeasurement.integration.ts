@@ -122,7 +122,6 @@ function rawDataBytes(data: NodeSocket.NodeWS.RawData): number {
   }
   return data.byteLength;
 }
-
 export function makeWebSocketTransferRecorder(): WebSocketTransferRecorder {
   let socket: NodeWebSocketWithTransport | null = null;
   // Held separately from the WebSocket so wire totals survive a close, which

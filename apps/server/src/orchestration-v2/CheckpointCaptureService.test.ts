@@ -7,14 +7,17 @@ import {
   EventId,
   MessageId,
   NodeId,
+  type OrchestrationV2Checkpoint,
   type OrchestrationV2DomainEvent,
   type OrchestrationV2Run,
+  type OrchestrationV2TurnItem,
   ProjectId,
   ProviderDriverKind,
   ProviderInstanceId,
   ProviderThreadId,
   RunId,
   ThreadId,
+  TurnItemId,
 } from "@t3tools/contracts";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
@@ -28,8 +31,46 @@ import { VcsProcessTimeoutError } from "@t3tools/contracts";
 import * as CheckpointService from "./CheckpointService.ts";
 import * as CheckpointCaptureService from "./CheckpointCaptureService.ts";
 import * as EventSink from "./EventSink.ts";
+import * as EventStore from "./EventStore.ts";
 import * as IdAllocator from "./IdAllocator.ts";
 import * as ProjectionStore from "./ProjectionStore.ts";
+
+const layerCheckpointDatabaseTest = SqlitePersistence.layerMemory;
+const layerCheckpointStoresTest = Layer.mergeAll(
+  layerCheckpointDatabaseTest,
+  EventStore.layer.pipe(Layer.provideMerge(layerCheckpointDatabaseTest)),
+  ProjectionStore.layer.pipe(Layer.provideMerge(layerCheckpointDatabaseTest)),
+);
+const layerCheckpointEventSinkTest = EventSink.layer.pipe(Layer.provide(layerCheckpointStoresTest));
+const layerCheckpointServiceTest = Layer.mock(CheckpointService.CheckpointServiceV2)({
+  materializeBaselineCheckpoint: () =>
+    Effect.die("the ready baseline prevents baseline materialization"),
+  capture: (input) =>
+    Effect.succeed({
+      id: CheckpointId.make("checkpoint:completion-sweep-captured"),
+      threadId: input.scope.threadId,
+      scopeId: input.scope.id,
+      runId: input.runId,
+      nodeId: input.nodeId,
+      parentCheckpointId: null,
+      ordinalWithinScope: input.ordinalWithinScope,
+      appRunOrdinal: input.appRunOrdinal,
+      ref: CheckpointRef.make("checkpoint-ref:completion-sweep"),
+      status: "ready",
+      files: [],
+      capturedAt: input.capturedAt,
+    } satisfies OrchestrationV2Checkpoint),
+});
+const layerCheckpointCaptureTest = CheckpointCaptureService.layer.pipe(
+  Layer.provideMerge(
+    Layer.mergeAll(
+      layerCheckpointStoresTest,
+      layerCheckpointEventSinkTest,
+      IdAllocator.layer,
+      layerCheckpointServiceTest,
+    ),
+  ),
+);
 
 const layerProjectionStoreTest = Layer.mergeAll(
   ProjectionStore.layer.pipe(Layer.provideMerge(SqlitePersistence.layerMemory)),
@@ -278,7 +319,7 @@ it.layer(layerProjectionStoreTest)("CheckpointCaptureServiceV2", (it) => {
                         NodeCrypto.layer,
                         Layer.mock(CheckpointStore.CheckpointStore)({
                           isGitRepository: () => Effect.succeed(true),
-                          captureCheckpoint: () => Effect.void,
+                          captureCheckpoint: () => Effect.succeed("captured"),
                           hasCheckpointRef: () =>
                             Effect.fail(
                               new VcsProcessTimeoutError({
@@ -380,6 +421,272 @@ it.layer(layerProjectionStoreTest)("CheckpointCaptureServiceV2", (it) => {
           assert.deepEqual(yield* Ref.get(committed), []);
         }).pipe(Effect.provide(layerCapture));
       }),
+  );
+
+  it.layer(layerCheckpointCaptureTest)(
+    "interrupts an unstarted leftover tool item while preserving live background work",
+    (it) =>
+      it.effect("completes the run and retains provider-tracked background bash", () =>
+        Effect.gen(function* () {
+          const eventSink = yield* EventSink.EventSinkV2;
+          const projectionStore = yield* ProjectionStore.ProjectionStoreV2;
+          const captureService = yield* CheckpointCaptureService.CheckpointCaptureServiceV2;
+          const now = yield* DateTime.now;
+          const sweepThreadId = ThreadId.make("thread:checkpoint-capture-item-sweep");
+          const sweepRunId = RunId.make("run:checkpoint-capture-item-sweep");
+          const sweepScopeId = CheckpointScopeId.make("scope:checkpoint-capture-item-sweep");
+          const sweepRootNodeId = NodeId.make("node:checkpoint-capture-item-sweep-root");
+          const sweepProviderThreadId = ProviderThreadId.make(
+            "provider-thread:checkpoint-capture-item-sweep",
+          );
+          const todoItem: OrchestrationV2TurnItem = {
+            id: TurnItemId.make("turn-item:checkpoint-capture-unstarted-todo"),
+            threadId: sweepThreadId,
+            runId: sweepRunId,
+            nodeId: sweepRootNodeId,
+            providerThreadId: sweepProviderThreadId,
+            providerTurnId: null,
+            nativeItemRef: null,
+            parentItemId: null,
+            ordinal: 1,
+            status: "pending",
+            title: "todo",
+            startedAt: null,
+            completedAt: null,
+            updatedAt: now,
+            type: "dynamic_tool",
+            toolName: "todo",
+            input: { op: "done" },
+          };
+          const backgroundBash: OrchestrationV2TurnItem = {
+            id: TurnItemId.make("turn-item:checkpoint-capture-live-bash"),
+            threadId: sweepThreadId,
+            runId: sweepRunId,
+            nodeId: sweepRootNodeId,
+            providerThreadId: sweepProviderThreadId,
+            providerTurnId: null,
+            nativeItemRef: null,
+            parentItemId: null,
+            ordinal: 2,
+            status: "running",
+            title: "background bash",
+            startedAt: now,
+            completedAt: null,
+            updatedAt: now,
+            type: "command_execution",
+            input: "sleep 600",
+          };
+          const run: OrchestrationV2Run = {
+            id: sweepRunId,
+            threadId: sweepThreadId,
+            ordinal: 1,
+            providerInstanceId,
+            modelSelection,
+            providerThreadId: sweepProviderThreadId,
+            userMessageId: MessageId.make("message:checkpoint-capture-item-sweep"),
+            rootNodeId: sweepRootNodeId,
+            activeAttemptId: null,
+            status: "waiting",
+            requestedAt: now,
+            startedAt: now,
+            completedAt: null,
+            checkpointId: null,
+            contextHandoffId: null,
+          };
+          const rootNode = {
+            id: sweepRootNodeId,
+            threadId: sweepThreadId,
+            runId: sweepRunId,
+            parentNodeId: null,
+            rootNodeId: sweepRootNodeId,
+            kind: "root_turn" as const,
+            status: "waiting" as const,
+            countsForRun: true,
+            providerThreadId: sweepProviderThreadId,
+            providerTurnId: null,
+            nativeItemRef: null,
+            runtimeRequestId: null,
+            checkpointScopeId: sweepScopeId,
+            startedAt: now,
+            completedAt: null,
+          };
+          const scope = {
+            id: sweepScopeId,
+            threadId: sweepThreadId,
+            runId: sweepRunId,
+            nodeId: sweepRootNodeId,
+            parentScopeId: null,
+            providerThreadId: sweepProviderThreadId,
+            kind: "root_run" as const,
+            ordinalWithinParent: 0,
+            advancesAppRunCount: true,
+            cwd: "/repo",
+            createdAt: now,
+          };
+          const providerThread = {
+            id: sweepProviderThreadId,
+            driver,
+            providerInstanceId,
+            providerSessionId: null,
+            appThreadId: sweepThreadId,
+            ownerNodeId: sweepRootNodeId,
+            nativeThreadRef: null,
+            nativeConversationHeadRef: null,
+            status: "idle" as const,
+            firstRunOrdinal: 1,
+            lastRunOrdinal: 1,
+            handoffIds: [],
+            forkedFrom: null,
+            pendingBackgroundTasks: [
+              {
+                taskId: String(backgroundBash.id),
+                kind: "command" as const,
+                description: "background bash",
+              },
+            ],
+            createdAt: now,
+            updatedAt: now,
+          };
+          const baseline = {
+            id: CheckpointId.make("checkpoint:completion-sweep-baseline"),
+            threadId: sweepThreadId,
+            scopeId: sweepScopeId,
+            runId: null,
+            nodeId: sweepRootNodeId,
+            parentCheckpointId: null,
+            ordinalWithinScope: 0,
+            appRunOrdinal: null,
+            ref: CheckpointRef.make("checkpoint-ref:completion-sweep-baseline"),
+            status: "ready" as const,
+            files: [],
+            capturedAt: now,
+          };
+
+          yield* eventSink.write({
+            events: [
+              {
+                id: EventId.make("event:checkpoint-capture-item-sweep-thread"),
+                type: "thread.created",
+                threadId: sweepThreadId,
+                occurredAt: now,
+                payload: {
+                  createdBy: "user",
+                  creationSource: "web",
+                  id: sweepThreadId,
+                  projectId,
+                  title: "Checkpoint capture item sweep",
+                  providerInstanceId,
+                  modelSelection,
+                  runtimeMode: "full-access",
+                  interactionMode: "default",
+                  branch: null,
+                  worktreePath: null,
+                  activeProviderThreadId: null,
+                  lineage: {
+                    parentThreadId: null,
+                    relationshipToParent: null,
+                    rootThreadId: sweepThreadId,
+                  },
+                  forkedFrom: null,
+                  createdAt: now,
+                  updatedAt: now,
+                  archivedAt: null,
+                  settledOverride: null,
+                  settledAt: null,
+                  lastVisitedAt: null,
+                  deletedAt: null,
+                },
+              },
+              {
+                id: EventId.make("event:checkpoint-capture-item-sweep-run"),
+                type: "run.created",
+                threadId: sweepThreadId,
+                runId: sweepRunId,
+                providerInstanceId,
+                occurredAt: now,
+                payload: run,
+              },
+              {
+                id: EventId.make("event:checkpoint-capture-item-sweep-node"),
+                type: "node.updated",
+                threadId: sweepThreadId,
+                runId: sweepRunId,
+                nodeId: sweepRootNodeId,
+                providerInstanceId,
+                occurredAt: now,
+                payload: rootNode,
+              },
+              {
+                id: EventId.make("event:checkpoint-capture-item-sweep-provider"),
+                type: "provider-thread.updated",
+                threadId: sweepThreadId,
+                providerInstanceId,
+                occurredAt: now,
+                payload: providerThread,
+              },
+              {
+                id: EventId.make("event:checkpoint-capture-item-sweep-scope"),
+                type: "checkpoint-scope.created",
+                threadId: sweepThreadId,
+                runId: sweepRunId,
+                nodeId: sweepRootNodeId,
+                occurredAt: now,
+                payload: scope,
+              },
+              {
+                id: EventId.make("event:checkpoint-capture-item-sweep-baseline"),
+                type: "checkpoint.captured",
+                threadId: sweepThreadId,
+                nodeId: sweepRootNodeId,
+                driver,
+                providerInstanceId,
+                occurredAt: now,
+                payload: baseline,
+              },
+              {
+                id: EventId.make("event:checkpoint-capture-item-sweep-todo"),
+                type: "turn-item.updated",
+                threadId: sweepThreadId,
+                runId: sweepRunId,
+                nodeId: sweepRootNodeId,
+                providerInstanceId,
+                occurredAt: now,
+                payload: todoItem,
+              },
+              {
+                id: EventId.make("event:checkpoint-capture-item-sweep-bash"),
+                type: "turn-item.updated",
+                threadId: sweepThreadId,
+                runId: sweepRunId,
+                nodeId: sweepRootNodeId,
+                providerInstanceId,
+                occurredAt: now,
+                payload: backgroundBash,
+              },
+            ],
+          });
+
+          yield* captureService.execute({
+            threadId: sweepThreadId,
+            runId: sweepRunId,
+            scopeId: sweepScopeId,
+          });
+
+          const completed = yield* projectionStore.getThreadProjection(sweepThreadId);
+          assert.equal(
+            completed.runs.find((candidate) => candidate.id === sweepRunId)?.status,
+            "completed",
+          );
+          assert.equal(
+            completed.turnItems.find((item) => item.id === todoItem.id)?.status,
+            "interrupted",
+          );
+          assert.equal(
+            completed.turnItems.find((item) => item.id === backgroundBash.id)?.status,
+            "running",
+          );
+        }),
+      ),
   );
 
   // Capture and rollback share the thread's effect lane, so a rollback can only

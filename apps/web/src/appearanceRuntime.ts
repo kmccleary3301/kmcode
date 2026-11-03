@@ -3,6 +3,7 @@ import {
   BrowserAppearanceStorage,
   createAppearanceRuntime,
   createEmptyAppearanceState,
+  resolveAppearanceState,
   DesktopBridgeAppearanceStorage,
   rewriteAppearancePackageCss,
   validateAppearanceSnippetCss,
@@ -10,8 +11,11 @@ import {
   type AppearanceCompiledOutput,
   type AppearanceCompilerAdapter,
   type AppearancePackageInput,
+  type AppearancePreference,
   type AppearancePersistedState,
+  type AppearanceResolved,
   type AppearanceRuntime,
+  type AppearanceSnapshot,
   type AppearanceStorageAdapter,
   type AppearanceStoredPackage,
   type AppearanceTypographyPreference,
@@ -115,6 +119,39 @@ const appearanceFontLoads = new AppearanceFontLoadCache();
 const appearanceAssets = new AppearanceAssetRegistry();
 let suppressPendingStartupApply = false;
 let appearanceFontLoadGeneration = 0;
+let nextAppearanceIntentGeneration = 0;
+let pendingPreferenceIntent: {
+  generation: number;
+  preference: AppearancePreference;
+} | null = null;
+
+export function allocateAppearanceGeneration(preference?: AppearancePreference): number {
+  nextAppearanceIntentGeneration = getLatestAppearanceGeneration() + 1;
+  if (typeof document !== "undefined" && document.documentElement?.dataset) {
+    document.documentElement.dataset.themeGeneration = String(nextAppearanceIntentGeneration);
+  }
+  pendingPreferenceIntent =
+    preference === undefined ? null : { generation: nextAppearanceIntentGeneration, preference };
+  return nextAppearanceIntentGeneration;
+}
+
+export function allocateAppearanceModeGeneration(): number {
+  return allocateAppearanceGeneration(pendingPreferenceIntent?.preference);
+}
+
+export function finishAppearanceIntent(generation: number): void {
+  if (pendingPreferenceIntent?.generation === generation) {
+    pendingPreferenceIntent = null;
+  }
+}
+
+export function getLatestAppearanceGeneration(): number {
+  const currentDomGeneration =
+    typeof document !== "undefined"
+      ? Number(document.documentElement.dataset?.themeGeneration ?? "0")
+      : 0;
+  return Math.max(nextAppearanceIntentGeneration, currentDomGeneration);
+}
 const COLOR_ROLE_SET = new Set<string>(THEME_COLOR_ROLES);
 
 const BUILTIN_TRUST: AppearanceTrust = {
@@ -377,16 +414,20 @@ function fontFaces(
     .join("\n");
 }
 
+// Turning animations off in appearance settings stops all motion. The system
+// reduced-motion preference is index.css's job: its blanket rule is unlayered
+// at zero specificity, so the fades motion.css keeps under reduced motion
+// still play. A layered !important copy here would beat those fades.
 function reducedMotionCss(variant: NormalizedAppearanceVariant | undefined): string {
-  if (variant === undefined) return "";
-  const protectedMotion =
-    variant.motion.reducedMotion === "always-reduce" || variant.motion.animationsEnabled === false;
+  if (
+    variant === undefined ||
+    (variant.motion.reducedMotion !== "always-reduce" && variant.motion.animationsEnabled !== false)
+  ) {
+    return "";
+  }
   const selector =
     "body, body *, body *::before, body *::after, [data-t3-app], [data-t3-app] *, [data-t3-app] *::before, [data-t3-app] *::after";
-  if (protectedMotion) {
-    return `${selector}{animation:none !important;transition:none !important;scroll-behavior:auto !important;}`;
-  }
-  return `@media (prefers-reduced-motion: reduce){${selector}{animation-duration:0s !important;transition-duration:0s !important;scroll-behavior:auto !important;}}`;
+  return `${selector}{animation:none !important;transition:none !important;scroll-behavior:auto !important;}`;
 }
 
 function cssLayer(name: string, parts: ReadonlyArray<string>): string {
@@ -639,6 +680,7 @@ export function compileWebAppearance(
       },
       diagnostics,
       [WEB_APPEARANCE_LAYERS]: layers,
+      ...(input.generation !== undefined ? { generation: input.generation } : {}),
     };
     return output;
   } catch (error) {
@@ -840,11 +882,29 @@ function applyWebAppearanceLayers(compiled: AppearanceCompiledOutput): void {
   );
 }
 
-async function applyWebAppearance(compiled: AppearanceCompiledOutput): Promise<void> {
+export async function applyWebAppearance(compiled: AppearanceCompiledOutput): Promise<void> {
   if (typeof document === "undefined") return;
   if (suppressPendingStartupApply) return;
-  const fontLoadGeneration = ++appearanceFontLoadGeneration;
   const root = document.documentElement;
+  const currentDomGeneration = Number(root.dataset.themeGeneration ?? "0");
+  const compiledGeneration =
+    typeof compiled === "object" &&
+    compiled !== null &&
+    "generation" in compiled &&
+    typeof compiled.generation === "number"
+      ? compiled.generation
+      : undefined;
+  if (
+    compiledGeneration !== undefined &&
+    currentDomGeneration > 0 &&
+    compiledGeneration < currentDomGeneration
+  ) {
+    return;
+  }
+  if (compiledGeneration !== undefined) {
+    root.dataset.themeGeneration = String(compiledGeneration);
+  }
+  const fontLoadGeneration = ++appearanceFontLoadGeneration;
   const bootVariables = Array.from({ length: root.style.length }, (_, index) =>
     root.style.item(index),
   ).filter((name) => name.startsWith("--app-theme-") || name.startsWith("--t3-"));
@@ -1092,10 +1152,73 @@ let runtimePromise: Promise<AppearanceRuntime> | null = null;
 let appearanceStorage: AppearanceStorageAdapter | null = null;
 let removeLibrarySubscription: (() => void) | null = null;
 let librarySync: Promise<void> = Promise.resolve();
+let latestAppearanceSnapshot: AppearanceSnapshot | null = null;
 
-async function syncEnvironmentPackages(runtime: AppearanceRuntime): Promise<void> {
+function preferenceForMode(
+  snapshot: AppearanceSnapshot,
+  mode: "system" | ThemeAppearance,
+  targetPackageId?: string,
+): AppearancePreference {
+  const desired = pendingPreferenceIntent?.preference ?? snapshot.preference;
+  const packageId =
+    targetPackageId ??
+    (desired.mode === "system" && mode !== "system"
+      ? ((mode === "dark" ? desired.darkPackageId : desired.lightPackageId) ?? desired.packageId)
+      : desired.packageId);
+  const preference = {
+    ...desired,
+    mode,
+    ...(packageId !== undefined ? { packageId } : {}),
+  };
+  const selectedPackage =
+    packageId === undefined
+      ? undefined
+      : (snapshot.packages[packageId] ??
+        snapshot.environmentPackages.find((item) => item.profile.metadata.id === packageId));
+  const selectedVariant = selectedPackage?.profile.variants.find(
+    (variant) => variant.id === desired.variantId,
+  );
+  if (desired.mode !== mode || (mode !== "system" && selectedVariant?.appearance !== mode)) {
+    delete preference.variantId;
+  }
+  return preference;
+}
+
+export function resolveAppearanceForMode(
+  appearance: ThemeAppearance,
+  mode: "system" | ThemeAppearance = appearance,
+): AppearanceResolved | null {
+  const snapshot = latestAppearanceSnapshot;
+  if (snapshot === null) return null;
+  const preference = preferenceForMode(snapshot, mode);
+  const packageId =
+    preference.mode === "system"
+      ? ((appearance === "dark" ? preference.darkPackageId : preference.lightPackageId) ??
+        preference.packageId)
+      : preference.packageId;
+  const pendingPackage = packageId === undefined ? undefined : snapshot.packages[packageId];
+  const packages =
+    pendingPreferenceIntent !== null && pendingPackage !== undefined && !pendingPackage.enabled
+      ? {
+          ...snapshot.packages,
+          [pendingPackage.profile.metadata.id]: { ...pendingPackage, enabled: true },
+        }
+      : snapshot.packages;
+  return resolveAppearanceState(
+    { ...snapshot, preference, packages },
+    snapshot.preview,
+    () => appearance,
+  );
+}
+async function syncEnvironmentPackages(
+  runtime: AppearanceRuntime,
+  apply = true,
+  generation?: number,
+): Promise<void> {
   await runtime.execute({
     type: "environment-packages",
+    apply,
+    ...(generation !== undefined ? { generation } : {}),
     packages: getEnvironmentThemes().map((theme): AppearancePackageInput => ({
       input: theme,
       sourceId: theme.id,
@@ -1151,6 +1274,7 @@ async function createWebAppearanceRuntime(): Promise<AppearanceRuntime> {
     apply: { apply: applyWebAppearance },
     defaultState,
     forceSafeMode,
+    allocateGeneration: allocateAppearanceGeneration,
     systemAppearance: () =>
       typeof window !== "undefined" &&
       typeof window.matchMedia === "function" &&
@@ -1180,13 +1304,54 @@ async function createWebAppearanceRuntime(): Promise<AppearanceRuntime> {
     await syncEnvironmentPackages(runtime);
     if (removeLibrarySubscription === null) {
       removeLibrarySubscription = subscribeToCustomThemes(() => {
+        const capturedGeneration = getLatestAppearanceGeneration();
         librarySync = librarySync
-          .then(() => syncEnvironmentPackages(runtime))
+          .then(() => syncEnvironmentPackages(runtime, true, capturedGeneration))
           .catch(() => undefined);
       });
     }
   }
-  return runtime;
+  latestAppearanceSnapshot = runtime.getSnapshot();
+  runtime.subscribe(() => {
+    latestAppearanceSnapshot = runtime.getSnapshot();
+  });
+  const rawExecute = runtime.execute;
+  const wrappedExecute: typeof rawExecute = (command, signal) => {
+    let commandWithGeneration = command;
+    if (command.generation === undefined && command.apply !== false) {
+      commandWithGeneration = {
+        ...command,
+        generation: allocateAppearanceGeneration(
+          command.type === "preference" ? command.preference : undefined,
+        ),
+      };
+    }
+    const intentGeneration = commandWithGeneration.generation;
+    if (
+      commandWithGeneration.type === "preference" &&
+      commandWithGeneration.apply !== false &&
+      intentGeneration !== undefined &&
+      intentGeneration >= getLatestAppearanceGeneration()
+    ) {
+      pendingPreferenceIntent = {
+        generation: intentGeneration,
+        preference: commandWithGeneration.preference,
+      };
+    }
+    return rawExecute(commandWithGeneration, signal).finally(() => {
+      if (
+        commandWithGeneration.type === "preference" &&
+        commandWithGeneration.apply !== false &&
+        intentGeneration !== undefined
+      ) {
+        finishAppearanceIntent(intentGeneration);
+      }
+    });
+  };
+  return {
+    ...runtime,
+    execute: wrappedExecute,
+  };
 }
 
 export function getAppearanceRuntime(): Promise<AppearanceRuntime> {
@@ -1279,22 +1444,30 @@ export async function executeAppearanceRecoveryCommand(
   return next;
 }
 
-export async function setAppearanceModePreference(mode: "system" | ThemeAppearance): Promise<void> {
-  const runtime = await getAppearanceRuntime();
-  const current = runtime.getSnapshot();
-  const preference = { ...current.preference, mode };
-  // An explicit mode must not keep a stale variant from the other appearance.
-  // Preserve a deliberately selected variant when it already belongs to the
-  // requested mode; otherwise let the runtime resolve that mode normally.
-  if (
-    current.preference.mode !== mode ||
-    (mode !== "system" && current.resolved.baseVariant?.appearance !== mode)
-  ) {
-    delete preference.variantId;
-  }
-  const result = await runtime.execute({ type: "preference", preference });
-  if (result.status === "rejected") {
-    throw new Error(result.diagnostics[0]?.message ?? "Appearance mode preference was rejected.");
+export async function setAppearanceModePreference(
+  mode: "system" | ThemeAppearance,
+  targetPackageId?: string,
+  generation: number = allocateAppearanceModeGeneration(),
+): Promise<void> {
+  try {
+    if (generation !== undefined && generation < getLatestAppearanceGeneration()) {
+      return;
+    }
+    const runtime = await getAppearanceRuntime();
+    if (generation !== undefined && generation < getLatestAppearanceGeneration()) {
+      return;
+    }
+    const preference = preferenceForMode(runtime.getSnapshot(), mode, targetPackageId);
+    const result = await runtime.execute({
+      type: "preference",
+      preference,
+      ...(generation !== undefined ? { generation } : {}),
+    });
+    if (result.status === "rejected") {
+      throw new Error(result.diagnostics[0]?.message ?? "Appearance mode preference was rejected.");
+    }
+  } finally {
+    finishAppearanceIntent(generation);
   }
 }
 
@@ -1320,10 +1493,11 @@ function trustForTheme(theme: ThemeDefinition): AppearanceTrust {
 async function ensureAppearanceThemePackage(
   runtime: AppearanceRuntime,
   theme: ThemeDefinition,
+  generation: number,
 ): Promise<void> {
   const trust = trustForTheme(theme);
   if (trust.class === "environment-palette") {
-    await syncEnvironmentPackages(runtime);
+    await syncEnvironmentPackages(runtime, false, generation);
     return;
   }
   const normalized = webCompiler.normalize(theme, { sourceId: theme.id, trust });
@@ -1336,12 +1510,16 @@ async function ensureAppearanceThemePackage(
       hashNormalizedAppearanceProfile(normalized.profile)
   ) {
     if (!existing.enabled) {
-      const enabled = await runtime.execute({ type: "enable", id: theme.id });
-      if (enabled.status !== "applied") {
+      const enabled = await runtime.execute({
+        type: "enable",
+        id: theme.id,
+        apply: false,
+        generation,
+      });
+      if (enabled.status === "cancelled") return;
+      if (enabled.status === "rejected") {
         throw new Error(
-          enabled.status === "rejected"
-            ? (enabled.diagnostics[0]?.message ?? "Appearance package enable was rejected.")
-            : "Appearance package enable was cancelled.",
+          enabled.diagnostics[0]?.message ?? "Appearance package enable was rejected.",
         );
       }
     }
@@ -1349,19 +1527,34 @@ async function ensureAppearanceThemePackage(
   }
   const result =
     existing === undefined
-      ? await runtime.execute({ type: "install", package: packageInput, activate: false })
-      : await runtime.execute({ type: "update", id: theme.id, package: packageInput });
+      ? await runtime.execute({
+          type: "install",
+          package: packageInput,
+          activate: false,
+          apply: false,
+          generation,
+        })
+      : await runtime.execute({
+          type: "update",
+          id: theme.id,
+          package: packageInput,
+          apply: false,
+          generation,
+        });
+  if (result.status === "cancelled") return;
   if (result.status === "rejected") {
     throw new Error(result.diagnostics[0]?.message ?? "Appearance package update was rejected.");
   }
   if (runtime.getSnapshot().packages[theme.id]?.enabled === false) {
-    const enabled = await runtime.execute({ type: "enable", id: theme.id });
-    if (enabled.status !== "applied") {
-      throw new Error(
-        enabled.status === "rejected"
-          ? (enabled.diagnostics[0]?.message ?? "Appearance package enable was rejected.")
-          : "Appearance package enable was cancelled.",
-      );
+    const enabled = await runtime.execute({
+      type: "enable",
+      id: theme.id,
+      apply: false,
+      generation,
+    });
+    if (enabled.status === "cancelled") return;
+    if (enabled.status === "rejected") {
+      throw new Error(enabled.diagnostics[0]?.message ?? "Appearance package enable was rejected.");
     }
   }
 }
@@ -1371,40 +1564,78 @@ export async function applyAppearanceTheme(
   appearance: ThemeAppearance,
   preferenceMode: "system" | ThemeAppearance = appearance,
   systemThemes?: Readonly<{ light: ThemeDefinition; dark: ThemeDefinition }>,
+  generation: number = allocateAppearanceGeneration(),
 ): Promise<void> {
-  const runtime = await getAppearanceRuntime();
-  const themes = [
-    theme,
-    ...(preferenceMode === "system" && systemThemes !== undefined
-      ? [systemThemes.light, systemThemes.dark]
-      : []),
-  ];
-  for (const candidate of new Map(themes.map((value) => [value.id, value])).values()) {
-    await ensureAppearanceThemePackage(runtime, candidate);
-  }
-  const result = await runtime.execute({
-    type: "preference",
-    preference: {
-      mode: preferenceMode,
-      packageId: theme.id,
-      variantId: appearance,
-      ...(preferenceMode === "system" && systemThemes !== undefined
-        ? {
-            lightPackageId: systemThemes.light.id,
-            darkPackageId: systemThemes.dark.id,
-          }
-        : {}),
-    },
-  });
-  if (result.status === "rejected") {
-    throw new Error(result.diagnostics[0]?.message ?? "Appearance preference was rejected.");
-  }
-  if (preferenceMode === "system") {
-    const refreshed = await runtime.execute({ type: "refresh" });
-    if (refreshed.status === "rejected") {
-      throw new Error(
-        refreshed.diagnostics[0]?.message ?? "System appearance refresh was rejected.",
-      );
+  try {
+    if (generation !== undefined && generation < getLatestAppearanceGeneration()) {
+      return;
     }
+    pendingPreferenceIntent = {
+      generation,
+      preference: {
+        mode: preferenceMode,
+        packageId: theme.id,
+        variantId: appearance,
+        ...(preferenceMode === "system" && systemThemes !== undefined
+          ? {
+              lightPackageId: systemThemes.light.id,
+              darkPackageId: systemThemes.dark.id,
+            }
+          : {}),
+      },
+    };
+    const runtime = await getAppearanceRuntime();
+    if (generation !== undefined && generation < getLatestAppearanceGeneration()) {
+      return;
+    }
+    const themes = [
+      theme,
+      ...(preferenceMode === "system" && systemThemes !== undefined
+        ? [systemThemes.light, systemThemes.dark]
+        : []),
+    ];
+    for (const candidate of new Map(themes.map((value) => [value.id, value])).values()) {
+      if (generation !== undefined && generation < getLatestAppearanceGeneration()) {
+        return;
+      }
+      await ensureAppearanceThemePackage(runtime, candidate, generation);
+    }
+    if (generation !== undefined && generation < getLatestAppearanceGeneration()) {
+      return;
+    }
+    const result = await runtime.execute({
+      type: "preference",
+      preference: {
+        mode: preferenceMode,
+        packageId: theme.id,
+        variantId: appearance,
+        ...(preferenceMode === "system" && systemThemes !== undefined
+          ? {
+              lightPackageId: systemThemes.light.id,
+              darkPackageId: systemThemes.dark.id,
+            }
+          : {}),
+      },
+      ...(generation !== undefined ? { generation } : {}),
+    });
+    if (result.status === "rejected") {
+      throw new Error(result.diagnostics[0]?.message ?? "Appearance preference was rejected.");
+    }
+    if (preferenceMode === "system") {
+      if (generation !== undefined && generation < getLatestAppearanceGeneration()) {
+        return;
+      }
+      const refreshed = await runtime.execute({
+        type: "refresh",
+        ...(generation !== undefined ? { generation } : {}),
+      });
+      if (refreshed.status === "rejected") {
+        throw new Error(
+          refreshed.diagnostics[0]?.message ?? "System appearance refresh was rejected.",
+        );
+      }
+    }
+  } finally {
+    finishAppearanceIntent(generation);
   }
 }

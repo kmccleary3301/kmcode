@@ -41,6 +41,21 @@ adapter boundary. Each instance keeps its configured binary, agent directory, en
 arguments, trust mode, and request limits. A Pi instance never launches the OMP driver, and vice
 versa.
 
+OMP's `agent_end` can yield while retries or background jobs remain pending. Root turns settle
+at `session_settled` or a stream-ordered native idle probe, not when an assistant message ends.
+Native retry and compaction activity invalidates older probes.
+
+Subagent records use native job/activation identity before agent labels. Structured job status and
+`durationMs` take precedence over legacy task-result text. Completion freezes the activation's
+timestamps; a distinct resumed activation can reopen only that logical child. Late deliveries
+remain attached to their originating root even after another root starts.
+
+Shutdown recovery inspects only an already-resident runtime bound to the same run, before closing
+provider sessions. A confirmed settlement preserves the captured native turn boundary and
+conversation head. Unsupported, failed, or busy inspection is not completion proof. A newly resumed
+quiet session cannot prove an older run finished; historical repairs require explicit native
+evidence and user confirmation.
+
 Antigravity separates account profiles per instance while sharing installed executables across the
 environment. It forces file-based credential storage because the native macOS keychain entry would
 otherwise be shared across instances. The launch environment removes ambient Google credentials,

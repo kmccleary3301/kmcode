@@ -138,6 +138,33 @@ describe("thread workflows", () => {
     expect(state.canPromoteToSteer).toBe(true);
   });
 
+  it("offers to skip a running compaction even when the provider cannot steer", () => {
+    const state = deriveThreadQueueWorkflowState({
+      thread: { id: "thread", activeProviderThreadId: null },
+      runs: [
+        {
+          id: "compacting",
+          status: "running",
+          userMessageId: "message-compact",
+          ordinal: 1,
+          activeAttemptId: "attempt-compact",
+        },
+        { id: "queued", status: "queued", userMessageId: "message-queued", ordinal: 2 },
+      ],
+      messages: [
+        { id: "message-compact", text: "/compact", attachments: [] },
+        { id: "message-queued", text: "Continue with the next task." },
+      ],
+      providerTurns: [],
+      providerThreads: [],
+      providerSessions: [],
+    } as never);
+
+    expect(state.promoteSkipsCompaction).toBe(true);
+    expect(state.canPromoteToSteer).toBe(true);
+  });
+
+
   it("keeps held messages visible and clears the hold when they leave the queue", () => {
     for (const status of ["queued", "cancelled", "starting"] as const) {
       const state = deriveThreadQueueWorkflowState({

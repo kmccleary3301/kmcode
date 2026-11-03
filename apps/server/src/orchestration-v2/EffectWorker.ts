@@ -490,6 +490,12 @@ export const layerExecutor: Layer.Layer<
   }),
 );
 
+// A running effect blocks later work on its thread and its lease is never reclaimed in-process,
+// so a stop that hangs must give up and fall through to the normal retry/fail path.
+const DELEGATED_TASKS_STOP_TIMEOUT = Duration.seconds(30);
+
+
+
 export class OrchestrationEffectWorkerError extends Schema.TaggedError<OrchestrationEffectWorkerError>()(
   "OrchestrationEffectWorkerError",
   {
@@ -678,10 +684,28 @@ export const layerWithOptions = (
           }).pipe(Effect.onError((cause) => requeueClaim(effect, cause)));
           if (cancelledBeforeExecution) return true;
 
-          const execution = executor
-            .execute(effect, { willRetry: effect.attemptCount < maxAttempts })
-            .pipe(Effect.as("executed" as const));
-          const exit = yield* Effect.exit(Effect.raceFirst(execution, cancellation)).pipe(
+          const execution = executor.execute(effect, {
+            willRetry: effect.attemptCount < maxAttempts,
+          });
+          const boundedExecution =
+            effect.request.type === "delegated-tasks.stop"
+              ? execution.pipe(
+                  Effect.timeoutOrElse({
+                    duration: DELEGATED_TASKS_STOP_TIMEOUT,
+                    orElse: () =>
+                      Effect.fail(
+                        new OrchestrationEffectExecutionError({
+                          effectId: effect.id,
+                          effectType: effect.request.type,
+                          cause: `Timed out after ${Duration.format(DELEGATED_TASKS_STOP_TIMEOUT)}.`,
+                        }),
+                      ),
+                  }),
+                )
+              : execution;
+          const exit = yield* Effect.exit(
+            Effect.raceFirst(boundedExecution.pipe(Effect.as("executed" as const)), cancellation),
+          ).pipe(
             Effect.ensuring(outbox.clearCancellation(effect.id)),
           );
           if (Exit.isSuccess(exit) && exit.value === "cancelled") {

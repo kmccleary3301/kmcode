@@ -4,6 +4,7 @@ import { ElectronBrowserHost } from "./browser/ElectronBrowserHost";
 import { AppearanceCustomizationManager } from "./components/settings/AppearanceCustomizationManager";
 import { QuitHoldOverlay } from "./components/QuitHoldOverlay";
 import { AppAtomRegistryProvider } from "./rpc/atomRegistry";
+import { PortForwardingCoordinator } from "./components/ports/PortForwardingCoordinator";
 import type { AppRouter } from "./router";
 
 function browserAppearanceRecoveryRequest(): "safe" | "reset" | null {
@@ -66,6 +67,7 @@ export function AppRoot({ router }: { readonly router: AppRouter }) {
       <RouterProvider router={router} />
       <ElectronBrowserHost />
       <QuitHoldOverlay />
+      <PortForwardingCoordinator />
     </AppAtomRegistryProvider>
   );
 }

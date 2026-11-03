@@ -61,6 +61,7 @@ import {
   connectionPhaseDotClassName,
   connectionPhasePingClassName,
 } from "../ConnectionStatusDot";
+import { EnvironmentConnectionDiagnosisDetails } from "../EnvironmentConnectionDiagnosisDetails";
 import {
   isProviderSettingsUpdateCandidate,
   isProviderUpdateActive,
@@ -398,12 +399,10 @@ function ProviderSettingsPanelContent(target: ProviderSettingsTarget) {
                         aria-hidden
                       />
                       <span className="max-w-40 truncate">{environment.label}</span>
-                      {environment.connection.phase !== "connected" ? (
-                        <ConnectionStatusDot
-                          dotClassName={connectionPhaseDotClassName(environment.connection.phase)}
-                          pingClassName={connectionPhasePingClassName(environment.connection.phase)}
-                        />
-                      ) : null}
+                      <ConnectionStatusDot
+                        dotClassName={connectionPhaseDotClassName(environment.connection.phase)}
+                        pingClassName={connectionPhasePingClassName(environment.connection.phase)}
+                      />
                       <span className="sr-only">
                         {detail}, {statusText}
                       </span>
@@ -411,7 +410,15 @@ function ProviderSettingsPanelContent(target: ProviderSettingsTarget) {
                   }
                 />
                 <TooltipPopup side="top">
-                  {detail} · {statusText}
+                  <div className="space-y-2">
+                    <div>
+                      {detail} · {statusText}
+                    </div>
+                    <EnvironmentConnectionDiagnosisDetails
+                      environmentId={environment.environmentId}
+                      label={environment.label}
+                    />
+                  </div>
                 </TooltipPopup>
               </Tooltip>
             );

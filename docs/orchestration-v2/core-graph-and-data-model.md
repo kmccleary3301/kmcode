@@ -200,6 +200,8 @@ type Run = {
     | "rolled_back";
   requestedAt: string;
   startedAt: string | null;
+  /** Native root execution settled; not the checkpoint-backed run completion time. */
+  workCompletedAt?: string;
   completedAt: string | null;
   checkpointId: CheckpointId | null;
   contextHandoffId: ContextHandoffId | null;
@@ -209,6 +211,7 @@ type Run = {
   };
 };
 ```
+`workCompletedAt` marks settlement of the selected root attempt's native execution. It can be durable while the run is still finalizing history, usage, or its checkpoint. `completedAt` remains the later run/checkpoint completion timestamp; child nodes and provider subturns do not set the root milestone.
 
 Only a run with `countsForConversation = true` contributes to the user-visible turn count and checkpoint count.
 

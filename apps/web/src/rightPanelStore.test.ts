@@ -501,6 +501,32 @@ describe("rightPanelStore", () => {
       threadPanelVisibilityByThreadKey: {},
     });
   });
+  it("keeps a persisted ports surface and normalizes duplicate singletons", () => {
+    const panelState = {
+      isOpen: true,
+      activeSurfaceId: "ports",
+      surfaces: [
+        { id: "ports", kind: "ports" as const },
+        { id: "ports", kind: "ports" as const },
+        { id: "diff", kind: "diff" as const },
+      ],
+    };
+    expect(
+      migratePersistedRightPanelState({ byThreadKey: { "env-1:thread-A": panelState } }),
+    ).toEqual({
+      byThreadKey: {
+        "env-1:thread-A": {
+          isOpen: true,
+          activeSurfaceId: "ports",
+          surfaces: [
+            { id: "ports", kind: "ports" },
+            { id: "diff", kind: "diff" },
+          ],
+        },
+      },
+      threadPanelVisibilityByThreadKey: {},
+    });
+  });
 
   it.each([{ kind: "plan", isOpen: true }])(
     "drops $kind with isOpen=$isOpen and falls back",
@@ -648,6 +674,19 @@ describe("rightPanelStore", () => {
       isOpen: true,
       activeSurfaceId: "files",
       surfaces: [{ id: "files", kind: "files" }],
+    });
+  });
+  it("keeps ports as a singleton surface across transitions", () => {
+    useRightPanelStore.getState().open(refA, "ports");
+    useRightPanelStore.getState().open(refA, "diff");
+    useRightPanelStore.getState().open(refA, "ports");
+    expect(selectThreadRightPanelState(useRightPanelStore.getState().byThreadKey, refA)).toEqual({
+      isOpen: true,
+      activeSurfaceId: "ports",
+      surfaces: [
+        { id: "ports", kind: "ports" },
+        { id: "diff", kind: "diff" },
+      ],
     });
   });
 

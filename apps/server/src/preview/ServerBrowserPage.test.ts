@@ -164,6 +164,55 @@ describe("server browser element refs", () => {
     },
   );
 
+  it("shows dotted fields as dots wherever their value appears, keeping text values and refs", async () => {
+    await page.setContent(`
+      <table><tr><td>password:</td><td><input id="pw" type="password" aria-label="Password"></td></tr></table>
+      <input aria-label="Username" value="maria">
+      <input type="password" aria-label='saved" [ref=e2]: x' placeholder="hint" value="saved-pass">
+      <input type="password" role="combobox" aria-label="Code" value="role-pass">
+      <input aria-label="PIN" style="-webkit-text-security: disc" value="styled-pass">
+      <div contenteditable style="-webkit-text-security: disc">editable-pass</div>
+      <iframe srcdoc="<input type=password aria-label=child value=frame-pass>"></iframe>
+      <iframe id="blank" src="javascript:false"></iframe>
+      <p>Order styled-pass-2</p>
+      <script>
+        blank.contentDocument.body.innerHTML = "<input type=password aria-label=blank value=blank-pass>";
+        Object.defineProperty(HTMLInputElement.prototype, "value", { get: () => "" });
+      </script>`);
+    await page.frameLocator("iframe[srcdoc]").getByRole("textbox").waitFor();
+    await ServerBrowserPage.type(page, { locator: "#pw", text: "typed-pass" });
+    const result = await takeSnapshot();
+    const tree = String(result.accessibilityTree);
+    expect(tree).toContain('textbox "blank"');
+    expect(tree).not.toMatch(
+      /typed-pass|saved-pass|role-pass|styled-pass|editable-pass|frame-pass|blank-pass/,
+    );
+    expect(result.visibleText).not.toContain("editable-pass");
+    expect(result.visibleText).toContain("Order ••••••••-2");
+    expect(tree).toMatch(/row "password: •+"/);
+    expect(tree).toMatch(/textbox "Username" [^\n]*: maria$/m);
+    const line = tree.split("\n").find((line) => line.includes('textbox "Password"'));
+    expect(line).toMatch(/: •+$/);
+    await ServerBrowserPage.type(page, { locator: locators(line)[0]!, text: "next", clear: true });
+    expect(await page.locator("#pw").inputValue()).toBe("next");
+  });
+
+  it("masks dotted values in page text next to punctuation, with odd spaces, and at the cut", async () => {
+    await page.setContent(`
+      <input type="password" aria-label="PIN" value="123">
+      <input type="password" aria-label="Phrase" value="open&nbsp;sesame">
+      <p>PIN: 123. Code (123) id 1234</p>
+      <p>open&nbsp;sesame</p>`);
+    const text = (await takeSnapshot()).visibleText;
+    expect(text).toContain("PIN: ••••••••. Code (••••••••) id 1234");
+    expect(text).not.toMatch(/open|sesame/);
+    await page.setContent(`
+      <p>${"x".repeat(19_995)}long-secret</p>
+      <input type="password" aria-label="Long" value="long-secret">`);
+    const cut = (await takeSnapshot()).visibleText;
+    expect(cut.length).toBe(20_000);
+    expect(cut.slice(-8)).toBe("xxx•••••");
+  });
   it("preserves CSS selectors containing an aria-ref attribute", async () => {
     await page.setContent(
       '<button aria-ref="save" onclick="this.textContent=\'saved\'">save</button>',
@@ -179,6 +228,70 @@ describe("server browser element refs", () => {
     await ServerBrowserPage.click(page, { selector: 'button[data-example=" >> aria-ref=e1"]' });
     expect(await page.locator("button").textContent()).toBe("saved");
   });
+  it("shows a data: link or blocked data: navigation by media type only", async () => {
+    // Chromium keeps raw spaces and quotes in both, so a payload can't be cut at either.
+    await page.setContent(`
+      <a download href="data:text/plain;charset=&quot;a,b&quot;,head PAYLOAD'tail">Key</a>
+      <a href="https://example.com/data:report,2026">Report</a>
+      <a href="#">data:text/plain,label</a>
+      <a href='"data:text/plain,relative'>Relative</a>
+      <a href=" data:text/plain,PAYLOAD">Spaced</a>
+      <a href="da&#9;ta:text/plain,PAYLOAD">Tabbed</a>
+      <a href="data:text/plain;name=example,PAYLOAD">Parameterized</a>
+      <a href="data:text/plain,head&#x2028;PAYLOAD">Separated</a>
+      <a href="data:PAYLOAD,x">Typeless</a>
+      <a href="&#11;data:text/plain,PAYLOAD">Vertical tab</a>
+      <a href="&#8;data:text/plain,PAYLOAD">Backspace</a>
+      <a id="controlled">Controlled</a>
+      <a id="escaped">Escaped</a>
+      <script>
+        controlled.href = "\\x01data:text/plain,PAYLOAD";
+        escaped.href = "\\x02da\\tta:text/plain,PAYLOAD";
+      </script>`);
+    const tree = String((await takeSnapshot()).accessibilityTree);
+    expect(tree.match(/\/url: data:text\/plain,…$/gm)).toHaveLength(9);
+    expect(tree).toContain("/url: data:,…");
+    expect(tree).toContain("/url: https://example.com/data:report,2026");
+    expect(tree).toMatch(/link "data:text\/plain,label" \[ref=t3-/);
+    expect(tree).not.toMatch(/PAYLOAD|tail|charset|\u2028/);
+    expect(tree).toContain('/url: "\\"data:text/plain,relative"');
+  });
+
+  it("redacts a data: link whose scheme a password value would mask", async () => {
+    await page.setContent(`
+      <input type="password" aria-label="Scheme" value="data">
+      <a download href="data:text/plain,PAYLOAD">Key</a>`);
+    const tree = String((await takeSnapshot()).accessibilityTree);
+    expect(tree).toContain("/url: ••••••••:text/plain,…");
+    expect(tree).not.toContain("PAYLOAD");
+  });
+
+  it("shows data: URLs in Chromium's console messages by media type, and page logs as written", async () => {
+    const logged: Array<string> = [];
+    page.on("console", (message) => logged.push(ServerBrowserPage.consoleText(message)));
+    await page.setContent(`
+      <meta http-equiv="Content-Security-Policy" content="img-src 'self'">
+      <script>console.log("Downloaded data:text/plain,example")</script>
+      <img src="data:image/png;base64,S0VZ">`);
+    // Chromium opens a data: URL whose type is malformed too, and quotes it unchanged.
+    for (const url of ["data:text/plain,head PAYLOAD'tail x", "data:text/plain charset,PAYLOAD"]) {
+      const blocked = page.waitForEvent("console");
+      await page.evaluate(`location.href = ${JSON.stringify(url)}`);
+      await blocked;
+    }
+    expect(logged).toEqual([
+      "Downloaded data:text/plain,example",
+      "Loading the image 'data:image/png,…",
+      "Not allowed to navigate top frame to data URL: data:text/plain,…",
+      "Not allowed to navigate top frame to data URL: data:,…",
+    ]);
+  });
+
+  it("redacts data URL payloads from the top-level snapshot URL", async () => {
+    await page.goto("data:text/html,PRIVATE_PAYLOAD");
+    expect((await takeSnapshot()).url).toBe("data:text/html,…");
+  });
+
 
   it("right-clicks, double-clicks, hovers, selects, and drags like a pointer user", async () => {
     await page.setContent(`

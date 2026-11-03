@@ -793,10 +793,9 @@ export const make = Effect.gen(function* () {
       }
     });
 
-    // Electron's windowMenu close role owns CmdOrCtrl+W. Holding the
-    // close-terminal shortcut can outlive the terminal that handled its first
-    // press, so reject repeats before they reach the native window accelerator.
-    // Deliberate presses still flow through the renderer or native menu.
+    // CmdOrCtrl+W closes one terminal or tab in the renderer, not the window.
+    // Holding it can outlive the terminal that handled its first press, so
+    // reject repeats before they reach the renderer.
     // Intercept the quit accelerator before the native menu sees it and apply
     // the configured direct, hold, or double-press behavior.
     const quitShortcutHandler = makeQuitShortcutHandler({

@@ -189,10 +189,12 @@ describe("HtmlRender", () => {
         title: "Revenue",
         height: 2_000,
       });
-      const stored = resolveAttachmentPathById({
-        attachmentsDir: config.attachmentsDir,
-        attachmentId: reference.attachmentId,
-      });
+      const stored = yield* Effect.promise(() =>
+        resolveAttachmentPathById({
+          attachmentsDir: config.attachmentsDir,
+          attachmentId: reference.attachmentId,
+        }),
+      );
       expect(stored?.endsWith(".html")).toBe(true);
       const html = yield* fileSystem.readFileString(stored ?? "");
       expect(html).toContain('<style id="t3-theme">');

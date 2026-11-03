@@ -1,0 +1,864 @@
+/* Minimal transcript style: the Cursor / Codex desktop look, shared by Minimal+
+ * and KM, scoped to `.km-transcript` with `data-transcript-style` "minimal",
+ * "minimal-plus" or "km". The prompt is a full-width outlined box; every step
+ * is one line of body-size sans text in two greys (verb lighter, object dimmer)
+ * behind one column of quiet icons (the pixel loader while it runs) and no
+ * timestamps. Minimal opens details on click; Minimal+ and KM also open live
+ * excerpts and subagent progress. Diff counts keep their colour. Motion is the
+ * second block below. */
+.km-transcript:is(
+    [data-transcript-style="minimal"],
+    [data-transcript-style="minimal-plus"],
+    [data-transcript-style="km"]
+  ) {
+  /* The prompt spans the column in a quiet outlined box, not a bubble. */
+  [data-message-role="user"] .group > * {
+    width: 100%;
+    max-width: 100%;
+  }
+  /* The box hangs out by its padding so its text lines up with the steps. */
+  [data-message-role="user"] .bg-message {
+    width: auto;
+    margin-inline: -0.875rem;
+    padding: 0.625rem 0.875rem;
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    background: var(--card);
+    color: var(--foreground);
+  }
+  [data-t3-part="timeline-markdown"] {
+    padding-inline: 0;
+  }
+
+  /* "Worked for 3m 22s ⌄": plain secondary text, no rule, no clock time. */
+  [data-t3-part="timeline-checkpoint"] {
+    border-bottom: 0;
+  }
+  [data-t3-part="timeline-checkpoint"] > button {
+    padding-inline: 0;
+  }
+  [data-t3-part="timeline-checkpoint"] > button,
+  [data-t3-part="timeline-checkpoint"] > button :not(.status-diff-added, .status-diff-removed),
+  .terminal-work-group-label {
+    color: var(--muted-foreground);
+  }
+  :is([data-t3-part="timeline-checkpoint"], [data-t3-part="timeline-tool-call"])
+    [data-slot="tooltip-trigger"].tabular-nums {
+    display: none;
+  }
+
+  /* Every step heading, framed pane or compact line, is one sans line. */
+  .tool-heading {
+    font-family: var(--font-sans);
+    font-size: 0.875rem;
+  }
+  .tool-heading :is(*, code):not(.status-diff-added, .status-diff-removed) {
+    font-family: inherit;
+    font-size: inherit;
+    font-weight: 400;
+  }
+  /* Diff counts and dropped or blocked to-dos keep their colour. */
+  .tool-heading
+    :is(*, code):not(
+      .status-diff-added,
+      .status-diff-removed,
+      .status-failed-mark,
+      .status-blocked-mark
+    ) {
+    color: var(--muted-foreground);
+  }
+  /* Inline code loses its chip; a to-do's strike line is its background. */
+  .tool-heading :is(*, code):not(.status-diff-added, .status-diff-removed, .motion-strike) {
+    background: transparent;
+  }
+  /* Two greys: the verb reads first, the object recedes. Matches the rule
+     above's specificity plus one attribute, so it wins without !important. */
+  .tool-heading
+    :is([data-tool-object], [data-tool-object] *, .tool-heading-details):not(
+      .status-diff-added,
+      .status-diff-removed,
+      .status-failed-mark,
+      .status-blocked-mark
+    ) {
+    color: color-mix(in srgb, var(--muted-foreground) 62%, transparent);
+  }
+  .tool-heading .tool-heading-details {
+    font-size: 0.8125rem;
+  }
+  /* The agent's own words for a step trail its summary after a quiet dot, in
+     the line's sans and a shade under its grey (a step heading's verb grey).
+     The tag says more than a raw command, so the summary's object ellipsizes
+     first; the tag only gives way past three fifths of the line. */
+  .tool-intent-tag {
+    flex: 0 0 auto;
+    max-width: 60%;
+    overflow: hidden;
+    color: color-mix(in srgb, currentColor 80%, transparent);
+    font-family: var(--font-sans);
+    font-weight: 400;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .tool-intent-tag::before {
+    content: "·" / "";
+    margin-inline-end: 0.375rem;
+  }
+  .tool-intent-tag:empty {
+    display: none;
+  }
+  /* One icon column on the prose edge: step, group and thought glyphs share
+     the 1rem gutter at the same weight, start-aligned so narrow glyphs (the
+     failure X, loaders, the avatar) start where the text does. Lines drop the
+     2px hover inset; Minimal never paints a hover box. */
+  :is(.tool-status-gutter, .step-glyph) {
+    color: var(--muted-foreground);
+  }
+  :is(.tool-status-gutter, .step-glyph, .minimal-agents-glyph),
+  :is(.tool-status-gutter, .step-glyph, .minimal-agents-glyph) > span {
+    justify-content: flex-start;
+  }
+  :is(.tool-status-gutter, .step-glyph) svg {
+    width: 0.875rem;
+    height: 0.875rem;
+  }
+  :is(
+    .group\/timeline-row,
+    .tool-io-pane.borderless-step-row .tool-header-disclosure,
+    .tool-compact-line,
+    .minimal-agents-header,
+    [data-t3-part="timeline-status"] > div
+  ) {
+    padding-inline-start: 0;
+  }
+  .tool-io-pane.borderless-step-row .tool-header-disclosure:hover {
+    background: transparent;
+  }
+  .tool-io-pane.borderless-step-row .tool-disclosure-chevron {
+    opacity: 0;
+    transition: opacity 150ms var(--ease-disclosure);
+  }
+  .tool-io-pane.borderless-step-row [data-expanded="true"] .tool-disclosure-chevron,
+  .tool-io-pane.borderless-step-row .tool-header-disclosure:focus-visible .tool-disclosure-chevron {
+    opacity: 1;
+  }
+  @media (hover: hover) and (pointer: fine) {
+    .tool-io-pane.borderless-step-row
+      .tool-header-disclosure:hover
+      .tool-heading
+      :is(*, code):not(.status-diff-added, .status-diff-removed) {
+      color: var(--foreground);
+    }
+    .tool-io-pane.borderless-step-row .tool-header-disclosure:hover .tool-disclosure-chevron {
+      opacity: 1;
+    }
+  }
+  /* Opened output sits flush under the line in a quiet well, without the rail.
+     Wait trees keep their padding: their branches are drawn against it. */
+  .tool-io-pane.borderless-step-row
+    .tool-body
+    .activity-disclosure-content:not(:has(> [data-t3-part="native-wait-tool"]:first-child)) {
+    margin-left: 0;
+    padding: 0.25rem 0 0.5rem;
+    border-left: 0;
+  }
+  .tool-io-pane.borderless-step-row :is(.docs-code-block, .tool-diff, .tool-listing) {
+    border-radius: 6px;
+    background: var(--surface-hover);
+  }
+
+  /* Group and live work lines: the same body-size secondary line. */
+  [data-t3-part="timeline-tool-call"] {
+    font-size: 0.875rem;
+    color: var(--muted-foreground);
+  }
+  [data-t3-part="timeline-tool-call"] :is(svg, .text-icon-muted) {
+    opacity: 0.7;
+  }
+  /* Cursor names the group only; the file preview line under it goes. */
+  .terminal-work-group-label > :nth-child(2) {
+    display: none;
+  }
+  @media (hover: hover) and (pointer: fine) {
+    button[data-t3-part="timeline-tool-call"]:hover {
+      background: transparent;
+      color: var(--foreground);
+    }
+  }
+
+  /* One delegation step sits above a quiet, outlined card with one row per agent. */
+  .minimal-agents-header {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    width: 100%;
+    min-width: 0;
+    min-height: 1.75rem;
+    padding: 0 0.125rem;
+    font-size: 0.875rem;
+    text-align: left;
+    color: var(--muted-foreground);
+  }
+  .minimal-agents-glyph {
+    display: inline-flex;
+    width: 1rem;
+    height: 1rem;
+    flex-shrink: 0;
+    align-items: center;
+    justify-content: center;
+  }
+  .minimal-agents-label {
+    display: inline-flex;
+    min-width: 0;
+    align-items: center;
+    gap: 0.375rem;
+    white-space: nowrap;
+    color: color-mix(in srgb, var(--muted-foreground) 62%, transparent);
+  }
+  .minimal-agents-label > :nth-child(2) {
+    width: 1rem;
+    height: 1rem;
+    flex-shrink: 0;
+    margin: 0;
+    box-shadow: none;
+  }
+  .minimal-agents-names {
+    overflow: hidden;
+    color: var(--muted-foreground);
+    text-overflow: ellipsis;
+  }
+  @media (hover: hover) and (pointer: fine) {
+    .minimal-agents-header:hover :is(.minimal-agents-label, .minimal-agents-names) {
+      color: var(--foreground);
+    }
+  }
+  .minimal-agents-card {
+    margin: 0.25rem 0 0.375rem 1.125rem;
+    border: 1px solid var(--border);
+    border-radius: 10px;
+  }
+  .minimal-agent-row + .minimal-agent-row {
+    border-top: 1px solid color-mix(in srgb, var(--border) 60%, transparent);
+  }
+  .minimal-agent-line {
+    position: relative;
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    width: 100%;
+    min-width: 0;
+    min-height: 1.75rem;
+    padding: 0.4375rem 0.75rem;
+    overflow: clip;
+    font-size: 0.8125rem;
+    text-align: left;
+  }
+  .minimal-agent-main {
+    position: relative;
+    display: flex;
+    min-width: 0;
+    flex: 1 1 auto;
+    align-items: center;
+    gap: 0.5rem;
+    overflow: hidden;
+    padding: 0;
+    text-align: left;
+    background: transparent;
+  }
+  .minimal-agent-provider {
+    display: inline-flex;
+    width: 0.875rem;
+    height: 0.875rem;
+    flex: 0 0 0.875rem;
+    align-items: center;
+    justify-content: center;
+    color: var(--muted-foreground);
+  }
+  .minimal-agent-provider :is(svg, img) {
+    width: 0.875rem;
+    height: 0.875rem;
+  }
+  .minimal-agent-glyph {
+    display: inline-flex;
+    width: 1rem;
+    height: 1rem;
+    flex-shrink: 0;
+    align-items: center;
+    justify-content: center;
+    color: var(--muted-foreground);
+  }
+  .minimal-agent-glyph svg {
+    width: 0.875rem;
+    height: 0.875rem;
+  }
+  .minimal-agent-text {
+    display: flex;
+    min-width: 0;
+    flex: 1 1 auto;
+    gap: 0.375rem;
+    overflow: hidden;
+    white-space: nowrap;
+    color: var(--muted-foreground);
+    font-size: 0.8125rem;
+    font-weight: 400;
+  }
+  [data-settled] .minimal-agent-text {
+    color: var(--foreground);
+  }
+  .minimal-agent-title {
+    min-width: 0;
+    max-width: 60%;
+    flex: 0 0 auto;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    font-weight: 400;
+  }
+  .minimal-agent-activity {
+    min-width: 0;
+    flex: 1 1 auto;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    color: color-mix(in srgb, currentColor 62%, transparent);
+  }
+  .minimal-agent-activity-failed {
+    color: var(--destructive);
+  }
+  .minimal-agent-elapsed {
+    flex-shrink: 0;
+    color: var(--muted-foreground);
+    font-size: 0.75rem;
+    opacity: 0;
+  }
+  .minimal-agent-details-toggle {
+    display: inline-flex;
+    width: 1rem;
+    height: 1.5rem;
+    flex: 0 0 1rem;
+    align-items: center;
+    justify-content: center;
+    padding: 0;
+    color: var(--muted-foreground);
+    opacity: 0.42;
+  }
+  .minimal-agent-details-toggle svg {
+    width: 0.75rem;
+    height: 0.75rem;
+  }
+  .minimal-agent-details-toggle[aria-expanded="true"] svg {
+    transform: rotate(180deg);
+  }
+  .minimal-agent-details-toggle:focus-visible,
+  .minimal-agent-main:focus-visible {
+    outline: 2px solid var(--ring);
+    outline-offset: -2px;
+  }
+  .minimal-agent-line:focus-within .minimal-agent-elapsed,
+  .minimal-agent-line:focus-within .minimal-agent-details-toggle,
+  .minimal-agent-details-toggle[aria-expanded="true"] {
+    opacity: 0.72;
+  }
+  @media (hover: hover) and (pointer: fine) {
+    .minimal-agent-line:hover .minimal-agent-elapsed,
+    .minimal-agent-line:hover .minimal-agent-details-toggle {
+      opacity: 0.72;
+    }
+    .minimal-agent-line:hover .minimal-agent-main {
+      color: var(--foreground);
+    }
+  }
+  .minimal-agent-row .border-t {
+    border-top-width: 0;
+  }
+  .minimal-agent-details .activity-disclosure-content > .minimal-agent-details-content {
+    display: grid;
+    min-width: 0;
+    gap: 0.375rem;
+    margin: 0;
+    padding: 0 0.75rem 0.625rem 2.25rem;
+    border-left-width: 0;
+    color: var(--muted-foreground);
+    font-size: 0.8125rem;
+    line-height: 1.35;
+  }
+  .minimal-agent-details-has-provider .activity-disclosure-content > .minimal-agent-details-content {
+    padding-left: 3.625rem;
+  }
+  .minimal-agent-details-content .subagent-details-task {
+    min-width: 0;
+    max-height: 5.4em;
+    overflow: hidden;
+  }
+  .minimal-agent-details-content .subagent-details-task[data-truncated] {
+    -webkit-mask-image: linear-gradient(to bottom, #000 0%, #000 70%, transparent 100%);
+    mask-image: linear-gradient(to bottom, #000 0%, #000 70%, transparent 100%);
+  }
+  .minimal-agent-details-content :is(.subagent-details-task, .subagent-details-live, [data-subagent-result]) {
+    min-width: 0;
+    font-size: 0.8125rem;
+    line-height: 1.35;
+  }
+  .minimal-agent-details-content :is(.subagent-details-task, .subagent-details-live, [data-subagent-result]) .markdown-renderer > :first-child {
+    margin-top: 0;
+  }
+  .minimal-agent-details-content :is(.subagent-details-task, .subagent-details-live, [data-subagent-result]) .markdown-renderer > :last-child {
+    margin-bottom: 0;
+  }
+  .minimal-agent-details-content .subagent-details-step {
+    display: flex;
+    min-width: 0;
+    align-items: flex-start;
+    gap: 0.375rem;
+    margin: 0;
+    color: var(--muted-foreground);
+    font-size: 0.75rem;
+    line-height: 1.35;
+  }
+  .minimal-agent-details-content .subagent-details-step-glyph {
+    display: inline-flex;
+    flex: 0 0 0.875rem;
+    align-items: center;
+    color: var(--muted-foreground);
+    font-size: 0.6875rem;
+  }
+  .minimal-agent-details-content .subagent-details-step .font-mono {
+    min-width: 0;
+    overflow-wrap: anywhere;
+  }
+  .minimal-agent-details-content .minimal-agent-details-footer {
+    display: flex;
+    min-width: 0;
+    align-items: baseline;
+    gap: 0.5rem;
+    color: var(--muted-foreground);
+    font-size: 0.75rem;
+    line-height: 1.3;
+  }
+  .minimal-agent-details-content .minimal-agent-details-thread-link {
+    flex: 0 0 auto;
+    margin-left: auto;
+    padding: 0;
+    color: color-mix(in srgb, var(--muted-foreground) 78%, transparent);
+    white-space: nowrap;
+  }
+  .minimal-agent-details-content .minimal-agent-details-thread-link:hover {
+    color: var(--foreground);
+  }
+}
+
+.km-transcript:is(
+    [data-transcript-style="minimal"],
+    [data-transcript-style="minimal-plus"],
+    [data-transcript-style="km"]
+  ) {
+  [data-user-message-folded-header] {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    width: 100%;
+    min-width: 0;
+    min-height: 1.75rem;
+    padding: 0 0.125rem;
+    border: 0;
+    background: transparent;
+    color: var(--muted-foreground);
+    font-size: 0.875rem;
+    font-weight: 400;
+    text-align: left;
+  }
+  [data-user-message-folded-header]:hover {
+    background: transparent;
+  }
+  .user-message-folded-icon {
+    display: inline-flex;
+    width: 1rem;
+    height: 1rem;
+    flex-shrink: 0;
+    align-items: center;
+    color: var(--muted-foreground);
+  }
+  .user-message-folded-icon svg {
+    width: 0.875rem;
+    height: 0.875rem;
+    opacity: 0.7;
+  }
+  .user-message-folded-label {
+    min-width: 0;
+    max-width: 36%;
+    overflow: hidden;
+    flex-shrink: 1;
+    color: color-mix(in srgb, var(--muted-foreground) 62%, transparent);
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .user-message-folded-separator {
+    flex-shrink: 0;
+    color: color-mix(in srgb, var(--muted-foreground) 62%, transparent);
+  }
+  .user-message-folded-summary {
+    min-width: 0;
+    overflow: hidden;
+    flex: 1;
+    color: var(--muted-foreground);
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .user-message-folded-chevron {
+    flex-shrink: 0;
+    color: var(--muted-foreground);
+    opacity: 0.7;
+  }
+}
+
+/* Motion, measured frame by frame from the reference recording and fit to its
+ * curves (nearly all of them --ease-disclosure at different lengths). Things
+ * arrive out of a blur, changed words roll (RollingText: the old word leaves
+ * up fast, the new one rises in slower, both clipped to the line), changed
+ * digits spin, the live line carries a dark band that sweeps back and forth,
+ * and a running step shows the pixel loader. Reduced motion keeps the fades only. */
+.km-transcript:is(
+    [data-transcript-style="minimal"],
+    [data-transcript-style="minimal-plus"],
+    [data-transcript-style="km"]
+  ) {
+  .messages-timeline-row-frame:is([data-arriving], [data-sent]) > .chat-content-lane,
+  .tool-io-pane.step-row-enter,
+  :is(.motion-enter, [data-motion-enter]) {
+    animation: minimal-enter 335ms var(--ease-disclosure);
+  }
+  /* An arriving row eases in once; rows inside it do not repeat the fade. */
+  .messages-timeline-row-frame:is([data-arriving], [data-sent])
+    :is(.tool-io-pane.step-row-enter, .motion-enter, [data-motion-enter]) {
+    animation: none;
+  }
+  /* A glyph or line that changed (ring to check, an agent's next action)
+     crossfades out of a blur in place, as the recording's subtask lines do. */
+  :is(.motion-swap, .motion-swap-text) {
+    animation: minimal-swap 300ms var(--ease-disclosure);
+  }
+  /* A block that leaves blurs out fast in place (about 120ms in the
+     recording) while its height closes on the usual curve. */
+  .messages-timeline-row-frame[data-exiting] {
+    filter: blur(4px);
+    transition:
+      opacity 130ms var(--ease-disclosure),
+      filter 130ms var(--ease-disclosure);
+  }
+  [data-streaming] .stream-word {
+    animation: minimal-word-in 280ms cubic-bezier(0.33, 1, 0.68, 1);
+  }
+
+  /* Status glyphs crossfade out of a blur: the loader blurs away in place as
+     the step's icon resolves behind it. */
+  .glyph-swap-in {
+    animation-name: minimal-glyph-swap-in;
+  }
+  .glyph-swap-out {
+    animation-name: minimal-glyph-swap-out;
+  }
+
+  /* An agent's line rolls when it finishes (about 0.2s in the recording):
+     the working line leaves up into a blur while its loader fades in place,
+     the finished line rises from below, and the check fades in once the
+     loader has gone. */
+  .minimal-agent-roll-in {
+    animation: minimal-line-in 300ms var(--ease-disclosure);
+  }
+  .minimal-agent-glyph-in {
+    animation: minimal-glyph-in 240ms var(--ease-disclosure);
+  }
+  .minimal-agent-leaving {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    padding: inherit;
+    visibility: hidden;
+    pointer-events: none;
+  }
+  .minimal-agent-leaving > .minimal-agent-glyph {
+    animation: minimal-glyph-out 90ms var(--ease-disclosure);
+  }
+  .minimal-agent-leaving > .minimal-agent-text {
+    animation: minimal-line-out 120ms var(--ease-disclosure);
+  }
+  /* The card fades and lifts as its disclosure height closes. */
+  .minimal-agents-card {
+    transform: translateY(0);
+    transition:
+      opacity 300ms var(--ease-disclosure),
+      transform 300ms var(--ease-disclosure);
+  }
+  .activity-disclosure-panel:not([data-open])
+    > .activity-disclosure-inner
+    > *
+    > .minimal-agents-card {
+    opacity: 0;
+    transform: translateY(-0.125rem);
+    transition-duration: 130ms;
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .minimal-agents-card {
+      transition: none;
+    }
+  }
+
+  @media (prefers-reduced-motion: no-preference) and (forced-colors: none) {
+    /* A live line that rolls or swaps in keeps its band: an element runs one
+       animation list, so the entrance is listed beside the shine. */
+    .cursor-subagent-shimmer.minimal-agent-roll-in {
+      animation:
+        minimal-line-in 300ms var(--ease-disclosure),
+        minimal-shine 1.83s linear infinite alternate;
+      animation-play-state: running, var(--visible-animation-state, paused);
+    }
+    .cursor-subagent-shimmer.motion-swap-text {
+      animation:
+        minimal-swap 300ms var(--ease-disclosure),
+        minimal-shine 1.83s linear infinite alternate;
+      animation-play-state: running, var(--visible-animation-state, paused);
+    }
+    /* The band lights the whole line, so the line's own greys step aside. */
+    .tool-io-pane.borderless-step-row
+      .tool-heading
+      .live-tool-shine
+      :is(*, code):not(.status-diff-added, .status-diff-removed) {
+      color: var(--foreground);
+    }
+  }
+}
+/* RollingText's parts, in the transcript and in surfaces outside it that
+   roll their live lines the same way (the composer's agent list). */
+:is(
+    .km-transcript:is(
+        [data-transcript-style="minimal"],
+        [data-transcript-style="minimal-plus"],
+        [data-transcript-style="km"]
+      ),
+    [data-rolling-text]
+  ) {
+  .roll-slot {
+    position: relative;
+    display: inline-block;
+    vertical-align: top;
+    overflow-y: clip;
+  }
+  /* Inline blocks drop a leading space unless told to keep it (" for 3.9s"),
+     and some rows set nowrap on every descendant. */
+  :is(.roll-slot, .roll-slot > *, .roll-suffix) {
+    white-space: pre;
+  }
+  .roll-in {
+    display: inline-block;
+    animation: minimal-roll-in 450ms var(--ease-disclosure);
+  }
+  .roll-out {
+    position: absolute;
+    inset-block-start: 0;
+    inset-inline-start: 0;
+    opacity: 0;
+    visibility: hidden;
+    pointer-events: none;
+    animation: minimal-roll-out 120ms var(--ease-disclosure);
+  }
+  /* Their own boxes, so they can glide by the width a roll changed: inline
+     spans ignore transforms. */
+  :is(.roll-suffix, .status-diff-added, .status-diff-removed) {
+    display: inline-block;
+  }
+  .digit-roll {
+    display: inline-block;
+    vertical-align: top;
+    height: 1lh;
+    overflow: clip;
+  }
+  .digit-roll-column {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+  }
+  .digit-roll-column > span {
+    height: 1lh;
+  }
+  /* At rest the column shows the new digit; the spin starts from the old one. */
+  .digit-roll[data-direction="up"] .digit-roll-column {
+    transform: translateY(-50%);
+    animation: minimal-digit-up 540ms var(--ease-disclosure);
+  }
+  .digit-roll[data-direction="down"] .digit-roll-column {
+    animation: minimal-digit-down 540ms var(--ease-disclosure);
+  }
+}
+/* Shared minimal-style text sweep for live transcript and sidebar labels. */
+@media (prefers-reduced-motion: no-preference) and (forced-colors: none) {
+  .minimal-text-shimmer,
+  .km-transcript:is(
+      [data-transcript-style="minimal"],
+      [data-transcript-style="minimal-plus"],
+      [data-transcript-style="km"]
+    )
+    :is(.live-tool-shine, .cursor-subagent-shimmer) {
+    -webkit-text-fill-color: currentColor;
+    background-image: none;
+    mask-image: linear-gradient(
+      90deg,
+      rgb(0 0 0 / 0.55) calc(50% - 2rem),
+      #000 50%,
+      rgb(0 0 0 / 0.55) calc(50% + 2rem)
+    );
+    mask-size: calc(100% + 40rem) 100%;
+    mask-repeat: no-repeat;
+    animation: minimal-shine 1.83s linear infinite alternate;
+    animation-play-state: var(--visible-animation-state, paused);
+  }
+  .km-transcript:is(
+      [data-transcript-style="minimal"],
+      [data-transcript-style="minimal-plus"],
+      [data-transcript-style="km"]
+    )
+    :is(.live-tool-shine, .cursor-subagent-shimmer) {
+    color: var(--foreground);
+  }
+}
+@keyframes minimal-enter {
+  from {
+    opacity: 0;
+    filter: blur(4px);
+    transform: translateY(2px);
+  }
+}
+@keyframes minimal-swap {
+  from {
+    opacity: 0;
+    filter: blur(3px);
+  }
+}
+@keyframes minimal-word-in {
+  from {
+    opacity: 0;
+    filter: blur(2px);
+  }
+}
+@keyframes minimal-roll-in {
+  from {
+    opacity: 0;
+    filter: blur(0.42em);
+    transform: translateY(1.2em);
+  }
+}
+@keyframes minimal-roll-out {
+  from {
+    opacity: 1;
+    visibility: visible;
+  }
+  to {
+    opacity: 0;
+    filter: blur(0.42em);
+    transform: translateY(-0.65em);
+  }
+}
+@keyframes minimal-digit-up {
+  from {
+    transform: translateY(0);
+  }
+}
+@keyframes minimal-digit-down {
+  from {
+    transform: translateY(-50%);
+  }
+}
+@keyframes minimal-glyph-swap-in {
+  0%,
+  20% {
+    opacity: 0;
+    filter: blur(3px);
+    transform: scale(0.85);
+  }
+}
+@keyframes minimal-glyph-swap-out {
+  to {
+    opacity: 0;
+    filter: blur(3px);
+    transform: scale(0.85);
+  }
+}
+@keyframes minimal-line-in {
+  from {
+    opacity: 0;
+    filter: blur(0.3em);
+    transform: translateY(0.5em);
+  }
+}
+@keyframes minimal-line-out {
+  from {
+    opacity: 1;
+    visibility: visible;
+  }
+  to {
+    opacity: 0;
+    filter: blur(0.3em);
+    transform: translateY(-0.4em);
+  }
+}
+@keyframes minimal-glyph-in {
+  0%,
+  35% {
+    opacity: 0;
+  }
+}
+@keyframes minimal-glyph-out {
+  from {
+    opacity: 1;
+    visibility: visible;
+  }
+  to {
+    opacity: 0;
+  }
+}
+@keyframes minimal-shine {
+  from {
+    mask-position: 100% 0;
+  }
+  to {
+    mask-position: 0% 0;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .km-transcript:is(
+      [data-transcript-style="minimal"],
+      [data-transcript-style="minimal-plus"],
+      [data-transcript-style="km"]
+    ) {
+    .messages-timeline-row-frame:is([data-arriving], [data-sent]) > .chat-content-lane,
+    .tool-io-pane.step-row-enter,
+    :is(.motion-enter, [data-motion-enter], .motion-swap, .motion-swap-text),
+    .minimal-agent-roll-in,
+    .minimal-agent-glyph-in,
+    [data-streaming] .stream-word {
+      animation: motion-fade var(--motion-duration) ease-out !important;
+    }
+    .minimal-agent-leaving {
+      display: none;
+    }
+    :is(.messages-timeline-row-frame[data-exiting], .minimal-agents-card) {
+      filter: none !important;
+    }
+  }
+  :is(
+      .km-transcript:is(
+          [data-transcript-style="minimal"],
+          [data-transcript-style="minimal-plus"],
+          [data-transcript-style="km"]
+        ),
+      [data-rolling-text]
+    ) {
+    .roll-in {
+      animation: motion-fade var(--motion-duration) ease-out !important;
+    }
+    .roll-out {
+      display: none;
+    }
+    .digit-roll-column {
+      animation: none !important;
+    }
+  }
+}

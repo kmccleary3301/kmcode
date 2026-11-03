@@ -80,11 +80,18 @@ export interface ParsedActivityDetail {
   readonly sections: ReadonlyArray<ActivityDetailSection>;
 }
 
+export type ActivityToolFamily = "command" | "read" | "search" | "write" | "diff" | "unknown";
+
+export interface ActivityToolPreview {
+  readonly label: string;
+  readonly text: string;
+}
+
 export interface ActivityToolPresentation {
   readonly toolName: string;
+  readonly family: ActivityToolFamily;
   readonly intent: string | undefined;
   readonly summary: string | undefined;
-  readonly inputText: string | null;
 }
 
 type JsonRecord = Record<string, unknown>;
@@ -302,8 +309,11 @@ function plainPreviewText(value: string): string {
 }
 
 function compactPreview(value: string, maxLength = 140): string {
-  const plain = plainPreviewText(value);
-  return plain.length <= maxLength ? plain : `${plain.slice(0, maxLength - 1)}…`;
+  const source = value.length > maxLength ? value.slice(0, maxLength) : value;
+  const plain = plainPreviewText(source);
+  if (!plain) return "";
+  if (value.length <= maxLength && plain.length <= maxLength) return plain;
+  return `${plain.slice(0, maxLength - 1)}…`;
 }
 
 function languageFromPath(path: string | null): string | null {
@@ -477,16 +487,42 @@ function parseEvalCells(args: JsonRecord | null, toolName: string): ReadonlyArra
   return [];
 }
 
+/** A statement that loads a file: the `read` helper, `open(…).read()`, `read_text()`, `readFile*`, `Bun.file(…).text()`. */
+const FILE_READ_STATEMENT =
+  /\b(?:read|read_text|readFile|readFileSync)\s*\(|\bopen\s*\([^)]*\)\s*\.read\s*\(|\bBun\.file\s*\([^)]*\)\s*\.(?:text|json)\s*\(/;
+/** A statement that only shows a value. */
+const OUTPUT_STATEMENT = /^(?:print|console\.log|display)\s*\(/;
+
+/**
+ * What a code-cell tool (eval, js, py, notebook) does: `"file-read"` when every
+ * statement loads a file or prints a value, `"code"` otherwise. `null` for other tools.
+ */
+export function codeCellKind(toolName: string, rawInput: unknown): "file-read" | "code" | null {
+  if (EVAL_TOOL_NAMES[toolName.trim().toLowerCase()] !== true) return null;
+  const statements = parseEvalCells(asRecord(parsedArgumentValue(rawInput)), toolName)
+    .flatMap((cell) => cell.code.split("\n"))
+    .map((line) => line.trim())
+    .filter((line) => line && !line.startsWith("#") && !line.startsWith("//"));
+  const readsFile = statements.some((line) => FILE_READ_STATEMENT.test(line));
+  return readsFile &&
+    statements.every((line) => FILE_READ_STATEMENT.test(line) || OUTPUT_STATEMENT.test(line))
+    ? "file-read"
+    : "code";
+}
+
 function toolIntent(toolName: string, args: JsonRecord | null): string | undefined {
   if (args !== null) {
     for (const key of ["i", "_i", "description"]) {
-      const value = asNonEmptyString(args[key]);
-      if (value !== null) return plainPreviewText(value);
+      const value = args[key];
+      if (typeof value === "string") {
+        const intent = compactPreview(value);
+        if (intent) return intent;
+      }
     }
   }
   if (EVAL_TOOL_NAMES[toolName.toLowerCase()] === true) {
     const title = parseEvalCells(args, toolName).find((cell) => cell.title?.trim())?.title;
-    if (title) return plainPreviewText(title);
+    if (title) return compactPreview(title);
   }
   return undefined;
 }
@@ -497,6 +533,12 @@ const READ_TOOL_NAMES: Record<string, true> = {
   cat: true,
   show: true,
   file_read: true,
+};
+const SEARCH_TOOL_NAMES: Record<string, true> = {
+  file_search: true,
+  glob: true,
+  grep: true,
+  web_search: true,
 };
 const EDIT_FAMILY_TOOLS: Record<string, true> = {
   edit: true,
@@ -519,6 +561,75 @@ function isCommandTool(toolName: string): boolean {
   );
 }
 
+function activityToolFamily(toolName: string): ActivityToolFamily {
+  const name = toolName.toLowerCase();
+  if (isCommandTool(name)) return "command";
+  if (READ_TOOL_NAMES[name] === true) return "read";
+  if (SEARCH_TOOL_NAMES[name] === true || name.includes("search")) return "search";
+  if (name === "write" || name.includes("write")) return "write";
+  if (EDIT_FAMILY_TOOLS[name] === true || name === "diff") return "diff";
+  return "unknown";
+}
+
+const TOOL_PRESENTATION_INPUT_KEYS = [
+  "i",
+  "_i",
+  "description",
+  "command",
+  "cmd",
+  "path",
+  "file_path",
+  "file",
+  "filename",
+  "sel",
+  "url",
+  "pattern",
+  "glob",
+  "query",
+  "regex",
+  "cwd",
+  "directory",
+  "input",
+  "_input",
+  "patch",
+  "patterns",
+  "queries",
+  "cells",
+  "timeoutMs",
+  "timeoutSeconds",
+  "timeout",
+  "limit",
+  "offset",
+  "count",
+] as const;
+
+function toolPresentationInput(rawInput: unknown): unknown {
+  if (typeof rawInput === "string") {
+    return rawInput.length <= 4_096 ? parsedArgumentValue(rawInput) : rawInput.slice(0, 240);
+  }
+  const input = asRecord(rawInput);
+  if (input === null) return rawInput;
+  const preview: JsonRecord = {};
+  for (const key of TOOL_PRESENTATION_INPUT_KEYS) {
+    const value = input[key];
+    if (typeof value === "string") preview[key] = value.slice(0, 240);
+    else if (typeof value === "number" || typeof value === "boolean" || value === null) {
+      preview[key] = value;
+    } else if ((key === "patterns" || key === "queries") && Array.isArray(value)) {
+      preview[key] = value
+        .slice(0, 2)
+        .map((entry) => (typeof entry === "string" ? entry.slice(0, 160) : null));
+    } else if (key === "cells" && Array.isArray(value)) {
+      preview.cells = value.slice(0, 2).flatMap((entry) => {
+        const cell = asRecord(entry);
+        const title = firstString(cell, ["title", "name", "description"]);
+        return title === null ? [] : [{ title: title.slice(0, 160) }];
+      });
+    }
+  }
+  return preview;
+}
+
 function pathSelector(args: JsonRecord | null): string {
   const path = argText(args, "path", "file_path", "file", "filename") ?? "";
   const selector = argText(args, "sel");
@@ -534,6 +645,7 @@ function patchTarget(input: string): string | null {
 
 function toolTarget(toolName: string, args: JsonRecord | null): string {
   const name = toolName.toLowerCase();
+  if (isCommandTool(name)) return argText(args, "command", "cmd") ?? "";
   if (READ_TOOL_NAMES[name] === true) {
     return pathSelector(args) || argText(args, "url") || "";
   }
@@ -547,6 +659,18 @@ function toolTarget(toolName: string, args: JsonRecord | null): string {
     const target = argText(args, "path", "file_path", "file", "cwd", "directory") ?? "";
     return [query, target].filter((value) => value.length > 0).join(" · ");
   }
+  if (name === "file_search") return argText(args, "pattern", "query", "regex") ?? "";
+  if (name === "web_search") {
+    const query = argText(args, "query", "pattern") ?? "";
+    if (query) return query;
+    const patterns = args?.patterns;
+    return Array.isArray(patterns)
+      ? patterns
+          .slice(0, 2)
+          .filter((value): value is string => typeof value === "string")
+          .join(" · ")
+      : "";
+  }
   if (name === "write") return pathSelector(args);
   if (EDIT_FAMILY_TOOLS[name] === true) {
     return pathSelector(args) || patchTarget(argText(args, "input", "_input", "patch") ?? "") || "";
@@ -557,9 +681,9 @@ function toolTarget(toolName: string, args: JsonRecord | null): string {
 function toolTargetSummary(toolName: string, args: JsonRecord | null): string | undefined {
   if (args === null) return undefined;
   const name = toolName.toLowerCase();
-  if (EVAL_TOOL_NAMES[name] === true || isCommandTool(name)) return undefined;
+  if (EVAL_TOOL_NAMES[name] === true) return undefined;
   const target = toolTarget(name, args);
-  return target || undefined;
+  return target ? compactPreview(target, 180) || undefined : undefined;
 }
 
 export function parseActivityToolPresentation(
@@ -568,13 +692,13 @@ export function parseActivityToolPresentation(
 ): ActivityToolPresentation {
   const data = asRecord(rawData);
   const item = asRecord(data?.item) ?? data;
-  const input =
+  const rawInput =
     item?.input ??
     item?.arguments ??
     data?.input ??
     data?.arguments ??
     (item?.command !== undefined ? { command: item.command } : undefined);
-  const parsedInput = parsedArgumentValue(input);
+  const parsedInput = toolPresentationInput(rawInput);
   const args = asRecord(parsedInput);
   const toolName =
     firstString(item, ["name", "tool", "toolName"]) ??
@@ -583,9 +707,9 @@ export function parseActivityToolPresentation(
     "tool";
   return {
     toolName,
+    family: activityToolFamily(toolName),
     intent: toolIntent(toolName, args),
     summary: toolTargetSummary(toolName, args),
-    inputText: input === undefined ? null : stringifyValue(parsedInput),
   };
 }
 
@@ -1592,8 +1716,249 @@ export function formatActivityDetailValue(block: ActivityDetailBlock): string {
       return block.raw;
   }
 }
+interface ActivityToolResultSource {
+  readonly item: JsonRecord;
+  readonly result: unknown;
+}
 
-export function parseActivityDetail(activity: ActivityDetailInput): ParsedActivityDetail {
+function activityToolResultSource(activity: ActivityDetailInput): ActivityToolResultSource | null {
+  const activityRecord = asRecord(activity);
+  const unwrapped =
+    activityRecord !== null &&
+    activityRecord.item !== undefined &&
+    activityRecord.visibility !== undefined
+      ? activityRecord.item
+      : activity;
+  const directRecord = asRecord(unwrapped);
+  if (directRecord === null) return null;
+
+  if (directRecord.type === "command_execution") {
+    return { item: directRecord, result: directRecord.output };
+  }
+  if (directRecord.type === "dynamic_tool") {
+    return { item: directRecord, result: directRecord.output };
+  }
+  if (directRecord.type === "file_change") {
+    return {
+      item: directRecord,
+      result: directRecord.diffStr ?? directRecord.result ?? directRecord.changes,
+    };
+  }
+  if (directRecord.type === "file_search" || directRecord.type === "web_search") {
+    return { item: directRecord, result: directRecord.results };
+  }
+  if (directRecord.type === "subagent") {
+    const liveContent = asRecord(directRecord.liveContent);
+    return {
+      item: directRecord,
+      result: directRecord.result ?? directRecord.progress ?? liveContent?.text,
+    };
+  }
+
+  const payload = asRecord(directRecord.payload);
+  const data = asRecord(payload?.data);
+  const item = asRecord(data?.item) ?? data ?? directRecord;
+  return {
+    item,
+    result:
+      item.result ??
+      item.output ??
+      data?.result ??
+      data?.rawOutput ??
+      directRecord.output ??
+      directRecord.result,
+  };
+}
+
+function boundedTextPreview(value: string, maxCharacters = 220, maxLines = 3): string {
+  const prefix = value.slice(0, maxCharacters);
+  let end = prefix.length;
+  let lineStart = 0;
+  for (let line = 0; line < maxLines; line++) {
+    const lineEnd = prefix.indexOf("\n", lineStart);
+    if (lineEnd < 0) break;
+    if (line === maxLines - 1) {
+      end = lineEnd;
+      break;
+    }
+    lineStart = lineEnd + 1;
+  }
+  const truncated = end < value.length;
+  const preview = prefix.slice(0, end).replace(/\r/g, "").trim();
+  return preview ? `${preview}${truncated ? "…" : ""}` : "";
+}
+
+function firstResultText(value: unknown, depth = 0): string | null {
+  if (depth > 4) return null;
+  if (typeof value === "string") return value;
+  if (Array.isArray(value)) {
+    const previews: string[] = [];
+    for (let index = 0; index < Math.min(value.length, 3); index++) {
+      const text = firstResultText(value[index], depth + 1);
+      if (text !== null) {
+        const preview = boundedTextPreview(text, 72, 1);
+        if (preview) previews.push(preview);
+      }
+    }
+    return previews.length > 0 ? previews.join("\n") : null;
+  }
+  const record = asRecord(value);
+  if (record === null) return null;
+  for (const key of [
+    "displayContent",
+    "errorText",
+    "displayErrorText",
+    "error",
+    "message",
+    "stderr",
+    "text",
+    "diff",
+    "perFileResults",
+    "details",
+    "content",
+    "output",
+    "result",
+  ]) {
+    const nested = record[key];
+    if (typeof nested === "string") return nested;
+    if (nested !== undefined && nested !== null) {
+      const text = firstResultText(nested, depth + 1);
+      if (text !== null) return text;
+    }
+  }
+  return null;
+}
+
+function searchResultsPreview(item: JsonRecord): string | null {
+  if ((item.type !== "file_search" && item.type !== "web_search") || !Array.isArray(item.results)) {
+    return null;
+  }
+  if (item.results.length === 0) return item.status === "completed" ? "No results" : null;
+  const lines: string[] = [];
+  for (let index = 0; index < Math.min(item.results.length, 2); index++) {
+    const result = asRecord(item.results[index]);
+    if (result === null) continue;
+    if (item.type === "file_search") {
+      const fileName = typeof result.fileName === "string" ? result.fileName : "";
+      const line = typeof result.line === "number" ? `:${result.line}` : "";
+      const snippet =
+        typeof result.preview === "string" ? boundedTextPreview(result.preview, 90, 1) : "";
+      const location = fileName ? `${compactPreview(fileName, 80)}${line}` : "";
+      const summary = [location, snippet].filter(Boolean).join(": ");
+      if (summary) lines.push(summary);
+    } else {
+      const title = typeof result.title === "string" ? compactPreview(result.title, 90) : "";
+      const url = typeof result.url === "string" ? compactPreview(result.url, 90) : "";
+      const snippet =
+        typeof result.snippet === "string" ? boundedTextPreview(result.snippet, 90, 1) : "";
+      const summary = [title || url, snippet].filter(Boolean).join(" — ");
+      if (summary) lines.push(summary);
+    }
+  }
+  return boundedTextPreview(lines.join("\n")) || (lines.length === 0 ? "No results" : null);
+}
+
+function fileChangePreview(item: JsonRecord): string | null {
+  if (item.type !== "file_change" || !Array.isArray(item.changes)) return null;
+  const lines: string[] = [];
+  for (let index = 0; index < Math.min(item.changes.length, 2); index++) {
+    const change = asRecord(item.changes[index]);
+    if (change === null) continue;
+    const operation =
+      typeof change.operation === "string" ? compactPreview(change.operation, 60) : "";
+    const path = typeof change.path === "string" ? compactPreview(change.path, 120) : "";
+    const summary = [operation, path].filter(Boolean).join(" ");
+    if (summary) lines.push(summary);
+  }
+  return lines.length > 0
+    ? boundedTextPreview(lines.join("\n"))
+    : item.changes.length === 0
+      ? "No file changes"
+      : null;
+}
+
+function diffTextPreview(value: string): string {
+  const prefix = value.slice(0, 4_096);
+  const changes: string[] = [];
+  let cursor = 0;
+  while (cursor < prefix.length && changes.length < 3) {
+    const lineEnd = prefix.indexOf("\n", cursor);
+    const end = lineEnd < 0 ? prefix.length : lineEnd;
+    const line = prefix.slice(cursor, end);
+    if (
+      (line.startsWith("+") && !line.startsWith("+++")) ||
+      (line.startsWith("-") && !line.startsWith("---"))
+    ) {
+      changes.push(line.slice(0, 180));
+    }
+    if (lineEnd < 0) break;
+    cursor = lineEnd + 1;
+  }
+  return boundedTextPreview(changes.length > 0 ? changes.join("\n") : prefix);
+}
+
+function structuredResultPreview(value: unknown): string | null {
+  if (value === null) return "null";
+  if (typeof value === "string") return boundedTextPreview(value);
+  if (typeof value === "number" || typeof value === "boolean") return String(value);
+  if (Array.isArray(value)) return value.length === 0 ? "No results" : `${value.length} items`;
+  const record = asRecord(value);
+  if (record === null) return null;
+  const entries: string[] = [];
+  let hasMore = false;
+  for (const key in record) {
+    if (!Object.hasOwn(record, key) || key === "isError" || key === "is_error") continue;
+    if (entries.length === 3) {
+      hasMore = true;
+      break;
+    }
+    const nested = record[key];
+    let summary: string;
+    if (typeof nested === "string") summary = boundedTextPreview(nested, 72, 1);
+    else if (nested === null || typeof nested === "number" || typeof nested === "boolean") {
+      summary = String(nested);
+    } else if (Array.isArray(nested)) summary = `${nested.length} items`;
+    else summary = "Object";
+    entries.push(`${key.slice(0, 48)}: ${summary}`);
+  }
+  if (hasMore) entries.push("…");
+  return entries.length > 0 ? boundedTextPreview(entries.join("\n")) : "Structured result";
+}
+
+export function activityToolResultPreview(
+  activity: ActivityDetailInput,
+  family: ActivityToolFamily,
+): ActivityToolPreview | null {
+  const source = activityToolResultSource(activity);
+  if (source === null || source.result === undefined) return null;
+  let text: string | null = null;
+  if (family === "search") text = searchResultsPreview(source.item);
+  if (text === null && family === "diff") text = fileChangePreview(source.item);
+  if (text === null) {
+    const rawText = firstResultText(source.result);
+    if (rawText !== null) {
+      text = family === "diff" ? diffTextPreview(rawText) : boundedTextPreview(rawText);
+    }
+  }
+  if (text === null || text.length === 0) text = structuredResultPreview(source.result);
+  if (text === null || text.length === 0) return null;
+  const label =
+    family === "command"
+      ? "Output"
+      : family === "read"
+        ? "Contents"
+        : family === "search"
+          ? "Results"
+          : family === "diff"
+            ? "Changes"
+            : "Result";
+  return { label, text };
+}
+
+export function parseActivityDetail(
+  activity: ActivityDetailInput,
+  side?: "input" | "result",
+): ParsedActivityDetail {
   const unwrapped =
     activity !== null &&
     typeof activity === "object" &&
@@ -1702,7 +2067,7 @@ export function parseActivityDetail(activity: ActivityDetailInput): ParsedActivi
     data.input ??
     data.arguments ??
     (item.command !== undefined ? { command: item.command } : undefined);
-  const input = parsedArgumentValue(rawInput);
+  const input = side === "result" ? toolPresentationInput(rawInput) : parsedArgumentValue(rawInput);
   const inputRecord = asRecord(input);
   const path =
     firstString(inputRecord, ["path", "file_path", "file", "filename"]) ??
@@ -1714,18 +2079,20 @@ export function parseActivityDetail(activity: ActivityDetailInput): ParsedActivi
     data.isError === true ||
     asRecord(result)?.isError === true;
   const resultDiffs: Array<{ readonly diff: string; readonly path: string | null }> = [];
-  const seenDiffs = new Set<string>();
-  for (const detail of [data, item, result, asRecord(result)?.details]) {
-    for (const entry of detailDiffs(detail)) {
-      const diffKey = `${entry.path ?? ""}\u0000${entry.diff}`;
-      if (seenDiffs.has(diffKey)) continue;
-      seenDiffs.add(diffKey);
-      resultDiffs.push(entry);
+  if (side !== "input") {
+    const seenDiffs = new Set<string>();
+    for (const detail of [data, item, result, asRecord(result)?.details]) {
+      for (const entry of detailDiffs(detail)) {
+        const diffKey = `${entry.path ?? ""}\u0000${entry.diff}`;
+        if (seenDiffs.has(diffKey)) continue;
+        seenDiffs.add(diffKey);
+        resultDiffs.push(entry);
+      }
     }
   }
 
   const sections: ActivityDetailSection[] = [];
-  if (input !== undefined) {
+  if (side !== "result" && input !== undefined) {
     const consumed: ConsumedArgumentPaths = new Set();
     const inputContent = inputBlocks(toolName, input, path, consumed, resultDiffs);
     const inputBlocksWithMetadata =
@@ -1734,43 +2101,48 @@ export function parseActivityDetail(activity: ActivityDetailInput): ParsedActivi
     sections.push(section("Input", inputBlocksWithMetadata, intent ?? undefined));
   }
 
-  const deduplicateOutput =
-    !isErrorTone &&
-    EDIT_FAMILY_TOOLS[toolName.toLowerCase()] === true &&
-    resultDiffs.length > 0 &&
-    resultDiffs.every((entry) => isRenderableDiff(entry.diff));
-  const resultRecord = asRecord(result);
   const resultLanguage =
     READ_TOOL_NAMES[toolName.toLowerCase()] === true && path !== null && !isErrorTone
       ? languageFromPath(path)
       : null;
   const resultContent: ActivityDetailBlock[] = [];
-  for (const entry of resultDiffs) {
-    const diff = parseDiffBlock(
-      entry.diff,
-      languageFromPath(entry.path) ?? languageFromText(entry.diff),
-      entry.path,
-    );
-    if (diff !== null && diff.mode !== "edit") resultContent.push(diff);
-  }
   let resultInfo: ResultBlockData = { blocks: [] };
-  if (result !== undefined) {
-    resultInfo = resultBlocks(
-      result,
-      path,
-      deduplicateOutput,
-      resultDiffs,
-      toolName,
-      resultLanguage,
-    );
-    resultContent.push(...resultInfo.blocks);
-  }
-  if (resultContent.length > 0) sections.push(section("Result", resultContent));
-  if (resultInfo.originalOutput !== undefined) {
-    sections.push(section("Original output", [{ kind: "text", text: resultInfo.originalOutput }]));
-  }
-  if (resultInfo.metadata !== undefined) {
-    sections.push(section("Result metadata", [{ kind: "structured", value: resultInfo.metadata }]));
+  if (side !== "input") {
+    for (const entry of resultDiffs) {
+      const diff = parseDiffBlock(
+        entry.diff,
+        languageFromPath(entry.path) ?? languageFromText(entry.diff),
+        entry.path,
+      );
+      if (diff !== null && diff.mode !== "edit") resultContent.push(diff);
+    }
+    const deduplicateOutput =
+      !isErrorTone &&
+      EDIT_FAMILY_TOOLS[toolName.toLowerCase()] === true &&
+      resultDiffs.length > 0 &&
+      resultDiffs.every((entry) => isRenderableDiff(entry.diff));
+    if (result !== undefined) {
+      resultInfo = resultBlocks(
+        result,
+        path,
+        deduplicateOutput,
+        resultDiffs,
+        toolName,
+        resultLanguage,
+      );
+      resultContent.push(...resultInfo.blocks);
+    }
+    if (resultContent.length > 0) sections.push(section("Result", resultContent));
+    if (resultInfo.originalOutput !== undefined) {
+      sections.push(
+        section("Original output", [{ kind: "text", text: resultInfo.originalOutput }]),
+      );
+    }
+    if (resultInfo.metadata !== undefined) {
+      sections.push(
+        section("Result metadata", [{ kind: "structured", value: resultInfo.metadata }]),
+      );
+    }
   }
 
   const metadata = Object.fromEntries(

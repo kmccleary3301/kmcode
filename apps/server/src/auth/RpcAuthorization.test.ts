@@ -4,8 +4,10 @@ import {
   AuthFilesystemReadScope,
   AuthProvidersManageScope,
   AuthSettingsWriteScope,
+  CommandId,
   DEFAULT_SERVER_SETTINGS,
   ProviderInstanceId,
+  ProjectId,
   ThreadId,
   AuthOrchestrationOperateScope,
   AuthOrchestrationReadScope,
@@ -15,6 +17,7 @@ import {
   AuthRelayWriteScope,
   AuthTerminalReadScope,
   AuthTerminalOperateScope,
+  ORCHESTRATION_V2_WS_METHODS,
   WS_METHODS,
   WsRpcGroup,
 } from "@t3tools/contracts";
@@ -33,6 +36,18 @@ import * as RpcAuthorization from "./RpcAuthorization.ts";
 describe("RPC authorization scopes", () => {
   it("declares exactly one scope for every RPC in the server group", () => {
     expect(new Set(Object.keys(RPC_REQUIRED_SCOPES))).toEqual(new Set(WsRpcGroup.requests.keys()));
+  });
+
+  it("requires operate scope to stop a native workflow", () => {
+    expect(
+      requiredScopeForRpcMethod(ORCHESTRATION_V2_WS_METHODS.stopWorkflow),
+    ).toBe(AuthOrchestrationOperateScope);
+  });
+
+  it("requires read scope for thread live streams", () => {
+    expect(requiredScopeForRpcMethod(ORCHESTRATION_V2_WS_METHODS.subscribeThreadLive)).toBe(
+      AuthOrchestrationReadScope,
+    );
   });
 
   it("authorizes background policy reporting and observation deliberately", () => {
@@ -322,6 +337,71 @@ describe("settings mutation authorization", () => {
     }).pipe(Effect.scoped),
   );
 });
+
+it.effect("requires settings-write for project script mutations", () =>
+  Effect.gen(function* () {
+    const group = WsRpcGroup.omit(
+      ...[...WsRpcGroup.requests.keys()].filter(
+        (
+          tag,
+        ): tag is Exclude<
+          keyof typeof RPC_REQUIRED_SCOPES,
+          typeof WS_METHODS.projectsMutate
+        > => tag !== WS_METHODS.projectsMutate,
+      ),
+    );
+    let handled = 0;
+    const projectId = ProjectId.make("project");
+    const client = yield* RpcTest.makeClient(group).pipe(
+      Effect.provide(
+        Layer.mergeAll(
+          group.toLayerHandler(WS_METHODS.projectsMutate, () =>
+            Effect.sync(() => {
+              handled++;
+              return {
+                id: projectId,
+                title: "Project",
+                workspaceRoot: "/repo",
+                defaultModelSelection: null,
+                scripts: [],
+                createdAt: "2026-01-01T00:00:00.000Z",
+                updatedAt: "2026-01-01T00:00:00.000Z",
+                deletedAt: null,
+              };
+            }),
+          ),
+          RpcAuthorization.layer([AuthOrchestrationOperateScope]),
+        ),
+      ),
+    );
+
+    yield* client[WS_METHODS.projectsMutate]({
+      type: "project.update",
+      commandId: CommandId.make("without-scripts"),
+      projectId,
+      title: "Updated project",
+    });
+    expect(handled).toBe(1);
+
+    expect(
+      yield* client[WS_METHODS.projectsMutate]({
+        type: "project.update",
+        commandId: CommandId.make("with-scripts"),
+        projectId,
+        scripts: [
+          {
+            id: "test",
+            name: "Test",
+            command: "npm test",
+            icon: "test",
+            runOnWorktreeCreate: false,
+          },
+        ],
+      }).pipe(Effect.flip),
+    ).toMatchObject({ requiredPermission: AuthSettingsWriteScope });
+    expect(handled).toBe(1);
+  }).pipe(Effect.scoped),
+);
 
 it.effect("requires task permission before attaching a prepared worktree to a thread", () =>
   Effect.gen(function* () {

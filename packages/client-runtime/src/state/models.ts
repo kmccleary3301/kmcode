@@ -1,10 +1,14 @@
-import { backgroundWorkHoldsCompletion } from "@t3tools/shared/orchestrationV2PendingBackgroundWork";
+import {
+  backgroundWorkHoldsCompletion,
+  isOmpAsyncJobWait,
+} from "@t3tools/shared/orchestrationV2PendingBackgroundWork";
 import { threadPullRequestsOf } from "@t3tools/shared/threadPullRequests";
 import type {
   ThreadLinkedPullRequest,
   EnvironmentId,
   MessageId,
   OrchestrationProjectShell,
+  OrchestrationV2PendingBackgroundTask,
   OrchestrationV2ProviderGoal,
   OrchestrationV2RunStatus,
   OrchestrationV2ProviderFailureClass,
@@ -42,7 +46,12 @@ export interface ThreadRunSummary {
   readonly requestedAt: string | null;
   readonly startedAt: string | null;
   readonly completedAt: string | null;
+  readonly workCompletedAt?: string | null;
   readonly assistantMessageId: MessageId | null;
+  /**
+   * The run is still open, but its provider turn already ended.
+   */
+  readonly turnEnded?: boolean;
   readonly sourcePlanRef?: {
     readonly threadId: ThreadId;
     readonly planId: PlanId;
@@ -53,12 +62,21 @@ export interface ThreadRuntimeSummary {
   readonly status: OrchestrationV2RunStatus | "idle";
   readonly activeRunId: RunId | null;
   readonly activityStartedAt?: string | null | undefined;
+  /** Native end of the activity-owning run, independent of the latest run. */
+  readonly activityRunWorkCompletedAt?: string | null | undefined;
+  readonly waitingOnBackgroundJob?: boolean;
   readonly providerInstanceId: ProviderInstanceId;
   readonly providerName: string | null;
   readonly lastError: string | null;
   readonly lastErrorClass?: OrchestrationV2ProviderFailureClass | null;
   readonly usageLimitResetAt?: string | null;
   readonly updatedAt: string;
+}
+
+export function hasBackgroundJobWaitSignal(
+  tasks: ReadonlyArray<OrchestrationV2PendingBackgroundTask> | null | undefined,
+): boolean {
+  return tasks?.some(isOmpAsyncJobWait) ?? false;
 }
 
 export function threadRuntimeIsActive(runtime: ThreadRuntimeSummary | null | undefined): boolean {
@@ -169,12 +187,15 @@ function terminalRunStatus(status: OrchestrationV2RunStatus): boolean {
 // run's completion, so #4415 waiting-presentation Waiting (session.idle) can
 // consume CTM runtime. Only work that wakes the agent holds it: commands it
 // left running, such as a dev server, present the run's own status (#14872).
-// The server suppresses the roster while an interruptible activity run exists,
-// so a remaining roster is stronger than checkpoint-oriented waiting.
+// An explicit background-job wait keeps its turn active; otherwise a
+// completion-holding roster parks the thread at idle.
 // latestRun keeps the latest run's status for history presentation.
 // A failed latest run outranks the roster, so the failure stays visible.
 function shellRuntime(thread: OrchestrationV2ThreadShell): ThreadRuntimeSummary | null {
+  const waitingOnBackgroundJob =
+    thread.activeRunId !== null && hasBackgroundJobWaitSignal(thread.pendingBackgroundTasks);
   const parkAtIdle =
+    !waitingOnBackgroundJob &&
     backgroundWorkHoldsCompletion(thread.pendingBackgroundTasks ?? []) &&
     thread.status !== "failed";
   // A pull request watch can hold a thread that never ran.
@@ -185,10 +206,15 @@ function shellRuntime(thread: OrchestrationV2ThreadShell): ThreadRuntimeSummary 
   return {
     status,
     activeRunId: thread.activeRunId,
+    waitingOnBackgroundJob,
     activityStartedAt:
       thread.activityRunStartedAt === undefined
         ? undefined
         : nullableIso(thread.activityRunStartedAt),
+    activityRunWorkCompletedAt:
+      thread.activityRunWorkCompletedAt === undefined
+        ? undefined
+        : nullableIso(thread.activityRunWorkCompletedAt),
     providerInstanceId: thread.providerInstanceId,
     providerName: null,
     lastError: thread.lastError ?? null,
@@ -224,6 +250,9 @@ export function presentThreadShell(
                 ? updatedAt
                 : null
               : nullableIso(thread.latestRunCompletedAt),
+          ...(thread.latestRunWorkCompletedAt === undefined
+            ? {}
+            : { workCompletedAt: nullableIso(thread.latestRunWorkCompletedAt) }),
           assistantMessageId: null,
         } satisfies ThreadRunSummary);
   return {
@@ -316,19 +345,31 @@ export function resolveThreadProviderStack(
 /**
  * Both shell and detail timers count from the activity-owning run's work
  * start, never last activity. A wake keeps the start of the work it continues.
+ * Once that run reports native completion, checkpoint bookkeeping is not work.
+ * The separate end survives a newer queued latest run, so it cannot revive this clock.
  */
 export function resolveThreadWorkingStartedAt(input: {
   readonly latestRun: Pick<
     ThreadRunSummary,
-    "runId" | "startedAt" | "requestedAt" | "completedAt"
+    "runId" | "startedAt" | "requestedAt" | "completedAt" | "workCompletedAt"
   > | null;
-  readonly runtime: Pick<ThreadRuntimeSummary, "activeRunId" | "activityStartedAt"> | null;
+  readonly runtime: Pick<
+    ThreadRuntimeSummary,
+    "activeRunId" | "activityStartedAt" | "activityRunWorkCompletedAt"
+  > | null;
 }): string | null {
+  if (input.runtime?.activityRunWorkCompletedAt != null) return null;
   const valid = (value: string | null | undefined) =>
     value != null && Number.isFinite(Date.parse(value)) ? value : null;
+  const run = input.latestRun;
+  if (
+    run?.workCompletedAt != null &&
+    (input.runtime?.activeRunId == null || run.runId === input.runtime.activeRunId)
+  ) {
+    return null;
+  }
   if (input.runtime?.activityStartedAt !== undefined) return valid(input.runtime.activityStartedAt);
   // Older servers can supply a timestamp only if the newest run owns the work.
-  const run = input.latestRun;
   if (run?.completedAt === null && run.runId === input.runtime?.activeRunId) {
     return valid(run.startedAt) ?? valid(run.requestedAt);
   }

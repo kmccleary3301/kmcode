@@ -2,7 +2,13 @@ import type { DesktopBridge } from "@t3tools/contracts";
 import { safeErrorLogAttributes } from "@t3tools/client-runtime/errors";
 import * as Schema from "effect/Schema";
 import { useCallback, useSyncExternalStore } from "react";
-import { applyAppearanceTheme, setAppearanceModePreference } from "../appearanceRuntime";
+import {
+  allocateAppearanceGeneration,
+  allocateAppearanceModeGeneration,
+  applyAppearanceTheme,
+  resolveAppearanceForMode,
+  setAppearanceModePreference,
+} from "../appearanceRuntime";
 import {
   applyThemePalette,
   CUSTOM_THEMES_STORAGE_KEY,
@@ -14,11 +20,14 @@ import {
   resolveDesktopTheme,
   resolveThemeAppearance,
   getThemeDefinition,
+  getThemeColorVariable,
+  isThemeColor,
   resolveThemeHalf,
   THEME_PREVIEW_ID,
   THEME_APPEARANCE_MODE_STORAGE_KEY,
   THEME_FOLLOW_SYSTEM_STORAGE_KEY,
   THEME_HALVES_STORAGE_KEY,
+  type ThemeColorRole,
   KM_CODE_THEME,
   ThemePreference,
   type ThemeAppearance,
@@ -139,7 +148,9 @@ let listeners: Array<() => void> = [];
 let lastSnapshot: ThemeSnapshot | null = null;
 let snapshotStale = true;
 let lastDesktopTheme: "light" | "dark" | "system" | null = null;
-let lastAppliedTheme: Omit<ThemeSnapshot, "resolvedTheme"> | null = null;
+let lastAppliedTheme:
+  | (Omit<ThemeSnapshot, "resolvedTheme"> & { paintedAppearance: ThemeAppearance })
+  | null = null;
 let themeStorageReadFailure: ThemeStorageError | null = null;
 
 function emitChange() {
@@ -297,6 +308,9 @@ function resolveBrowserChromeSurface(): HTMLElement {
 export function syncBrowserChromeTheme() {
   if (typeof document === "undefined" || typeof getComputedStyle === "undefined") return;
   const rootStyles = getComputedStyle(document.documentElement);
+  const themeCanvasColor = document.documentElement.dataset.themeId
+    ? normalizeThemeColor(rootStyles.getPropertyValue("--app-theme-canvas"))
+    : null;
   const themeChromeColor = document.documentElement.dataset.themeId
     ? normalizeThemeColor(rootStyles.getPropertyValue("--app-chrome-background"))
     : null;
@@ -304,24 +318,35 @@ export function syncBrowserChromeTheme() {
     getComputedStyle(resolveBrowserChromeSurface()).backgroundColor,
   );
   const fallbackColor = normalizeThemeColor(getComputedStyle(document.body).backgroundColor);
-  const backgroundColor = themeChromeColor ?? surfaceColor ?? fallbackColor;
-  if (!backgroundColor) return;
+  const chromeBackground = themeChromeColor ?? surfaceColor ?? fallbackColor;
+  const bodyBackground = themeCanvasColor ?? chromeBackground;
+  if (!chromeBackground && !bodyBackground) return;
 
-  document.documentElement.style.backgroundColor = backgroundColor;
-  document.body.style.backgroundColor = backgroundColor;
+  if (chromeBackground) {
+    document.documentElement.style.backgroundColor = chromeBackground;
+  }
+  if (bodyBackground) {
+    document.body.style.backgroundColor = bodyBackground;
+  }
   // Update every theme-color meta so any element another layer added (for
   // example a media-scoped one) carries the resolved color too.
   const themeColorMetas = document.querySelectorAll<HTMLMetaElement>(
     `meta[name="${THEME_COLOR_META_NAME}"]`,
   );
-  if (themeColorMetas.length === 0) {
-    ensureThemeColorMetaTag().setAttribute("content", backgroundColor);
-    return;
-  }
-  for (const element of themeColorMetas) {
-    element.setAttribute("content", backgroundColor);
+  const metaColor = chromeBackground ?? bodyBackground;
+  if (metaColor) {
+    if (themeColorMetas.length === 0) {
+      ensureThemeColorMetaTag().setAttribute("content", metaColor);
+      return;
+    }
+    for (const element of themeColorMetas) {
+      element.setAttribute("content", metaColor);
+    }
   }
 }
+
+let themeApplyGeneration = 0;
+let pendingBuiltinSelection: { theme: Theme; generation: number } | null = null;
 
 function applyTheme(
   theme: Theme,
@@ -329,11 +354,13 @@ function applyTheme(
     suppressTransitions = false,
     preservePreview = true,
     preserveRuntimeSelection = false,
+    explicitThemeSelection = false,
     onRuntimeFailure,
   }: {
     suppressTransitions?: boolean;
     preservePreview?: boolean;
     preserveRuntimeSelection?: boolean;
+    explicitThemeSelection?: boolean;
     onRuntimeFailure?: () => void;
   } = {},
 ) {
@@ -354,7 +381,11 @@ function applyTheme(
     lastAppliedTheme.appearanceMode === appearanceMode &&
     themeHalvesSignature(lastAppliedTheme.themeHalves) === themeHalvesSignature(themeHalves)
   ) {
-    syncDesktopTheme(theme, followSystem, appearanceMode);
+    syncDesktopTheme(
+      theme,
+      followSystem,
+      followSystem ? appearanceMode : lastAppliedTheme.paintedAppearance,
+    );
     return;
   }
 
@@ -368,30 +399,87 @@ function applyTheme(
     appearanceMode,
     themeHalves,
   );
-  const runtimeUpdate = preserveRuntimeSelection
-    ? setAppearanceModePreference(appearanceMode)
+  const selectedTheme = resolveThemeHalf(theme, themeHalves, resolvedAppearance);
+  const definition = getThemeDefinition(selectedTheme);
+  // The stored theme preference is the source of truth for every library
+  // theme. A mode change keeps the runtime's own package only when the
+  // preference cannot name it (a package installed outside the theme library)
+  // and that package can render the requested appearance; anything else
+  // repaints the stored selection, so a stale runtime package never survives.
+  const runtimeAppearance =
+    preserveRuntimeSelection && pendingBuiltinSelection?.theme !== theme
+      ? resolveAppearanceForMode(resolvedAppearance, appearanceMode)
+      : null;
+  const preserveRuntimePackage =
+    runtimeAppearance !== null &&
+    runtimeAppearance.basePackageId !== null &&
+    getThemeDefinition(runtimeAppearance.basePackageId) === null &&
+    runtimeAppearance.variant?.appearance === resolvedAppearance;
+  const activeAppearance = preserveRuntimePackage ? runtimeAppearance : null;
+  if (activeAppearance) {
+    for (const [role, value] of Object.entries(activeAppearance.values)) {
+      const variable = getThemeColorVariable(role as ThemeColorRole);
+      if (variable && isThemeColor(value)) {
+        document.documentElement.style.setProperty(variable, value);
+      }
+    }
+  } else if (definition !== null) {
+    applyThemePalette(selectedTheme, resolvedAppearance);
+  }
+
+  const currentGeneration = preserveRuntimePackage
+    ? allocateAppearanceModeGeneration()
+    : allocateAppearanceGeneration();
+  themeApplyGeneration = currentGeneration;
+  if (explicitThemeSelection || pendingBuiltinSelection?.theme === theme) {
+    pendingBuiltinSelection = { theme, generation: currentGeneration };
+  }
+
+  const runtimeUpdate = preserveRuntimePackage
+    ? setAppearanceModePreference(appearanceMode, undefined, currentGeneration)
     : (() => {
-        const selectedTheme = resolveThemeHalf(theme, themeHalves, resolvedAppearance);
-        applyThemePalette(selectedTheme, resolvedAppearance);
-        const definition = getThemeDefinition(selectedTheme) ?? KM_CODE_THEME;
+        const themeDef = definition ?? KM_CODE_THEME;
         const lightDefinition =
           getThemeDefinition(resolveThemeHalf(theme, themeHalves, "light")) ?? KM_CODE_THEME;
         const darkDefinition =
           getThemeDefinition(resolveThemeHalf(theme, themeHalves, "dark")) ?? KM_CODE_THEME;
-        return applyAppearanceTheme(definition, resolvedAppearance, appearanceMode, {
-          light: lightDefinition,
-          dark: darkDefinition,
-        });
+        return applyAppearanceTheme(
+          themeDef,
+          resolvedAppearance,
+          appearanceMode,
+          {
+            light: lightDefinition,
+            dark: darkDefinition,
+          },
+          currentGeneration,
+        );
       })();
-  void runtimeUpdate.catch((error: unknown) => {
-    onRuntimeFailure?.();
-    console.error("Appearance runtime failed to apply the selected theme.", error);
-  });
+  void runtimeUpdate
+    .catch((error: unknown) => {
+      if (currentGeneration === themeApplyGeneration) {
+        onRuntimeFailure?.();
+        console.error("Appearance runtime failed to apply the selected theme.", error);
+      }
+    })
+    .finally(() => {
+      if (pendingBuiltinSelection?.generation === currentGeneration) {
+        pendingBuiltinSelection = null;
+      }
+    });
+  // A preserved runtime package always has a variant for this appearance.
   const isDark = resolvedAppearance === "dark";
   document.documentElement.classList.toggle("dark", isDark);
-  lastAppliedTheme = { theme, systemDark, followSystem, appearanceMode, themeHalves };
+  document.documentElement.style.colorScheme = resolvedAppearance;
+  lastAppliedTheme = {
+    theme,
+    systemDark,
+    followSystem,
+    appearanceMode,
+    themeHalves,
+    paintedAppearance: resolvedAppearance,
+  };
   syncBrowserChromeTheme();
-  syncDesktopTheme(theme, followSystem, appearanceMode);
+  syncDesktopTheme(theme, followSystem, followSystem ? appearanceMode : resolvedAppearance);
   if (suppressTransitions) {
     // Force a reflow so the no-transitions class takes effect before removal
     void document.documentElement.offsetHeight;
@@ -507,6 +595,40 @@ function getServerSnapshot() {
   return DEFAULT_THEME_SNAPSHOT;
 }
 
+/**
+ * The appearance runtime restores its own persisted package at startup. When
+ * that package is a library theme other than the stored selection, repaint the
+ * stored selection so the theme settings and the screen cannot disagree.
+ */
+export function reconcileStoredTheme(): void {
+  if (typeof window === "undefined") return;
+  const theme = getStored();
+  const appearanceMode = readAppearanceModePreference(theme);
+  const followSystem = appearanceMode === "system";
+  const themeHalves = readStoredThemeHalves();
+  const resolvedAppearance = resolveThemeAppearance(
+    theme,
+    followSystem ? getSystemDark() : false,
+    followSystem,
+    appearanceMode,
+    themeHalves,
+  );
+  const runtimeAppearance = resolveAppearanceForMode(resolvedAppearance, appearanceMode);
+  const runtimePackageId = runtimeAppearance?.basePackageId ?? null;
+  // A package the theme library cannot name was chosen outside it; keep it.
+  if (runtimePackageId !== null && getThemeDefinition(runtimePackageId) === null) return;
+  const storedPackageId =
+    getThemeDefinition(resolveThemeHalf(theme, themeHalves, resolvedAppearance))?.id ??
+    KM_CODE_THEME.id;
+  if (
+    runtimePackageId === storedPackageId &&
+    runtimeAppearance?.variant?.appearance === resolvedAppearance
+  ) {
+    return;
+  }
+  applyTheme(theme, { suppressTransitions: true });
+}
+
 function handleSystemAppearanceChange() {
   const storedTheme = getStored();
   if (readAppearanceModePreference(storedTheme) === "system") {
@@ -618,6 +740,7 @@ export function useTheme() {
     }
     applyTheme(next, {
       suppressTransitions: true,
+      explicitThemeSelection: true,
       onRuntimeFailure: () =>
         rollbackLegacyAppearance(previousTheme, [
           [STORAGE_KEY, previousTheme],

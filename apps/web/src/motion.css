@@ -1,0 +1,392 @@
+/* Transcript motion shared by status-bearing components. One length
+ * (--motion-duration, mirrored by MOTION_MS in lib/motion.ts) and one curve
+ * (--ease-disclosure) for opening, closing, glides, swaps and rolls, at most
+ * 4px of travel. Closing always animates as fully as opening: a close that
+ * snaps makes everything below it jump.
+ * Components opt in only for changes they saw happen (useChangedSinceMount,
+ * live-mount flags), so history and virtualized remounts render still.
+ * Reduced motion keeps the fades and drops travel; the blanket rule in
+ * index.css zeroes everything else. */
+
+@property --glide-fade {
+  syntax: "<length>";
+  inherits: false;
+  initial-value: 0px;
+}
+@property --stick-fade-top {
+  syntax: "<length>";
+  inherits: false;
+  initial-value: 0px;
+}
+@property --stick-fade-bottom {
+  syntax: "<length>";
+  inherits: false;
+  initial-value: 0px;
+}
+
+:root {
+  --motion-fade-size: 1.25rem;
+}
+
+/* A status glyph that just changed re-enters in place; keyed per status. */
+.motion-swap {
+  animation: motion-swap-in var(--motion-duration) var(--ease-disclosure);
+}
+@keyframes motion-swap-in {
+  from {
+    opacity: 0;
+    transform: scale(0.9);
+  }
+}
+
+/* GlyphSwap: a status glyph that changed crossfades in place. The old glyph
+ * fades out quickly while the new one comes in behind it, so a loader never
+ * blinks off before its check appears. */
+.glyph-swap {
+  position: relative;
+}
+.glyph-swap > span {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+.glyph-swap-in {
+  animation: glyph-swap-in var(--motion-duration) var(--ease-disclosure);
+}
+.glyph-swap-out {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  animation: glyph-swap-out 160ms var(--ease-disclosure) forwards;
+}
+@keyframes glyph-swap-in {
+  0%,
+  20% {
+    opacity: 0;
+    transform: scale(0.8);
+  }
+}
+@keyframes glyph-swap-out {
+  to {
+    opacity: 0;
+    transform: scale(0.8);
+  }
+}
+
+/* Changed text (a header's verb, a count) resolves out of a slight blur
+ * rather than zooming: words scaling reads as a pop. */
+.motion-swap-text {
+  animation: motion-swap-text-in var(--motion-duration) var(--ease-disclosure);
+}
+@keyframes motion-swap-text-in {
+  from {
+    opacity: 0;
+    filter: blur(2px);
+  }
+}
+
+/* Rows that mount while live rise into place instead of appearing. */
+.motion-enter,
+[data-motion-enter] {
+  animation: motion-enter var(--motion-duration) var(--ease-disclosure);
+}
+@keyframes motion-enter {
+  from {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+}
+
+/* A list row that leaves collapses its own height while it fades, so the rows
+ * below close up smoothly instead of jumping when it unmounts. The row's one
+ * child clips; spacing between rows belongs inside that child. */
+.motion-row {
+  display: grid;
+  grid-template-rows: 1fr;
+  transition:
+    grid-template-rows var(--motion-duration) var(--ease-disclosure),
+    opacity var(--motion-duration) ease-out;
+}
+.motion-row > * {
+  min-height: 0;
+  overflow: hidden;
+}
+.motion-row[data-exiting] {
+  grid-template-rows: 0fr;
+  opacity: 0;
+}
+
+/* Status-driven text color settles instead of flipping. */
+.motion-tint {
+  transition: color var(--motion-duration) ease;
+}
+
+/* Disclosure chevrons turn on the same curve and length as the panel they open. */
+.motion-chevron {
+  transition: transform var(--motion-duration) var(--ease-disclosure);
+}
+
+/* A finished item is struck through by a line drawn left to right. Initial
+ * renders have no previous style, so history arrives already struck. A
+ * background line, unlike a transformed rule, follows wrapped lines. */
+.motion-strike {
+  background-image: linear-gradient(
+    color-mix(in srgb, currentColor 65%, transparent),
+    color-mix(in srgb, currentColor 65%, transparent)
+  );
+  background-repeat: no-repeat;
+  background-position: 0 55%;
+  background-size: 0% 1px;
+  -webkit-box-decoration-break: clone;
+  box-decoration-break: clone;
+  transition:
+    background-size var(--motion-duration) var(--ease-disclosure),
+    color var(--motion-duration) ease;
+}
+.motion-strike[data-struck] {
+  background-size: 100% 1px;
+}
+
+/* Waiting clock: the hand ticks round in twelve steps, like OMP's TUI glyph.
+ * Every hand shares the document timeline's phase, so a tree of waits ticks
+ * together instead of scattering. */
+.motion-clock-hand {
+  transform-box: view-box;
+  transform-origin: 8px 8px;
+  animation: motion-clock-tick 2s steps(12) infinite;
+}
+@keyframes motion-clock-tick {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+/* SpinningGlobe: an opaque sphere. Five longitude halves 72° apart follow the
+ * projected sine of their longitude across the near face only (the first half
+ * of the cycle, fifteen-degree linear stops), fading in and out at the limb;
+ * on the far side they stay hidden, so nothing shows through. Non-scaling
+ * hairlines stay crisp at 14px. The static transforms are the
+ * reduced-motion still frame. */
+.spinning-globe-latitude {
+  vector-effect: non-scaling-stroke;
+  stroke-width: 1.2px;
+  opacity: 0.5;
+}
+.spinning-globe-meridian {
+  transform-box: view-box;
+  transform-origin: 12px 12px;
+  vector-effect: non-scaling-stroke;
+  stroke-width: 1.2px;
+  animation: spinning-globe-meridian 2.4s linear infinite;
+}
+.spinning-globe-meridian[data-meridian="1"] {
+  transform: scaleX(-1);
+  opacity: 0;
+}
+.spinning-globe-meridian[data-meridian="2"] {
+  transform: scaleX(-0.309);
+  opacity: 1;
+  animation-delay: -480ms;
+}
+.spinning-globe-meridian[data-meridian="3"] {
+  transform: scaleX(0.809);
+  opacity: 0.9;
+  animation-delay: -960ms;
+}
+.spinning-globe-meridian[data-meridian="4"] {
+  transform: scaleX(0.809);
+  opacity: 0;
+  animation-delay: -1440ms;
+}
+.spinning-globe-meridian[data-meridian="5"] {
+  transform: scaleX(-0.309);
+  opacity: 0;
+  animation-delay: -1920ms;
+}
+@keyframes spinning-globe-meridian {
+  0% {
+    transform: scaleX(-1);
+    opacity: 0;
+  }
+  4.167% {
+    transform: scaleX(-0.966);
+    opacity: 0.55;
+  }
+  8.333% {
+    transform: scaleX(-0.866);
+    opacity: 0.85;
+  }
+  12.5% {
+    transform: scaleX(-0.707);
+    opacity: 1;
+  }
+  16.667% {
+    transform: scaleX(-0.5);
+    opacity: 1;
+  }
+  20.833% {
+    transform: scaleX(-0.259);
+    opacity: 1;
+  }
+  25% {
+    transform: scaleX(0);
+    opacity: 1;
+  }
+  29.167% {
+    transform: scaleX(0.259);
+    opacity: 1;
+  }
+  33.333% {
+    transform: scaleX(0.5);
+    opacity: 1;
+  }
+  37.5% {
+    transform: scaleX(0.707);
+    opacity: 1;
+  }
+  41.667% {
+    transform: scaleX(0.866);
+    opacity: 0.85;
+  }
+  45.833% {
+    transform: scaleX(0.966);
+    opacity: 0.55;
+  }
+  /* Far side: hidden while it swings back to the left limb. */
+  50% {
+    transform: scaleX(1);
+    opacity: 0;
+  }
+  100% {
+    transform: scaleX(-1);
+    opacity: 0;
+  }
+}
+
+/* A box gliding taller (useSmoothHeight, an opening disclosure) fades its
+ * bottom edge, so new lines come up through the fade; once it lands the fade
+ * eases out and the last line settles to full contrast. Animations, not
+ * transitions: these boxes already transition their own geometry. */
+[data-glide="grow"],
+[data-glide="settle"] {
+  -webkit-mask-image: linear-gradient(to bottom, black calc(100% - var(--glide-fade)), transparent);
+  mask-image: linear-gradient(to bottom, black calc(100% - var(--glide-fade)), transparent);
+}
+[data-glide="grow"] {
+  --glide-fade: var(--motion-fade-size);
+  animation: glide-fade-in var(--motion-duration) ease-out;
+}
+[data-glide="settle"] {
+  animation: glide-fade-out var(--motion-duration) ease-out;
+}
+@keyframes glide-fade-in {
+  from {
+    --glide-fade: 0px;
+  }
+}
+@keyframes glide-fade-out {
+  from {
+    --glide-fade: var(--motion-fade-size);
+  }
+}
+
+/* Live scrollers (useBottomStick): an edge fades while content lies beyond it
+ * or the follow roll is still moving. Declared after the glide fade so a
+ * scroller's own edges win while it also glides. */
+[data-stick-fade] {
+  -webkit-mask-image: linear-gradient(
+    to bottom,
+    transparent,
+    black var(--stick-fade-top),
+    black calc(100% - var(--stick-fade-bottom)),
+    transparent
+  );
+  mask-image: linear-gradient(
+    to bottom,
+    transparent,
+    black var(--stick-fade-top),
+    black calc(100% - var(--stick-fade-bottom)),
+    transparent
+  );
+  transition:
+    --stick-fade-top var(--motion-duration) ease-out,
+    --stick-fade-bottom var(--motion-duration) ease-out;
+}
+[data-stick-fade~="top"] {
+  --stick-fade-top: var(--motion-fade-size);
+}
+[data-stick-fade~="bottom"] {
+  --stick-fade-bottom: var(--motion-fade-size);
+}
+/* A box mid-glide shows its in-flight content, not a scrollbar flash. */
+[data-bottom-stick-viewport][data-glide="grow"] {
+  scrollbar-width: none;
+}
+
+/* Timeline slots (MessagesTimeline's TimelineRowFrame). A live arrival mounts
+ * collapsed until its glide takes over; a slot mid-glide or leaving clips to
+ * its moving edge; a leaving slot fades as it collapses. */
+.messages-timeline-row-frame[data-arriving] {
+  height: 0;
+}
+.messages-timeline-row-frame[data-arriving],
+.messages-timeline-row-frame[data-glide],
+.messages-timeline-row-frame[data-exiting] {
+  overflow: clip;
+}
+.messages-timeline-row-frame[data-exiting] {
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity var(--motion-duration) var(--ease-disclosure);
+}
+
+.bottom-stick-jump {
+  transition:
+    opacity var(--motion-duration) var(--ease-disclosure),
+    transform var(--motion-duration) var(--ease-disclosure);
+}
+
+@keyframes motion-fade {
+  from {
+    opacity: 0;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .motion-swap,
+  .motion-swap-text {
+    animation: motion-fade var(--motion-duration) ease-out !important;
+  }
+  .motion-enter,
+  [data-motion-enter] {
+    animation: motion-fade var(--motion-duration) ease-out !important;
+  }
+  .glyph-swap-in {
+    animation: motion-fade var(--motion-duration) ease-out !important;
+  }
+  .glyph-swap-out {
+    animation: glyph-fade-out 160ms ease-out forwards !important;
+  }
+  .motion-row {
+    transition: opacity var(--motion-duration) ease-out !important;
+  }
+  .messages-timeline-row-frame[data-exiting] {
+    transition: opacity var(--motion-duration) ease-out !important;
+  }
+  .motion-tint {
+    transition: color var(--motion-duration) ease !important;
+  }
+  .motion-clock-hand,
+  .spinning-globe-meridian {
+    animation: none !important;
+  }
+  .bottom-stick-jump {
+    transition: opacity var(--motion-duration) ease-out !important;
+    transform: none !important;
+  }
+}
+@keyframes glyph-fade-out {
+  to {
+    opacity: 0;
+  }
+}

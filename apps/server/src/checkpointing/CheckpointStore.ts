@@ -19,7 +19,7 @@ import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 
 import type { CheckpointStoreError } from "./Errors.ts";
-import type { VcsCheckpointOps } from "../vcs/VcsDriver.ts";
+import type { VcsCheckpointCaptureOutcome, VcsCheckpointOps } from "../vcs/VcsDriver.ts";
 import * as VcsDriverRegistry from "../vcs/VcsDriverRegistry.ts";
 
 export interface CaptureCheckpointInput {
@@ -57,11 +57,12 @@ export class CheckpointStore extends Context.Service<
     /**
      * Capture a checkpoint commit and store it at the provided checkpoint ref.
      *
-     * Uses an isolated temporary Git index and writes a hidden ref.
+     * Uses an isolated temporary Git index and writes a hidden ref. Skips, writing no ref,
+     * when the workspace is too large to snapshot.
      */
     readonly captureCheckpoint: (
       input: CaptureCheckpointInput,
-    ) => Effect.Effect<void, CheckpointStoreError>;
+    ) => Effect.Effect<VcsCheckpointCaptureOutcome, CheckpointStoreError>;
 
     /** Check whether a checkpoint ref exists. */
     readonly hasCheckpointRef: (

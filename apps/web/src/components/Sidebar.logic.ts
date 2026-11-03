@@ -1,4 +1,5 @@
 import { resolveThreadWorkingStartedAt } from "@t3tools/client-runtime/state/models";
+import { threadRuntimeHasActiveWork } from "@t3tools/client-runtime/state/thread-execution";
 import { backgroundWorkHoldsCompletion } from "@t3tools/shared/orchestrationV2PendingBackgroundWork";
 import { threadPullRequestSearchTerms } from "@t3tools/shared/threadPullRequests";
 import * as React from "react";
@@ -625,11 +626,12 @@ export function buildBulkUnpinContextMenuItem(input: {
 export interface ThreadStatusPill {
   label:
     | "Working"
+    | "Finishing"
     | "Connecting"
     | "Completed"
     | "Pending Approval"
     | "Awaiting Input"
-    | "Waiting"
+    | "Monitoring"
     | "Plan Ready";
   colorClass: string;
   dotClass: string;
@@ -641,7 +643,8 @@ const THREAD_STATUS_PRIORITY: Record<ThreadStatusPill["label"], number> = {
   "Awaiting Input": 4,
   Working: 3,
   Connecting: 3,
-  Waiting: 2.5,
+  Finishing: 2.75,
+  Monitoring: 2.5,
   "Plan Ready": 2,
   Completed: 1,
 };
@@ -977,7 +980,36 @@ export function shouldRecedeSidebarThread(input: {
 type SidebarThreadStatusInput = Pick<
   SidebarThreadSummary,
   "hasPendingApprovals" | "hasPendingUserInput" | "runtime"
->;
+> & {
+  readonly latestRun?: SidebarThreadSummary["latestRun"] | undefined;
+};
+
+type SidebarActivityInput = Pick<SidebarThreadSummary, "runtime"> & {
+  readonly latestRun?: SidebarThreadSummary["latestRun"] | undefined;
+};
+
+/** Native execution can end before a run finishes checkpoint finalization. */
+export function isSidebarActivityFinishing(thread: SidebarActivityInput): boolean {
+  const runtime = thread.runtime;
+  if (
+    (runtime?.status !== "running" && runtime?.status !== "waiting") ||
+    runtime.activityRunWorkCompletedAt == null
+  ) {
+    return false;
+  }
+  const latestRun = thread.latestRun;
+  const activeRunOwnsCurrentActivation =
+    runtime.activeRunId !== null &&
+    (latestRun === null ||
+      latestRun === undefined ||
+      (latestRun.runId === runtime.activeRunId &&
+        (latestRun.status === "preparing" ||
+          latestRun.status === "starting" ||
+          latestRun.status === "running" ||
+          latestRun.status === "waiting"))) &&
+    threadRuntimeHasActiveWork(runtime);
+  return !activeRunOwnsCurrentActivation;
+}
 
 export function resolveSidebarThreadStatus(thread: SidebarThreadStatusInput): SidebarThreadStatus {
   if (thread.hasPendingApprovals) {
@@ -987,8 +1019,8 @@ export function resolveSidebarThreadStatus(thread: SidebarThreadStatusInput): Si
     return "input";
   }
   if (
-    thread.runtime !== null &&
-    ["preparing", "queued", "starting", "running", "waiting"].includes(thread.runtime.status)
+    threadRuntimeHasActiveWork(thread.runtime, thread.latestRun) ||
+    isSidebarActivityFinishing(thread)
   ) {
     return "working";
   }
@@ -1183,7 +1215,28 @@ export function resolveThreadStatusPill(input: {
     };
   }
 
-  if (thread.runtime?.status === "running" || thread.runtime?.status === "waiting") {
+  // An open OMP turn parked on a background job that will wake it.
+  if (thread.runtime?.waitingOnBackgroundJob === true) {
+    return {
+      label: "Monitoring",
+      colorClass: "text-sidebar-muted-foreground",
+      dotClass: "bg-sidebar-muted-foreground",
+      pulse: false,
+    };
+  }
+  if (isSidebarActivityFinishing(thread)) {
+    return {
+      label: "Finishing",
+      colorClass: "text-sidebar-muted-foreground",
+      dotClass: "bg-sidebar-muted-foreground",
+      pulse: false,
+    };
+  }
+
+  if (
+    (thread.runtime?.status === "running" || thread.runtime?.status === "waiting") &&
+    threadRuntimeHasActiveWork(thread.runtime, thread.latestRun)
+  ) {
     return {
       label: "Working",
       colorClass: "text-sky-600 dark:text-sky-300/80",
@@ -1207,7 +1260,7 @@ export function resolveThreadStatusPill(input: {
 
   if (backgroundWorkHoldsCompletion(thread.pendingBackgroundTasks ?? [])) {
     return {
-      label: "Waiting",
+      label: "Monitoring",
       colorClass: "text-sidebar-muted-foreground",
       dotClass: "bg-sidebar-muted-foreground",
       pulse: false,

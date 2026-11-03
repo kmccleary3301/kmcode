@@ -40,6 +40,7 @@ import {
   ensureSshEnvironment,
   fetchSshEnvironmentDescriptor,
   fetchSshSessionState,
+  getSshTunnelStatus,
   issueSshWebSocketTicket,
   resolveSshHost,
   resolveSshPasswordPrompt,
@@ -94,6 +95,13 @@ import {
   installCliCommand,
   uninstallCliCommand,
 } from "./methods/cliCommand.ts";
+import {
+  portForwardList,
+  portForwardResolveConnection,
+  portForwardStart,
+  portForwardStop,
+  portForwardStopAll,
+} from "./methods/portForward.ts";
 
 export const installDesktopIpcHandlers = Effect.fn("desktop.ipc.installHandlers")(function* () {
   const ipc = yield* DesktopIpc.DesktopIpc;
@@ -147,6 +155,7 @@ export const installDesktopIpcHandlers = Effect.fn("desktop.ipc.installHandlers"
   yield* ipc.handle(resolveSshHost);
   yield* ipc.handle(ensureSshEnvironment);
   yield* ipc.handle(disconnectSshEnvironment);
+  yield* ipc.handle(getSshTunnelStatus);
   yield* ipc.handle(fetchSshEnvironmentDescriptor);
   yield* ipc.handle(bootstrapSshBearerSession);
   yield* ipc.handle(fetchSshSessionState);
@@ -188,4 +197,9 @@ export const installDesktopIpcHandlers = Effect.fn("desktop.ipc.installHandlers"
   }
   yield* ipc.handle(PreviewIpc.listBrowserImportSources);
   yield* ipc.handle(PreviewIpc.importBrowserCookies);
+  yield* ipc.handle(portForwardList);
+  yield* ipc.handle(portForwardStart);
+  yield* ipc.handle(portForwardStop);
+  yield* ipc.handle(portForwardStopAll);
+  yield* ipc.handle(portForwardResolveConnection);
 });

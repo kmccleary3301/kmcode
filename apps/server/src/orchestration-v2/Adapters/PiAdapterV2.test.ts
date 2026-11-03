@@ -15,6 +15,7 @@ import {
   type OrchestrationV2AppThread,
   type OrchestrationV2ProviderThread,
   type OrchestrationV2ProviderTurn,
+  type OrchestrationV2ThreadLiveItem,
 } from "@t3tools/contracts";
 import * as Cause from "effect/Cause";
 import * as DateTime from "effect/DateTime";
@@ -23,6 +24,7 @@ import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
 import * as PlatformError from "effect/PlatformError";
 import * as Queue from "effect/Queue";
 import * as Schema from "effect/Schema";
@@ -34,10 +36,12 @@ import { ChildProcess, ChildProcessSpawner } from "effect/process";
 import * as ServerConfig from "../../config.ts";
 import * as McpProviderSession from "../../mcp/McpProviderSession.ts";
 import * as IdAllocator from "../IdAllocator.ts";
+import * as ThreadLiveOverlay from "../ThreadLiveOverlay.ts";
 import {
   ProviderAdapterV2RuntimePolicy,
   type ProviderAdapterV2Event,
   type ProviderAdapterV2SessionRuntime,
+  type ProviderAdapterV2TurnInput,
 } from "../ProviderAdapter.ts";
 import { handoffBudget } from "../ContextHandoffBudget.ts";
 import { makePiAdapterV2, PI_PROVIDER } from "./PiAdapterV2.ts";
@@ -48,7 +52,14 @@ const layerServerConfig = ServerConfig.layerTest(process.cwd(), {
   prefix: "t3-pi-v2-adapter-",
 }).pipe(Layer.provide(NodeServices.layer));
 
-const layerTest = Layer.mergeAll(NodeServices.layer, IdAllocator.layer, layerServerConfig);
+const layerTest = Layer.mergeAll(
+  NodeServices.layer,
+  IdAllocator.layer,
+  layerServerConfig,
+  ThreadLiveOverlay.layer,
+);
+
+const layerTestWithTestClock = Layer.mergeAll(layerTest, TestClock.layer());
 
 const decodeJsonLine = Schema.decodeSync(Schema.fromJsonString(Schema.Unknown));
 const encodeJsonLine = Schema.encodeSync(Schema.fromJsonString(Schema.Unknown));
@@ -100,6 +111,8 @@ interface FakePi {
   readonly queueCommands: (data: unknown) => void;
   /** Make the next `get_commands` ack fail. */
   readonly failNextCommands: () => void;
+  /** Reject the next OMP goal RPC. */
+  readonly failNextGoal: () => void;
   /** Close the fake process stdout stream. */
   readonly closeStdout: Effect.Effect<void>;
   readonly lastSpawn: () => {
@@ -144,6 +157,7 @@ const makeFakePi: Effect.Effect<FakePi> = Effect.gen(function* () {
   let deferState = false;
   let deferredStateRequest: PiRpcRecord | undefined;
   let failState = false;
+  let failGoal = false;
   let vetoSwitch = false;
   let vetoNewSession = false;
   let deferredLifecycle: string | undefined;
@@ -197,6 +211,12 @@ const makeFakePi: Effect.Effect<FakePi> = Effect.gen(function* () {
         return { ...base, ...(commandsQueue.shift() ?? { data: { commands: [] } }) };
       case "fork":
         return { ...base, data: { text: "Hello pi", cancelled: false } };
+      case "goal":
+        if (failGoal) {
+          failGoal = false;
+          return { ...base, success: false, error: "Goal mode is disabled (goal.enabled)." };
+        }
+        return base;
       default:
         return base;
     }
@@ -306,6 +326,9 @@ const makeFakePi: Effect.Effect<FakePi> = Effect.gen(function* () {
     queueStats: (data) => statsQueue.push(data),
     queueCommands: (data) => commandsQueue.push({ success: true, data }),
     failNextCommands: () => commandsQueue.push({ success: false }),
+    failNextGoal: () => {
+      failGoal = true;
+    },
     closeStdout: Queue.end(stdout),
     lastSpawn: () => lastSpawn,
   } satisfies FakePi;
@@ -316,26 +339,35 @@ const makeAdapter = Effect.fnUntraced(function* (
   launchArgs = "",
   forkFake?: FakePi,
   dialect: PiDialect = PI_DIALECT,
+  replacementFake?: FakePi,
 ) {
   const idAllocator = yield* IdAllocator.IdAllocatorV2;
   const serverConfig = yield* ServerConfig.ServerConfig;
+  const threadLiveOverlay = yield* ThreadLiveOverlay.ThreadLiveOverlay;
   const fileSystem = yield* FileSystem.FileSystem;
+  let sessionSpawns = 0;
+  const spawner =
+    forkFake === undefined && replacementFake === undefined
+      ? fake.spawner
+      : ChildProcessSpawner.make((command) => {
+          if (ChildProcess.isStandardCommand(command) && command.args.includes("--fork")) {
+            return (forkFake ?? fake).spawner.spawn(command);
+          }
+          sessionSpawns += 1;
+          return sessionSpawns > 1 && replacementFake !== undefined
+            ? replacementFake.spawner.spawn(command)
+            : fake.spawner.spawn(command);
+        });
   return makePiAdapterV2({
     instanceId: PI_INSTANCE_ID,
     settings: { enabled: true, binaryPath: "pi", launchArgs, customModels: [] },
     dialect,
     environment: {},
-    spawner:
-      forkFake === undefined
-        ? fake.spawner
-        : ChildProcessSpawner.make((command) =>
-            ChildProcess.isStandardCommand(command) && command.args.includes("--fork")
-              ? forkFake.spawner.spawn(command)
-              : fake.spawner.spawn(command),
-          ),
+    spawner,
     fileSystem,
     idAllocator,
     serverConfig,
+    threadLiveOverlay,
   });
 });
 
@@ -346,8 +378,9 @@ const openRuntime = Effect.fnUntraced(function* (
   providerSessionId = SESSION_ID,
   forkFake?: FakePi,
   dialect: PiDialect = PI_DIALECT,
+  replacementFake?: FakePi,
 ) {
-  const adapter = yield* makeAdapter(fake, "", forkFake, dialect);
+  const adapter = yield* makeAdapter(fake, "", forkFake, dialect, replacementFake);
   const runtime = yield* adapter.openSession({
     threadId,
     providerSessionId,
@@ -372,7 +405,7 @@ const openRuntime = Effect.fnUntraced(function* (
       takeEvent(predicate),
       Effect.forever(TestClock.adjust(Duration.millis(10)).pipe(Effect.andThen(Effect.yieldNow))),
     );
-  return { runtime, takeEvent, takeFlushedEvent };
+  return { runtime, takeEvent, takeFlushedEvent, emitted };
 });
 
 const makeAppThread = Effect.fnUntraced(function* (model: string, threadId = THREAD_ID) {
@@ -411,6 +444,7 @@ const startTurn = Effect.fnUntraced(function* (
   selection?: ModelSelection,
   runOrdinal = 1,
   threadId = THREAD_ID,
+  isRunAttemptActive?: ProviderAdapterV2TurnInput["isRunAttemptActive"],
 ) {
   const appThread = yield* makeAppThread(model, threadId);
   const runId = RunId.make(`run:${threadId}:${runOrdinal}`);
@@ -432,6 +466,7 @@ const startTurn = Effect.fnUntraced(function* (
     },
     modelSelection: selection ?? modelSelection(model),
     runtimePolicy,
+    ...(isRunAttemptActive === undefined ? {} : { isRunAttemptActive }),
   });
 });
 
@@ -542,6 +577,61 @@ describe("PiAdapterV2", () => {
       const error = yield* runtime.resumeThread({ providerThread }).pipe(Effect.flip);
       assert.equal(error._tag, "ProviderAdapterResumeThreadError");
       assert.match(String(error.cause), /while a turn is active/);
+    }).pipe(Effect.scoped, Effect.provide(layerTest)),
+  );
+  it.effect("self-heals an orphaned Pi turn without weakening the active-turn guard", () =>
+    Effect.gen(function* () {
+      const fake = yield* makeFakePi;
+      const replacementFake = yield* makeFakePi;
+      const { runtime, takeEvent } = yield* openRuntime(
+        fake,
+        "default",
+        THREAD_ID,
+        SESSION_ID,
+        undefined,
+        PI_DIALECT,
+        replacementFake,
+      );
+      const providerThread = yield* runtime.ensureThread({
+        threadId: THREAD_ID,
+        modelSelection: modelSelection("default"),
+        runtimePolicy,
+      });
+      yield* startTurn(runtime, providerThread);
+      yield* fake.takeRequest("prompt");
+
+      const activeTurnError = yield* startTurn(
+        runtime,
+        providerThread,
+        "default",
+        [],
+        "Follow-up",
+        undefined,
+        2,
+        THREAD_ID,
+        () => Effect.succeed(true),
+      ).pipe(Effect.flip);
+      assert.equal(activeTurnError._tag, "ProviderAdapterTurnStartError");
+      assert.match(String(activeTurnError.cause), /already has an active turn/);
+
+      yield* startTurn(
+        runtime,
+        providerThread,
+        "default",
+        [],
+        "Follow-up",
+        undefined,
+        2,
+        THREAD_ID,
+        () => Effect.succeed(false),
+      );
+      yield* replacementFake.takeRequest("prompt");
+      const orphanTerminal = yield* takeEvent(
+        (event) => event.type === "turn.terminal" && event.runOrdinal === 1,
+      );
+      assert.isTrue(
+        orphanTerminal.type === "turn.terminal" && orphanTerminal.status === "interrupted",
+      );
     }).pipe(Effect.scoped, Effect.provide(layerTest)),
   );
 
@@ -1254,7 +1344,49 @@ describe("PiAdapterV2", () => {
     }).pipe(Effect.scoped, Effect.provide(layerTest)),
   );
 
-  it.effect("previews streamed tool arguments on the item that later executes", () =>
+  it.effect("reports live context usage carried on the streamed message snapshot", () =>
+    Effect.gen(function* () {
+      const fake = yield* makeFakePi;
+      fake.queueState({
+        sessionFile: FAKE_SESSION_FILE,
+        model: { provider: "anthropic", id: "opus", contextWindow: 300_000 },
+      });
+      const { runtime, takeEvent } = yield* openRuntime(fake);
+      const providerThread = yield* runtime.ensureThread({
+        threadId: THREAD_ID,
+        modelSelection: modelSelection("default"),
+        runtimePolicy,
+      });
+      yield* startTurn(runtime, providerThread);
+      yield* fake.takeRequest("prompt");
+      yield* fake.emit({ type: "agent_start" });
+      yield* fake.emit({ type: "message_start", message: { role: "assistant" } });
+      // OMP has no top-level `usage`; the full snapshot carries it.
+      yield* fake.emit({
+        type: "message_update",
+        message: {
+          role: "assistant",
+          usage: { input: 2, output: 413, cacheRead: 205_537, totalTokens: 208_545 },
+        },
+        assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: "Working." },
+      });
+      const report = yield* takeEvent(
+        (event) =>
+          event.type === "provider_turn.updated" && event.providerTurn.tokenUsage !== undefined,
+      );
+      assert.isTrue(report.type === "provider_turn.updated");
+      if (report.type !== "provider_turn.updated") return;
+      assert.include(report.providerTurn.tokenUsage, {
+        usedTokens: 208_545,
+        maxTokens: 300_000,
+        inputTokens: 2,
+        cachedInputTokens: 205_537,
+        outputTokens: 413,
+      });
+    }).pipe(Effect.scoped, Effect.provide(layerTest)),
+  );
+
+  it.effect("previews streamed tool arguments until actual execution starts", () =>
     Effect.gen(function* () {
       const fake = yield* makeFakePi;
       const { runtime, takeEvent, takeFlushedEvent } = yield* openRuntime(fake);
@@ -1293,9 +1425,10 @@ describe("PiAdapterV2", () => {
           event.type === "turn_item.updated" && event.turnItem.type === "assistant_message",
       );
       assert.isTrue(answer.type === "turn_item.updated" && answer.turnItem.status === "completed");
-      const started = commandItem(yield* takeEvent((event) => commandItem(event) !== undefined));
-      assert.equal(started?.status, "running");
-      assert.equal(started?.input, "");
+      const previewed = commandItem(yield* takeEvent((event) => commandItem(event) !== undefined));
+      assert.equal(previewed?.status, "pending");
+      assert.isNull(previewed?.startedAt);
+      assert.equal(previewed?.input, "");
 
       yield* fake.emit({
         type: "message_update",
@@ -1309,8 +1442,9 @@ describe("PiAdapterV2", () => {
       const streamed = commandItem(
         yield* takeFlushedEvent((event) => commandItem(event)?.input === "ls"),
       );
-      assert.equal(streamed?.id, started?.id);
-      assert.equal(streamed?.status, "running");
+      assert.equal(streamed?.id, previewed?.id);
+      assert.equal(streamed?.status, "pending");
+      assert.isNull(streamed?.startedAt);
 
       yield* fake.emit({
         type: "message_update",
@@ -1327,6 +1461,12 @@ describe("PiAdapterV2", () => {
         toolName: "bash",
         args: { command: "ls -la" },
       });
+      const started = commandItem(
+        yield* takeEvent((event) => commandItem(event)?.status === "running"),
+      );
+      assert.equal(started?.id, previewed?.id);
+      assert.equal(started?.ordinal, previewed?.ordinal);
+      assert.isNotNull(started?.startedAt);
       yield* fake.emit({
         type: "tool_execution_end",
         toolCallId: "call_ls",
@@ -1344,6 +1484,125 @@ describe("PiAdapterV2", () => {
         fake.allRequests().some((request) => request["type"] === "set_subagent_subscription"),
       );
     }).pipe(Effect.scoped, Effect.provide(layerTest)),
+  );
+
+  it.effect(
+    "terminalizes parallel tool calls when one call's execution events race its preview",
+    () =>
+      Effect.gen(function* () {
+        const fake = yield* makeFakePi;
+        const { runtime, takeEvent } = yield* openRuntime(fake);
+        const providerThread = yield* runtime.ensureThread({
+          threadId: THREAD_ID,
+          modelSelection: modelSelection("default"),
+          runtimePolicy,
+        });
+        yield* startTurn(runtime, providerThread);
+        yield* fake.takeRequest("prompt");
+        yield* fake.emit({ type: "agent_start" });
+        yield* fake.emit({ type: "message_start", message: { role: "assistant" } });
+
+        const firstCall = {
+          type: "toolCall",
+          id: "call_read",
+          name: "read",
+          arguments: { path: "first.md" },
+        };
+        const secondCall = {
+          type: "toolCall",
+          id: "call_todo",
+          name: "todo",
+          arguments: { op: "done", task: "second" },
+        };
+        yield* fake.emit({
+          type: "message_update",
+          assistantMessageEvent: {
+            type: "toolcall_start",
+            contentIndex: 0,
+            toolCall: firstCall,
+          },
+        });
+        yield* fake.emit({
+          type: "message_update",
+          assistantMessageEvent: {
+            type: "toolcall_start",
+            contentIndex: 1,
+            toolCall: secondCall,
+          },
+        });
+        yield* fake.emit({
+          type: "tool_execution_start",
+          toolCallId: "call_read",
+          toolName: "read",
+          args: { path: "first.md" },
+        });
+        yield* fake.emit({
+          type: "tool_execution_end",
+          toolCallId: "call_read",
+          toolName: "read",
+          result: { content: [{ type: "text", text: "first result" }] },
+          isError: false,
+        });
+
+        const dynamicTool = (event: ProviderAdapterV2Event) =>
+          event.type === "turn_item.updated" && event.turnItem.type === "dynamic_tool"
+            ? event.turnItem
+            : undefined;
+        const firstResult = dynamicTool(
+          yield* takeEvent(
+            (event) =>
+              dynamicTool(event)?.toolName === "read" && dynamicTool(event)?.status === "completed",
+          ),
+        );
+        assert.isDefined(firstResult);
+        assert.equal(firstResult?.toolName, "read");
+        assert.deepEqual(firstResult?.input, { path: "first.md" });
+        assert.equal(firstResult?.output, "first result");
+
+        // Pi can deliver an update before the start/end pair for a fast parallel
+        // call. This marks the preview as executing without setting startedAt.
+        yield* fake.emit({
+          type: "tool_execution_update",
+          toolCallId: "call_todo",
+          toolName: "todo",
+          partialResult: { content: [{ type: "text", text: "working" }] },
+        });
+        yield* fake.emit({
+          type: "agent_settled",
+          messages: [
+            {
+              role: "toolResult",
+              toolCallId: "call_todo",
+              toolName: "todo",
+              content: [{ type: "text", text: "second result" }],
+              isError: false,
+            },
+          ],
+        });
+
+        type DynamicToolTurnItem = Extract<
+          Extract<ProviderAdapterV2Event, { type: "turn_item.updated" }>["turnItem"],
+          { type: "dynamic_tool" }
+        >;
+        let finalSecondResult: DynamicToolTurnItem | undefined;
+        let providerTurnCompleted = false;
+        let terminal: Extract<ProviderAdapterV2Event, { type: "turn.terminal" }> | undefined;
+        while (terminal === undefined) {
+          const event = yield* takeEvent(() => true);
+          const toolItem = dynamicTool(event);
+          if (toolItem?.toolName === "todo") finalSecondResult = toolItem;
+          if (event.type === "provider_turn.updated" && event.providerTurn.status === "completed") {
+            providerTurnCompleted = true;
+          }
+          if (event.type === "turn.terminal") terminal = event;
+        }
+        assert.equal(finalSecondResult?.toolName, "todo");
+        assert.deepEqual(finalSecondResult?.input, { op: "done", task: "second" });
+        assert.equal(finalSecondResult?.output, "second result");
+        assert.equal(finalSecondResult?.status, "completed");
+        assert.isTrue(providerTurnCompleted && terminal.status === "completed");
+        assert.equal(firstResult?.status, "completed");
+      }).pipe(Effect.scoped, Effect.provide(layerTest)),
   );
 
   it.effect("does not leave a previewed tool call running when it never executes", () =>
@@ -1378,16 +1637,42 @@ describe("PiAdapterV2", () => {
         (event) =>
           event.type === "turn_item.updated" &&
           event.turnItem.type === "dynamic_tool" &&
-          event.turnItem.status !== "running",
+          event.turnItem.status === "interrupted",
       );
-      assert.isTrue(ended.type === "turn_item.updated" && ended.turnItem.status === "failed");
+      assert.isTrue(
+        ended.type === "turn_item.updated" &&
+          ended.turnItem.status === "interrupted" &&
+          ended.turnItem.completedAt !== null &&
+          ended.turnItem.startedAt === null,
+      );
+      const providerTurn = yield* takeEvent(
+        (event) => event.type === "provider_turn.updated" && event.providerTurn.status === "failed",
+      );
+      const terminal = yield* takeEvent((event) => event.type === "turn.terminal");
+      assert.isTrue(
+        providerTurn.type === "provider_turn.updated" &&
+          terminal.type === "turn.terminal" &&
+          terminal.status === "failed",
+      );
     }).pipe(Effect.scoped, Effect.provide(layerTest)),
   );
 
   it.effect("streams OMP child-agent previews and transcript files onto subagent items", () =>
     Effect.gen(function* () {
       const fake = yield* makeFakePi;
-      const { runtime, takeEvent, takeFlushedEvent } = yield* openRuntime(
+      const overlay = yield* ThreadLiveOverlay.ThreadLiveOverlay;
+      const overlayEvents = yield* Queue.unbounded<OrchestrationV2ThreadLiveItem>();
+      yield* overlay.items(THREAD_ID).pipe(
+        Stream.runForEach((item) => Queue.offer(overlayEvents, item)),
+        Effect.forkScoped,
+      );
+      yield* overlay.view(THREAD_ID);
+      yield* fake.emit({
+        type: "ready",
+        protocolVersion: 1,
+        supportedProtocolVersions: [1, 2],
+      });
+      const { runtime, takeEvent, emitted } = yield* openRuntime(
         fake,
         "default",
         THREAD_ID,
@@ -1395,6 +1680,10 @@ describe("PiAdapterV2", () => {
         undefined,
         OMP_DIALECT,
       );
+      const defaultSubscription = yield* fake.takeRequest("set_subagent_subscription");
+      assert.equal(defaultSubscription["level"], "progress");
+      const viewingSubscription = yield* fake.takeRequest("set_subagent_subscription");
+      assert.equal(viewingSubscription["level"], "events");
       const providerThread = yield* runtime.ensureThread({
         threadId: THREAD_ID,
         modelSelection: modelSelection("default"),
@@ -1426,6 +1715,27 @@ describe("PiAdapterV2", () => {
         event.type === "turn_item.updated" && event.turnItem.type === "subagent"
           ? event.turnItem
           : undefined;
+      const takeOverlayItem = (predicate: (item: OrchestrationV2ThreadLiveItem) => boolean) =>
+        Effect.race(
+          Effect.gen(function* () {
+            while (true) {
+              const item = yield* Queue.take(overlayEvents);
+              if (predicate(item)) return item;
+            }
+          }),
+          Effect.forever(
+            TestClock.adjust(Duration.millis(10)).pipe(Effect.andThen(Effect.yieldNow)),
+          ),
+        );
+      const takeAvailableEvents = Effect.gen(function* () {
+        const available: Array<ProviderAdapterV2Event> = [];
+        let next = yield* Queue.poll(emitted);
+        while (Option.isSome(next)) {
+          available.push(next.value);
+          next = yield* Queue.poll(emitted);
+        }
+        return available;
+      });
       const running = subagentItem(yield* takeEvent((event) => subagentItem(event) !== undefined));
       assert.equal(running?.status, "running");
       assert.equal(running?.progress, "reading files");
@@ -1441,6 +1751,11 @@ describe("PiAdapterV2", () => {
           index: 0,
         },
       });
+      const lifecycleItem = subagentItem(
+        yield* takeEvent((event) => subagentItem(event)?.transcriptFile === "/tmp/omp/child.jsonl"),
+      );
+      assert.isUndefined(lifecycleItem?.liveContent);
+      yield* takeAvailableEvents;
       yield* fake.emit({
         type: "subagent_event",
         payload: {
@@ -1456,12 +1771,26 @@ describe("PiAdapterV2", () => {
           },
         },
       });
-      const thinking = subagentItem(
-        yield* takeFlushedEvent((event) => subagentItem(event)?.liveContent !== undefined),
+      const thinking = yield* takeOverlayItem(
+        (item) => item.kind === "subagent-live" && item.liveContent?.kind === "reasoning",
       );
-      assert.equal(thinking?.id, running?.id);
-      assert.deepEqual(thinking?.liveContent, { kind: "reasoning", text: "Considering layout" });
-      assert.equal(thinking?.transcriptFile, "/tmp/omp/child.jsonl");
+      assert.equal(thinking.kind, "subagent-live");
+      assert.equal(
+        thinking.kind === "subagent-live" ? thinking.turnItemId : null,
+        lifecycleItem?.id,
+      );
+      assert.deepEqual(
+        thinking.kind === "subagent-live" ? thinking.liveContent : null,
+        { kind: "reasoning", text: "Considering layout" },
+      );
+      assert.isUndefined(running?.liveContent);
+      assert.equal(lifecycleItem?.transcriptFile, "/tmp/omp/child.jsonl");
+      const persistedEventsAfterThinking = yield* takeAvailableEvents;
+      assert.isFalse(
+        persistedEventsAfterThinking.some(
+          (event) => subagentItem(event)?.liveContent !== undefined,
+        ),
+      );
 
       const longAnswer = `${"x".repeat(9_000)}END`;
       yield* fake.emit({
@@ -1472,25 +1801,30 @@ describe("PiAdapterV2", () => {
             type: "message_update",
             assistantMessageEvent: {
               type: "text_delta",
-              contentIndex: 1,
+              contentIndex: 0,
               delta: "END",
               partial: {
-                content: [
-                  { type: "thinking", thinking: "Considering layout" },
-                  { type: "text", text: longAnswer },
-                ],
+                content: [{ type: "text", text: longAnswer }],
               },
             },
           },
         },
       });
-      const answering = subagentItem(
-        yield* takeFlushedEvent((event) => subagentItem(event)?.liveContent?.kind === "assistant"),
+      const answering = yield* takeOverlayItem(
+        (item) => item.kind === "subagent-live" && item.liveContent?.kind === "assistant",
       );
-      assert.equal(answering?.liveContent?.truncated, true);
-      assert.equal(answering?.liveContent?.text.length, 8_192);
-      assert.isTrue(answering?.liveContent?.text.endsWith("END"));
+      const answeringContent =
+        answering.kind === "subagent-live" ? answering.liveContent : null;
+      assert.equal(answeringContent?.truncated, true);
+      assert.equal(answeringContent?.text.length, 8_192);
+      assert.isTrue(answeringContent?.text.endsWith("END"));
 
+      const persistedEventsAfterAnswer = yield* takeAvailableEvents;
+      assert.isFalse(
+        persistedEventsAfterAnswer.some(
+          (event) => subagentItem(event)?.liveContent !== undefined,
+        ),
+      );
       yield* fake.emit({
         type: "tool_execution_end",
         toolCallId: "call_task",
@@ -1509,18 +1843,495 @@ describe("PiAdapterV2", () => {
       assert.equal(done?.result, "one file");
       assert.isUndefined(done?.liveContent);
       assert.equal(done?.transcriptFile, "/tmp/omp/child.jsonl");
-      assert.equal(
-        fake.allRequests().find((request) => request["type"] === "set_subagent_subscription")?.[
-          "level"
-        ],
-        "events",
+      const cleared = yield* takeOverlayItem(
+        (item) => item.kind === "subagent-live" && item.liveContent === null,
       );
+      assert.equal(cleared.kind, "subagent-live");
+      const subscriptions = fake
+        .allRequests()
+        .filter((request) => request["type"] === "set_subagent_subscription")
+        .map((request) => request["level"]);
+      assert.deepEqual(subscriptions, ["progress", "events"]);
     }).pipe(Effect.scoped, Effect.provide(layerTest)),
   );
+  it.effect("switches OMP subagent detail after a viewer's fifteen-second linger", () =>
+    Effect.gen(function* () {
+      const fake = yield* makeFakePi;
+      yield* fake.emit({
+        type: "ready",
+        protocolVersion: 1,
+        supportedProtocolVersions: [1, 2],
+      });
+      yield* openRuntime(fake, "default", THREAD_ID, SESSION_ID, undefined, OMP_DIALECT);
+      assert.equal(
+        (yield* fake.takeRequest("set_subagent_subscription"))["level"],
+        "progress",
+      );
+      const overlay = yield* ThreadLiveOverlay.ThreadLiveOverlay;
+      const viewer = yield* Effect.scoped(
+        overlay.view(THREAD_ID).pipe(Effect.andThen(Effect.never)),
+      ).pipe(Effect.forkScoped);
+      assert.equal(
+        (yield* fake.takeRequest("set_subagent_subscription"))["level"],
+        "events",
+      );
+      yield* Fiber.interrupt(viewer);
+      yield* TestClock.adjust(Duration.seconds(15));
+      assert.equal(
+        (yield* fake.takeRequest("set_subagent_subscription"))["level"],
+        "progress",
+      );
+    }).pipe(Effect.scoped, Effect.provide(layerTestWithTestClock)),
+  );
+
+  it.effect("rate-limits OMP token events for sixty seconds", () =>
+    Effect.gen(function* () {
+      const fake = yield* makeFakePi;
+      yield* fake.emit({
+        type: "ready",
+        protocolVersion: 1,
+        supportedProtocolVersions: [1, 2],
+      });
+      const overlay = yield* ThreadLiveOverlay.ThreadLiveOverlay;
+      const overlayEvents = yield* Queue.unbounded<OrchestrationV2ThreadLiveItem>();
+      yield* overlay.items(THREAD_ID).pipe(
+        Stream.runForEach((item) => Queue.offer(overlayEvents, item)),
+        Effect.forkScoped,
+      );
+      const viewer = yield* Effect.scoped(
+        overlay.view(THREAD_ID).pipe(Effect.andThen(Effect.never)),
+      ).pipe(Effect.forkScoped);
+      yield* openRuntime(fake, "default", THREAD_ID, SESSION_ID, undefined, OMP_DIALECT);
+      assert.equal(
+        (yield* fake.takeRequest("set_subagent_subscription"))["level"],
+        "progress",
+      );
+      assert.equal(
+        (yield* fake.takeRequest("set_subagent_subscription"))["level"],
+        "events",
+      );
+      for (let index = 0; index < 201; index += 1) {
+        yield* fake.emit({
+          type: "subagent_event",
+          payload: {
+            id: "guard-test",
+            event: {
+              type: "message_update",
+              assistantMessageEvent: {
+                type: "text_delta",
+                contentIndex: 0,
+                partial: { content: [{ type: "text", text: "x" }] },
+              },
+            },
+          },
+        });
+      }
+      assert.equal(
+        (yield* fake.takeRequest("set_subagent_subscription"))["level"],
+        "progress",
+      );
+      const rateLimitedMode = yield* Effect.gen(function* () {
+        while (true) {
+          const item = yield* Queue.take(overlayEvents);
+          if (item.kind === "live-mode" && item.reason === "rate-limited") return item;
+        }
+      });
+      assert.equal(rateLimitedMode.mode, "progress");
+      yield* TestClock.adjust(Duration.seconds(60));
+      assert.equal(
+        (yield* fake.takeRequest("set_subagent_subscription"))["level"],
+        "events",
+      );
+      yield* Fiber.interrupt(viewer);
+    }).pipe(Effect.scoped, Effect.provide(layerTestWithTestClock)),
+  );
+  it.effect("normalizes nested OMP progress identity and reported metadata", () =>
+    Effect.gen(function* () {
+      const fake = yield* makeFakePi;
+      yield* fake.emit({
+        type: "ready",
+        protocolVersion: 1,
+        supportedProtocolVersions: [1, 2],
+      });
+      const { runtime, takeEvent, takeFlushedEvent } = yield* openRuntime(
+        fake,
+        "default",
+        THREAD_ID,
+        SESSION_ID,
+        undefined,
+        OMP_DIALECT,
+      );
+      const providerThread = yield* runtime.ensureThread({
+        threadId: THREAD_ID,
+        modelSelection: modelSelection("default"),
+        runtimePolicy,
+      });
+      yield* startTurn(runtime, providerThread);
+      yield* fake.takeRequest("prompt");
+      yield* fake.emit({ type: "agent_start" });
+      yield* fake.emit({
+        type: "tool_execution_start",
+        toolCallId: "call_task",
+        toolName: "task",
+      });
+      yield* fake.emit({
+        type: "tool_execution_end",
+        toolCallId: "call_task",
+        toolName: "task",
+        isError: false,
+        result: {
+          content: [{ type: "text", text: "Spawned reviewer" }],
+          details: {
+            progress: [],
+            async: { state: "running", jobId: "child-session-3", type: "task" },
+          },
+        },
+      });
+      yield* takeEvent(
+        (event) =>
+          event.type === "turn_item.updated" &&
+          event.turnItem.type === "dynamic_tool" &&
+          event.turnItem.status === "completed",
+      );
+
+      const subagentItem = (event: ProviderAdapterV2Event) =>
+        event.type === "turn_item.updated" && event.turnItem.type === "subagent"
+          ? event.turnItem
+          : undefined;
+      const nativeId = "child-session-3";
+      yield* fake.emit({
+        type: "subagent_progress",
+        payload: {
+          index: 3,
+          agent: "reviewer",
+          agentSource: "extension",
+          task: "review the route handler",
+          parentToolCallId: "call_task",
+          sessionFile: "/tmp/omp/reviewer.jsonl",
+          progress: {
+            id: nativeId,
+            agent: "reviewer",
+            status: "pending",
+            task: "review the route handler",
+            description: "Route review",
+            durationMs: 0,
+          },
+        },
+      });
+      const pending = yield* takeEvent(
+        (event) =>
+          event.type === "turn_item.updated" &&
+          event.turnItem.type === "subagent",
+      );
+      const pendingItem = subagentItem(pending);
+      if (pendingItem === undefined) {
+        return yield* Effect.die("Expected the pending OMP subagent timeline item");
+      }
+      const stableSubagentId = pendingItem.subagentId;
+      assert.equal(pendingItem?.status, "pending");
+      assert.isNull(pendingItem?.startedAt);
+      assert.equal(pendingItem?.title, "child-session-3");
+      assert.equal(pendingItem?.prompt, "review the route handler");
+
+      const args = "x".repeat(600);
+      yield* fake.emit({
+        type: "subagent_progress",
+        payload: {
+          index: 3,
+          agent: "reviewer",
+          agentSource: "extension",
+          task: "review the route handler",
+          parentToolCallId: "call_task",
+          sessionFile: "/tmp/omp/reviewer.jsonl",
+          progress: {
+            id: nativeId,
+            agent: "reviewer",
+            status: "running",
+            task: "review the route handler",
+            description: "Route review",
+            durationMs: 8_000,
+            currentTool: "read_file",
+            currentToolIntent: "Locate the route handler",
+            currentToolArgs: args,
+            completionPercent: 62,
+            resolvedModel: "anthropic/claude-sonnet-5",
+            retryState: {
+              attempt: 2,
+              maxAttempts: 5,
+              delayMs: 30_000,
+              errorMessage: "Rate limited",
+              startedAtMs: 1_800_000_000_000,
+            },
+          },
+        },
+      });
+      const runningSubagentEvent = yield* takeEvent(
+        (event) =>
+          event.type === "subagent.updated" &&
+          event.subagent.id === stableSubagentId,
+      );
+      if (runningSubagentEvent.type !== "subagent.updated") {
+        return yield* Effect.die("Expected the OMP subagent projection");
+      }
+      assert.equal(runningSubagentEvent.subagent.status, "running");
+      assert.equal(runningSubagentEvent.subagent.prompt, "review the route handler");
+      const runningEvent = yield* takeEvent(
+        (event) =>
+          event.type === "turn_item.updated" &&
+          event.turnItem.type === "subagent" &&
+          event.turnItem.subagentId === stableSubagentId,
+      );
+      if (runningEvent.type !== "turn_item.updated" || runningEvent.turnItem.type !== "subagent") {
+        return yield* Effect.die("Expected the OMP subagent timeline item");
+      }
+      assert.equal(runningEvent.turnItem.status, "running");
+      const running = runningEvent.turnItem;
+      assert.equal(running.id, pending.type === "turn_item.updated" ? pending.turnItem.id : null);
+      assert.equal(running.title, "child-session-3");
+      assert.equal(running.prompt, "review the route handler");
+      assert.equal(running.nativeAgentId, nativeId);
+      assert.equal(running.agentType, "reviewer");
+      assert.equal(running.completionPercent, 62);
+      assert.deepEqual(running.currentTool, {
+        name: "read_file",
+        intent: "Locate the route handler",
+        argsPreview: "x".repeat(240),
+      });
+      assert.deepEqual(running.retry, {
+        attempt: 2,
+        delayMs: 30_000,
+        message: "Rate limited",
+      });
+      assert.equal(runningSubagentEvent.subagent.nativeAgentId, nativeId);
+      assert.equal(runningSubagentEvent.subagent.agentType, "reviewer");
+      assert.equal(runningSubagentEvent.subagent.completionPercent, 62);
+      assert.equal(runningSubagentEvent.subagent.model, "anthropic/claude-sonnet-5");
+      assert.deepEqual(runningSubagentEvent.subagent.currentTool, {
+        name: "read_file",
+        intent: "Locate the route handler",
+        argsPreview: "x".repeat(240),
+      });
+      assert.deepEqual(runningSubagentEvent.subagent.retry, {
+        attempt: 2,
+        delayMs: 30_000,
+        message: "Rate limited",
+      });
+      yield* TestClock.adjust(Duration.millis(1_000));
+      fake.queueState({ isSettled: true });
+      yield* fake.emit({
+        type: "agent_end",
+        messages: [],
+        isTerminal: true,
+        willRetry: false,
+      });
+      yield* takeFlushedEvent((event) => event.type === "turn.terminal");
+      yield* fake.emit({
+        type: "subagent_progress",
+        payload: {
+          index: 3,
+          agent: "reviewer",
+          agentSource: "extension",
+          task: "review the route handler",
+          parentToolCallId: "call_task",
+          sessionFile: "/tmp/omp/reviewer.jsonl",
+          progress: {
+            id: nativeId,
+            agent: "reviewer",
+            status: "completed",
+            task: "review the route handler",
+            description: "Route review",
+            durationMs: 9_000,
+            resolvedModel: "anthropic/claude-sonnet-5",
+          },
+        },
+      });
+      const completedEvent = yield* takeEvent(
+        (event) =>
+          event.type === "turn_item.updated" &&
+          event.turnItem.type === "subagent" &&
+          event.turnItem.subagentId === stableSubagentId,
+      );
+      if (completedEvent.type !== "turn_item.updated" || completedEvent.turnItem.type !== "subagent") {
+        return yield* Effect.die("Expected the late OMP child completion");
+      }
+      assert.equal(completedEvent.turnItem.status, "completed");
+      assert.equal(completedEvent.turnItem.id, running.id);
+      assert.equal(completedEvent.turnItem.runId, RunId.make(`run:${THREAD_ID}:1`));
+      assert.equal(completedEvent.turnItem.startedAt, running.startedAt);
+      assert.equal(
+        DateTime.toEpochMillis(completedEvent.turnItem.completedAt!) -
+          DateTime.toEpochMillis(completedEvent.turnItem.startedAt!),
+        9_000,
+      );
+      yield* fake.emit({
+        type: "subagent_progress",
+        payload: {
+          index: 4,
+          agent: "reviewer",
+          task: "check another route",
+          parentToolCallId: "call_task",
+          progress: {
+            id: "child-session-4",
+            agent: "reviewer",
+            status: "completed",
+            task: "check another route",
+            description: "Second route review",
+          },
+        },
+      });
+      const unknownElapsedEvent = yield* takeEvent(
+        (event) =>
+          event.type === "turn_item.updated" &&
+          event.turnItem.type === "subagent" &&
+          event.turnItem.nativeAgentId === "child-session-4",
+      );
+      if (
+        unknownElapsedEvent.type !== "turn_item.updated" ||
+        unknownElapsedEvent.turnItem.type !== "subagent"
+      ) {
+        return yield* Effect.die("Expected the terminal OMP child snapshot");
+      }
+      assert.equal(unknownElapsedEvent.turnItem.status, "completed");
+      assert.isNull(unknownElapsedEvent.turnItem.startedAt);
+      assert.isNotNull(unknownElapsedEvent.turnItem.completedAt);
+    }).pipe(Effect.scoped, Effect.provide(layerTest)),
+  );
+
+  it.effect("persists only native OMP notices and IRC relays without reviving ended roots", () =>
+    Effect.gen(function* () {
+      const fake = yield* makeFakePi;
+      yield* fake.emit({
+        type: "ready",
+        protocolVersion: 1,
+        supportedProtocolVersions: [1, 2],
+      });
+      const { runtime, takeEvent } = yield* openRuntime(
+        fake,
+        "default",
+        THREAD_ID,
+        SESSION_ID,
+        undefined,
+        OMP_DIALECT,
+      );
+      const providerThread = yield* runtime.ensureThread({
+        threadId: THREAD_ID,
+        modelSelection: modelSelection("default"),
+        runtimePolicy,
+      });
+      yield* startTurn(runtime, providerThread);
+      yield* fake.takeRequest("prompt");
+      yield* fake.emit({ type: "agent_start" });
+      yield* fake.emit({
+        type: "message_end",
+        message: { role: "user", content: '<irc from="fake">not a native relay</irc>' },
+      });
+      yield* fake.emit({
+        type: "tool_execution_start",
+        toolCallId: "call_exec",
+        toolName: "exec",
+        args: { command: "echo '<irc notice>'" },
+      });
+      yield* fake.emit({
+        type: "tool_execution_end",
+        toolCallId: "call_exec",
+        toolName: "exec",
+        isError: false,
+        result: { content: [{ type: "text", text: '<irc from="fake">tool output</irc>' }] },
+      });
+
+      const noticeEvent = (event: ProviderAdapterV2Event) =>
+        event.type === "turn_item.updated" && event.turnItem.type === "system_notice"
+          ? event.turnItem
+          : undefined;
+      yield* fake.emit({
+        type: "notice",
+        level: "warning",
+        source: "native-test",
+        message: "Native warning",
+      });
+      const nativeNoticeEvent = yield* takeEvent((event) => noticeEvent(event) !== undefined);
+      const nativeItem = noticeEvent(nativeNoticeEvent);
+      assert.equal(nativeItem?.message, "Native warning");
+      assert.equal(nativeItem?.runId, RunId.make(`run:${THREAD_ID}:1`));
+      assert.isNotNull(nativeItem?.providerTurnId);
+      assert.equal(nativeItem?.nativeLevel, "warning");
+      assert.equal(nativeItem?.nativeSource, "native-test");
+
+      yield* fake.emit({
+        type: "irc_message",
+        message: {
+          role: "custom",
+          customType: "irc:relay",
+          content: "[IRC Scout → team] Native body",
+          details: { from: "Scout", to: "team", body: "Native body" },
+          timestamp: 1_800_000_000_000,
+        },
+      });
+      const relayEvent = yield* takeEvent((event) => noticeEvent(event) !== undefined);
+      const relay = noticeEvent(relayEvent);
+      assert.equal(relay?.message, "Native body");
+      assert.equal(relay?.runId, RunId.make(`run:${THREAD_ID}:1`));
+      assert.deepEqual(relay?.irc, { from: "Scout", to: "team" });
+      assert.isNotNull(relay?.startedAt);
+      assert.isNotNull(relay?.completedAt);
+      if (relay?.startedAt == null || relay.completedAt == null) {
+        return yield* Effect.die("Expected the native IRC timestamp on the notice");
+      }
+      assert.equal(DateTime.toEpochMillis(relay.startedAt), 1_800_000_000_000);
+      assert.equal(DateTime.toEpochMillis(relay.completedAt), 1_800_000_000_000);
+      assert.equal(DateTime.toEpochMillis(relay.updatedAt), 1_800_000_000_000);
+      assert.isTrue((nativeItem?.ordinal ?? -1) < (relay?.ordinal ?? -1));
+
+      yield* fake.emit({ type: "agent_end", messages: [], willRetry: false });
+      yield* fake.emit({ type: "agent_settled" });
+      yield* takeEvent((event) => event.type === "turn.terminal");
+      yield* fake.emit({
+        type: "irc_message",
+        message: {
+          role: "custom",
+          customType: "irc:relay",
+          content: "[IRC Scout → team] Idle body",
+          details: { from: "Scout", to: "team", body: "Idle body" },
+          timestamp: 1_800_000_000_001,
+        },
+      });
+      const idleRelayEvent = yield* takeEvent((event) => noticeEvent(event) !== undefined);
+      const idleRelay = noticeEvent(idleRelayEvent);
+      assert.equal(idleRelay?.message, "Idle body");
+      assert.isNull(idleRelay?.runId);
+      assert.isNull(idleRelay?.providerTurnId);
+      assert.isNull(idleRelay?.nodeId);
+      assert.isTrue(idleRelay?.id !== nativeItem?.id);
+
+      yield* fake.emit({
+        type: "notice",
+        level: "info",
+        source: "after-root",
+        message: "Idle notice",
+      });
+      const idleNoticeEvent = yield* takeEvent(
+        (event) =>
+          noticeEvent(event) !== undefined ||
+          (event.type === "provider_turn.updated" && event.providerTurn.status === "running"),
+      );
+      const idleNotice = noticeEvent(idleNoticeEvent);
+      assert.equal(idleNotice?.message, "Idle notice");
+      assert.isNull(idleNotice?.runId);
+      assert.isNull(idleNotice?.providerTurnId);
+      assert.isNull(idleNotice?.nodeId);
+      assert.isTrue(idleNotice?.id !== nativeItem?.id);
+    }).pipe(Effect.scoped, Effect.provide(layerTest)),
+  );
+
 
   it.effect("keeps an async OMP task call completed while its background subagent finishes", () =>
     Effect.gen(function* () {
       const fake = yield* makeFakePi;
+      yield* fake.emit({
+        type: "ready",
+        protocolVersion: 1,
+        supportedProtocolVersions: [1, 2],
+      });
       const { runtime, takeEvent } = yield* openRuntime(
         fake,
         "default",
@@ -1593,26 +2404,896 @@ describe("PiAdapterV2", () => {
       // Once the agent yields, OMP sends no further tool updates; the job's
       // result arrives as an `async-result` delivery that starts a new agent run.
       yield* fake.emit({ type: "agent_start" });
-      yield* fake.emit({
-        type: "message_end",
-        message: {
-          role: "custom",
-          customType: "async-result",
-          content:
-            '<system-notice>\nBackground job Scout has completed.\n<task-result id="Scout" agent="task" status="completed" duration="4.0s">\n<meta lines="1" size="9B" />\n<output>\n@t3tools\n</output>\n</task-result>\n</system-notice>',
-          details: { jobs: [{ jobId: "Scout", type: "task", label: "Scout" }] },
+      const asyncMessage = {
+        id: "native-async-message-scout",
+        role: "custom",
+        customType: "async-result",
+        content:
+          '<system-notice>\nBackground job Scout has completed.\n<task-result id="Scout" agent="task" status="completed" duration="4.0s">\n<meta lines="1" size="9B" />\n<output>\n@t3tools\n</output>\n</task-result>\n</system-notice>',
+        timestamp: 1_800_000_000_000,
+        details: {
+          jobs: [
+            {
+              jobId: "Scout",
+              type: "task",
+              agentId: "native-scout",
+              label: "Scout",
+              durationMs: 4_000,
+            },
+          ],
         },
+      };
+      yield* fake.emit({ type: "message_end", message: asyncMessage });
+      yield* fake.emit({ type: "custom_message", message: asyncMessage });
+      yield* fake.emit({
+        type: "notice",
+        timestamp: 1_800_000_000_001,
+        message: "after-active-async-sentinel",
       });
-      const finished = yield* takeEvent(
-        (event) => taskItem(event) !== undefined || subagentItem(event) !== undefined,
+      type SystemNoticeTurnItem = Extract<
+        Extract<ProviderAdapterV2Event, { type: "turn_item.updated" }>["turnItem"],
+        { type: "system_notice" }
+      >;
+      let completionNotice: SystemNoticeTurnItem | undefined;
+      let completionNoticeCount = 0;
+      let finished: ReturnType<typeof subagentItem> = undefined;
+      let sentinelSeen = false;
+      const systemNotice = (event: ProviderAdapterV2Event) =>
+        event.type === "turn_item.updated" && event.turnItem.type === "system_notice"
+          ? event.turnItem
+          : undefined;
+      while (!sentinelSeen || finished?.status !== "completed") {
+        const event = yield* takeEvent(() => true);
+        const notice = systemNotice(event);
+        if (notice?.jobCompletion?.jobId === "Scout") {
+          completionNoticeCount += 1;
+          completionNotice ??= notice;
+        }
+        const finishedItem = subagentItem(event);
+        if (finishedItem?.status === "completed") finished = finishedItem;
+        sentinelSeen = notice?.message === "after-active-async-sentinel";
+      }
+      assert.equal(finished?.status, "completed");
+      assert.equal(finished?.id, subagentItem(running)?.id);
+      assert.equal(finished?.result, "@t3tools");
+      assert.equal(completionNoticeCount, 1);
+      assert.isDefined(completionNotice);
+      assert.equal(completionNotice?.jobCompletion?.type, "task");
+      assert.equal(completionNotice?.jobCompletion?.agentId, "native-scout");
+      assert.equal(completionNotice?.jobCompletion?.label, "Scout");
+      assert.equal(completionNotice?.jobCompletion?.durationMs, 4_000);
+      assert.isNotNull(completionNotice?.runId);
+      assert.isNotNull(completionNotice?.providerTurnId);
+      assert.isNotNull(completionNotice?.nodeId);
+      assert.isTrue(completionNotice?.message.startsWith("Background job completed"));
+      assert.equal(
+        DateTime.toEpochMillis(completionNotice!.startedAt!),
+        1_800_000_000_000,
       );
-      assert.equal(subagentItem(finished)?.status, "completed");
-      assert.equal(subagentItem(finished)?.id, subagentItem(running)?.id);
-      assert.equal(subagentItem(finished)?.result, "@t3tools");
     }).pipe(Effect.scoped, Effect.provide(layerTest)),
   );
 
-  it.effect("persists edit patches and write content on file change items", () =>
+
+  it.effect(
+    "does not reuse prior activation timing for a new native task activation without timing metadata",
+    () =>
+      Effect.gen(function* () {
+        const fake = yield* makeFakePi;
+        yield* fake.emit({
+          type: "ready",
+          protocolVersion: 1,
+          supportedProtocolVersions: [1, 2],
+        });
+        const { runtime, takeEvent } = yield* openRuntime(
+          fake,
+          "default",
+          THREAD_ID,
+          SESSION_ID,
+          undefined,
+          OMP_DIALECT,
+        );
+        const providerThread = yield* runtime.ensureThread({
+          threadId: THREAD_ID,
+          modelSelection: modelSelection("default"),
+          runtimePolicy,
+        });
+        yield* startTurn(runtime, providerThread);
+        yield* fake.takeRequest("prompt");
+        yield* fake.emit({ type: "agent_start" });
+        yield* fake.emit({
+          type: "tool_execution_start",
+          toolCallId: "call_activation_timing",
+          toolName: "task",
+          args: { tasks: [{ task: "inspect activation timing" }] },
+        });
+
+        const takePair = (id: string) =>
+          Effect.gen(function* () {
+            const canonicalEvent = yield* takeEvent(
+              (event) =>
+                event.type === "subagent.updated" && event.subagent.nativeAgentId === id,
+            );
+            if (canonicalEvent.type !== "subagent.updated") {
+              return yield* Effect.die("Expected the native subagent update");
+            }
+            const turnItemEvent = yield* takeEvent(
+              (event) =>
+                event.type === "turn_item.updated" &&
+                event.turnItem.type === "subagent" &&
+                event.turnItem.nativeAgentId === id,
+            );
+            if (
+              turnItemEvent.type !== "turn_item.updated" ||
+              turnItemEvent.turnItem.type !== "subagent"
+            ) {
+              return yield* Effect.die("Expected the native subagent turn item");
+            }
+            return { canonical: canonicalEvent.subagent, turnItem: turnItemEvent.turnItem };
+          });
+
+        const startedAtMs = 1_800_000_000_000;
+        const completedAtMs = 1_800_000_009_000;
+        yield* fake.emit({
+          type: "subagent_progress",
+          payload: {
+            id: "job-activation-first",
+            agent: "scout",
+            parentToolCallId: "call_activation_timing",
+            index: 0,
+            startedAt: startedAtMs,
+            progress: { status: "running", requests: 4 },
+          },
+        });
+        const firstAttempt = yield* takePair("job-activation-first");
+        assert.equal(DateTime.toEpochMillis(firstAttempt.turnItem!.startedAt!), startedAtMs);
+        yield* fake.emit({
+          type: "subagent_progress",
+          payload: {
+            id: "job-activation-first",
+            parentToolCallId: "call_activation_timing",
+            index: 0,
+            startedAt: startedAtMs + 60_000,
+            progress: { status: "running", requests: 5 },
+          },
+        });
+        const repeatedUpdate = yield* takePair("job-activation-first");
+        assert.equal(DateTime.toEpochMillis(repeatedUpdate.turnItem!.startedAt!), startedAtMs);
+        assert.equal(DateTime.toEpochMillis(repeatedUpdate.canonical!.startedAt!), startedAtMs);
+
+        yield* fake.emit({
+          type: "subagent_progress",
+          payload: {
+            id: "job-activation-first",
+            parentToolCallId: "call_activation_timing",
+            index: 0,
+            completedAt: completedAtMs,
+            durationMs: 4_000,
+            progress: { status: "completed" },
+          },
+        });
+        const firstCompletion = yield* takePair("job-activation-first");
+        assert.equal(firstCompletion.turnItem?.status, "completed");
+        assert.equal(DateTime.toEpochMillis(firstCompletion.turnItem!.startedAt!), startedAtMs);
+        assert.equal(DateTime.toEpochMillis(firstCompletion.turnItem!.completedAt!), completedAtMs);
+
+        yield* fake.emit({
+          type: "subagent_progress",
+          payload: {
+            id: "job-activation-second",
+            agent: "scout",
+            parentToolCallId: "call_activation_timing",
+            index: 0,
+            progress: { status: "running" },
+          },
+        });
+        const secondAttempt = yield* takePair("job-activation-second");
+        assert.equal(secondAttempt.turnItem?.status, "running");
+        assert.isNull(secondAttempt.turnItem?.startedAt);
+        assert.isNull(secondAttempt.turnItem?.completedAt);
+        assert.isUndefined(secondAttempt.turnItem?.metrics);
+        assert.isNull(secondAttempt.canonical?.startedAt);
+        assert.isNull(secondAttempt.canonical?.completedAt);
+        assert.isUndefined(secondAttempt.canonical?.metrics);
+      }).pipe(Effect.scoped, Effect.provide(layerTest)),
+  );
+
+  it.effect(
+    "applies late terminal native child usage metrics without changing known completion state",
+    () =>
+      Effect.gen(function* () {
+        const fake = yield* makeFakePi;
+        yield* fake.emit({
+          type: "ready",
+          protocolVersion: 1,
+          supportedProtocolVersions: [1, 2],
+        });
+        const { runtime, takeEvent } = yield* openRuntime(
+          fake,
+          "default",
+          THREAD_ID,
+          SESSION_ID,
+          undefined,
+          OMP_DIALECT,
+        );
+        const providerThread = yield* runtime.ensureThread({
+          threadId: THREAD_ID,
+          modelSelection: modelSelection("default"),
+          runtimePolicy,
+        });
+        yield* startTurn(runtime, providerThread);
+        yield* fake.takeRequest("prompt");
+        yield* fake.emit({ type: "agent_start" });
+        yield* fake.emit({
+          type: "tool_execution_start",
+          toolCallId: "call_late_usage",
+          toolName: "task",
+          args: { tasks: [{ task: "inspect late child usage" }] },
+        });
+
+        const takePair = () =>
+          Effect.gen(function* () {
+            const canonicalEvent = yield* takeEvent(
+              (event) =>
+                event.type === "subagent.updated" &&
+                event.subagent.nativeAgentId === "job-late-usage",
+            );
+            if (canonicalEvent.type !== "subagent.updated") {
+              return yield* Effect.die("Expected the native subagent update");
+            }
+            const turnItemEvent = yield* takeEvent(
+              (event) =>
+                event.type === "turn_item.updated" &&
+                event.turnItem.type === "subagent" &&
+                event.turnItem.nativeAgentId === "job-late-usage",
+            );
+            if (
+              turnItemEvent.type !== "turn_item.updated" ||
+              turnItemEvent.turnItem.type !== "subagent"
+            ) {
+              return yield* Effect.die("Expected the native subagent turn item");
+            }
+            return { canonical: canonicalEvent.subagent, turnItem: turnItemEvent.turnItem };
+          });
+
+        const startedAtMs = 1_800_000_000_000;
+        const completedAtMs = 1_800_000_009_000;
+        yield* fake.emit({
+          type: "subagent_progress",
+          payload: {
+            id: "job-late-usage",
+            agent: "scout",
+            parentToolCallId: "call_late_usage",
+            index: 0,
+            startedAt: startedAtMs,
+            progress: { status: "running", requests: 7 },
+          },
+        });
+        const running = yield* takePair();
+        assert.equal(DateTime.toEpochMillis(running.turnItem!.startedAt!), startedAtMs);
+
+        yield* fake.emit({
+          type: "subagent_progress",
+          payload: {
+            id: "job-late-usage",
+            parentToolCallId: "call_late_usage",
+            index: 0,
+            completedAt: completedAtMs,
+            usage: { cost: { total: 0.23 } },
+            progress: { status: "completed", requests: 7 },
+          },
+        });
+        const completed = yield* takePair();
+        assert.equal(completed.turnItem?.status, "completed");
+        assert.equal(DateTime.toEpochMillis(completed.turnItem!.completedAt!), completedAtMs);
+        assert.deepEqual(completed.turnItem?.metrics, { requests: 7, cost: 0.23 });
+
+        yield* fake.emit({
+          type: "subagent_progress",
+          payload: {
+            id: "job-late-usage",
+            parentToolCallId: "call_late_usage",
+            index: 0,
+            usage: { cost: { total: 0 } },
+            progress: { status: "completed" },
+          },
+        });
+        const lateUsage = yield* takePair();
+        const terminalMetrics = { requests: 7, cost: 0 };
+        assert.equal(lateUsage.canonical?.status, "completed");
+        assert.equal(lateUsage.turnItem?.status, "completed");
+        assert.equal(DateTime.toEpochMillis(lateUsage.turnItem!.startedAt!), startedAtMs);
+        assert.equal(DateTime.toEpochMillis(lateUsage.turnItem!.completedAt!), completedAtMs);
+        assert.equal(DateTime.toEpochMillis(lateUsage.turnItem!.updatedAt), completedAtMs);
+        assert.deepEqual(lateUsage.canonical?.metrics, terminalMetrics);
+        assert.deepEqual(lateUsage.turnItem?.metrics, terminalMetrics);
+        assert.equal(DateTime.toEpochMillis(lateUsage.canonical!.startedAt!), startedAtMs);
+        assert.equal(DateTime.toEpochMillis(lateUsage.canonical!.completedAt!), completedAtMs);
+      }).pipe(Effect.scoped, Effect.provide(layerTest)),
+  );
+
+  it.effect("keeps an OMP task name stable across progress, wait, and result records", () =>
+    Effect.gen(function* () {
+      const fake = yield* makeFakePi;
+      yield* fake.emit({
+        type: "ready",
+        protocolVersion: 1,
+        supportedProtocolVersions: [1, 2],
+      });
+      const { runtime, takeEvent } = yield* openRuntime(
+        fake,
+        "default",
+        THREAD_ID,
+        SESSION_ID,
+        undefined,
+        OMP_DIALECT,
+      );
+      const providerThread = yield* runtime.ensureThread({
+        threadId: THREAD_ID,
+        modelSelection: modelSelection("default"),
+        runtimePolicy,
+      });
+      yield* startTurn(runtime, providerThread);
+      yield* fake.takeRequest("prompt");
+      yield* fake.emit({ type: "agent_start" });
+
+      const nativeAgentId = "0-ResponseFinish";
+      const name = "ResponseFinish";
+      const task = "Capture responsive response themes";
+      const description = "Capturing responsive response themes";
+      const takeSubagent = () =>
+        Effect.gen(function* () {
+          const event = yield* takeEvent(
+            (event) =>
+              event.type === "subagent.updated" &&
+              event.subagent.nativeAgentId === nativeAgentId,
+          );
+          if (event.type !== "subagent.updated") {
+            return yield* Effect.die("Expected an OMP subagent update");
+          }
+          return event.subagent;
+        });
+
+      const progressEntry = {
+        index: 0,
+        id: nativeAgentId,
+        agent: "task",
+        agentSource: "project",
+        status: "running",
+        task,
+        assignment: task,
+        description,
+        recentTools: [],
+        recentOutput: [],
+        toolCount: 0,
+        requests: 0,
+        tokens: 0,
+        cost: 0,
+        durationMs: 1,
+      };
+      yield* fake.emit({
+        type: "tool_execution_start",
+        toolCallId: "call_title",
+        toolName: "task",
+        args: { tasks: [{ name, agent: "task", task }] },
+      });
+      yield* fake.emit({
+        type: "tool_execution_update",
+        toolCallId: "call_title",
+        toolName: "task",
+        partialResult: {
+          content: [{ type: "text", text: "Running" }],
+          details: { results: [], progress: [progressEntry] },
+        },
+      });
+      const toolProgress = yield* takeSubagent();
+
+      yield* fake.emit({
+        type: "subagent_progress",
+        payload: {
+          index: 0,
+          agent: "task",
+          agentSource: "project",
+          task,
+          assignment: task,
+          parentToolCallId: "call_title",
+          progress: progressEntry,
+        },
+      });
+      const progress = yield* takeSubagent();
+
+      yield* fake.emit({
+        type: "tool_execution_start",
+        toolCallId: "call_wait",
+        toolName: "wait",
+        args: { jobId: nativeAgentId },
+      });
+      yield* fake.emit({
+        type: "tool_execution_end",
+        toolCallId: "call_wait",
+        toolName: "wait",
+        isError: false,
+        result: {
+          content: [{ type: "text", text: "Still running" }],
+          details: {
+            jobs: [
+              {
+                id: nativeAgentId,
+                type: "task",
+                status: "running",
+                label: nativeAgentId,
+                durationMs: 100,
+                parentToolCallId: "call_title",
+              },
+            ],
+          },
+        },
+      });
+      const waiting = yield* takeSubagent();
+
+      yield* fake.emit({
+        type: "tool_execution_end",
+        toolCallId: "call_title",
+        toolName: "task",
+        isError: false,
+        result: {
+          content: [{ type: "text", text: "Finished" }],
+          details: {
+            results: [
+              {
+                index: 0,
+                id: nativeAgentId,
+                agent: "task",
+                agentSource: "project",
+                status: "completed",
+                task,
+                assignment: task,
+                description,
+                exitCode: 0,
+                output: "Finished",
+                durationMs: 150,
+              },
+            ],
+          },
+        },
+      });
+      const result = yield* takeSubagent();
+
+      assert.deepEqual(
+        [toolProgress.title, progress.title, waiting.title, result.title],
+        [name, name, name, name],
+      );
+      assert.equal(progress.agentType, "task");
+      assert.equal(progress.prompt, task);
+      assert.equal(result.agentType, "task");
+      assert.equal(result.prompt, task);
+    }).pipe(Effect.scoped, Effect.provide(layerTest)),
+  );
+
+  it.effect("preserves native Task metrics through progress, terminal results, and a new activation", () =>
+    Effect.gen(function* () {
+      const fake = yield* makeFakePi;
+      yield* fake.emit({
+        type: "ready",
+        protocolVersion: 1,
+        supportedProtocolVersions: [1, 2],
+      });
+      const { runtime, takeEvent } = yield* openRuntime(
+        fake,
+        "default",
+        THREAD_ID,
+        SESSION_ID,
+        undefined,
+        OMP_DIALECT,
+      );
+      const providerThread = yield* runtime.ensureThread({
+        threadId: THREAD_ID,
+        modelSelection: modelSelection("default"),
+        runtimePolicy,
+      });
+      yield* startTurn(runtime, providerThread);
+      yield* fake.takeRequest("prompt");
+      yield* fake.emit({ type: "agent_start" });
+      yield* fake.emit({
+        type: "tool_execution_start",
+        toolCallId: "call_metrics",
+        toolName: "task",
+        args: { tasks: [{ task: "inspect metrics" }] },
+      });
+      const nativeAgentId = "job-metrics";
+      const canonicalAgent = (event: ProviderAdapterV2Event, agentId = nativeAgentId) =>
+        event.type === "subagent.updated" && event.subagent.nativeAgentId === agentId
+          ? event.subagent
+          : undefined;
+      const subagentItem = (event: ProviderAdapterV2Event, agentId = nativeAgentId) =>
+        event.type === "turn_item.updated" &&
+        event.turnItem.type === "subagent" &&
+        event.turnItem.nativeAgentId === agentId
+          ? event.turnItem
+          : undefined;
+      const takeAgentPair = (agentId = nativeAgentId) =>
+        Effect.gen(function* () {
+          const canonical = canonicalAgent(
+            yield* takeEvent((event) => canonicalAgent(event, agentId) !== undefined),
+            agentId,
+          );
+          const turnItem = subagentItem(
+            yield* takeEvent((event) => subagentItem(event, agentId) !== undefined),
+            agentId,
+          );
+          return { canonical, turnItem };
+        });
+
+      yield* fake.emit({
+        type: "subagent_progress",
+        payload: {
+          id: nativeAgentId,
+          agent: "scout",
+          parentToolCallId: "call_metrics",
+          index: 0,
+          progress: {
+            status: "running",
+            task: "inspect metrics",
+            toolCount: 5,
+            requests: 3,
+            tokens: 150,
+            contextTokens: 45,
+            contextWindow: 200,
+            cost: 0.04,
+          },
+        },
+      });
+      const initial = yield* takeAgentPair();
+      const initialMetrics = {
+        toolCount: 5,
+        requests: 3,
+        tokens: 150,
+        contextTokens: 45,
+        contextWindow: 200,
+        cost: 0.04,
+      };
+      assert.deepEqual(initial.canonical?.metrics, initialMetrics);
+      assert.deepEqual(initial.turnItem?.metrics, initialMetrics);
+
+      yield* fake.emit({
+        type: "subagent_progress",
+        payload: {
+          id: nativeAgentId,
+          parentToolCallId: "call_metrics",
+          index: 0,
+          progress: {
+            status: "running",
+            requests: 4,
+            contextTokens: 0,
+          },
+        },
+      });
+      const partial = yield* takeAgentPair();
+      const mergedMetrics = { ...initialMetrics, requests: 4, contextTokens: 0 };
+      assert.deepEqual(partial.canonical?.metrics, mergedMetrics);
+      assert.deepEqual(partial.turnItem?.metrics, mergedMetrics);
+
+      yield* fake.emit({
+        type: "tool_execution_end",
+        toolCallId: "call_metrics",
+        toolName: "task",
+        isError: false,
+        result: {
+          content: [{ type: "text", text: "finished" }],
+          details: {
+            results: [
+              {
+                id: nativeAgentId,
+                status: "completed",
+                requests: 8,
+                tokens: 250,
+                contextTokens: 70,
+                contextWindow: 300,
+                usage: { cost: { total: 0.17 } },
+              },
+            ],
+          },
+        },
+      });
+      const terminal = yield* takeAgentPair();
+      const terminalMetrics = {
+        toolCount: 5,
+        requests: 8,
+        tokens: 250,
+        contextTokens: 70,
+        contextWindow: 300,
+        cost: 0.17,
+      };
+      assert.equal(terminal.turnItem?.status, "completed");
+      assert.deepEqual(terminal.canonical?.metrics, terminalMetrics);
+      assert.deepEqual(terminal.turnItem?.metrics, terminalMetrics);
+
+      yield* fake.emit({
+        type: "subagent_progress",
+        payload: {
+          id: "job-metrics-next",
+          agent: "scout",
+          parentToolCallId: "call_metrics",
+          index: 0,
+          progress: { status: "running", toolCount: 2 },
+        },
+      });
+      const nextActivation = yield* takeAgentPair("job-metrics-next");
+      assert.equal(nextActivation.turnItem?.status, "running");
+      assert.deepEqual(nextActivation.canonical?.metrics, { toolCount: 2 });
+      assert.deepEqual(nextActivation.turnItem?.metrics, { toolCount: 2 });
+    }).pipe(Effect.scoped, Effect.provide(layerTest)),
+  );
+
+  it.effect("links native child items to their actual parent task items and retains known links", () =>
+    Effect.gen(function* () {
+      const fake = yield* makeFakePi;
+      yield* fake.emit({
+        type: "ready",
+        protocolVersion: 1,
+        supportedProtocolVersions: [1, 2],
+      });
+      const { runtime, takeEvent } = yield* openRuntime(
+        fake,
+        "default",
+        THREAD_ID,
+        SESSION_ID,
+        undefined,
+        OMP_DIALECT,
+      );
+      const providerThread = yield* runtime.ensureThread({
+        threadId: THREAD_ID,
+        modelSelection: modelSelection("default"),
+        runtimePolicy,
+      });
+      yield* startTurn(runtime, providerThread);
+      yield* fake.takeRequest("prompt");
+      yield* fake.emit({ type: "agent_start" });
+      const parentTaskItem = (event: ProviderAdapterV2Event) =>
+        event.type === "turn_item.updated" &&
+        event.turnItem.type === "dynamic_tool" &&
+        event.turnItem.toolName === "task"
+          ? event.turnItem
+          : undefined;
+      const childItem = (event: ProviderAdapterV2Event) =>
+        event.type === "turn_item.updated" && event.turnItem.type === "subagent"
+          ? event.turnItem
+          : undefined;
+      yield* fake.emit({
+        type: "tool_execution_start",
+        toolCallId: "call_parent_a",
+        toolName: "task",
+        args: { tasks: [{ task: "parent A" }] },
+      });
+      const parentA = parentTaskItem(yield* takeEvent((event) => parentTaskItem(event) !== undefined));
+      yield* fake.emit({
+        type: "tool_execution_start",
+        toolCallId: "call_parent_b",
+        toolName: "task",
+        args: { tasks: [{ task: "parent B" }] },
+      });
+      const parentB = parentTaskItem(yield* takeEvent((event) => parentTaskItem(event) !== undefined));
+
+      yield* fake.emit({
+        type: "subagent_progress",
+        payload: {
+          id: "job-parent-a",
+          parentToolCallId: "call_parent_a",
+          index: 0,
+          progress: { status: "running", task: "parent A" },
+        },
+      });
+      const childA = childItem(
+        yield* takeEvent((event) => childItem(event)?.nativeAgentId === "job-parent-a"),
+      );
+      yield* fake.emit({
+        type: "subagent_progress",
+        payload: {
+          id: "job-parent-b",
+          parentToolCallId: "call_parent_b",
+          index: 0,
+          progress: { status: "running", task: "parent B" },
+        },
+      });
+      const childB = childItem(
+        yield* takeEvent((event) => childItem(event)?.nativeAgentId === "job-parent-b"),
+      );
+      assert.equal(childA?.parentItemId, parentA?.id);
+      assert.equal(childB?.parentItemId, parentB?.id);
+      assert.notEqual(parentA?.id, parentB?.id);
+
+      yield* fake.emit({
+        type: "subagent_progress",
+        payload: {
+          id: "job-parent-a",
+          progress: { status: "running", requests: 2 },
+        },
+      });
+      const partialChildA = childItem(
+        yield* takeEvent(
+          (event) => childItem(event)?.nativeAgentId === "job-parent-a" && childItem(event)?.metrics?.requests === 2,
+        ),
+      );
+      assert.equal(partialChildA?.parentItemId, parentA?.id);
+    }).pipe(Effect.scoped, Effect.provide(layerTest)),
+  );
+
+  it.effect("records late async job completion once as a runless native notice", () =>
+    Effect.gen(function* () {
+      const fake = yield* makeFakePi;
+      yield* fake.emit({
+        type: "ready",
+        protocolVersion: 1,
+        supportedProtocolVersions: [1, 2],
+      });
+      const { runtime, takeEvent } = yield* openRuntime(
+        fake,
+        "default",
+        THREAD_ID,
+        SESSION_ID,
+        undefined,
+        OMP_DIALECT,
+      );
+      const providerThread = yield* runtime.ensureThread({
+        threadId: THREAD_ID,
+        modelSelection: modelSelection("default"),
+        runtimePolicy,
+      });
+      yield* startTurn(runtime, providerThread);
+      yield* fake.takeRequest("prompt");
+      yield* fake.emit({ type: "agent_start" });
+      yield* fake.emit({
+        type: "tool_execution_start",
+        toolCallId: "call_late_task",
+        toolName: "task",
+        args: { tasks: [{ task: "finish after the root" }] },
+      });
+      yield* fake.emit({
+        type: "subagent_progress",
+        payload: {
+          id: "job-actual-17",
+          parentToolCallId: "call_late_task",
+          index: 0,
+          progress: { status: "running", task: "finish after the root" },
+        },
+      });
+      const runningChild = (event: ProviderAdapterV2Event) =>
+        event.type === "turn_item.updated" &&
+        event.turnItem.type === "subagent" &&
+        event.turnItem.nativeAgentId === "job-actual-17"
+          ? event.turnItem
+          : undefined;
+      yield* takeEvent((event) => runningChild(event) !== undefined);
+
+      fake.queueState({
+        isSettled: true,
+        isStreaming: false,
+        isCompacting: false,
+        hasPendingAsyncWork: false,
+        pendingMessageCount: 0,
+      });
+      yield* fake.emit({ type: "agent_end", isTerminal: true, willRetry: false });
+      yield* takeEvent((event) => event.type === "turn.terminal");
+      yield* startTurn(runtime, providerThread, "default", [], "Run two remains active", undefined, 2);
+      yield* fake.takeRequest("prompt");
+      yield* fake.emit({ type: "agent_start" });
+      yield* takeEvent(
+        (event) =>
+          event.type === "provider_turn.updated" && event.providerTurn.status === "running",
+      );
+
+      const asyncMessage = {
+        role: "custom",
+        customType: "async-result",
+        timestamp: 1_800_000_000_000,
+        content: "parent raw result should not appear in the completion notice",
+        details: {
+          jobs: [
+            {
+              jobId: "job-actual-17",
+              type: "task",
+              status: "completed",
+              agentId: "native-agent-17",
+              label: "Friendly worker label",
+              durationMs: 2_500,
+              parentToolCallId: "call_late_task",
+            },
+            {
+              jobId: "job-actual-18",
+              type: "task",
+              status: "completed",
+              agentId: "native-agent-18",
+              label: "Friendly worker label",
+              durationMs: 1_200,
+              parentToolCallId: "call_late_task",
+            },
+          ],
+        },
+      };
+      yield* fake.emit({ type: "message_end", message: asyncMessage });
+      yield* fake.emit({ type: "custom_message", message: asyncMessage });
+      yield* fake.emit({
+        type: "notice",
+        timestamp: 1_800_000_000_001,
+        message: "after-async-completion-sentinel",
+      });
+
+      type SystemNoticeTurnItem = Extract<
+        Extract<ProviderAdapterV2Event, { type: "turn_item.updated" }>["turnItem"],
+        { type: "system_notice" }
+      >;
+      type SubagentTurnItem = Extract<
+        Extract<ProviderAdapterV2Event, { type: "turn_item.updated" }>["turnItem"],
+        { type: "subagent" }
+      >;
+      const completionNotices = new Map<string, SystemNoticeTurnItem>();
+      const expectedJobIds: Record<string, true> = {
+        "job-actual-17": true,
+        "job-actual-18": true,
+      };
+      let completionNoticeCount = 0;
+      let completedChild: SubagentTurnItem | undefined;
+      let rootRevived = false;
+      let activeRootTerminated = false;
+      let sentinelSeen = false;
+      const systemNotice = (event: ProviderAdapterV2Event) =>
+        event.type === "turn_item.updated" && event.turnItem.type === "system_notice"
+          ? event.turnItem
+          : undefined;
+      while (!sentinelSeen) {
+        const event = yield* takeEvent(() => true);
+        const notice = systemNotice(event);
+        const jobId = notice?.jobCompletion?.jobId;
+        if (
+          notice !== undefined &&
+          jobId !== undefined &&
+          expectedJobIds[jobId] === true
+        ) {
+          completionNoticeCount += 1;
+          completionNotices.set(jobId, notice);
+        }
+        const child = runningChild(event);
+        if (child?.status === "completed") completedChild = child;
+        if (event.type === "provider_turn.updated" && event.providerTurn.status === "running") {
+          rootRevived = true;
+        }
+        if (event.type === "turn.terminal") activeRootTerminated = true;
+        sentinelSeen = notice?.message === "after-async-completion-sentinel";
+      }
+
+      const firstCompletionNotice = completionNotices.get("job-actual-17");
+      const secondCompletionNotice = completionNotices.get("job-actual-18");
+      assert.equal(completionNoticeCount, 2);
+      assert.deepEqual(
+        Array.from(completionNotices.keys()).sort(),
+        ["job-actual-17", "job-actual-18"],
+      );
+      assert.isFalse(rootRevived);
+      assert.isFalse(activeRootTerminated);
+      assert.equal(completedChild?.status, "completed");
+      assert.isDefined(firstCompletionNotice);
+      assert.equal(firstCompletionNotice?.jobCompletion?.type, "task");
+      assert.equal(firstCompletionNotice?.jobCompletion?.status, "completed");
+      assert.equal(firstCompletionNotice?.jobCompletion?.agentId, "native-agent-17");
+      assert.equal(firstCompletionNotice?.jobCompletion?.label, "Friendly worker label");
+      assert.equal(firstCompletionNotice?.jobCompletion?.durationMs, 2_500);
+      assert.equal(firstCompletionNotice?.runId, null);
+      assert.equal(firstCompletionNotice?.providerTurnId, null);
+      assert.equal(firstCompletionNotice?.nodeId, null);
+      assert.isTrue(firstCompletionNotice?.message.startsWith("Background job completed"));
+      assert.isTrue(firstCompletionNotice?.message.includes("job-actual-17"));
+      assert.isFalse(firstCompletionNotice?.message.includes("Friendly worker label"));
+      assert.isFalse(
+        firstCompletionNotice?.message.includes("parent raw result should not appear"),
+      );
+      assert.equal(DateTime.toEpochMillis(firstCompletionNotice!.startedAt!), 1_800_000_000_000);
+      assert.equal(secondCompletionNotice?.jobCompletion?.jobId, "job-actual-18");
+      assert.equal(secondCompletionNotice?.jobCompletion?.label, "Friendly worker label");
+      assert.equal(secondCompletionNotice?.runId, null);
+      assert.equal(secondCompletionNotice?.providerTurnId, null);
+    }).pipe(Effect.scoped, Effect.provide(layerTest)),
+  );
+
+  it.effect("persists edit patches, write content, and line counts on file change items", () =>
     Effect.gen(function* () {
       const fake = yield* makeFakePi;
       const { runtime, takeEvent } = yield* openRuntime(fake);
@@ -1651,7 +3332,10 @@ describe("PiAdapterV2", () => {
         edit.type === "turn_item.updated" &&
           edit.turnItem.type === "file_change" &&
           edit.turnItem.fileName === "a.ts" &&
-          edit.turnItem.diffStr === patch,
+          edit.turnItem.diffStr === patch &&
+          // File headers are not changed lines; the wire drops the patch but keeps these.
+          edit.turnItem.additions === 1 &&
+          edit.turnItem.deletions === 1,
       );
 
       yield* fake.emit({
@@ -1677,7 +3361,8 @@ describe("PiAdapterV2", () => {
         write.type === "turn_item.updated" &&
           write.turnItem.type === "file_change" &&
           write.turnItem.fileName === "b.ts" &&
-          write.turnItem.newStr === "export {};\n",
+          write.turnItem.newStr === "export {};\n" &&
+          write.turnItem.additions === 1,
       );
 
       // A failed edit has no patch, so it keeps the error to show when expanded.
@@ -1703,8 +3388,89 @@ describe("PiAdapterV2", () => {
       assert.isTrue(
         failedEdit.type === "turn_item.updated" &&
           failedEdit.turnItem.type === "file_change" &&
-          failedEdit.turnItem.diffStr === "Could not find the text in c.ts.",
+          failedEdit.turnItem.diffStr === "Could not find the text in c.ts." &&
+          failedEdit.turnItem.additions === undefined,
       );
+    }).pipe(Effect.scoped, Effect.provide(layerTest)),
+  );
+
+  it.effect("reports a write to an xd:// tool device as that tool's call, not a file edit", () =>
+    Effect.gen(function* () {
+      const fake = yield* makeFakePi;
+      const { runtime, takeEvent } = yield* openRuntime(fake);
+      const providerThread = yield* runtime.ensureThread({
+        threadId: THREAD_ID,
+        modelSelection: modelSelection("default"),
+        runtimePolicy,
+      });
+      yield* startTurn(runtime, providerThread);
+      yield* fake.takeRequest("prompt");
+      yield* fake.emit({ type: "agent_start" });
+      const args = { title: "Child", task: "Run it", mode: "async" };
+      yield* fake.emit({
+        type: "tool_execution_start",
+        toolCallId: "call_device",
+        toolName: "write",
+        args: { path: "xd://mcp__t3-code__delegate_task", content: JSON.stringify(args) },
+      });
+      yield* fake.emit({
+        type: "tool_execution_end",
+        toolCallId: "call_device",
+        toolName: "write",
+        isError: false,
+        result: { content: [{ type: "text", text: '{"childThreadId":"thread-child"}' }] },
+      });
+      const call = yield* takeEvent(
+        (event) =>
+          event.type === "turn_item.updated" &&
+          event.turnItem.status === "completed" &&
+          (event.turnItem.type === "dynamic_tool" || event.turnItem.type === "file_change"),
+      );
+      assert.isTrue(call.type === "turn_item.updated" && call.turnItem.type === "dynamic_tool");
+      if (call.type !== "turn_item.updated" || call.turnItem.type !== "dynamic_tool") return;
+      assert.equal(call.turnItem.toolName, "mcp__t3-code__delegate_task");
+      assert.deepEqual(call.turnItem.input, args);
+      assert.equal(call.turnItem.output, '{"childThreadId":"thread-child"}');
+    }).pipe(Effect.scoped, Effect.provide(layerTest)),
+  );
+
+  it.effect("keeps an xd:// tool read as a documentation lookup", () =>
+    Effect.gen(function* () {
+      const fake = yield* makeFakePi;
+      const { runtime, takeEvent } = yield* openRuntime(fake);
+      const providerThread = yield* runtime.ensureThread({
+        threadId: THREAD_ID,
+        modelSelection: modelSelection("default"),
+        runtimePolicy,
+      });
+      yield* startTurn(runtime, providerThread);
+      yield* fake.takeRequest("prompt");
+      yield* fake.emit({ type: "agent_start" });
+      const args = { path: "xd://mcp__t3-code__delegate_task" };
+      yield* fake.emit({
+        type: "tool_execution_start",
+        toolCallId: "call_device_read",
+        toolName: "read",
+        args,
+      });
+      yield* fake.emit({
+        type: "tool_execution_end",
+        toolCallId: "call_device_read",
+        toolName: "read",
+        isError: false,
+        result: { content: [{ type: "text", text: "Usage: delegate_task(...)" }] },
+      });
+      const lookup = yield* takeEvent(
+        (event) =>
+          event.type === "turn_item.updated" &&
+          event.turnItem.status === "completed" &&
+          event.turnItem.type === "dynamic_tool" &&
+          event.turnItem.toolName === "read",
+      );
+      assert.isTrue(lookup.type === "turn_item.updated" && lookup.turnItem.type === "dynamic_tool");
+      if (lookup.type !== "turn_item.updated" || lookup.turnItem.type !== "dynamic_tool") return;
+      assert.equal(lookup.turnItem.toolName, "read");
+      assert.deepEqual(lookup.turnItem.input, args);
     }).pipe(Effect.scoped, Effect.provide(layerTest)),
   );
 
@@ -1735,6 +3501,50 @@ describe("PiAdapterV2", () => {
       assert.isTrue(terminal.type === "turn.terminal" && terminal.status === "completed");
     }).pipe(Effect.scoped, Effect.provide(layerTest)),
   );
+  it.effect(
+    "publishes root execution end before terminal metadata finalization for Pi and OMP",
+    () =>
+      Effect.gen(function* () {
+        for (const dialect of [PI_DIALECT, OMP_DIALECT]) {
+          const fake = yield* makeFakePi;
+          if (dialect === OMP_DIALECT) {
+            yield* fake.emit({
+              type: "ready",
+              protocolVersion: 1,
+              supportedProtocolVersions: [1, 2],
+            });
+          }
+          const { runtime, takeEvent } = yield* openRuntime(
+            fake,
+            "default",
+            THREAD_ID,
+            SESSION_ID,
+            undefined,
+            dialect,
+          );
+          const providerThread = yield* runtime.ensureThread({
+            threadId: THREAD_ID,
+            modelSelection: modelSelection("default"),
+            runtimePolicy,
+          });
+          yield* startTurn(runtime, providerThread);
+          yield* fake.takeRequest("prompt");
+          yield* fake.emit({ type: "agent_start" });
+          yield* fake.emit(
+            dialect === OMP_DIALECT
+              ? { type: "agent_end", isTerminal: true }
+              : { type: "agent_settled" },
+          );
+
+          const executionEndOrTerminal = yield* takeEvent(
+            (event) =>
+              String(event.type) === "run.execution-ended" || event.type === "turn.terminal",
+          );
+          assert.equal(String(executionEndOrTerminal.type), "run.execution-ended");
+        }
+      }).pipe(Effect.scoped, Effect.provide(layerTest)),
+  );
+
 
   it.effect("leaves /compacted as an ordinary prompt", () =>
     Effect.gen(function* () {
@@ -2695,6 +4505,636 @@ describe("PiAdapterV2", () => {
       yield* fake.closeStdout;
       const terminal = yield* takeEvent((event) => event.type === "turn.terminal");
       assert.isTrue(terminal.type === "turn.terminal" && terminal.status === "interrupted");
+    }).pipe(Effect.scoped, Effect.provide(layerTest)),
+  );
+
+  it.effect("re-probes terminal OMP turns with the capped settlement backoff", () =>
+    Effect.gen(function* () {
+      const fake = yield* makeFakePi;
+      yield* fake.emit({
+        type: "ready",
+        protocolVersion: 1,
+        supportedProtocolVersions: [1, 2],
+      });
+      const { runtime, takeEvent } = yield* openRuntime(
+        fake,
+        "default",
+        THREAD_ID,
+        SESSION_ID,
+        undefined,
+        OMP_DIALECT,
+      );
+      const providerThread = yield* runtime.ensureThread({
+        threadId: THREAD_ID,
+        modelSelection: modelSelection("default"),
+        runtimePolicy,
+      });
+      yield* startTurn(runtime, providerThread);
+      yield* fake.takeRequest("prompt");
+
+      const stateRequestCount = () =>
+        fake.allRequests().filter((request) => request.type === "get_state").length;
+      const initialStateRequestCount = stateRequestCount();
+      const unsettledState = { isSettled: false, pendingMessageCount: 1 };
+      yield* fake.emit({ type: "agent_start" });
+      fake.queueState(unsettledState);
+      yield* fake.emit({ type: "agent_end", isTerminal: true, willRetry: false });
+      yield* fake.takeRequest("get_state");
+      yield* Effect.yieldNow;
+
+      let expectedRequestCount = initialStateRequestCount + 1;
+      assert.equal(stateRequestCount(), expectedRequestCount);
+
+      const delays = [30_000, 60_000, 120_000, 240_000, 600_000, 600_000];
+      for (const [index, delayMs] of delays.entries()) {
+        fake.queueState(
+          index === delays.length - 1
+            ? { isSettled: true, pendingMessageCount: 0 }
+            : unsettledState,
+        );
+
+        yield* TestClock.adjust(Duration.millis(delayMs - 1));
+        assert.equal(stateRequestCount(), expectedRequestCount);
+        yield* TestClock.adjust(Duration.millis(1));
+        yield* Effect.yieldNow;
+
+        expectedRequestCount += 1;
+        assert.equal(stateRequestCount(), expectedRequestCount);
+        yield* fake.takeRequest("get_state");
+        yield* Effect.yieldNow;
+      }
+
+      const terminal = yield* takeEvent((event) => event.type === "turn.terminal");
+      assert.isTrue(terminal.type === "turn.terminal" && terminal.status === "completed");
+    }).pipe(Effect.scoped, Effect.provide(layerTest)),
+  );
+
+  it.effect("stops settlement re-probes after new agent activity", () =>
+    Effect.gen(function* () {
+      const fake = yield* makeFakePi;
+      yield* fake.emit({
+        type: "ready",
+        protocolVersion: 1,
+        supportedProtocolVersions: [1, 2],
+      });
+      const { runtime, takeEvent } = yield* openRuntime(
+        fake,
+        "default",
+        THREAD_ID,
+        SESSION_ID,
+        undefined,
+        OMP_DIALECT,
+      );
+      const providerThread = yield* runtime.ensureThread({
+        threadId: THREAD_ID,
+        modelSelection: modelSelection("default"),
+        runtimePolicy,
+      });
+      yield* startTurn(runtime, providerThread);
+      yield* fake.takeRequest("prompt");
+      const running = yield* takeEvent(
+        (event) =>
+          event.type === "provider_turn.updated" && event.providerTurn.status === "running",
+      );
+      const providerTurnId =
+        running.type === "provider_turn.updated" ? running.providerTurn.id : undefined;
+      assert.isDefined(providerTurnId);
+
+      const stateRequestCount = () =>
+        fake.allRequests().filter((request) => request.type === "get_state").length;
+      const initialStateRequestCount = stateRequestCount();
+      const unsettledState = { isSettled: false, pendingMessageCount: 1 };
+      yield* fake.emit({ type: "agent_start" });
+      fake.queueState(unsettledState);
+      yield* fake.emit({ type: "agent_end", isTerminal: true, willRetry: false });
+      yield* fake.takeRequest("get_state");
+      yield* Effect.yieldNow;
+
+      assert.equal(stateRequestCount(), initialStateRequestCount + 1);
+      fake.queueState(unsettledState);
+      yield* TestClock.adjust(Duration.seconds(30));
+      yield* Effect.yieldNow;
+      assert.equal(stateRequestCount(), initialStateRequestCount + 2);
+      yield* fake.takeRequest("get_state");
+      yield* Effect.yieldNow;
+
+      yield* fake.emit({ type: "agent_start" });
+      yield* Effect.yieldNow;
+      yield* TestClock.adjust(Duration.seconds(60));
+      yield* Effect.yieldNow;
+      assert.equal(stateRequestCount(), initialStateRequestCount + 2);
+    }).pipe(Effect.scoped, Effect.provide(layerTest)),
+  );
+
+  it.effect("shows OMP background waits and clears them on resumed agent activity", () =>
+    Effect.gen(function* () {
+      const fake = yield* makeFakePi;
+      yield* fake.emit({
+        type: "ready",
+        protocolVersion: 1,
+        supportedProtocolVersions: [1, 2],
+      });
+      const { runtime, takeEvent } = yield* openRuntime(
+        fake,
+        "default",
+        THREAD_ID,
+        SESSION_ID,
+        undefined,
+        OMP_DIALECT,
+      );
+      const providerThread = yield* runtime.ensureThread({
+        threadId: THREAD_ID,
+        modelSelection: modelSelection("default"),
+        runtimePolicy,
+      });
+      yield* startTurn(runtime, providerThread);
+      yield* fake.takeRequest("prompt");
+      yield* fake.emit({ type: "agent_start" });
+      fake.queueState({
+        isSettled: false,
+        isStreaming: false,
+        isCompacting: false,
+        hasPendingAsyncWork: true,
+        pendingMessageCount: 0,
+      });
+      yield* fake.emit({ type: "agent_end", isTerminal: true, willRetry: false });
+      yield* fake.takeRequest("get_state");
+
+      const waitingEvent = yield* takeEvent(
+        (event) =>
+          event.type === "provider_thread.updated" &&
+          event.providerThread.pendingBackgroundTasks?.some(
+            (task) => task.kind === "background_task" && task.description === "Background job",
+          ) === true,
+      );
+      if (waitingEvent.type !== "provider_thread.updated") {
+        return yield* Effect.die("Expected the OMP background wait roster");
+      }
+      const waitingTask = waitingEvent.providerThread.pendingBackgroundTasks?.[0];
+      assert.isDefined(waitingTask);
+      assert.equal(waitingTask.kind, "background_task");
+      assert.equal(waitingTask.description, "Background job");
+      assert.isTrue(waitingTask.taskId.startsWith("omp:async:"));
+
+      yield* fake.emit({ type: "agent_start" });
+      const resumedEvent = yield* takeEvent(
+        (event) =>
+          event.type === "provider_thread.updated" &&
+          event.providerThread.pendingBackgroundTasks?.every(
+            (task) => task.kind !== "background_task" || task.description !== "Background job",
+          ) === true,
+      );
+      if (resumedEvent.type !== "provider_thread.updated") {
+        return yield* Effect.die("Expected the OMP background wait roster to clear");
+      }
+      assert.deepEqual(resumedEvent.providerThread.pendingBackgroundTasks, []);
+    }).pipe(Effect.scoped, Effect.provide(layerTest)),
+  );
+  it.effect("creates an OMP goal through RPC and mirrors goal_updated", () =>
+    Effect.gen(function* () {
+      const fake = yield* makeFakePi;
+      yield* fake.emit({
+        type: "ready",
+        protocolVersion: 1,
+        supportedProtocolVersions: [1, 2],
+      });
+      const { runtime, takeEvent } = yield* openRuntime(
+        fake,
+        "default",
+        THREAD_ID,
+        SESSION_ID,
+        undefined,
+        OMP_DIALECT,
+      );
+      const providerThread = yield* runtime.ensureThread({
+        threadId: THREAD_ID,
+        modelSelection: modelSelection("default"),
+        runtimePolicy,
+      });
+
+      yield* startTurn(runtime, providerThread, "default", [], "/goal set Ship it");
+      const get = yield* fake.takeRequest("goal");
+      assert.equal(get["op"], "get");
+      const create = yield* fake.takeRequest("goal");
+      assert.equal(create["op"], "create");
+      assert.equal(create["objective"], "Ship it");
+
+      yield* fake.emit({
+        type: "goal_updated",
+        goal: {
+          id: "goal-1",
+          objective: "Ship it",
+          status: "active",
+          tokensUsed: 12,
+          timeUsedSeconds: 3,
+          createdAt: 1,
+          updatedAt: 2,
+        },
+      });
+      const updated = yield* takeEvent(
+        (event) =>
+          event.type === "provider_thread.updated" &&
+          event.providerThread.goal?.status === "active" &&
+          event.providerThread.goal.objective === "Ship it",
+      );
+      if (updated.type !== "provider_thread.updated") {
+        return yield* Effect.die("Expected the OMP goal provider-thread update");
+      }
+      assert.equal(updated.providerThread.goal?.tokensUsed, 12);
+      assert.equal(updated.providerThread.goal?.tokenBudget, null);
+      assert.equal(updated.providerThread.goal?.timeUsedSeconds, 3);
+    }).pipe(Effect.scoped, Effect.provide(layerTest)),
+  );
+
+  it.effect("runs a new OMP goal's first turn inside the KM turn", () =>
+    Effect.gen(function* () {
+      const fake = yield* makeFakePi;
+      yield* fake.emit({
+        type: "ready",
+        protocolVersion: 1,
+        supportedProtocolVersions: [1, 2],
+      });
+      const { runtime, takeEvent } = yield* openRuntime(
+        fake,
+        "default",
+        THREAD_ID,
+        SESSION_ID,
+        undefined,
+        OMP_DIALECT,
+      );
+      const providerThread = yield* runtime.ensureThread({
+        threadId: THREAD_ID,
+        modelSelection: modelSelection("default"),
+        runtimePolicy,
+      });
+
+      yield* startTurn(runtime, providerThread, "default", [], "/goal Ship it");
+      yield* fake.takeRequest("goal");
+      yield* fake.takeRequest("goal");
+      // OMP does not continue goals for RPC hosts, so the turn starts the goal's work itself.
+      const kickoff = yield* fake.takeRequest("prompt");
+      assert.equal(
+        kickoff["message"],
+        "Your goal is set (/goal create). Work on it now, continuing from where you left off.",
+      );
+      yield* fake.emit({ type: "agent_start" });
+      yield* fake.emit({ type: "agent_end", isTerminal: true, willRetry: false });
+      const terminal = yield* takeEvent((event) => event.type === "turn.terminal");
+      assert.isTrue(terminal.type === "turn.terminal" && terminal.status === "completed");
+    }).pipe(Effect.scoped, Effect.provide(layerTest)),
+  );
+
+  it.effect("maps OMP paused, complete, and dropped goal events", () =>
+    Effect.gen(function* () {
+      const fake = yield* makeFakePi;
+      yield* fake.emit({
+        type: "ready",
+        protocolVersion: 1,
+        supportedProtocolVersions: [1, 2],
+      });
+      const { runtime, takeEvent } = yield* openRuntime(
+        fake,
+        "default",
+        THREAD_ID,
+        SESSION_ID,
+        undefined,
+        OMP_DIALECT,
+      );
+      yield* runtime.ensureThread({
+        threadId: THREAD_ID,
+        modelSelection: modelSelection("default"),
+        runtimePolicy,
+      });
+
+      for (const [nativeStatus, expectedStatus] of [
+        ["active", "active"],
+        ["paused", "paused"],
+        ["complete", "complete"],
+        ["dropped", null],
+      ]) {
+        yield* fake.emit({
+          type: "goal_updated",
+          goal: {
+            id: "goal-1",
+            objective: "Ship it",
+            status: nativeStatus,
+            tokensUsed: 5,
+            tokenBudget: 100,
+            timeUsedSeconds: 2,
+            createdAt: 1,
+            updatedAt: 2,
+          },
+        });
+        const updated = yield* takeEvent(
+          (event) =>
+            event.type === "provider_thread.updated" &&
+            (event.providerThread.goal?.status ?? null) === expectedStatus,
+        );
+        assert.isTrue(updated.type === "provider_thread.updated");
+      }
+    }).pipe(Effect.scoped, Effect.provide(layerTest)),
+  );
+
+  it.effect("maps /goal clear to the OMP drop RPC operation", () =>
+    Effect.gen(function* () {
+      const fake = yield* makeFakePi;
+      yield* fake.emit({
+        type: "ready",
+        protocolVersion: 1,
+        supportedProtocolVersions: [1, 2],
+      });
+      const { runtime } = yield* openRuntime(
+        fake,
+        "default",
+        THREAD_ID,
+        SESSION_ID,
+        undefined,
+        OMP_DIALECT,
+      );
+      const providerThread = yield* runtime.ensureThread({
+        threadId: THREAD_ID,
+        modelSelection: modelSelection("default"),
+        runtimePolicy,
+      });
+
+      yield* startTurn(runtime, providerThread, "default", [], "/goal clear");
+      const drop = yield* fake.takeRequest("goal");
+      assert.equal(drop["op"], "drop");
+      assert.isFalse(fake.allRequests().some((request) => request["type"] === "prompt"));
+    }).pipe(Effect.scoped, Effect.provide(layerTest)),
+  );
+
+  it.effect("surfaces OMP goal RPC errors and settles the KM turn", () =>
+    Effect.gen(function* () {
+      const fake = yield* makeFakePi;
+      yield* fake.emit({
+        type: "ready",
+        protocolVersion: 1,
+        supportedProtocolVersions: [1, 2],
+      });
+      const { runtime, takeEvent } = yield* openRuntime(
+        fake,
+        "default",
+        THREAD_ID,
+        SESSION_ID,
+        undefined,
+        OMP_DIALECT,
+      );
+      const providerThread = yield* runtime.ensureThread({
+        threadId: THREAD_ID,
+        modelSelection: modelSelection("default"),
+        runtimePolicy,
+      });
+      fake.failNextGoal();
+
+      yield* startTurn(runtime, providerThread, "default", [], "/goal show");
+      const get = yield* fake.takeRequest("goal");
+      assert.equal(get["op"], "get");
+      const error = yield* takeEvent(
+        (event) => event.type === "turn_item.updated" && event.turnItem.type === "error",
+      );
+      if (error.type !== "turn_item.updated" || error.turnItem.type !== "error") {
+        return yield* Effect.die("Expected a visible OMP goal RPC error");
+      }
+      assert.include(error.turnItem.failure.message, "Goal mode is disabled");
+      const terminal = yield* takeEvent((event) => event.type === "turn.terminal");
+      assert.isTrue(terminal.type === "turn.terminal" && terminal.status === "failed");
+    }).pipe(Effect.scoped, Effect.provide(layerTest)),
+  );
+
+  it.effect("shows the OMP background wait when the agent yields to a background job", () =>
+    Effect.gen(function* () {
+      const fake = yield* makeFakePi;
+      yield* fake.emit({
+        type: "ready",
+        protocolVersion: 1,
+        supportedProtocolVersions: [1, 2],
+      });
+      const { runtime, takeEvent } = yield* openRuntime(
+        fake,
+        "default",
+        THREAD_ID,
+        SESSION_ID,
+        undefined,
+        OMP_DIALECT,
+      );
+      const providerThread = yield* runtime.ensureThread({
+        threadId: THREAD_ID,
+        modelSelection: modelSelection("default"),
+        runtimePolicy,
+      });
+      yield* startTurn(runtime, providerThread);
+      yield* fake.takeRequest("prompt");
+      const running = yield* takeEvent(
+        (event) =>
+          event.type === "provider_turn.updated" && event.providerTurn.status === "running",
+      );
+      assert.isTrue(
+        running.type === "provider_turn.updated" && running.providerTurn.status === "running",
+      );
+
+      const stateRequestCount = () =>
+        fake.allRequests().filter((request) => request.type === "get_state").length;
+      const initialStateRequestCount = stateRequestCount();
+      yield* fake.emit({ type: "agent_start" });
+      fake.queueState({
+        isSettled: false,
+        isStreaming: false,
+        isCompacting: false,
+        hasPendingAsyncWork: true,
+        pendingMessageCount: 0,
+      });
+      yield* fake.emit({
+        type: "agent_end",
+        isTerminal: false,
+        yielded: true,
+        awaitingAsyncWork: true,
+      });
+      const stateRequestFiber = yield* fake
+        .takeRequest("get_state")
+        .pipe(Effect.timeoutOption(Duration.seconds(1)), Effect.forkScoped);
+      for (let attempt = 0; attempt < 20; attempt += 1) {
+        yield* Effect.yieldNow;
+      }
+      yield* TestClock.adjust(Duration.seconds(1));
+      const stateRequest = yield* Fiber.join(stateRequestFiber);
+      assert.equal(stateRequest._tag, "Some");
+      assert.equal(stateRequestCount(), initialStateRequestCount + 1);
+
+      const waitingEvent = yield* takeEvent(
+        (event) =>
+          event.type === "provider_thread.updated" &&
+          event.providerThread.pendingBackgroundTasks?.some(
+            (task) => task.kind === "background_task" && task.description === "Background job",
+          ) === true,
+      );
+      if (waitingEvent.type !== "provider_thread.updated") {
+        return yield* Effect.die("Expected the OMP background wait roster");
+      }
+      const waitingTask = waitingEvent.providerThread.pendingBackgroundTasks?.[0];
+      assert.isDefined(waitingTask);
+      assert.equal(waitingTask.kind, "background_task");
+      assert.equal(waitingTask.description, "Background job");
+      assert.isTrue(waitingTask.taskId.startsWith("omp:async:"));
+
+      const completionCheckFiber = yield* takeEvent(
+        (event) => event.type === "provider_turn.updated" && event.providerTurn.status === "completed",
+      ).pipe(Effect.timeoutOption(Duration.millis(1)), Effect.forkScoped);
+      yield* Effect.yieldNow;
+      yield* TestClock.adjust(Duration.millis(1));
+      const completionCheck = yield* Fiber.join(completionCheckFiber);
+      assert.equal(completionCheck._tag, "None");
+
+      yield* fake.emit({ type: "agent_start" });
+      const resumedEvent = yield* takeEvent(
+        (event) =>
+          event.type === "provider_thread.updated" &&
+          event.providerThread.pendingBackgroundTasks?.every(
+            (task) => task.kind !== "background_task" || task.description !== "Background job",
+          ) === true,
+      );
+      if (resumedEvent.type !== "provider_thread.updated") {
+        return yield* Effect.die("Expected the OMP background wait roster to clear");
+      }
+      assert.deepEqual(resumedEvent.providerThread.pendingBackgroundTasks, []);
+
+      const requestCountBeforeNonAsyncYield = stateRequestCount();
+      yield* fake.emit({ type: "agent_end", isTerminal: false, yielded: true });
+      yield* fake.emit({
+        type: "message_update",
+        assistantMessageEvent: { type: "text_end", contentIndex: 0, content: "Still running" },
+      });
+      const nonAsyncYieldResult = yield* takeEvent(
+        (event) =>
+          (event.type === "provider_thread.updated" &&
+            event.providerThread.pendingBackgroundTasks?.some(
+              (task) => task.kind === "background_task" && task.description === "Background job",
+            ) === true) ||
+          (event.type === "turn_item.updated" && event.turnItem.type === "assistant_message"),
+      );
+      assert.isTrue(
+        nonAsyncYieldResult.type === "turn_item.updated" &&
+          nonAsyncYieldResult.turnItem.type === "assistant_message" &&
+          nonAsyncYieldResult.turnItem.status === "completed",
+      );
+      assert.equal(stateRequestCount(), requestCountBeforeNonAsyncYield);
+    }).pipe(Effect.scoped, Effect.provide(layerTest)),
+  );
+
+  it.effect("names each OMP background job on the wait and drops each one that ends", () =>
+    Effect.gen(function* () {
+      const fake = yield* makeFakePi;
+      yield* fake.emit({
+        type: "ready",
+        protocolVersion: 1,
+        supportedProtocolVersions: [1, 2],
+      });
+      const { runtime, takeEvent } = yield* openRuntime(
+        fake,
+        "default",
+        THREAD_ID,
+        SESSION_ID,
+        undefined,
+        OMP_DIALECT,
+      );
+      const providerThread = yield* runtime.ensureThread({
+        threadId: THREAD_ID,
+        modelSelection: modelSelection("default"),
+        runtimePolicy,
+      });
+      yield* startTurn(runtime, providerThread);
+      yield* fake.takeRequest("prompt");
+      yield* fake.emit({ type: "agent_start" });
+      const backgroundJob = (toolCallId: string, jobId: string, intent: string, command: string) =>
+        Effect.gen(function* () {
+          yield* fake.emit({
+            type: "tool_execution_start",
+            toolCallId,
+            toolName: "bash",
+            intent,
+            args: { command },
+          });
+          yield* fake.emit({
+            type: "tool_execution_end",
+            toolCallId,
+            toolName: "bash",
+            result: {
+              content: [{ type: "text", text: `Backgrounded as job ${jobId} (no deadline)` }],
+              details: { async: { state: "running", jobId, type: "bash" } },
+            },
+          });
+        });
+      yield* backgroundJob("call_gate", "bg_1", "Running gate 42", "make gate GATE=42");
+      yield* backgroundJob("call_watch", "bg_2", "Watching CI", "gh run watch 7");
+
+      fake.queueState({
+        isSettled: false,
+        isStreaming: false,
+        isCompacting: false,
+        hasPendingAsyncWork: true,
+        pendingMessageCount: 0,
+      });
+      yield* fake.emit({
+        type: "agent_end",
+        isTerminal: false,
+        yielded: true,
+        awaitingAsyncWork: true,
+      });
+      const waiting = yield* takeEvent(
+        (event) =>
+          event.type === "provider_thread.updated" &&
+          (event.providerThread.pendingBackgroundTasks?.length ?? 0) > 0,
+      );
+      if (waiting.type !== "provider_thread.updated") {
+        return yield* Effect.die("Expected the OMP background wait roster");
+      }
+      const roster = waiting.providerThread.pendingBackgroundTasks ?? [];
+      assert.deepEqual(
+        roster.map(({ taskId, kind, description, command }) => ({
+          taskId,
+          kind,
+          description,
+          command,
+        })),
+        [
+          {
+            taskId: "omp:async:bg_1",
+            kind: "background_task",
+            description: "Running gate 42",
+            command: "make gate GATE=42",
+          },
+          {
+            taskId: "omp:async:bg_2",
+            kind: "background_task",
+            description: "Watching CI",
+            command: "gh run watch 7",
+          },
+        ],
+      );
+      assert.isTrue(roster.every((task) => task.startedAt !== undefined));
+
+      // OMP keeps streaming a backgrounded call's job frames after the call ends.
+      yield* fake.emit({
+        type: "tool_execution_update",
+        toolCallId: "call_watch",
+        toolName: "bash",
+        partialResult: {
+          content: [{ type: "text", text: "run 7 passed" }],
+          details: { async: { state: "completed", jobId: "bg_2", type: "bash" } },
+        },
+      });
+      const remaining = yield* takeEvent(
+        (event) =>
+          event.type === "provider_thread.updated" &&
+          event.providerThread.pendingBackgroundTasks?.length === 1,
+      );
+      if (remaining.type !== "provider_thread.updated") {
+        return yield* Effect.die("Expected the finished job to leave the roster");
+      }
+      assert.deepEqual(
+        remaining.providerThread.pendingBackgroundTasks?.map((task) => task.taskId),
+        ["omp:async:bg_1"],
+      );
     }).pipe(Effect.scoped, Effect.provide(layerTest)),
   );
 

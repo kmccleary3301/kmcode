@@ -317,7 +317,9 @@ const publishThemeFile = Effect.fn(function* (input: {
     .pipe(
       Effect.mapError((cause) => new ThemeFileUnreadableError({ filePath: input.filePath, cause })),
     );
-  const raw = readThemeFileGuarded(resolvedSource, MAX_THEME_FILE_BYTES);
+  const raw = yield* Effect.promise(() =>
+    readThemeFileGuarded(resolvedSource, MAX_THEME_FILE_BYTES),
+  );
   if (raw === null) {
     return yield* new ThemeFileUnreadableError({ filePath: input.filePath });
   }

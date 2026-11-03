@@ -340,6 +340,40 @@ export function parseStandaloneComposerSlashCommand(
   return "default";
 }
 
+export type ComposerGoalCommand =
+  | { readonly kind: "set"; readonly objective: string }
+  | { readonly kind: "show" | "pause" | "resume" | "clear" | "budget" };
+
+/**
+ * A `/goal` draft as providers read it: `set <objective>` or a bare objective
+ * sets the goal; the control words act on the current one. Null when the draft
+ * is not a goal command, or `/goal set` has no objective yet.
+ */
+export function parseComposerGoalCommand(text: string): ComposerGoalCommand | null {
+  const match = /^\/goal(?:\s+([\s\S]*))?$/iu.exec(text.trim());
+  if (!match) return null;
+  const args = match[1]?.trim() ?? "";
+  const word = /^\S*/u.exec(args)?.[0].toLowerCase() ?? "";
+  switch (word) {
+    case "":
+    case "show":
+      return { kind: "show" };
+    case "pause":
+    case "resume":
+    case "budget":
+      return { kind: word };
+    case "clear":
+    case "drop":
+      return { kind: "clear" };
+    case "set": {
+      const objective = args.slice(word.length).trim();
+      return objective.length === 0 ? null : { kind: "set", objective };
+    }
+    default:
+      return { kind: "set", objective: args };
+  }
+}
+
 export function replaceTextRange(
   text: string,
   rangeStart: number,

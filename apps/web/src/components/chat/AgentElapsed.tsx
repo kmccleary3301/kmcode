@@ -64,7 +64,7 @@ export function AgentElapsed({
     return () => clearInterval(id);
   }, [live, startedAt, completedAt, agent.status, format]);
 
-  const elapsedMs = deriveSubagentElapsedMs(agent, 0);
+  const elapsedMs = deriveSubagentElapsedMs(agent, Date.now());
   if (elapsedMs === null) {
     return null;
   }

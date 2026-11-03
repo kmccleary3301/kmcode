@@ -3727,10 +3727,12 @@ export function makeCodexAdapterV2(adapterOptions: CodexAdapterV2Options): Provi
               // that already ended badly took the capture and settled its item.
               if (!(yield* takePendingMcpAppCapture(nativeTurnId, item.id))) {
                 if (reference !== undefined) {
-                  const filePath = resolveAttachmentPathById({
-                    attachmentsDir: serverConfig.attachmentsDir,
-                    attachmentId: reference.attachmentId,
-                  });
+                  const filePath = yield* Effect.promise(() =>
+                    resolveAttachmentPathById({
+                      attachmentsDir: serverConfig.attachmentsDir,
+                      attachmentId: reference.attachmentId,
+                    }),
+                  );
                   if (filePath !== null) {
                     yield* fileSystem.remove(filePath, { force: true }).pipe(Effect.ignore);
                   }
@@ -5547,6 +5549,13 @@ export function makeCodexAdapterV2(adapterOptions: CodexAdapterV2Options): Provi
             const hasActiveDescendants = Array.from((yield* Ref.get(activeTurns)).values()).some(
               (candidate) => isDescendantCodexTurn(candidate, input.context),
             );
+            // Native subagents run on their own threads, so a failed root leaves
+            // them working. Stop interrupts the whole lineage and still waits for
+            // descendants to settle before emitting its terminal.
+            if (event.status === "failed" && hasActiveDescendants) {
+              yield* emitRootTerminal(input.context, { ...event, childTurnsContinue: true });
+              return;
+            }
             if (event.status !== "completed" && hasActiveDescendants) {
               yield* Ref.update(deferredRootTerminals, (current) => {
                 const updated = new Map(current);

@@ -606,7 +606,13 @@ const isExecutableFile = Effect.fnUntraced(function* (
     return windowsPathExtensions.includes(extension.toUpperCase());
   }
 
-  return canExecuteFile(filePath);
+  const executable = yield* Effect.result(
+    Effect.tryPromise({
+      try: () => NodeFS.promises.access(filePath, NodeFS.constants.X_OK),
+      catch: () => false,
+    }),
+  );
+  return executable._tag === "Success";
 });
 
 const resolveCommandPathForPlatform = Effect.fn("shell.resolveCommandPathForPlatform")(function* (

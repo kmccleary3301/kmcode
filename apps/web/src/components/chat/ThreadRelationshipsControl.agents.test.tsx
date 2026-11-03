@@ -3,6 +3,7 @@ import { create, type ReactTestInstance, type ReactTestRenderer } from "react-te
 import {
   EnvironmentId,
   ThreadId,
+  RunId,
   type ModelSelection,
   type ProviderOptionDescriptor,
   type OrchestrationV2ContextTransfer,
@@ -20,6 +21,7 @@ const state = vi.hoisted(() => ({
   command: vi.fn().mockResolvedValue({ _tag: "Success" }),
 }));
 
+vi.mock("@effect/atom-react", () => ({ useAtomValue: () => true }));
 vi.mock("@tanstack/react-router", () => ({ useNavigate: () => state.navigate }));
 vi.mock("../../state/entities", () => ({
   useThreadProjection: () => ({ projection: state.projection }),
@@ -31,6 +33,13 @@ vi.mock("../../lib/archivedThreadsState", () => ({
   useArchivedThreadSnapshots: () => ({ snapshots: [] }),
 }));
 vi.mock("../../state/use-atom-command", () => ({ useAtomCommand: () => state.command }));
+vi.mock("../../hooks/useSubagentLiveContent", () => ({
+  useSubagentLiveContent: (
+    _threadRef: unknown,
+    input: { readonly persisted?: unknown },
+  ) => ({ liveContent: input.persisted ?? null, rateLimited: false }),
+  LiveViewPausedNote: () => null,
+}));
 vi.mock("../ui/tooltip", () => ({
   Tooltip: ({ children }: { children: ReactNode }) => children,
   TooltipTrigger: ({ render, children }: { render: ReactElement; children: ReactNode }) =>
@@ -65,6 +74,11 @@ it.each(["codex", "claudeAgent"])(
     const child = {
       id: "child",
       title: "Worker",
+      status: "running",
+      activityRunStatus: "running",
+      activeRunId: RunId.make("child-run"),
+      activityRunStartedAt: DateTime.makeUnsafe("2026-09-16T12:00:00Z"),
+      activityRunWorkCompletedAt: null,
       lineage: { parentThreadId: "parent", relationshipToParent: "subagent" },
     };
     const agent = {
@@ -139,7 +153,16 @@ it.each(["codex", "claudeAgent"])(
         input: { threadId: "child" },
       });
     }
-    state.shells = [{ environmentId: "test", source: child }];
+    state.shells = [
+      {
+        environmentId: "test",
+        source: {
+          ...child,
+          activeRunId: null,
+          activityRunWorkCompletedAt: DateTime.makeUnsafe("2026-09-16T12:02:00Z"),
+        },
+      },
+    ];
     for (const status of ["completed", "failed", "interrupted"]) {
       state.projection = { ...projection, subagents: [{ ...agent, status }] };
       await act(async () => renderer.update(cloneElement(panel)));
@@ -147,9 +170,20 @@ it.each(["codex", "claudeAgent"])(
         0,
       );
     }
+    state.shells = [
+      {
+        environmentId: "test",
+        source: { ...child, activityRunStartedAt: null },
+      },
+    ];
     state.projection = { ...projection, subagents: [{ ...agent, startedAt: null }] };
     await act(async () => renderer.update(cloneElement(panel)));
-    expect(renderer.root.findAllByProps({ "aria-label": "Stop subagent Worker" })).toHaveLength(0);
+    expect(
+      renderer.root.findAll(
+        (node) =>
+          node.type === "button" && node.props["aria-label"] === "Stop subagent Worker",
+      ),
+    ).toHaveLength(1);
     state.projection = {
       ...projection,
       subagents: [{ ...agent, origin: "provider_native", driver: "claudeAgent" }],
@@ -158,6 +192,97 @@ it.each(["codex", "claudeAgent"])(
     expect(renderer.root.findAllByProps({ "aria-label": "Stop subagent Worker" })).toHaveLength(0);
   },
 );
+
+it("stops Claude-native workflows by task identity without interrupting the parent thread", async () => {
+  vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+  state.command.mockClear();
+  state.navigate.mockClear();
+  const parent = {
+    id: "parent",
+    lineage: { relationshipToParent: null },
+    activeProviderThreadId: null,
+  };
+  const workflowTask = {
+    id: "workflow:claude",
+    threadId: "parent",
+    childThreadId: "synthetic-claude-workflow",
+    origin: "provider_native",
+    driver: "claudeAgent",
+    providerInstanceId: "claudeAgent",
+    title: "Claude workflow",
+    prompt: "Coordinate the task",
+    model: null,
+    status: "running",
+    progress: null,
+    result: null,
+    startedAt: DateTime.makeUnsafe("2026-09-16T12:00:00Z"),
+    completedAt: null,
+    updatedAt: DateTime.makeUnsafe("2026-09-16T12:00:00Z"),
+    workflow: { phases: [], agents: [] },
+  };
+  const syntheticWorkflowThread = {
+    id: "synthetic-claude-workflow",
+    title: "Claude workflow",
+    status: "running",
+    activityRunStatus: null,
+    activeRunId: null,
+    activityRunStartedAt: null,
+    activityRunWorkCompletedAt: null,
+    lineage: { parentThreadId: "parent", relationshipToParent: "subagent" },
+  };
+  state.shells = [{ environmentId: "test", source: syntheticWorkflowThread }];
+  const projection = {
+    thread: parent,
+    runs: [],
+    providerThreads: [],
+    providerSessions: [],
+    contextTransfers: [],
+    subagents: [workflowTask],
+  };
+  state.projection = projection;
+  const panel = (
+    <ThreadRelationshipsPanel
+      environmentId={EnvironmentId.make("test")}
+      threadId={ThreadId.make("parent")}
+    />
+  );
+  await act(async () => {
+    renderer = create(panel);
+  });
+
+  const stopButton = () =>
+    renderer.root.findByProps({ "aria-label": "Stop workflow Claude workflow" });
+  await act(async () => stopButton().props.onClick());
+  expect(state.command).toHaveBeenCalledWith({
+    environmentId: "test",
+    input: { threadId: "parent", subagentId: "workflow:claude" },
+  });
+  expect(state.navigate).not.toHaveBeenCalled();
+
+  state.command.mockClear();
+  state.projection = {
+    ...projection,
+    subagents: [
+      {
+        ...workflowTask,
+        id: "workflow:omp",
+        childThreadId: "synthetic-omp-workflow",
+        driver: "omp",
+      },
+    ],
+  };
+  state.shells = [
+    {
+      environmentId: "test",
+      source: { ...syntheticWorkflowThread, id: "synthetic-omp-workflow" },
+    },
+  ];
+  await act(async () => renderer.update(cloneElement(panel)));
+  expect(
+    renderer.root.findAllByProps({ "aria-label": "Stop workflow Claude workflow" }),
+  ).toHaveLength(0);
+  expect(state.command).not.toHaveBeenCalled();
+});
 
 it("shows the matching child agent details and refreshes them when the agent settles", async () => {
   vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
@@ -294,6 +419,94 @@ it("shows the matching child agent details and refreshes them when the agent set
   };
   await act(async () => renderer.update(cloneElement(panel)));
   expect(text()).toContain("Lineage · 1 running");
+});
+
+it("keeps a completed child activation settled until a newer shell activation begins", async () => {
+  vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+  state.showTooltips = true;
+  const environmentId = EnvironmentId.make("test");
+  const startedAt = DateTime.makeUnsafe("2026-09-16T12:00:00Z");
+  const completedAt = DateTime.makeUnsafe("2026-09-16T12:02:15Z");
+  const child = {
+    id: "child",
+    title: "Checker",
+    status: "running",
+    activityRunStatus: "running",
+    activeRunId: null,
+    activityRunStartedAt: startedAt,
+    activityRunWorkCompletedAt: completedAt,
+    lineage: { parentThreadId: "parent", relationshipToParent: "subagent" },
+  };
+  const agent = {
+    id: "agent",
+    childThreadId: "child",
+    origin: "app_owned",
+    driver: "codex",
+    providerInstanceId: "codex",
+    title: "Checker",
+    prompt: "Check the change",
+    model: "gpt-5.4",
+    status: "completed",
+    progress: null,
+    result: "Checks passed",
+    startedAt,
+    completedAt,
+    updatedAt: completedAt,
+  };
+  state.shells = [{ environmentId, source: child }];
+  state.projection = {
+    thread: {
+      id: "parent",
+      lineage: { parentThreadId: null, relationshipToParent: null },
+      activeProviderThreadId: null,
+    },
+    runs: [],
+    providerThreads: [],
+    providerSessions: [],
+    contextTransfers: [],
+    subagents: [agent],
+  };
+  const panel = (
+    <ThreadRelationshipsPanel environmentId={environmentId} threadId={ThreadId.make("parent")} />
+  );
+  await act(async () => {
+    renderer = create(panel);
+  });
+  const text = () => {
+    const read = (node: ReactTestInstance | string): string => {
+      if (typeof node === "string") return node;
+      return node.children.map(read).join("");
+    };
+    return read(renderer.root);
+  };
+  const stopButtons = () =>
+    renderer.root.findAll(
+      (node) => node.type === "button" && node.props["aria-label"] === "Stop subagent Checker",
+    );
+  expect(stopButtons()).toHaveLength(0);
+  const collapsedGroup = renderer.root.findAllByProps({ type: "button", "aria-expanded": false })[0];
+  if (collapsedGroup) await act(async () => collapsedGroup.props.onClick());
+  expect(stopButtons()).toHaveLength(0);
+  expect(text()).toContain("completed");
+  expect(text()).toContain("Checks passed");
+  expect(text()).toContain("2m 15s");
+
+  state.shells = [
+    {
+      environmentId,
+      source: {
+        ...child,
+        activeRunId: "child-follow-up",
+        activityRunStartedAt: DateTime.makeUnsafe("2026-09-16T12:03:00Z"),
+        activityRunWorkCompletedAt: null,
+      },
+    },
+  ];
+  await act(async () => renderer.update(cloneElement(panel)));
+  expect(stopButtons().length).toBeGreaterThan(0);
+  expect(text()).not.toContain("2m 15s");
+  expect(text()).toContain("running");
+  expect(text()).not.toContain("Checks passed");
 });
 
 it("shows readable models and only differing workspace details in agent tooltips", async () => {

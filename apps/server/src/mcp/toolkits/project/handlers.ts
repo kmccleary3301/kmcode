@@ -1,9 +1,13 @@
-import { MessageId, ThreadId, OrchestratorMcpFailure, ProjectId } from "@t3tools/contracts";
+import { CommandId, MessageId, ThreadId, OrchestratorMcpFailure, ProjectId } from "@t3tools/contracts";
 import { formatThreadLink } from "@t3tools/shared/threadLinks";
+import * as Crypto from "effect/Crypto";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
+import * as Hex from "effect/encoding/Hex";
 import * as Option from "effect/Option";
+import * as Schema from "effect/Schema";
 import * as ThreadMessageIntake from "../../../orchestration-v2/ThreadMessageIntake.ts";
+import * as ThreadManagementService from "../../../orchestration-v2/ThreadManagementService.ts";
 import * as Claims from "../../../orchestration-v2/AttachmentClaims.ts";
 import * as Project from "../../../project/ProjectService.ts";
 import * as ManagedProjectFolders from "../../../project/ManagedProjectFolders.ts";
@@ -48,6 +52,18 @@ const assertProjectWorktree = Effect.fn("mcp.assertProjectWorktree")(function* (
     });
 });
 
+/** Stable per caller and key so the thread launch service can replay its accepted receipt. */
+const launchCommandId = Effect.fn("mcp.launchCommandId")(function* (
+  namespace: string,
+  key: string,
+) {
+  const crypto = yield* Crypto.Crypto;
+  // @effect-diagnostics-next-line preferSchemaOverJson:off - keep caller namespace and key unambiguous.
+  const bytes = new TextEncoder().encode(JSON.stringify([namespace, key]));
+  const digest = yield* crypto.digest("SHA-256", bytes).pipe(Effect.mapError(unavailable));
+  return CommandId.make(`mcp:launch:${Hex.encode(digest)}`);
+});
+
 const access = Effect.gen(function* () {
   yield* readCaller();
   return yield* Project.ProjectService;
@@ -59,16 +75,34 @@ export const layer = McpToolAccess.toLayer(ProjectToolkit, {
       Effect.gen(function* () {
         const context = yield* readCaller();
         const { caller, scope } = context;
-        const commandId = yield* newCommandId();
+        const commandId =
+          input.clientRequestId === undefined
+            ? yield* newCommandId()
+            : yield* launchCommandId(scope.requestNamespace, input.clientRequestId);
         const threadId = ThreadId.make(commandId);
         const messageId = MessageId.make(commandId);
+        const existingLaunch =
+          input.clientRequestId === undefined
+            ? undefined
+            : yield* context.threads
+                .getThreadShell(threadId)
+                .pipe(Effect.mapError(unavailable));
+        const replayThread =
+          existingLaunch !== undefined && existingLaunch !== null && existingLaunch.deletedAt === null
+            ? existingLaunch
+            : undefined;
+        const replaying = replayThread !== undefined;
         const attachments = input.attachments ?? [];
-        if (attachments.some((attachment) => !Claims.attachmentIsPendingUpload(attachment)))
+        if (
+          !replaying &&
+          attachments.some((attachment) => !Claims.attachmentIsPendingUpload(attachment))
+        )
           return yield* new OrchestratorMcpFailure({
             code: "invalid_request",
             message: "A new thread accepts only pending attachment uploads.",
           });
         if (
+          !replaying &&
           input.scratch === true &&
           (input.projectId !== undefined || input.workspaceStrategy !== undefined)
         )
@@ -78,7 +112,8 @@ export const layer = McpToolAccess.toLayer(ProjectToolkit, {
               "scratch:true picks its own project and folder; omit projectId and workspaceStrategy.",
           });
         const projectId =
-          input.scratch === true
+          replayThread?.projectId ??
+          (input.scratch === true
             ? (yield* ManagedProjectFolders.ManagedProjectFolders.pipe(
                 Effect.flatMap((folders) => folders.ensureScratchProject),
                 Effect.mapError(
@@ -89,13 +124,13 @@ export const layer = McpToolAccess.toLayer(ProjectToolkit, {
                     }),
                 ),
               )).projectId
-            : yield* resolveProjectId(context, input.projectId);
+            : yield* resolveProjectId(context, input.projectId));
         const readProject = Project.ProjectService.pipe(
           Effect.flatMap((projects) => projects.getById(projectId)),
           Effect.mapError(unavailable),
           Effect.map(Option.getOrUndefined),
         );
-        if (input.workspaceStrategy?.type === "existing_worktree") {
+        if (!replaying && input.workspaceStrategy?.type === "existing_worktree") {
           const project = yield* readProject;
           if (project === undefined)
             return yield* new OrchestratorMcpFailure({
@@ -105,6 +140,7 @@ export const layer = McpToolAccess.toLayer(ProjectToolkit, {
           yield* assertProjectWorktree(project.workspaceRoot, input.workspaceStrategy.worktreePath);
         }
         const modelSelection =
+          replayThread?.modelSelection ??
           input.modelSelection ??
           caller?.modelSelection ??
           (yield* readProject)?.defaultModelSelection ??
@@ -140,7 +176,15 @@ export const layer = McpToolAccess.toLayer(ProjectToolkit, {
           Effect.mapError((error) =>
             error._tag === "AttachmentClaimError"
               ? new OrchestratorMcpFailure({ code: "orchestration_error", message: error.message })
-              : unavailable(),
+              : error._tag === "ThreadLaunchError" &&
+                    Schema.is(
+                      ThreadManagementService.ThreadManagementProviderInstanceDisabledError,
+                    )(error.cause)
+                ? new OrchestratorMcpFailure({
+                    code: "invalid_request",
+                    message: error.cause.message,
+                  })
+                : unavailable(),
           ),
         );
         const thread = result.projection.thread;

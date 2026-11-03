@@ -93,6 +93,19 @@ or remove it. On mobile, open the machine under **Settings → Environments** an
 choose **Edit**. Signing out of T3 Connect removes only that route; a machine
 you can still reach another way stays saved.
 
+### Diagnose a connection
+
+Hover the reconnecting banner or an environment's connection status dot to see
+whether your device is offline, the network path failed before the server could
+be reached, or the server stopped responding after the connection opened. For
+Linux hosts, the details include the latest sample's age and may show I/O
+pressure, event-loop delay, top disk readers and writers, D-state tasks, and a
+main-thread stall's wait channel. After recovery, the diagnosis can identify a
+host reboot, server restart, or recent stall. High I/O pressure or event-loop
+delay is also reported while connected. Host samples are kept in memory and
+aren't available on other server operating systems.
+
+
 ### Balance new threads across machines
 
 Auto balance is off by default. On web and desktop, enable it in
@@ -138,6 +151,85 @@ tailscale serve --https=443 off
 
 If that port is already in use, choose another with
 `--tailscale-serve-port`. See `t3 pair --help` for other pairing options.
+
+### Forward remote ports to localhost
+
+In the desktop app, choose **Ports** from a thread's right-panel **+** menu.
+The terminal drawer also has a **Ports** tab.
+Right-panel terminals fill the available pane height. Switching between Terminal
+and Ports keeps remote terminal sessions running.
+**Add port** forwards a remote loopback TCP port to this computer. The table shows
+the local address, process, origin, and connection state, with copy, open, and
+stop controls. Both the desktop app and remote server need a build with Ports
+support.
+
+For OMP's browser login, forward remote port **1455** to local port **1455** before
+opening the authorization link on this computer. Its `localhost:1455` callback
+then reaches OMP on the remote machine. An occupied local port produces an error;
+KM Code does not silently choose another port.
+
+**Auto forward** is on by default for remote environments. The first successful
+scan records existing listeners without forwarding them. A newly started
+listener, such as a Next.js dev server or an OMP login callback, is forwarded
+once two consecutive scans (about 2.5 seconds apart) see it, even with the Ports
+tab closed, so servers that live only for a moment, like test fixtures, are
+skipped. An automatic forward closes as soon as nothing listens on its remote
+port any more. Each environment holds at most 100 automatic forwards at once;
+change this under **Settings → Connections → Port forwarding**. Forwards you
+start yourself are never closed automatically and don't count toward the limit.
+
+**Stop forwarding** closes this computer's local tunnel and excludes that
+environment's port from auto-forwarding, even if its listener disappears,
+restarts, or the app reconnects. Choose **Forward** to start it again.
+**Remove port** also hides the entry; choose **Removed** and **Restore** to show
+it again without starting a forward. **Stop all** asks for confirmation, then
+closes every forward in every environment at once. Servers listening at that
+moment are not auto-forwarded again, while servers started afterwards still
+are; no per-port exclusions are saved. Turning Auto forward off stops automatic
+forwards but keeps manually added forwards. The toggle remembers its value while
+tabs and threads change within this window's session. These controls do not
+stop remote processes or change Tailscale Serve.
+
+Forwarded addresses bind only to this computer's loopback interfaces, not its
+LAN or tailnet interfaces. Traffic uses the environment's authenticated
+connection, including SSH and Tailscale routes; no separate SSH `-L` command or
+Tailscale Serve mapping is needed for each port. A network interruption closes
+active TCP streams; new connections use fresh authorization tickets.
+
+Forwards last for the desktop window's session. Removing the environment,
+reloading or closing the window, or quitting the app releases its listeners.
+Browser clients cannot bind or stop local TCP listeners; they can preview remote
+ports and remove entries from their list. Discovery uses `ss` on Linux, `lsof` on
+macOS, and `netstat` on Windows; a missing or failed discovery command appears as
+an error rather than an empty list.
+
+### Use Ports from a phone or browser
+
+Open a thread's terminal drawer and select **Ports**. The web app refreshes the
+listener list while this panel is open, including when you connect directly to a
+remote server through Tailscale HTTPS. Start a development server in the terminal
+and its port appears automatically.
+On narrow screens, the port number stays visible while you scroll to the actions.
+Available actions have separate touch-sized targets so you can identify the port
+before changing it.
+
+Choose **Preview** beside a port to open it in the environment's browser.
+The server-side browser reaches the remote loopback address; KM Code streams the
+page and your interactions through its authenticated connection. Your phone does
+not need its own port listener, an SSH tunnel, or a separate Tailscale Serve
+mapping for each development port. This action stays inside Preview even when
+your usual link preference is to open the system browser.
+
+Preview requires preview-operate permission and an available, sandboxed browser
+on the host. The first use downloads the managed browser. On Ubuntu hosts that
+restrict user namespaces, follow [browser host setup](#browser-host-setup).
+The Ports panel shows a reason when Preview is unavailable.
+
+This is streamed browser access, not phone-local TCP forwarding. A provider
+OAuth redirect to `localhost:1455` in your phone's system browser does not reach
+the remote terminal. For OMP login, use its authorization-code or full-redirect-URL
+paste option, or a device flow when the provider offers one. Desktop localhost
+forwarding remains available for callbacks that require the same local port.
 
 ### Hosted web app
 

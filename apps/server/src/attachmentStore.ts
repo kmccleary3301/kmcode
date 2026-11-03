@@ -1,6 +1,6 @@
 // @effect-diagnostics nodeBuiltinImport:off
 import * as NodeCrypto from "node:crypto";
-import * as NodeFS from "node:fs";
+import * as NodeFS from "node:fs/promises";
 import * as NodePath from "node:path";
 
 import type { ChatAttachment } from "@t3tools/contracts";
@@ -167,10 +167,10 @@ export function resolveAttachmentPath(input: {
   });
 }
 
-export function resolveAttachmentPathById(input: {
+export async function resolveAttachmentPathById(input: {
   readonly attachmentsDir: string;
   readonly attachmentId: string;
-}): string | null {
+}): Promise<string | null> {
   const normalizedId = normalizeAttachmentRelativePath(input.attachmentId);
   if (!normalizedId || normalizedId.includes("/") || normalizedId.includes(".")) {
     return null;
@@ -181,15 +181,25 @@ export function resolveAttachmentPathById(input: {
       attachmentsDir: input.attachmentsDir,
       relativePath: `${normalizedId}.${fileExtension.toLowerCase()}`,
     });
-    return filePath && NodeFS.existsSync(filePath) ? filePath : null;
+    if (!filePath) return null;
+    try {
+      await NodeFS.access(filePath);
+      return filePath;
+    } catch {
+      return null;
+    }
   }
   for (const extension of ATTACHMENT_FILENAME_EXTENSIONS) {
     const maybePath = resolveAttachmentRelativePath({
       attachmentsDir: input.attachmentsDir,
       relativePath: `${normalizedId}${extension}`,
     });
-    if (maybePath && NodeFS.existsSync(maybePath)) {
+    if (!maybePath) continue;
+    try {
+      await NodeFS.access(maybePath);
       return maybePath;
+    } catch {
+      continue;
     }
   }
   return null;
@@ -204,11 +214,11 @@ export type AttachmentClaimPlan =
     }
   | { readonly ok: false; readonly reason: string };
 
-export function planAttachmentClaim(input: {
+export async function planAttachmentClaim(input: {
   readonly attachmentsDir: string;
   readonly threadId: string;
   readonly attachmentId: string;
-}): AttachmentClaimPlan {
+}): Promise<AttachmentClaimPlan> {
   const uuid = parseAttachmentUuid(input.attachmentId);
   const requestedSegment = parseThreadSegmentFromAttachmentId(input.attachmentId);
   if (!uuid || !requestedSegment) {
@@ -222,7 +232,7 @@ export function planAttachmentClaim(input: {
     return { ok: false, reason: "attachment must be a pending upload" };
   }
 
-  const currentPath = resolveAttachmentPathById({
+  const currentPath = await resolveAttachmentPathById({
     attachmentsDir: input.attachmentsDir,
     attachmentId: input.attachmentId,
   });
@@ -250,13 +260,13 @@ export function planAttachmentClaim(input: {
   };
 }
 
-export function sweepStalePendingAttachments(input: {
+export async function sweepStalePendingAttachments(input: {
   readonly attachmentsDir: string;
   readonly nowMs: number;
-}): { readonly deleted: number } {
+}): Promise<{ readonly deleted: number }> {
   let entries: string[];
   try {
-    entries = NodeFS.readdirSync(input.attachmentsDir);
+    entries = await NodeFS.readdir(input.attachmentsDir);
   } catch {
     return { deleted: 0 };
   }
@@ -283,8 +293,8 @@ export function sweepStalePendingAttachments(input: {
     }
     try {
       const maxAgeMs = isPartial ? PARTIAL_UPLOAD_MAX_AGE_MS : PENDING_ATTACHMENT_MAX_AGE_MS;
-      if (input.nowMs - NodeFS.statSync(resolved).mtimeMs > maxAgeMs) {
-        NodeFS.unlinkSync(resolved);
+      if ((input.nowMs - (await NodeFS.stat(resolved)).mtimeMs) > maxAgeMs) {
+        await NodeFS.unlink(resolved);
         deleted += 1;
       }
     } catch {

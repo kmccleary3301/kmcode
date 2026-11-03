@@ -1,6 +1,7 @@
 interface ObservedAnimation {
   element: HTMLElement | SVGElement;
   intersecting: boolean;
+  onVisibilityChange?: ((running: boolean) => void) | undefined;
 }
 
 const animations = new Map<Element, ObservedAnimation>();
@@ -15,6 +16,7 @@ function updateAnimation(animation: ObservedAnimation) {
     "--visible-animation-will-change",
     running ? "transform" : "auto",
   );
+  animation.onVisibilityChange?.(running);
 }
 
 function updateAnimations() {
@@ -22,12 +24,17 @@ function updateAnimations() {
 }
 
 /** Attach to a stable animation container. All refs share visibility and motion listeners. */
-export function observeVisibleAnimation(element: HTMLElement | SVGElement | null) {
+export function observeVisibleAnimation(
+  element: HTMLElement | SVGElement | null,
+  onVisibilityChange?: ((running: boolean) => void) | undefined,
+) {
   if (element === null) return;
-  element.style.setProperty("--visible-animation-state", "paused");
-  element.style.setProperty("--visible-animation-will-change", "auto");
-  if (typeof IntersectionObserver === "undefined") return;
-
+  if (typeof IntersectionObserver === "undefined") {
+    element.style.setProperty("--visible-animation-state", "paused");
+    element.style.setProperty("--visible-animation-will-change", "auto");
+    onVisibilityChange?.(false);
+    return;
+  }
   if (observer === null) {
     reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)");
     reducedMotion.addEventListener("change", updateAnimations);
@@ -43,8 +50,20 @@ export function observeVisibleAnimation(element: HTMLElement | SVGElement | null
     });
   }
 
-  const animation = { element, intersecting: false };
+  const rect = element.getBoundingClientRect();
+  const animation: ObservedAnimation = {
+    element,
+    intersecting:
+      rect.width > 0 &&
+      rect.height > 0 &&
+      rect.bottom > 0 &&
+      rect.right > 0 &&
+      rect.top < window.innerHeight &&
+      rect.left < window.innerWidth,
+    onVisibilityChange,
+  };
   animations.set(element, animation);
+  updateAnimation(animation);
   observer.observe(element);
 
   return () => {
@@ -53,6 +72,7 @@ export function observeVisibleAnimation(element: HTMLElement | SVGElement | null
     observer?.unobserve(element);
     element.style.setProperty("--visible-animation-state", "paused");
     element.style.setProperty("--visible-animation-will-change", "auto");
+    animation.onVisibilityChange?.(false);
     if (animations.size === 0) {
       observer?.disconnect();
       observer = null;

@@ -1,9 +1,11 @@
 import { assert, it } from "@effect/vitest";
 import {
   ORCHESTRATION_PROTOCOL_VERSION,
+  ThreadId,
   type ServerConfig,
   type ServerConfigStreamEvent,
 } from "@t3tools/contracts";
+import type { OrchestrationV2ThreadLiveItem } from "@t3tools/contracts";
 import { HostProcessPlatform } from "@t3tools/shared/hostProcess";
 import * as ConfigProvider from "effect/ConfigProvider";
 import * as Deferred from "effect/Deferred";
@@ -15,15 +17,18 @@ import * as Layer from "effect/Layer";
 import * as Path from "effect/Path";
 import * as Queue from "effect/Queue";
 import * as Stream from "effect/Stream";
+import * as Option from "effect/Option";
 import * as TestClock from "effect/testing/TestClock";
 import { ChildProcessSpawner } from "effect/process";
 
 import * as ExternalLauncher from "./process/externalLauncher.ts";
+import * as ThreadLiveOverlay from "./orchestration-v2/ThreadLiveOverlay.ts";
 import {
   hasCompatibleOrchestrationProtocol,
   resolveAvailableEditorsForConfig,
   shouldUseBoundedThreadSnapshot,
   withLateEditorConfig,
+  subscribeOrchestrationV2ThreadLive,
 } from "./ws.ts";
 
 it("accepts only the current orchestration protocol before websocket RPC setup", () => {
@@ -233,4 +238,39 @@ it.effect("recovers a reveal kind whose real probe outlasts the config timeout",
       assert.equal(late.config.shellRevealInFileManagerKind, "file-explorer");
     }
   }).pipe(Effect.scoped),
+);
+
+it.effect("streams thread live items while registering a viewer for the stream lifetime", () =>
+  Effect.gen(function* () {
+    const threadId = ThreadId.make("thread-live-overlay-test");
+    const liveOverlay = yield* ThreadLiveOverlay.ThreadLiveOverlay;
+    const received = yield* Queue.unbounded<OrchestrationV2ThreadLiveItem>();
+    const liveStream = yield* subscribeOrchestrationV2ThreadLive({ threadId });
+    const streamFiber = yield* liveStream.pipe(
+      Stream.runForEach((item) => Queue.offer(received, item)),
+      Effect.forkScoped,
+    );
+
+    const viewedWhileOpen = yield* liveOverlay.viewed(threadId).pipe(
+      Stream.filter((isViewed) => isViewed),
+      Stream.runHead,
+    );
+    assert.equal(Option.getOrNull(viewedWhileOpen), true);
+
+    const item: OrchestrationV2ThreadLiveItem = {
+      kind: "live-mode",
+      mode: "events",
+      reason: "viewing",
+    };
+    yield* liveOverlay.publish(threadId, item);
+    assert.deepEqual(yield* Queue.take(received), item);
+
+    yield* Fiber.interrupt(streamFiber);
+    yield* TestClock.adjust(Duration.seconds(15));
+    const viewedAfterLinger = yield* liveOverlay.viewed(threadId).pipe(
+      Stream.filter((isViewed) => !isViewed),
+      Stream.runHead,
+    );
+    assert.equal(Option.getOrNull(viewedAfterLinger), false);
+  }).pipe(Effect.scoped, Effect.provide(ThreadLiveOverlay.layer)),
 );

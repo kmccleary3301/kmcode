@@ -9,12 +9,15 @@ import {
   DEFAULT_CODE_FONT_SIZE,
   DEFAULT_INTERFACE_FONT_SIZE,
   DEFAULT_PROMPT_FONT_SIZE,
+  DEFAULT_TEXT_FONT_SIZE,
   MAX_CODE_FONT_SIZE,
   MAX_INTERFACE_FONT_SIZE,
   MAX_PROMPT_FONT_SIZE,
+  MAX_TEXT_FONT_SIZE,
   MIN_CODE_FONT_SIZE,
   MIN_INTERFACE_FONT_SIZE,
   MIN_PROMPT_FONT_SIZE,
+  MIN_TEXT_FONT_SIZE,
 } from "@t3tools/contracts";
 
 export const DEFAULT_SANS_FONT_STACK =
@@ -94,6 +97,7 @@ export interface AppearanceFontPreferences {
   readonly code: string;
   readonly composer: string;
   readonly sizeInterface: number;
+  readonly sizeText: number;
   readonly sizePrompt: number;
   readonly sizeCode: number;
   /** Grayscale `antialiased` rendering; false keeps the heavier platform default. */
@@ -130,6 +134,8 @@ export function applyAppearanceFontVariables(
   }
 
   root.style.fontSize = `${clampInterfaceFontSize(preferences.sizeInterface)}px`;
+  root.style.setProperty("--font-size-text", `${clampTextFontSize(preferences.sizeText)}px`);
+  root.style.setProperty("--font-size-markdown", "var(--font-size-text)");
   root.style.setProperty("--font-size-prompt", `${clampPromptFontSize(preferences.sizePrompt)}px`);
   const code = clampCodeFontSize(preferences.sizeCode);
   root.style.setProperty("--font-size-code", `${code}px`);
@@ -158,6 +164,10 @@ export function clampInterfaceFontSize(value: number): number {
     MAX_INTERFACE_FONT_SIZE,
     DEFAULT_INTERFACE_FONT_SIZE,
   );
+}
+
+export function clampTextFontSize(value: number): number {
+  return clampFontSize(value, MIN_TEXT_FONT_SIZE, MAX_TEXT_FONT_SIZE, DEFAULT_TEXT_FONT_SIZE);
 }
 
 export function clampPromptFontSize(value: number): number {

@@ -180,11 +180,35 @@ describe("getDesktopUpdateActionError", () => {
 });
 
 describe("desktop update UI helpers", () => {
-  it("routes versioned updates to the fork release listing without fabricating a tag", () => {
+  it("routes versioned updates to the KM Code release listing without fabricating a tag", () => {
     expect(getDesktopUpdateReleaseUrl("0.0.30")).toBe(
       "https://github.com/kmccleary3301/kmcode/releases",
     );
     expect(getDesktopUpdateReleaseUrl("0.0.30-nightly.20260728.931")).toBe(
+      "https://github.com/kmccleary3301/kmcode/releases",
+    );
+  });
+
+  it("uses the configured desktop update repository for release URLs", () => {
+    expect(getDesktopUpdateReleaseUrl("1.2.3", "JustYannicc/t3code")).toBe(
+      "https://github.com/JustYannicc/t3code/releases",
+    );
+    expect(getDesktopUpdateReleaseHistoryUrl("JustYannicc/t3code")).toBe(
+      "https://github.com/JustYannicc/t3code/releases",
+    );
+  });
+
+  it.each([
+    "owner/repo/extra",
+    "owner#notes/repo",
+    "owner/repo#notes",
+    "owner?tab=notes/repo",
+    "owner/repo?tab=notes",
+  ])("falls back to KM Code for an invalid configured repository: %s", (repository) => {
+    expect(getDesktopUpdateReleaseHistoryUrl(repository)).toBe(
+      "https://github.com/kmccleary3301/kmcode/releases",
+    );
+    expect(getDesktopUpdateReleaseUrl("1.2.3", repository)).toBe(
       "https://github.com/kmccleary3301/kmcode/releases",
     );
   });

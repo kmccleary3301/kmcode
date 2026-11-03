@@ -33,6 +33,11 @@ import { parseThreadKey, threadKey } from "./entities.ts";
 import { applyOrchestrationV2ProjectionEvent } from "./orchestrationV2Projection.ts";
 import { THREAD_SNAPSHOT_IDLE_TTL_MS } from "./threadRetention.ts";
 import { followStreamInEnvironment } from "./runtime.ts";
+import {
+  environmentThreadLiveOverlayAtom,
+  reduceThreadLiveOverlay,
+  resetThreadLiveOverlay,
+} from "./threadLiveOverlay.ts";
 import * as ThreadHistoryController from "./threadHistoryController.ts";
 import { fetchEnvironmentThreadHistoryPage } from "./threadHistoryHttp.ts";
 import {
@@ -570,6 +575,7 @@ export const makeEnvironmentThreadState = Effect.fn("EnvironmentThreadState.make
   const applyItemLocked = Effect.fn("EnvironmentThreadState.applyItemLocked")(function* (
     item: OrchestrationV2ThreadStreamItem,
   ) {
+
     if (item.kind === "synchronized") {
       yield* Ref.set(awaitingCompletion, false);
       yield* SubscriptionRef.update(state, (current) =>
@@ -586,8 +592,6 @@ export const makeEnvironmentThreadState = Effect.fn("EnvironmentThreadState.make
         item.historyCursor !== undefined ||
         item.hasMoreHistory !== undefined ||
         item.latestLocalTurnOrdinal !== undefined;
-      // Bounded socket fallbacks carry their cursor. Legacy-compatible full
-      // snapshots omit these fields and still replace progressive state.
       yield* setThread(
         item.projection,
         hasProgressiveHistory
@@ -608,7 +612,6 @@ export const makeEnvironmentThreadState = Effect.fn("EnvironmentThreadState.make
 
     yield* applyEventsLocked([item]);
   });
-
   const applyItems = Effect.fn("EnvironmentThreadState.applyItems")(function* (
     items: ReadonlyArray<OrchestrationV2ThreadStreamItem>,
   ) {
@@ -937,7 +940,7 @@ export const makeEnvironmentThreadState = Effect.fn("EnvironmentThreadState.make
 function threadStateChanges(
   environmentId: EnvironmentIdType,
   threadId: ThreadIdType,
-  resumeCache?: ThreadResumeCache,
+  resumeCache: ThreadResumeCache | undefined,
 ) {
   return followStreamInEnvironment(
     environmentId,
@@ -986,10 +989,55 @@ export function createEnvironmentThreadStateAtoms<R, E>(
       )
       .pipe(Atom.setIdleTTL(0), Atom.withLabel(`environment-thread-state:${key}`));
   });
+  const liveOverlaySubscriptionFamily = Atom.family((key: string) => {
+    const { environmentId, threadId } = parseThreadKey(key);
+    const overlayAtom = environmentThreadLiveOverlayAtom(environmentId, threadId);
+    return runtime
+      .atom(
+        (get) => {
+          const registry = get.registry;
+          const stream = subscribeDynamic(
+            ORCHESTRATION_V2_WS_METHODS.subscribeThreadLive,
+            () =>
+              Effect.sync(() => {
+                registry.set(overlayAtom, resetThreadLiveOverlay());
+                return { threadId };
+              }),
+            {
+              onDefect: () => Effect.void,
+              onExpectedFailure: () => Effect.void,
+              retryExpectedFailureAfter: "250 millis",
+            },
+          ).pipe(
+            Stream.mapEffect((item) =>
+              Effect.sync(() => {
+                const current = registry.get(overlayAtom) ?? resetThreadLiveOverlay();
+                const next = reduceThreadLiveOverlay(current, item);
+                registry.set(overlayAtom, next);
+                return next;
+              }),
+            ),
+            Stream.ensuring(
+              Effect.sync(() => {
+                registry.set(overlayAtom, resetThreadLiveOverlay());
+              }),
+            ),
+          );
+          return followStreamInEnvironment(environmentId, stream);
+        },
+        { initialValue: resetThreadLiveOverlay() },
+      )
+      .pipe(
+        Atom.setIdleTTL(0),
+        Atom.withLabel(`environment-thread-live-overlay-subscription:${key}`),
+      );
+  });
 
   return {
     stateAtom: (environmentId: EnvironmentIdType, threadId: ThreadIdType) =>
       family(threadKey({ environmentId, threadId })),
+    liveOverlaySubscriptionAtom: (environmentId: EnvironmentIdType, threadId: ThreadIdType) =>
+      liveOverlaySubscriptionFamily(threadKey({ environmentId, threadId })),
   };
 }
 
@@ -1007,3 +1055,4 @@ export * from "./threadFeedback.ts";
 export * from "./threadDetail.ts";
 export * from "./threadShell.ts";
 export * from "./threadState.ts";
+export * from "./threadLiveOverlay.ts";

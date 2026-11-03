@@ -1529,7 +1529,7 @@ export class DesktopAppearanceStorage implements AppearanceStorageAdapter {
       diagnosticsFile === undefined
     )
       throw new Error("incomplete package files");
-    decodePackageDocument(new TextDecoder().decode(packageDocument.bytes));
+    const stored = decodePackageDocument(new TextDecoder().decode(packageDocument.bytes)).package;
     const diagnostics = decodeDiagnostics(new TextDecoder().decode(diagnosticsFile.bytes));
     if (appearanceSha256(diagnostics) !== appearanceSha256(previous.diagnostics))
       throw new Error("package diagnostics changed");
@@ -1577,8 +1577,15 @@ export class DesktopAppearanceStorage implements AppearanceStorageAdapter {
       ...(desktopCss === undefined ? {} : { desktopCss }),
       assets,
     });
+    // Manifests cannot carry migration provenance (a version 1 theme re-normalizes as version 2),
+    // so unchanged profile content keeps the provenance recorded in package.json.
+    const migration =
+      hashAppearanceProfileContent(rebuilt.profile) === hashAppearanceProfileContent(stored.profile)
+        ? stored.profile.migration
+        : rebuilt.profile.migration;
     return {
       ...rebuilt,
+      profile: { ...rebuilt.profile, migration },
       diagnostics: previous.diagnostics,
       enabled: previous.enabled,
     };

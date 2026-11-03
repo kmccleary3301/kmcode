@@ -84,10 +84,12 @@ export const issueAttachmentUploadUrl = Effect.fn("AttachmentUpload.issueUrl")(f
     nowMs - previousSweep >= PENDING_ATTACHMENT_SWEEP_INTERVAL_MS
   ) {
     lastPendingSweepByDirectory.set(config.attachmentsDir, nowMs);
-    const swept = sweepStalePendingAttachments({
-      attachmentsDir: config.attachmentsDir,
-      nowMs,
-    });
+    const swept = yield* Effect.promise(() =>
+      sweepStalePendingAttachments({
+        attachmentsDir: config.attachmentsDir,
+        nowMs,
+      }),
+    );
     if (swept.deleted > 0) {
       yield* Effect.logInfo("Removed expired attachment uploads.", { deleted: swept.deleted });
     }
@@ -230,10 +232,12 @@ export const deletePendingAttachment = Effect.fn("AttachmentUpload.deletePending
   }
 
   const config = yield* ServerConfig.ServerConfig;
-  const attachmentPath = resolveAttachmentPathById({
-    attachmentsDir: config.attachmentsDir,
-    attachmentId,
-  });
+  const attachmentPath = yield* Effect.promise(() =>
+    resolveAttachmentPathById({
+      attachmentsDir: config.attachmentsDir,
+      attachmentId,
+    }),
+  );
   if (!attachmentPath) {
     return;
   }

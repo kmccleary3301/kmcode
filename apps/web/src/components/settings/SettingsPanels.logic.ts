@@ -83,6 +83,7 @@ type TypographySettings = Pick<
   | "fontFamilyCode"
   | "fontFamilyTerminal"
   | "fontSizeInterface"
+  | "fontSizeText"
   | "fontSizePrompt"
   | "fontSizeCode"
   | "fontSizeTerminal"
@@ -95,7 +96,10 @@ export function getChangedTypographySettingLabels(settings: TypographySettings):
     settings.fontSizeInterface !== DEFAULT_UNIFIED_SETTINGS.fontSizeInterface
       ? ["Interface font"]
       : []),
-    ...(settings.fontFamilyText !== DEFAULT_UNIFIED_SETTINGS.fontFamilyText ? ["Text font"] : []),
+    ...(settings.fontFamilyText !== DEFAULT_UNIFIED_SETTINGS.fontFamilyText ||
+    settings.fontSizeText !== DEFAULT_UNIFIED_SETTINGS.fontSizeText
+      ? ["Text font"]
+      : []),
     ...(settings.fontFamilyComposer !== DEFAULT_UNIFIED_SETTINGS.fontFamilyComposer ||
     settings.fontSizePrompt !== DEFAULT_UNIFIED_SETTINGS.fontSizePrompt
       ? ["Prompt font"]

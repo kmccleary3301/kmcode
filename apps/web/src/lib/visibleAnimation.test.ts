@@ -24,10 +24,23 @@ class TestIntersectionObserver {
   }
 }
 
-function animationElement() {
+function animationElement(inViewport = false) {
   const properties = new Map<string, string>();
+  const top = inViewport ? 10 : 900;
+  const bounds = {
+    x: 0,
+    y: top,
+    top,
+    right: 10,
+    bottom: top + 10,
+    left: 0,
+    width: 10,
+    height: 10,
+    toJSON: () => ({}),
+  } satisfies DOMRect;
   const element = {
     style: { setProperty: (name: string, value: string) => properties.set(name, value) },
+    getBoundingClientRect: () => bounds,
   } as unknown as HTMLElement;
   return {
     element,
@@ -48,7 +61,11 @@ beforeEach(() => {
   observers = [];
   cleanups = [];
   vi.stubGlobal("document", page);
-  vi.stubGlobal("window", { matchMedia: () => motion });
+  vi.stubGlobal("window", {
+    matchMedia: () => motion,
+    innerWidth: 1_000,
+    innerHeight: 800,
+  });
   vi.stubGlobal("IntersectionObserver", TestIntersectionObserver);
 });
 
@@ -58,6 +75,15 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
+it("starts an on-screen animation without waiting for an observer frame", () => {
+  const animation = animationElement(true);
+  const changes: boolean[] = [];
+  const cleanup = observeVisibleAnimation(animation.element, (running) => changes.push(running));
+  if (cleanup) cleanups.push(cleanup);
+
+  expect(animation.state()).toBe("running");
+  expect(changes).toEqual([true]);
+});
 describe("observeVisibleAnimation", () => {
   it("runs only intersecting animations in a visible document with motion enabled", () => {
     const first = animationElement();
@@ -150,5 +176,24 @@ describe("observeVisibleAnimation", () => {
     expect(animation.state()).toBe("paused");
     expect(animation.willChange()).toBe("auto");
     expect(observers).toHaveLength(0);
+  });
+
+  it("invokes onVisibilityChange callback when visibility state updates", () => {
+    const animation = animationElement();
+    const changes: boolean[] = [];
+    const cleanup = observeVisibleAnimation(animation.element, (running) => changes.push(running));
+    if (cleanup) cleanups.push(cleanup);
+    expect(changes).toEqual([false]);
+
+    observers[0]!.report(animation.element, true);
+    expect(changes).toEqual([false, true]);
+
+    page.visibilityState = "hidden";
+    page.dispatchEvent(new Event("visibilitychange"));
+    expect(changes).toEqual([false, true, false]);
+
+    page.visibilityState = "visible";
+    page.dispatchEvent(new Event("visibilitychange"));
+    expect(changes).toEqual([false, true, false, true]);
   });
 });

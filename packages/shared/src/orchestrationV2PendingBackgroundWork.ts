@@ -7,6 +7,7 @@ import type {
   ThreadPullRequestLink,
 } from "@t3tools/contracts";
 import { isOrchestrationV2WorkActive } from "@t3tools/contracts";
+import * as DateTime from "effect/DateTime";
 
 import { threadPullRequestKeyOf } from "./threadPullRequests.ts";
 
@@ -50,6 +51,18 @@ const SETTLED_FOR_BACKGROUND_WAIT_RUN_STATUSES = new Set<OrchestrationV2Run["sta
 void TERMINAL_RUN_STATUSES;
 
 export type PendingBackgroundWorkTask = OrchestrationV2PendingBackgroundTask;
+
+/**
+ * OMP keeps its run open while it waits on its own async jobs (background
+ * bash, eval, async tasks). The Pi adapter lists each job, or one unnamed job
+ * when it saw none start, under this task id prefix.
+ */
+export const OMP_ASYNC_JOB_TASK_ID_PREFIX = "omp:async:";
+
+/** Whether the task is an OMP async job the open run is waiting on. */
+export function isOmpAsyncJobWait(task: Pick<PendingBackgroundWorkTask, "kind" | "taskId">) {
+  return task.kind === "background_task" && task.taskId.startsWith(OMP_ASYNC_JOB_TASK_ID_PREFIX);
+}
 
 /**
  * Whether a turn-item update can end background work that a settled run is
@@ -104,6 +117,7 @@ type PendingBackgroundWorkTurnItem = {
   readonly type: OrchestrationV2TurnItem["type"];
   readonly status: OrchestrationV2TurnItem["status"];
   readonly title: string | null;
+  readonly startedAt?: OrchestrationV2TurnItem["startedAt"] | undefined;
   /** When present and the run is rolled_back, the item is abandoned, not pending. */
   readonly runId?: OrchestrationV2Run["id"] | string | null;
   readonly nativeItemRef?: {
@@ -156,7 +170,14 @@ function pendingTaskFromTurnItem(
   item: PendingBackgroundWorkTurnItem,
 ): PendingBackgroundWorkTask {
   const description = descriptionFromTurnItem(item);
-  const named = { taskId, ...(description === undefined ? {} : { description }) };
+  const command =
+    item.type === "command_execution" && typeof item.input === "string" ? item.input.trim() : "";
+  const named = {
+    taskId,
+    ...(description === undefined ? {} : { description }),
+    ...(command.length === 0 || command === description ? {} : { command }),
+    ...(item.startedAt == null ? {} : { startedAt: DateTime.formatIso(item.startedAt) }),
+  };
   switch (item.type) {
     case "subagent":
       return {

@@ -33,6 +33,7 @@ import { EditProvider, File, Virtualizer, useWorkerPool } from "@pierre/diffs/re
 import { DiffWorkerPoolProvider } from "../DiffWorkerPoolProvider";
 import { useFilesystemReadAccess } from "~/state/filesystem";
 import {
+  executeAtomQuery,
   isAtomCommandInterrupted,
   squashAtomCommandFailure,
 } from "@t3tools/client-runtime/state/runtime";
@@ -40,6 +41,8 @@ import { mediaFileReference } from "@t3tools/client-runtime/media-reference";
 import { FolderTree, Globe2, WrapTextIcon } from "lucide-react";
 import { Code2, Eye, Table2 } from "lucide";
 import * as Schema from "effect/Schema";
+import { AsyncResult } from "effect/reactivity";
+
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { isBrowserPreviewFile, openFileInPreview } from "~/browser/openFileInPreview";
@@ -62,13 +65,20 @@ import { ScrollArea } from "~/components/ui/scroll-area";
 import { stackedThreadToast, toastManager } from "~/components/ui/toast";
 import { type DraftId, useComposerDraftStore } from "~/composerDraftStore";
 import { buildFileReviewComment } from "~/reviewCommentContext";
+import { appAtomRegistry } from "~/rpc/atomRegistry";
 import { assetEnvironment } from "~/state/assets";
 import { usePreviewAvailable } from "~/browser/previewRuntime";
-import { useEnvironmentHttpBaseUrl, usePrimaryEnvironmentId } from "~/state/environments";
+import {
+  useEnvironment,
+  useEnvironmentHttpBaseUrl,
+  usePrimaryEnvironmentId,
+} from "~/state/environments";
 import { previewEnvironment } from "~/state/preview";
 import { useEnvironmentScope } from "~/state/session";
 import { useAtomCommand } from "~/state/use-atom-command";
 import { useAtomQueryRunner } from "~/state/use-atom-query-runner";
+import { environmentThreadDetails } from "~/state/threads";
+
 
 import { AttachmentFilePreview } from "./AttachmentFilePreview";
 import { AudioPreview } from "./AudioPreview";
@@ -106,10 +116,12 @@ import {
   setMarkdownTaskChecked,
   shouldShowFileExplorer,
 } from "./filePreviewMode";
+import { findThreadFilePathCandidates } from "./threadFilePathResolver";
 import { useFileSaveCoordinator } from "./useFileSaveCoordinator";
 import {
   getOptimisticProjectFileQueryData,
   getProjectFileContents,
+  getProjectFileQueryAtom,
   setProjectFileQueryData,
   useProjectFileQuery,
 } from "./projectFilesQueryState";
@@ -131,6 +143,25 @@ interface FilePreviewPanelProps {
   selectedFilePending: boolean;
   workspaceMutationId: string | null;
 }
+
+interface ThreadFileResolutionIdentity {
+  readonly environmentId: EnvironmentId;
+  readonly threadEnvironmentId: ScopedThreadRef["environmentId"];
+  readonly threadId: ScopedThreadRef["threadId"];
+  readonly cwd: string;
+  readonly requestedPath: string;
+}
+
+type ThreadFileResolution = ThreadFileResolutionIdentity &
+  (
+    | { readonly status: "resolving" }
+    | {
+        readonly status: "resolved";
+        readonly absolutePath: string;
+        readonly triedPaths: ReadonlyArray<string>;
+      }
+    | { readonly status: "failed"; readonly triedPaths: ReadonlyArray<string> }
+  );
 
 const FILE_EXPLORER_STORAGE_KEY = "t3code.fileExplorerOpen";
 const RENDER_MARKDOWN_STORAGE_KEY = "t3code.renderMarkdown";
@@ -1018,12 +1049,32 @@ export default function FilePreviewPanel({
   selectedFilePending,
   workspaceMutationId,
 }: FilePreviewPanelProps) {
-  const relativePath =
+  const threadEnvironmentId = threadRef.environmentId;
+  const threadId = threadRef.threadId;
+  const requestedPreviewPath =
     attachment === undefined ? resolveFilePreviewPath(requestedPath, cwd) : requestedPath;
+  const [threadFileResolution, setThreadFileResolution] = useState<ThreadFileResolution | null>(
+    null,
+  );
+  const currentThreadFileResolution =
+    attachment === undefined &&
+    threadFileResolution?.environmentId === environmentId &&
+    threadFileResolution.threadEnvironmentId === threadEnvironmentId &&
+    threadFileResolution.threadId === threadId &&
+    threadFileResolution.cwd === cwd &&
+    threadFileResolution.requestedPath === requestedPreviewPath
+      ? threadFileResolution
+      : null;
+  const resolvedPath =
+    currentThreadFileResolution?.status === "resolved"
+      ? currentThreadFileResolution.absolutePath
+      : null;
+  const relativePath = resolvedPath ?? requestedPreviewPath;
   const { resolvedTheme } = useTheme();
   const wordWrap = useClientSettings((settings) => settings.wordWrap);
   const canOperatePreview = useEnvironmentScope(environmentId, AuthPreviewOperateScope);
   const primaryEnvironmentId = usePrimaryEnvironmentId();
+  const environment = useEnvironment(environmentId);
   const remoteOpenState = useRemoteOpenState(environmentId);
   const environmentHttpBaseUrl = useEnvironmentHttpBaseUrl(environmentId);
   const previewAvailable = usePreviewAvailable(environmentId);
@@ -1056,12 +1107,104 @@ export default function FilePreviewPanel({
     relativePath,
     attachment === undefined && relativePath !== null,
   );
+  // The read error's platform cause does not survive the RPC, so a missing
+  // file is indistinguishable from an unreadable one; any failed read of a
+  // relative link except a folder or an unreadable workspace tries the thread.
+  const shouldResolveFromThread =
+    attachment === undefined &&
+    requestedPreviewPath !== null &&
+    !isAbsolutePath(requestedPreviewPath) &&
+    file.readError !== null &&
+    file.readError.failure !== "path_not_file" &&
+    file.readError.operation !== "realpath-workspace-root";
+  useEffect(() => {
+    if (!shouldResolveFromThread || requestedPreviewPath === null) return;
+
+    const controller = new AbortController();
+    const resolutionIdentity = {
+      environmentId,
+      threadEnvironmentId,
+      threadId,
+      cwd,
+      requestedPath: requestedPreviewPath,
+    };
+    setThreadFileResolution({ ...resolutionIdentity, status: "resolving" });
+
+    void (async () => {
+      const turnItems = appAtomRegistry.get(
+        environmentThreadDetails.visibleTurnItemsAtom({
+          environmentId: threadEnvironmentId,
+          threadId,
+        }),
+      );
+      const candidates = findThreadFilePathCandidates(turnItems, requestedPreviewPath);
+      const triedPaths: string[] = [];
+      const seenPaths = new Set<string>();
+      const tryCandidate = async (absolutePath: string): Promise<boolean> => {
+        if (controller.signal.aborted || seenPaths.has(absolutePath)) return false;
+        seenPaths.add(absolutePath);
+        triedPaths.push(absolutePath);
+        const result = await executeAtomQuery(
+          appAtomRegistry,
+          getProjectFileQueryAtom(environmentId, cwd, absolutePath),
+          {
+            reportDefect: false,
+            reportFailure: false,
+            signal: controller.signal,
+          },
+        );
+        return AsyncResult.isSuccess(result);
+      };
+
+      for (const absolutePath of candidates.mentionedPaths) {
+        const found = await tryCandidate(absolutePath);
+        if (controller.signal.aborted) return;
+        if (found) {
+          setThreadFileResolution({
+            ...resolutionIdentity,
+            status: "resolved",
+            absolutePath,
+            triedPaths,
+          });
+          return;
+        }
+      }
+
+      for (const absolutePath of candidates.workingDirectoryPaths) {
+        const found = await tryCandidate(absolutePath);
+        if (controller.signal.aborted) return;
+        if (found) {
+          setThreadFileResolution({
+            ...resolutionIdentity,
+            status: "resolved",
+            absolutePath,
+            triedPaths,
+          });
+          return;
+        }
+      }
+
+      setThreadFileResolution({ ...resolutionIdentity, status: "failed", triedPaths });
+    })();
+
+    return () => controller.abort();
+  }, [
+    cwd,
+    environmentId,
+    requestedPreviewPath,
+    shouldResolveFromThread,
+    threadEnvironmentId,
+    threadId,
+  ]);
   const attemptedPath = file.readError?.resolvedPath ?? file.readError?.operationPath;
   // A chat link cannot tell a folder from a file, so a folder arrives here as
   // a file surface and the read fails. Keep the breadcrumbs, drop the preview
   // pane, and let the tree fill the surface with the folder revealed. Mutation
   // refresh stays on so the surface notices if the path becomes a file. A host
   // path cannot be revealed in the workspace tree, so it keeps the read error.
+  const isResolvingThreadPath =
+    shouldResolveFromThread &&
+    (currentThreadFileResolution === null || currentThreadFileResolution.status === "resolving");
   const isDirectory = file.isNotFile && !isHostFile;
   // Everything preview-related keys off previewPath; a folder has no preview.
   const previewPath = isDirectory ? null : relativePath;
@@ -1307,6 +1450,14 @@ export default function FilePreviewPanel({
           ) : null}
         </div>
       ) : null}
+      {currentThreadFileResolution?.status === "resolved" ? (
+        <div className="shrink-0 border-b px-3 py-1.5 text-2xs text-muted-foreground">
+          Resolved from thread:{" "}
+          <code className="break-all font-mono select-all">
+            {currentThreadFileResolution.absolutePath}
+          </code>
+        </div>
+      ) : null}
       {relativePath && !attachment && !isHostFile && !canWriteFiles && !fileAccess.isPending ? (
         <div className="shrink-0 border-b px-3 py-1.5 text-2xs text-muted-foreground">
           Read-only connection. Unsaved edits are kept until write access returns.
@@ -1325,7 +1476,12 @@ export default function FilePreviewPanel({
         <div
           className={cn("min-w-0 flex-1 flex-col overflow-hidden", previewPath ? "flex" : "hidden")}
         >
-          {isDirectory ? null : relativePath && attachment ? (
+          {isResolvingThreadPath ? (
+            <div className="flex min-h-0 flex-1 items-center justify-center gap-2 text-muted-foreground">
+              <Spinner size="lg" />
+              Looking for this file in the thread...
+            </div>
+          ) : isDirectory ? null : relativePath && attachment ? (
             <AttachmentFilePreview
               key={`${environmentId}:${attachment.id}`}
               name={attachment.name}
@@ -1384,6 +1540,28 @@ export default function FilePreviewPanel({
                     Attempted path
                     <code className="block break-all font-mono text-foreground select-all">
                       {attemptedPath}
+                    </code>
+                  </p>
+                ) : null}
+                {currentThreadFileResolution?.status === "failed" &&
+                currentThreadFileResolution.triedPaths.length > 0 ? (
+                  <p className="text-muted-foreground">
+                    Tried candidates
+                    {currentThreadFileResolution.triedPaths.map((path) => (
+                      <code
+                        key={path}
+                        className="block break-all font-mono text-foreground select-all"
+                      >
+                        {path}
+                      </code>
+                    ))}
+                  </p>
+                ) : null}
+                {environmentId !== primaryEnvironmentId ? (
+                  <p className="text-muted-foreground">
+                    Environment:{" "}
+                    <code className="break-all font-mono select-all">
+                      {environment?.label ?? environmentId}
                     </code>
                   </p>
                 ) : null}

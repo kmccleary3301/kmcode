@@ -11,12 +11,16 @@ import {
   type ProjectId,
   ThreadId,
 } from "@t3tools/contracts";
+import * as Cause from "effect/Cause";
 import * as Context from "effect/Context";
 import * as DateTime from "effect/DateTime";
+import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
+import * as Equal from "effect/Equal";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as PubSub from "effect/PubSub";
+import * as Queue from "effect/Queue";
 import * as Semaphore from "effect/Semaphore";
 import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
@@ -126,6 +130,7 @@ export interface EventSinkV2Shape {
     readonly acceptedAt: DateTime.Utc;
     readonly events: ReadonlyArray<OrchestrationV2DomainEvent>;
     readonly effects: ReadonlyArray<EffectOutbox.PendingOrchestrationEffectV2>;
+    readonly updateDelegatedCompletionOnlyRunId?: RunId;
     readonly cancelUnsettledEffects?: {
       readonly effectTypes: ReadonlyArray<EffectOutbox.OrchestrationEffectRequestV2["type"]>;
       readonly reason: string;
@@ -226,8 +231,234 @@ const layerBase: Layer.Layer<
           );
         }
       });
+
+    const SUBAGENT_SNAPSHOT_INTERVAL_MS = Duration.toMillis(Duration.seconds(2));
+    const STREAMING_ITEM_INTERVAL_MS = Duration.toMillis(Duration.millis(250));
+    // Tool cards are re-sent while their arguments stream in and on every progress tick, often
+    // with only `updatedAt` changed (km-dev 10-29: a pending file_change card stored 347 times in
+    // 48 s, ~15 KB each; tool cards were ~85% of new event-log bytes).
+    const TOOL_PROGRESS_INTERVAL_MS = Duration.toMillis(Duration.seconds(1));
+    const TOOL_PROGRESS_ITEM_TYPES: ReadonlySet<string> = new Set([
+      "dynamic_tool",
+      "file_change",
+      "command_execution",
+      "file_search",
+      "web_search",
+    ]);
+    const SNAPSHOT_STATE_IDLE_MS = Duration.toMillis(Duration.minutes(1));
+    const SNAPSHOT_FLUSH_RETRY_MS = Duration.toMillis(Duration.seconds(1));
+    const TERMINAL_SNAPSHOT_STATUSES = new Set(["completed", "failed", "cancelled", "interrupted"]);
+    type SnapshotThrottleReservation = {
+      readonly key: string;
+      readonly event: OrchestrationV2DomainEvent;
+      readonly status: string;
+      /** A change in any field folded into this key persists immediately. */
+      readonly forceKey: string;
+      readonly intervalMs: number;
+    };
+    type SnapshotThrottleState = {
+      lastForceKey: string | undefined;
+      lastPersistedAt: number | undefined;
+      /** Payload of the newest persisted or in-flight throttled snapshot. */
+      lastPayload: OrchestrationV2DomainEvent["payload"] | undefined;
+      pending: SnapshotThrottleReservation | undefined;
+      pendingDueAt: number | undefined;
+      flushing: boolean;
+    };
+    const snapshotThrottleStates = new Map<string, SnapshotThrottleState>();
+    // Child-thread model sync runs only for persisted subagent updates, so a
+    // model or child-thread change must never wait in the throttle.
+    const subagentForceKey = (status: string, model: string | null, childThreadId: string | null) =>
+      `${status}\u0000${model ?? ""}\u0000${childThreadId ?? ""}`;
+    const snapshotThrottleInfo = (
+      event: OrchestrationV2DomainEvent,
+    ): SnapshotThrottleReservation | undefined => {
+      switch (event.type) {
+        case "subagent.updated":
+          return {
+            key: `subagent:${event.threadId}:${event.payload.id}`,
+            event,
+            status: event.payload.status,
+            forceKey: subagentForceKey(
+              event.payload.status,
+              event.payload.model,
+              event.payload.childThreadId,
+            ),
+            intervalMs: SUBAGENT_SNAPSHOT_INTERVAL_MS,
+          };
+        case "turn-item.updated":
+          return event.payload.type === "subagent"
+            ? {
+                key: `turn-item:${event.threadId}:${event.payload.id}`,
+                event,
+                status: event.payload.status,
+                forceKey: subagentForceKey(
+                  event.payload.status,
+                  event.payload.model ?? null,
+                  event.payload.childThreadId,
+                ),
+                intervalMs: SUBAGENT_SNAPSHOT_INTERVAL_MS,
+              }
+            : {
+                key: `turn-item:${event.threadId}:${event.payload.id}`,
+                event,
+                status: event.payload.status,
+                forceKey: event.payload.status,
+                intervalMs:
+                  "streaming" in event.payload && event.payload.streaming
+                    ? STREAMING_ITEM_INTERVAL_MS
+                    : TOOL_PROGRESS_INTERVAL_MS,
+              };
+        default:
+          return undefined;
+      }
+    };
+    // App-owned tasks are low-rate server state machines (delivery claims,
+    // wake flags) whose updates must land at once; only provider progress
+    // ticks are throttled.
+    const shouldThrottleSnapshot = (event: OrchestrationV2DomainEvent): boolean => {
+      switch (event.type) {
+        case "subagent.updated":
+          return event.payload.origin === "provider_native";
+        case "turn-item.updated":
+          // Provider subagent cards carry no streaming flag, but adapters
+          // re-send them on every native progress tick, like subagent.updated.
+          // Tool cards are re-sent the same way; status changes still persist at once.
+          // A running command's output chunks are kept: background commands report
+          // each one as it arrives, often minutes apart.
+          if (event.payload.type === "subagent") return event.payload.origin === "provider_native";
+          if ("streaming" in event.payload && event.payload.streaming) return true;
+          return (
+            TOOL_PROGRESS_ITEM_TYPES.has(event.payload.type) &&
+            !(event.payload.type === "command_execution" && event.payload.status === "running")
+          );
+        default:
+          return false;
+      }
+    };
+    const newThrottleState = (): SnapshotThrottleState => ({
+      lastForceKey: undefined,
+      lastPersistedAt: undefined,
+      lastPayload: undefined,
+      pending: undefined,
+      pendingDueAt: undefined,
+      flushing: false,
+    });
+    // Wakes the trailing-flush worker; it sleeps without a timer while nothing is pending.
+    const flushWakeups = yield* Queue.sliding<void>(1);
+    let lastIdleSweepAt = 0;
+    const sweepIdleThrottleStates = (now: number) => {
+      lastIdleSweepAt = now;
+      for (const [key, state] of snapshotThrottleStates) {
+        if (
+          state.pending === undefined &&
+          !state.flushing &&
+          state.lastPersistedAt !== undefined &&
+          now - state.lastPersistedAt > SNAPSHOT_STATE_IDLE_MS
+        ) {
+          snapshotThrottleStates.delete(key);
+        }
+      }
+    };
+    /**
+     * Pure in-memory step, run before any transaction is opened: callers skip
+     * the database entirely when every event is withheld.
+     */
+    const throttleSnapshotUpdates = (events: ReadonlyArray<OrchestrationV2DomainEvent>) =>
+      Effect.gen(function* () {
+        const now = DateTime.toEpochMillis(yield* DateTime.now);
+        return yield* Effect.sync(() => {
+          if (now - lastIdleSweepAt > SNAPSHOT_STATE_IDLE_MS) sweepIdleThrottleStates(now);
+          const persisted: Array<OrchestrationV2DomainEvent> = [];
+          const reservations: Array<SnapshotThrottleReservation> = [];
+          for (const event of events) {
+            const info = snapshotThrottleInfo(event);
+            if (info === undefined) {
+              persisted.push(event);
+              continue;
+            }
+            const state = snapshotThrottleStates.get(info.key) ?? newThrottleState();
+            const forceKeyChanged = state.lastForceKey !== info.forceKey;
+            state.lastForceKey = info.forceKey;
+            const terminal = TERMINAL_SNAPSHOT_STATUSES.has(info.status);
+            const throttleable = shouldThrottleSnapshot(event);
+            const forcePersist = forceKeyChanged || terminal || !throttleable;
+            if (forcePersist) {
+              state.lastPersistedAt = now;
+              state.lastPayload = throttleable ? event.payload : undefined;
+              state.pending = undefined;
+              state.pendingDueAt = undefined;
+              if (terminal) {
+                snapshotThrottleStates.delete(info.key);
+              } else {
+                snapshotThrottleStates.set(info.key, state);
+              }
+              persisted.push(event);
+              reservations.push(info);
+              continue;
+            }
+            // Re-sent or flapped-back snapshots match what is already stored.
+            // An in-flight flush is about to store its pending payload, so a
+            // flap back must still be queued behind it.
+            if (
+              !state.flushing &&
+              state.lastPayload !== undefined &&
+              Equal.equals(event.payload, state.lastPayload)
+            ) {
+              state.pending = undefined;
+              state.pendingDueAt = undefined;
+              snapshotThrottleStates.set(info.key, state);
+              continue;
+            }
+
+            const dueAt = (state.lastPersistedAt ?? now) + info.intervalMs;
+            if (!state.flushing && now >= dueAt) {
+              state.lastPersistedAt = now;
+              state.lastPayload = event.payload;
+              state.pending = undefined;
+              state.pendingDueAt = undefined;
+              snapshotThrottleStates.set(info.key, state);
+              persisted.push(event);
+              reservations.push(info);
+              continue;
+            }
+            state.pending = info;
+            state.pendingDueAt = state.flushing ? Math.max(dueAt, now) : dueAt;
+            snapshotThrottleStates.set(info.key, state);
+            Queue.offerUnsafe(flushWakeups, undefined);
+          }
+          return { persisted, reservations };
+        });
+      });
+    const requeueSnapshotReservations = (
+      reservations: ReadonlyArray<SnapshotThrottleReservation>,
+      now: number,
+    ) => {
+      for (const reservation of reservations) {
+        const state = snapshotThrottleStates.get(reservation.key) ?? newThrottleState();
+        state.lastForceKey = reservation.forceKey;
+        state.lastPersistedAt = now - reservation.intervalMs;
+        // Nothing from the failed write is stored, so no payload may be skipped as a duplicate.
+        state.lastPayload = undefined;
+        if (state.pending === undefined) {
+          state.pending = reservation;
+        }
+        state.pendingDueAt = now;
+        snapshotThrottleStates.set(reservation.key, state);
+      }
+      Queue.offerUnsafe(flushWakeups, undefined);
+    };
+    const throttleSnapshotEvents = (
+      events: ReadonlyArray<OrchestrationV2DomainEvent>,
+      commandId: CommandId | undefined,
+    ) =>
+      commandId === undefined
+        ? throttleSnapshotUpdates(events)
+        : Effect.succeed({ persisted: events, reservations: [] });
     const publishStoredEvents = (events: ReadonlyArray<OrchestrationV2StoredEvent>) =>
-      eventStore.publishCommitted(events).pipe(Effect.andThen(publishLiveEvents(events)));
+      events.length === 0
+        ? Effect.void
+        : eventStore.publishCommitted(events).pipe(Effect.andThen(publishLiveEvents(events)));
 
     // Transactions commit one at a time, but each writer publishes after its
     // commit. If a writer is descheduled in between, a later commit reaches
@@ -241,25 +472,27 @@ const layerBase: Layer.Layer<
       transaction: Effect.Effect<A, E, R>,
       publish: (committed: A) => Effect.Effect<void>,
     ) =>
-      Effect.suspend(() => {
-        let holdsLane = false;
-        const takeLane = publishLane.take(1).pipe(
-          Effect.andThen(
-            Effect.sync(() => {
-              holdsLane = true;
-            }),
-          ),
-          Effect.uninterruptible,
-        );
-        return sql
-          .withTransaction(Effect.tap(transaction, () => takeLane))
-          .pipe(
-            Effect.tap(publish),
-            Effect.ensuring(
-              Effect.suspend(() => (holdsLane ? publishLane.release(1) : Effect.void)),
+      Effect.uninterruptibleMask((restore) =>
+        Effect.suspend(() => {
+          let holdsLane = false;
+          const takeLane = publishLane.take(1).pipe(
+            Effect.andThen(
+              Effect.sync(() => {
+                holdsLane = true;
+              }),
             ),
+            Effect.uninterruptible,
           );
-      });
+          return sql
+            .withTransaction(Effect.tap(restore(transaction), () => takeLane))
+            .pipe(
+              Effect.tap(publish),
+              Effect.ensuring(
+                Effect.suspend(() => (holdsLane ? publishLane.release(1) : Effect.void)),
+              ),
+            );
+        }),
+      );
 
     // A user can answer after terminal normalization reads the pending request.
     // Recheck inside the write transaction so stale cleanup cannot erase answers.
@@ -368,17 +601,27 @@ const layerBase: Layer.Layer<
         "orchestration_v2.thread_id": input.events[0]?.threadId ?? null,
       });
 
+      // Throttle before the transaction: withheld snapshot ticks then cost no
+      // SQL at all, instead of a BEGIN/COMMIT on the single connection each.
+      const throttled = yield* throttleSnapshotEvents(input.events, input.commandId);
+      if (throttled.persisted.length === 0 && input.effects.length === 0) {
+        return [];
+      }
+      const attemptedSnapshots = throttled.reservations;
       return yield* commitThenPublish(
         Effect.gen(function* () {
-          const normalized = yield* normalizeEvents(
+          const candidates =
             input.guardPendingUserInputCancellations === true
-              ? yield* guardUserInputCancellations(input.events)
-              : input.events,
-          );
-          const committed = yield* eventStore.append({
-            ...(input.commandId === undefined ? {} : { commandId: input.commandId }),
-            events: normalized,
-          });
+              ? yield* guardUserInputCancellations(throttled.persisted)
+              : throttled.persisted;
+          const normalized = yield* normalizeEvents(candidates);
+          const committed =
+            normalized.length === 0
+              ? []
+              : yield* eventStore.append({
+                  ...(input.commandId === undefined ? {} : { commandId: input.commandId }),
+                  events: normalized,
+                });
           yield* applyStoredEvents(committed);
           yield* effectOutbox.enqueue(input.effects);
           return committed;
@@ -390,8 +633,139 @@ const layerBase: Layer.Layer<
             }
             yield* publishStoredEvents(storedEvents);
           }),
+      ).pipe(
+        Effect.catchCause((cause) =>
+          Effect.gen(function* () {
+            if (attemptedSnapshots.length > 0) {
+              const now = DateTime.toEpochMillis(yield* DateTime.now);
+              yield* Effect.sync(() => requeueSnapshotReservations(attemptedSnapshots, now));
+            }
+            return yield* Effect.failCause(cause);
+          }),
+        ),
       );
     });
+
+    const flushThrottledSnapshots = (force = false) =>
+      Effect.gen(function* () {
+        const now = DateTime.toEpochMillis(yield* DateTime.now);
+        const ready = yield* Effect.sync(() => {
+          const snapshots: Array<SnapshotThrottleReservation> = [];
+          for (const state of snapshotThrottleStates.values()) {
+            if (force) state.flushing = false;
+            if (
+              state.pending !== undefined &&
+              !state.flushing &&
+              (force || (state.pendingDueAt !== undefined && state.pendingDueAt <= now))
+            ) {
+              state.flushing = true;
+              snapshots.push(state.pending);
+            }
+          }
+          sweepIdleThrottleStates(now);
+          return snapshots;
+        });
+        if (ready.length === 0) return;
+
+        yield* commitThenPublish(
+          Effect.gen(function* () {
+            const normalized = yield* normalizeEvents(
+              ready.map((reservation) => reservation.event),
+            );
+            const committed =
+              normalized.length === 0 ? [] : yield* eventStore.append({ events: normalized });
+            yield* applyStoredEvents(committed);
+            return committed;
+          }),
+          publishStoredEvents,
+        ).pipe(
+          Effect.tap(() =>
+            Effect.gen(function* () {
+              const committedAt = DateTime.toEpochMillis(yield* DateTime.now);
+              yield* Effect.sync(() => {
+                for (const reservation of ready) {
+                  const state = snapshotThrottleStates.get(reservation.key);
+                  if (state === undefined) continue;
+                  state.flushing = false;
+                  state.lastPersistedAt = committedAt;
+                  state.lastPayload = reservation.event.payload;
+                  if (state.pending?.event === reservation.event) {
+                    state.pending = undefined;
+                    state.pendingDueAt = undefined;
+                  } else if (state.pending !== undefined) {
+                    state.pendingDueAt = committedAt + state.pending.intervalMs;
+                  }
+                  if (
+                    TERMINAL_SNAPSHOT_STATUSES.has(reservation.status) &&
+                    state.pending === undefined
+                  ) {
+                    snapshotThrottleStates.delete(reservation.key);
+                  }
+                }
+              });
+            }),
+          ),
+          Effect.catchCause((cause) =>
+            Effect.gen(function* () {
+              const retryAt = DateTime.toEpochMillis(yield* DateTime.now);
+              yield* Effect.sync(() => {
+                for (const reservation of ready) {
+                  const state = snapshotThrottleStates.get(reservation.key) ?? newThrottleState();
+                  state.lastForceKey = reservation.forceKey;
+                  state.lastPayload = undefined;
+                  state.flushing = false;
+                  state.lastPersistedAt = retryAt - reservation.intervalMs;
+                  if (state.pending === undefined) state.pending = reservation;
+                  // The worker wakes on due times, so pace retries of a failing flush here.
+                  state.pendingDueAt = retryAt + SNAPSHOT_FLUSH_RETRY_MS;
+                  snapshotThrottleStates.set(reservation.key, state);
+                }
+              });
+              yield* Effect.logError("Event snapshot trailing flush failed", {
+                cause: Cause.pretty(cause),
+              });
+            }),
+          ),
+        );
+      });
+    yield* Effect.addFinalizer(() =>
+      flushThrottledSnapshots(true).pipe(
+        Effect.catchCause((cause) =>
+          Effect.logError("Event snapshot shutdown flush failed", { cause: Cause.pretty(cause) }),
+        ),
+      ),
+    );
+    // Earliest due time of a pending snapshot that is not already being flushed.
+    const nextFlushDueAt = () => {
+      let dueAt: number | undefined;
+      for (const state of snapshotThrottleStates.values()) {
+        if (state.pending === undefined || state.flushing || state.pendingDueAt === undefined) {
+          continue;
+        }
+        dueAt = dueAt === undefined ? state.pendingDueAt : Math.min(dueAt, state.pendingDueAt);
+      }
+      return dueAt;
+    };
+    yield* Effect.gen(function* () {
+      while (true) {
+        const dueAt = nextFlushDueAt();
+        if (dueAt === undefined) {
+          yield* Queue.take(flushWakeups);
+          continue;
+        }
+        const delayMs = dueAt - DateTime.toEpochMillis(yield* DateTime.now);
+        if (delayMs > 0) {
+          // A newer pending snapshot may be due sooner (streaming items use a shorter interval).
+          yield* Effect.raceFirst(Effect.sleep(Duration.millis(delayMs)), Queue.take(flushWakeups));
+          continue;
+        }
+        yield* flushThrottledSnapshots().pipe(
+          Effect.catchCause((cause) =>
+            Effect.logError("Event snapshot flush worker failed", { cause: Cause.pretty(cause) }),
+          ),
+        );
+      }
+    }).pipe(Effect.forkScoped);
 
     const writeIfRunCurrentEffect = Effect.fn("orchestrationV2.EventSink.writeIfRunCurrent")(
       function* (input: Parameters<EventSinkV2Shape["writeIfRunCurrent"]>[0]) {
@@ -428,15 +802,19 @@ const layerBase: Layer.Layer<
               };
             }
 
-            const normalized = yield* normalizeEvents(
+            const candidates =
               input.guardPendingUserInputCancellations === true
                 ? yield* guardUserInputCancellations(input.events)
-                : input.events,
-            );
-            const storedEvents = yield* eventStore.append({
-              ...(input.commandId === undefined ? {} : { commandId: input.commandId }),
-              events: normalized,
-            });
+                : input.events;
+            const throttled = yield* throttleSnapshotEvents(candidates, input.commandId);
+            const normalized = yield* normalizeEvents(throttled.persisted);
+            const storedEvents =
+              normalized.length === 0
+                ? []
+                : yield* eventStore.append({
+                    ...(input.commandId === undefined ? {} : { commandId: input.commandId }),
+                    events: normalized,
+                  });
             yield* applyStoredEvents(storedEvents);
             yield* effectOutbox.enqueue(input.effects ?? []);
             return { committed: true as const, storedEvents };
@@ -493,15 +871,19 @@ const layerBase: Layer.Layer<
             };
           }
 
-          const normalized = yield* normalizeEvents(
+          const candidates =
             input.guardPendingUserInputCancellations === true
               ? yield* guardUserInputCancellations(input.events)
-              : input.events,
-          );
-          const storedEvents = yield* eventStore.append({
-            ...(input.commandId === undefined ? {} : { commandId: input.commandId }),
-            events: normalized,
-          });
+              : input.events;
+          const throttled = yield* throttleSnapshotEvents(candidates, input.commandId);
+          const normalized = yield* normalizeEvents(throttled.persisted);
+          const storedEvents =
+            normalized.length === 0
+              ? []
+              : yield* eventStore.append({
+                  ...(input.commandId === undefined ? {} : { commandId: input.commandId }),
+                  events: normalized,
+                });
           yield* applyStoredEvents(storedEvents);
           return { committed: true as const, storedEvents };
         }),
@@ -543,7 +925,32 @@ const layerBase: Layer.Layer<
             return { ...existing, committed: false as const, cancelledEffectIds: [] };
           }
 
-          const normalized = yield* normalizeEvents(input.events);
+          const completionRunId = input.updateDelegatedCompletionOnlyRunId;
+          const events =
+            completionRunId === undefined
+              ? input.events
+              : yield* Effect.forEach(input.events, (event) =>
+                  Effect.gen(function* () {
+                    if (event.type !== "run.updated" || event.payload.id !== completionRunId)
+                      return event;
+                    const { runs } = yield* projectionStore.getThreadRecords(
+                      event.threadId,
+                      ["runs"],
+                      { runIds: [completionRunId] },
+                    );
+                    const current = runs[0];
+                    return current === undefined
+                      ? event
+                      : {
+                          ...event,
+                          payload: {
+                            ...current,
+                            delegatedCompletion: event.payload.delegatedCompletion,
+                          },
+                        };
+                  }),
+                );
+          const normalized = yield* normalizeEvents(events);
           const storedEvents = yield* eventStore.append({
             commandId: input.commandId,
             events: normalized,

@@ -12,6 +12,7 @@ import * as Cause from "effect/Cause";
 import * as DateTime from "effect/DateTime";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
+import * as Fiber from "effect/Fiber";
 import * as Exit from "effect/Exit";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
@@ -104,6 +105,7 @@ function layerExecutorFor(input: {
         shutdown: Effect.void,
         open: () => Effect.die("unused open"),
         get: () => Effect.succeed(Option.none()),
+        inspectSettlement: () => Effect.succeed(null),
         close: () => Effect.void,
         closeInstance: () => Effect.void,
         release: () => record("release"),
@@ -836,4 +838,64 @@ it.effect("settles a delegated child once its restart continuation fails for goo
       assert.deepEqual(yield* Ref.get(recovered), [threadId]);
     }).pipe(Effect.provide(layer));
   }),
+);
+it.effect("retries a delegated-task stop after the 30-second execution deadline", () =>
+  Effect.gen(function* () {
+    const now = DateTime.formatIso(yield* DateTime.now);
+    const effectId = "effect:worker-delegated-stop-timeout";
+    const workerId = "worker-delegated-stop-timeout";
+    const claimedEffect: EffectOutbox.OrchestrationEffectV2 = {
+      id: effectId,
+      commandId: CommandId.make("command:worker-delegated-stop-timeout"),
+      threadId: ThreadId.make("thread:worker-delegated-stop-timeout"),
+      request: { type: "delegated-tasks.stop" },
+      status: "running",
+      attemptCount: 1,
+      availableAt: now,
+      leaseOwner: workerId,
+      leaseExpiresAt: now,
+      createdAt: now,
+      updatedAt: now,
+      completedAt: null,
+      lastError: null,
+    };
+    const executionStarted = yield* Deferred.make<void>();
+    const retries = yield* Ref.make<ReadonlyArray<{ readonly error: string; readonly delayMs: number }>>(
+      [],
+    );
+    const layerOutbox = Layer.mock(EffectOutbox.EffectOutboxV2)({
+      claimNext: () => Effect.succeed(Option.some(claimedEffect)),
+      get: () => Effect.succeed(Option.some(claimedEffect)),
+      awaitCancellation: () => Effect.never,
+      clearCancellation: () => Effect.void,
+      retry: ({ error, delayMs }) =>
+        Ref.update(retries, (existing) => [...existing, { error, delayMs }]).pipe(
+          Effect.as(true),
+        ),
+    });
+    const layerExecutor = Layer.succeed(
+      EffectWorker.OrchestrationEffectExecutorV2,
+      EffectWorker.OrchestrationEffectExecutorV2.of({
+        execute: () =>
+          Deferred.succeed(executionStarted, undefined).pipe(Effect.andThen(Effect.never)),
+      }),
+    );
+    const layerWorker = EffectWorker.layerWithOptions({ workerId }).pipe(
+      Layer.provide(Layer.merge(layerOutbox, layerExecutor)),
+    );
+    const workerRun = yield* EffectWorker.OrchestrationEffectWorkerV2.pipe(
+      Effect.flatMap((worker) => worker.runOnce),
+      Effect.provide(layerWorker),
+      Effect.forkScoped,
+    );
+    yield* Deferred.await(executionStarted);
+    yield* TestClock.adjust("29 seconds");
+    assert.equal((yield* Ref.get(retries)).length, 0);
+    yield* TestClock.adjust("1 second");
+    assert.isTrue(yield* Fiber.join(workerRun));
+    const retry = (yield* Ref.get(retries))[0];
+    assert.isDefined(retry);
+    assert.equal(retry?.delayMs, 100);
+    assert.include(retry?.error ?? "", "Timed out after");
+  }).pipe(Effect.provide(TestClock.layer())),
 );

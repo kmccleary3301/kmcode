@@ -4,6 +4,8 @@ import {
   AuthAdministrativeScopes,
   AuthOrchestrationOperateScope,
   AuthOrchestrationReadScope,
+  AuthSettingsWriteScope,
+  AuthSourceControlWriteScope,
   AuthStandardClientScopes,
   type AuthAccessTokenResult,
   type AuthBrowserSessionResult,
@@ -74,7 +76,8 @@ export interface IssuedBearerSession {
  * token cannot reach the full RPC surface around that cap.
  *
  * A read-only grant holds `orchestration:read` alone. Any other grant also
- * holds `orchestration:operate` and carries its runtime-mode ceiling.
+ * holds `orchestration:operate` and carries its runtime-mode ceiling. Full-access
+ * additionally grants settings and source-control writes.
  */
 const MCP_CLIENT_SUBJECT = "mcp-client";
 const MCP_CLIENT_SESSION_TTL = Duration.days(30);
@@ -84,7 +87,14 @@ export const mcpClientScopes = (
 ): ReadonlyArray<AuthEnvironmentScope> =>
   access === "read-only"
     ? [AuthOrchestrationReadScope]
-    : [AuthOrchestrationReadScope, AuthOrchestrationOperateScope];
+    : access === "full-access"
+      ? [
+          AuthOrchestrationReadScope,
+          AuthOrchestrationOperateScope,
+          AuthSettingsWriteScope,
+          AuthSourceControlWriteScope,
+        ]
+      : [AuthOrchestrationReadScope, AuthOrchestrationOperateScope];
 
 export interface McpClientSession {
   readonly sessionId: AuthSessionId;

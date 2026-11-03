@@ -13,6 +13,7 @@ import {
   type T3McpToolDefinition,
   type T3McpToolSummaryAction,
 } from "@t3tools/shared/t3McpToolPresentation";
+import { parseToolDeviceArguments, parseToolDeviceName } from "@t3tools/shared/toolDevice";
 import { classifyMarkdownImageSource } from "@t3tools/client-runtime/markdown-images";
 import { resolveMediaSource } from "@t3tools/client-runtime/media-source";
 import { parseChangeRequestUrl } from "@t3tools/shared/changeRequestUrl";
@@ -26,6 +27,290 @@ import {
   t3ToolResultIndicatesFailure,
   type T3ToolSummaryCall,
 } from "@t3tools/client-runtime/t3ToolSummary";
+
+export interface DiffStats {
+  readonly added: number;
+  readonly removed: number;
+}
+
+/** `+n −m` with zero sides omitted; empty when nothing changed. */
+export function formatDiffStats(stats: DiffStats): string {
+  return [stats.added > 0 ? `+${stats.added}` : "", stats.removed > 0 ? `−${stats.removed}` : ""]
+    .filter(Boolean)
+    .join(" ");
+}
+
+/** Line counts of a successful edit; the wire carries counts, not patch bodies. */
+export function turnItemDiffStats(item: OrchestrationV2TurnItem | undefined): DiffStats | null {
+  if (
+    item?.type !== "file_change" ||
+    item.status === "failed" ||
+    parseToolDeviceName(item.fileName) !== undefined
+  ) {
+    return null;
+  }
+  if (item.additions === undefined && item.deletions === undefined) return null;
+  return { added: item.additions ?? 0, removed: item.deletions ?? 0 };
+}
+
+/** Active and settled verb per tool; the tense is the step's status. */
+const TOOL_VERBS: Record<string, readonly [active: string, settled: string]> = {
+  read: ["Reading", "Read"],
+  edit: ["Editing", "Edited"],
+  ast_edit: ["Editing", "Edited"],
+  write: ["Writing", "Wrote"],
+  grep: ["Searching", "Searched"],
+  rg: ["Searching", "Searched"],
+  ast_grep: ["Searching", "Searched"],
+  search: ["Searching", "Searched"],
+  web_search: ["Searching the web for", "Searched the web for"],
+  find: ["Finding", "Found"],
+  glob: ["Finding", "Found"],
+  ls: ["Listing", "Listed"],
+  list: ["Listing", "Listed"],
+  bash: ["Running", "Ran"],
+  shell: ["Running", "Ran"],
+  eval: ["Evaluating", "Evaluated"],
+  todo: ["Updating plan", "Updated plan"],
+  hub: ["Waiting for", "Waited for"],
+  wait: ["Waiting for", "Waited for"],
+  task: ["Delegating", "Delegated"],
+  browser: ["Browsing", "Browsed"],
+  fetch: ["Fetching", "Fetched"],
+};
+
+/** Verb for a tool in the tense its status implies; unknown tools read "Running x" / "Ran x". */
+export function toolVerb(toolName: string, running: boolean): string {
+  const verbs = TOOL_VERBS[toolName.trim().toLowerCase()];
+  if (verbs) return running ? verbs[0] : verbs[1];
+  return running ? `Running ${toolName}` : `Ran ${toolName}`;
+}
+
+export interface ToolVerbObject {
+  readonly verb: string;
+  readonly object: string;
+  /** The object is a file path: render basename bold, folder muted. */
+  readonly objectIsPath: boolean;
+  /** The agent's own description of the step (`i`, `_i`, `description`). */
+  readonly intent: string | undefined;
+  /** A search that settled without results: informative, not a failure. */
+  readonly noMatch: boolean;
+}
+
+export function deriveToolVerbObject(input: {
+  readonly toolName: string;
+  readonly args: unknown;
+  readonly running: boolean;
+  /** The settled result as the client sees it; decides "No matches" for searches. */
+  readonly result?: SearchResultEvidence | undefined;
+  /** A curated name ("Read a T3 thread") that reads better than "Ran mcp__…" for unknown tools. */
+  readonly displayName?: string | undefined;
+}): ToolVerbObject {
+  const name = input.toolName.trim().toLowerCase();
+  const args = asRecord(input.args) ?? {};
+  const text = (key: string) => {
+    const value = args[key];
+    return typeof value === "string" && value.trim().length > 0 ? value.trim() : undefined;
+  };
+  const intent = text("i") ?? text("_i") ?? text("description");
+  const deviceTool = name === "read" ? parseToolDeviceName(text("path") ?? "") : undefined;
+  if (deviceTool !== undefined) {
+    const displayName = resolveT3McpToolDefinition(deviceTool)?.displayName ?? deviceTool;
+    return {
+      verb: input.running ? "Checking usage for" : "Checked usage for",
+      object: displayName,
+      objectIsPath: false,
+      intent: undefined,
+      noMatch: false,
+    };
+  }
+  let object: string;
+  let noMatch = false;
+  switch (name) {
+    case "read":
+    case "edit":
+    case "ast_edit":
+    case "write":
+      object = text("path") ?? text("file_path") ?? "file";
+      break;
+    case "grep":
+    case "rg":
+    case "ast_grep":
+    case "search":
+    case "find":
+    case "glob": {
+      const pattern = text("pattern") ?? text("query") ?? "";
+      const scope = text("path");
+      object = scope && pattern ? `${pattern} in ${scope}` : pattern || scope || "files";
+      noMatch = !input.running && input.result !== undefined && searchFoundNothing(input.result);
+      break;
+    }
+    case "ls":
+    case "list":
+      object = text("path") ?? ".";
+      break;
+    case "bash":
+    case "shell":
+      object = text("command")?.split("\n")[0]?.trim() || "command";
+      break;
+    case "eval": {
+      const language = text("language") ?? text("lang") ?? "code";
+      const firstLine = text("code")
+        ?.split("\n")
+        .find((line) => line.trim().length > 0)
+        ?.trim();
+      object = firstLine ? `${language} · ${firstLine}` : language;
+      break;
+    }
+    case "todo": {
+      const phases = Array.isArray(args.phases) ? args.phases.length : 0;
+      object =
+        phases > 0 ? `${phases} ${phases === 1 ? "phase" : "phases"}` : (text("op") ?? "plan");
+      break;
+    }
+    case "hub":
+    case "wait": {
+      const ids = Array.isArray(args.ids) ? args.ids.length : 0;
+      object = ids > 0 ? `${ids} ${ids === 1 ? "job" : "jobs"}` : "background jobs";
+      break;
+    }
+    case "task": {
+      const tasks = Array.isArray(args.tasks) ? args.tasks : [];
+      const first = asRecord(tasks[0]);
+      const label =
+        (typeof first?.name === "string" && first.name) ||
+        (typeof first?.task === "string" && first.task.split("\n")[0]) ||
+        text("task") ||
+        text("agent") ||
+        "task";
+      object = tasks.length > 1 ? `${label} +${tasks.length - 1}` : label;
+      break;
+    }
+    case "web_search":
+      object = text("query") ?? "the web";
+      break;
+    default: {
+      const firstValue = Object.entries(args).find(
+        ([key, value]) =>
+          key !== "i" && key !== "_i" && key !== "description" && typeof value === "string",
+      )?.[1];
+      object = typeof firstValue === "string" ? firstValue.split("\n")[0]!.trim() : "";
+    }
+  }
+  return {
+    verb:
+      TOOL_VERBS[name] === undefined && input.displayName?.trim()
+        ? input.displayName.trim()
+        : toolVerb(input.toolName, input.running),
+    object,
+    objectIsPath:
+      (name === "read" || name === "edit" || name === "ast_edit" || name === "write") &&
+      object !== "file",
+    intent:
+      intent !== undefined && intent.toLowerCase() === object.toLowerCase() ? undefined : intent,
+    noMatch,
+  };
+}
+
+interface SearchResultEvidence {
+  readonly output?: unknown;
+  readonly outputOmitted?: boolean | undefined;
+  readonly details?: unknown;
+}
+
+/**
+ * A settled search that found nothing. The wire withholds plain-text output, so
+ * OMP's `details.matchCount`/`fileCount` decide first; local output text is the fallback.
+ */
+function searchFoundNothing(result: SearchResultEvidence): boolean {
+  const details = asRecord(result.details);
+  if (typeof details?.matchCount === "number") return details.matchCount === 0;
+  if (typeof details?.fileCount === "number") return details.fileCount === 0;
+  if (typeof result.output === "string") {
+    const output = result.output.trim();
+    return (
+      output.length === 0 ||
+      /^(?:no (?:matches|files|results)(?: found)?|0 matches)\b/i.test(output)
+    );
+  }
+  return result.output === undefined && result.outputOmitted !== true;
+}
+
+/** `└ a.ts, b.ts, +4`: what an exploration burst looked at, files by basename, searches by pattern. */
+export function explorationSubline(entries: ReadonlyArray<WorkLogPresentationEntry>): string {
+  const seen: Record<string, true> = {};
+  const targets: string[] = [];
+  for (const entry of entries) {
+    const item = entry.structuredPayload;
+    const args = asRecord(item?.type === "dynamic_tool" ? item.input : entry.toolData) ?? {};
+    const path = entry.changedFiles?.[0] ?? (typeof args.path === "string" ? args.path : undefined);
+    const pattern =
+      typeof args.pattern === "string"
+        ? args.pattern
+        : typeof args.query === "string"
+          ? args.query
+          : undefined;
+    const target =
+      toolGroupAction(entry) === "code-search" && pattern
+        ? pattern.trim()
+        : path
+            ?.trim()
+            .replace(/[\\/]+$/, "")
+            .split(/[\\/]/)
+            .pop();
+    if (!target || seen[target]) continue;
+    seen[target] = true;
+    targets.push(target);
+  }
+  if (targets.length === 0) return "";
+  const shown = targets.slice(0, 3).join(", ");
+  return targets.length > 3 ? `└ ${shown}, +${targets.length - 3}` : `└ ${shown}`;
+}
+
+/**
+ * Which consecutive steps merge into one row: exploration, edits, or other
+ * generic tools ("Used 3 tools"). Commands, eval, web search, and task
+ * delegation always stand alone.
+ */
+export type ToolCoalesceCategory = "explore" | "edit" | "other" | "individual";
+
+const STANDALONE_DYNAMIC_TOOLS: Record<string, true> = { eval: true, task: true, web_search: true };
+
+export function workEntryCoalesceCategory(entry: WorkLogPresentationEntry): ToolCoalesceCategory {
+  if (entry.itemType === "reasoning") return "individual";
+  const action = toolGroupAction(entry);
+  if (action === "read" || action === "code-search") return "explore";
+  if (action === "edit" && entry.itemType === "file_change") return "edit";
+  if (action === "command" || action === "search") return "individual";
+  const payload = entry.structuredPayload;
+  if (
+    payload?.type === "dynamic_tool" &&
+    STANDALONE_DYNAMIC_TOOLS[(payload.toolName ?? "").trim().toLowerCase()]
+  ) {
+    return "individual";
+  }
+  return "other";
+}
+
+/** `Worked for 39s · 14 steps · edited 3 files +120 −8` */
+export function formatTurnFoldSummary(input: {
+  readonly duration: string | null;
+  readonly stepCount: number;
+  readonly filesEdited: number;
+  readonly diffStats: DiffStats;
+}): string {
+  const parts = [input.duration ? `Worked for ${input.duration}` : "Worked"];
+  if (input.stepCount > 0) {
+    parts.push(`${input.stepCount} ${input.stepCount === 1 ? "step" : "steps"}`);
+  }
+  if (input.filesEdited > 0) {
+    const stats = formatDiffStats(input.diffStats);
+    parts.push(
+      `edited ${input.filesEdited} ${input.filesEdited === 1 ? "file" : "files"}${stats ? ` ${stats}` : ""}`,
+    );
+  }
+  return parts.join(" · ");
+}
 
 export type WorkLogToolLifecycleStatus = RuntimeItemStatus | "stopped" | "idle";
 
@@ -119,6 +404,8 @@ function workEntryToolName(
   entry: Pick<WorkLogPresentationEntry, "label" | "toolTitle" | "toolData" | "structuredPayload">,
 ): string | undefined {
   const item = entry.structuredPayload;
+  const deviceOperation = workEntryDeviceOperation(item);
+  if (deviceOperation?.kind === "call") return deviceOperation.toolName;
   if (item?.type === "dynamic_tool" && item.toolName) return item.toolName;
   const data = asRecord(entry.toolData);
   if (typeof data?.server === "string" && typeof data.tool === "string") {
@@ -136,6 +423,17 @@ function workEntryToolOutput(
   return item?.type === "dynamic_tool"
     ? item.output
     : (data?.output ?? data?.result ?? data?.rawOutput ?? data?.content);
+}
+
+function workEntryToolInput(
+  entry: Pick<WorkLogPresentationEntry, "toolData" | "structuredPayload">,
+): unknown {
+  const item = entry.structuredPayload;
+  const deviceOperation = workEntryDeviceOperation(item);
+  if (deviceOperation?.kind === "call") return deviceOperation.input;
+  if (item?.type === "dynamic_tool") return item.input;
+  const data = asRecord(entry.toolData);
+  return data?.arguments ?? data?.input ?? data?.rawInput;
 }
 
 function resolveT3McpToolPresentation(
@@ -203,12 +501,32 @@ export function resolveWorkEntryToolPresentation(
   >,
   fallbackStatus?: "inProgress" | "completed",
 ) {
-  const definition = resolveT3McpToolDefinition(workEntryToolName(entry));
+  const deviceOperation = workEntryDeviceOperation(entry.structuredPayload);
   const status = entry.toolLifecycleStatus ?? fallbackStatus;
+  if (deviceOperation?.kind === "lookup") {
+    const definition = resolveT3McpToolDefinition(deviceOperation.toolName);
+    const displayName = definition?.displayName ?? deviceOperation.toolName;
+    const verb =
+      status === "completed"
+        ? "Checked usage for"
+        : status === "failed"
+          ? "Failed to check usage for"
+          : status === "declined"
+            ? "Declined to check usage for"
+            : status === "stopped"
+              ? "Stopped checking usage for"
+              : "Checking usage for";
+    return { displayName: `${verb} ${displayName}`, icon: definition?.icon ?? "t3-code" };
+  }
+  const definition = resolveT3McpToolDefinition(workEntryToolName(entry));
+  const data =
+    deviceOperation?.kind === "call"
+      ? { arguments: workEntryToolInput(entry) }
+      : entry.toolData;
   return resolveT3McpToolPresentation(
     definition,
     definition && t3ToolResultIndicatesFailure(workEntryToolOutput(entry)) ? "failed" : status,
-    entry.toolData,
+    data,
   );
 }
 
@@ -216,6 +534,38 @@ function asRecord(value: unknown): Record<string, unknown> | null {
   return value !== null && typeof value === "object" && !Array.isArray(value)
     ? (value as Record<string, unknown>)
     : null;
+}
+
+export type WorkEntryDeviceOperation =
+  | { readonly kind: "call"; readonly toolName: string; readonly input: unknown }
+  | { readonly kind: "lookup"; readonly toolName: string };
+
+/** The call or usage lookup represented by an OMP tool-device turn item. */
+export function workEntryDeviceOperation(
+  item: OrchestrationV2TurnItem | undefined,
+): WorkEntryDeviceOperation | null {
+  if (item?.type === "file_change") {
+    const toolName = parseToolDeviceName(item.fileName);
+    return toolName === undefined
+      ? null
+      : { kind: "call", toolName, input: parseToolDeviceArguments(item.newStr) };
+  }
+  if (item?.type !== "dynamic_tool") return null;
+  const args = asRecord(item.input);
+  const path = typeof args?.path === "string" ? args.path : "";
+  const toolName = parseToolDeviceName(path);
+  if (toolName === undefined) return null;
+  if (item.toolName === "read") return { kind: "lookup", toolName };
+  if (item.toolName === "write") {
+    return {
+      kind: "call",
+      toolName,
+      input: parseToolDeviceArguments(
+        args !== null && typeof args.content === "string" ? args.content : undefined,
+      ),
+    };
+  }
+  return null;
 }
 
 function nonEmptyString(value: unknown): string | null {
@@ -380,6 +730,9 @@ function workEntryIndicatesToolFailureFromOutput(
   }
   const item = entry.structuredPayload;
   if (item?.type === "command_execution") {
+    if (item.exitCode === 1 && item.input && /^\s*(?:rg|grep)\b/.test(item.input)) {
+      return false;
+    }
     if (item.outputIndicatesFailure || (item.exitCode !== undefined && item.exitCode !== 0)) {
       return true;
     }
@@ -388,6 +741,14 @@ function workEntryIndicatesToolFailureFromOutput(
     if (item.output && toolOutputIndicatesFailure(item.output.slice(0, 32_768))) {
       return true;
     }
+  }
+  // A search that found nothing settled normally; "No matches" is its answer.
+  if (
+    item?.type === "dynamic_tool" &&
+    /^(?:grep|rg|ast_grep|search|find|glob)$/i.test(item.toolName ?? "") &&
+    searchFoundNothing(item)
+  ) {
+    return false;
   }
   const output = includeCommand
     ? [entry.detail, entry.command].filter(Boolean).join("\n")
@@ -429,6 +790,15 @@ export function workLogEntryIsLocalCodeSearch(entry: WorkLogPresentationEntry): 
 
 export function toolGroupAction(entry: WorkLogPresentationEntry): ToolGroupAction {
   if (entry.itemType === "thread_created") return "thread-create";
+  const deviceOperation = workEntryDeviceOperation(entry.structuredPayload);
+  if (deviceOperation?.kind === "lookup") return "other";
+  if (deviceOperation?.kind === "call") {
+    const devicePresentation = resolveWorkEntryToolPresentation(entry);
+    if (devicePresentation?.action !== undefined) return devicePresentation.action;
+    if (devicePresentation?.icon === "browser") return "browser";
+    if (devicePresentation?.icon === "device") return "device";
+    return "other";
+  }
   const presentation = resolveWorkEntryToolPresentation(entry);
   if (presentation?.action !== undefined) return presentation.action;
   if (presentation?.icon === "browser") return "browser";
@@ -570,7 +940,7 @@ function toolGroupActionLabel(action: ToolGroupAction, count: number): string {
     case "read":
       return `Read ${count} ${count === 1 ? "file" : "files"}`;
     case "edit":
-      return `Changed ${count} ${count === 1 ? "file" : "files"}`;
+      return `Edited ${count} ${count === 1 ? "file" : "files"}`;
     case "command":
       return `Ran ${count} ${count === 1 ? "command" : "commands"}`;
     case "thread-create":
@@ -591,16 +961,8 @@ function toolGroupActionLabel(action: ToolGroupAction, count: number): string {
 }
 
 function t3ToolSummaryCall(entry: WorkLogPresentationEntry): T3ToolSummaryCall {
-  const item = entry.structuredPayload;
-  const data =
-    entry.toolData !== null && typeof entry.toolData === "object"
-      ? (entry.toolData as Record<string, unknown>)
-      : undefined;
   return {
-    input:
-      item?.type === "dynamic_tool"
-        ? item.input
-        : (data?.arguments ?? data?.input ?? data?.rawInput),
+    input: workEntryToolInput(entry),
     output: workEntryToolOutput(entry),
     outcome:
       entry.toolLifecycleStatus === "failed" ||
@@ -654,10 +1016,15 @@ function summaryActionPriority(action: ToolGroupAction | T3McpToolSummaryAction)
   }
 }
 
-/** Summarizes at most two action categories; every omitted call still counts in the remainder. */
+/**
+ * Summarizes at most two action categories; every omitted call still counts in
+ * the remainder. An edit summary ends in its `+n −m`, also given as `diffStats`
+ * for renderers that style the counts.
+ */
 export function summarizeToolGroup(entries: ReadonlyArray<WorkLogPresentationEntry>): {
   summary: string;
   hasFailure: boolean;
+  diffStats?: DiffStats;
 } {
   const toolEntries = entries.filter((entry) => entry.itemType !== "reasoning");
   if (entries.length > 0 && toolEntries.length === 0) {
@@ -667,6 +1034,53 @@ export function summarizeToolGroup(entries: ReadonlyArray<WorkLogPresentationEnt
     };
   }
   entries = toolEntries;
+  const isExploration =
+    entries.length > 0 &&
+    entries.every((e) => {
+      const a = toolGroupAction(e);
+      return a === "read" || a === "code-search";
+    });
+  if (isExploration) {
+    const readCount = entries.filter((e) => toolGroupAction(e) === "read").length;
+    const searchCount = entries.filter((e) => toolGroupAction(e) === "code-search").length;
+    const parts: string[] = [];
+    if (readCount > 0) parts.push(`${readCount} ${readCount === 1 ? "file" : "files"}`);
+    if (searchCount > 0) parts.push(`${searchCount} ${searchCount === 1 ? "search" : "searches"}`);
+    const isLive = entries.some((e) => e.toolLifecycleStatus === "inProgress");
+    const prefix = isLive ? "Exploring" : "Explored";
+    return {
+      summary: `${prefix} ${parts.join(", ")}`,
+      hasFailure: entries.some(workEntryDisplayIndicatesToolFailure),
+    };
+  }
+  const isEdit = entries.length > 0 && entries.every((e) => toolGroupAction(e) === "edit");
+  if (isEdit) {
+    const fileCount = toolGroupActionCount("edit", entries);
+    let added = 0;
+    let removed = 0;
+    for (const entry of entries) {
+      const stats = turnItemDiffStats(entry.structuredPayload);
+      added += stats?.added ?? 0;
+      removed += stats?.removed ?? 0;
+    }
+    const statText = formatDiffStats({ added, removed });
+    const live = entries.some((entry) => entry.toolLifecycleStatus === "inProgress");
+    return {
+      summary: `${live ? "Editing" : "Edited"} ${fileCount} ${fileCount === 1 ? "file" : "files"}${statText ? ` ${statText}` : ""}`,
+      hasFailure: entries.some(workEntryDisplayIndicatesToolFailure),
+      diffStats: { added, removed },
+    };
+  }
+  const isCommand = entries.length > 0 && entries.every((e) => toolGroupAction(e) === "command");
+  if (isCommand) {
+    const count = entries.length;
+    const isLive = entries.some((e) => e.toolLifecycleStatus === "inProgress");
+    const prefix = isLive ? "Running" : "Ran";
+    return {
+      summary: `${prefix} ${count} ${count === 1 ? "command" : "commands"}`,
+      hasFailure: entries.some(workEntryDisplayIndicatesToolFailure),
+    };
+  }
   const groups = new Map<
     ToolGroupAction | T3McpToolSummaryAction,
     {
@@ -758,7 +1172,12 @@ export function toolGroupSummaryKind(
   if (action !== "other") return action;
   const fallbackKinds = new Set(
     entries.map((entry): ToolGroupSummaryKind => {
-      if (entry.itemType === "dynamic_tool") return "dynamic-tool";
+      if (
+        entry.itemType === "dynamic_tool" ||
+        workEntryDeviceOperation(entry.structuredPayload)?.kind === "call"
+      ) {
+        return "dynamic-tool";
+      }
       if (entry.itemType === "subagent") return "agent-tool";
       if (entry.tone === "thinking") return "agent-tool";
       if (entry.tone === "tool") return "tone-tool";

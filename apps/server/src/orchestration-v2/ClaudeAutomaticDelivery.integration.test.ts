@@ -43,8 +43,6 @@ import { checkpointWorkspace } from "./testkit/ReplayFixtureWorkspace.ts";
 const sessionId = "automatic-delivery-session";
 const settings = Schema.decodeSync(ClaudeSettings)({});
 const decodeScheduledTask = Schema.decodeEffect(ScheduledTaskUpsertInput);
-const refusal =
-  "The user doesn't want to take this action right now. STOP what you are doing and wait for the user to tell you how to proceed.";
 const statusIds = ["status-1", "status-2", "status-3", "status-4"];
 const modelSelection = {
   instanceId: ProviderInstanceId.make("claudeAgent"),
@@ -82,7 +80,7 @@ const batch = frame({
   },
 });
 
-const toolResult = (id: string, cancelled: boolean) =>
+const toolResult = (id: string) =>
   frame({
     type: "user",
     uuid: `result-${id}`,
@@ -94,15 +92,14 @@ const toolResult = (id: string, cancelled: boolean) =>
         {
           type: "tool_result",
           tool_use_id: id,
-          is_error: cancelled,
-          content: cancelled ? refusal : id === "build" ? "build OK" : "Task completed normally",
+          is_error: false,
+          content: id === "build" ? "build OK" : "Task completed normally",
         },
       ],
     },
-    ...(cancelled ? { tool_result_meta: [{ id, non_execution_kind: "cancelled" }] } : {}),
   });
 
-const result = (uuid: string, aborted: boolean) =>
+const result = (uuid: string, userMessageUuids?: ReadonlyArray<string>) =>
   frame({
     type: "result",
     subtype: "success",
@@ -112,25 +109,24 @@ const result = (uuid: string, aborted: boolean) =>
     num_turns: 1,
     result: "",
     stop_reason: "end_turn",
-    terminal_reason: aborted ? "aborted_tools" : "completed",
+    terminal_reason: "completed",
     permission_denials: [],
     duration_ms: 1,
     duration_api_ms: 1,
     total_cost_usd: 0,
     usage: { input_tokens: 1, output_tokens: 1 },
     modelUsage: {},
+    ...(userMessageUuids === undefined ? {} : { user_message_uuids: [...userMessageUuids] }),
   });
 
 it.effect.each(["child completion", "scheduled message", "user steering"] as const)(
-  "delivers %s with Claude's native pending-tool cancellation behavior",
+  "delivers %s without cancelling Claude's pending tool batch",
   (delivery) =>
     Effect.scoped(
       Effect.gen(function* () {
         const cwd = yield* checkpointWorkspace("claude-automatic-delivery");
         const sdkMessages = yield* Queue.unbounded<SDKMessage>();
         const offers: SDKUserMessage[] = [];
-        const nativeQueue: SDKUserMessage[] = [];
-        const batchAbort = new AbortController();
         const adapter = ClaudeAdapterV2.makeClaudeAdapterV2({
           instanceId: modelSelection.instanceId,
           settings,
@@ -148,12 +144,6 @@ it.effect.each(["child completion", "scheduled message", "user steering"] as con
                 offer: (message) =>
                   Effect.sync(() => {
                     offers.push(message);
-                    nativeQueue.push(message);
-                    // Claude Code 2.1.289's queue watcher aborts when a now-priority
-                    // command arrives, including while Bash blocks pending reads.
-                    if (nativeQueue.some((command) => command.priority === "now")) {
-                      batchAbort.abort({ kind: "interrupt" });
-                    }
                   }),
                 setModel: () => Effect.void,
                 setPermissionMode: () => Effect.void,
@@ -344,25 +334,27 @@ it.effect.each(["child completion", "scheduled message", "user steering"] as con
           }
           yield* worker.drain();
           const explicitSteer = delivery === "user steering";
-          assert.equal(batchAbort.signal.aborted, explicitSteer);
-          assert.equal(offers.length, explicitSteer ? 2 : 1);
+          const activeSteer = explicitSteer || delivery === "child completion";
+          assert.isFalse(offers.some((offer) => offer.priority === "now"));
+          assert.equal(offers.length, activeSteer ? 2 : 1);
           const finished = yield* watch(
             (event) =>
               event.type === "run.updated" &&
               event.payload.id === parent.id &&
               event.payload.status === "waiting",
           );
-          // Bash finishes before the pending status reads, as in the capture.
-          yield* Queue.offer(sdkMessages, toolResult("build", false));
-          for (const id of statusIds)
-            yield* Queue.offer(sdkMessages, toolResult(id, batchAbort.signal.aborted));
-          if (explicitSteer) yield* Queue.offer(sdkMessages, result("aborted", true));
-          yield* Queue.offer(sdkMessages, result("completed", false));
+          // Live steers fold after the running tool round; queued messages stay on the next run.
+          yield* Queue.offer(sdkMessages, toolResult("build"));
+          for (const id of statusIds) yield* Queue.offer(sdkMessages, toolResult(id));
+          const resultUuids = offers.flatMap((offer) =>
+            offer.uuid === undefined ? [] : [offer.uuid],
+          );
+          yield* Queue.offer(sdkMessages, result("completed", resultUuids));
           yield* Fiber.join(finished);
           yield* worker.drain();
           yield* orchestrator.resumeQueuedRuns;
           yield* worker.drain();
-          if (!explicitSteer) {
+          if (delivery === "scheduled message") {
             const queued = (yield* orchestrator.getThreadProjection(threadId)).runs[1]!;
             const noticeFinished = yield* watch(
               (event) =>
@@ -370,18 +362,9 @@ it.effect.each(["child completion", "scheduled message", "user steering"] as con
                 event.payload.id === queued.id &&
                 event.payload.status === "waiting",
             );
-            const delivered =
-              delivery === "child completion"
-                ? yield* watch(
-                    (event) =>
-                      event.type === "subagent.updated" &&
-                      event.payload.completionDelivery?.state === "delivered",
-                  )
-                : null;
-            yield* Queue.offer(sdkMessages, result("notice-completed", false));
+            yield* Queue.offer(sdkMessages, result("notice-completed"));
             yield* Fiber.join(noticeFinished);
             yield* worker.drain();
-            if (delivered !== null) yield* Fiber.join(delivered);
           }
           const after = yield* orchestrator.getThreadProjection(threadId);
           const reads = after.turnItems.filter((item) =>
@@ -389,26 +372,24 @@ it.effect.each(["child completion", "scheduled message", "user steering"] as con
           );
           assert.equal(reads.length, 4);
           for (const read of reads) {
-            assert.equal(read.status, explicitSteer ? "cancelled" : "completed");
-            assert.equal(read.toolNonExecutionKind, explicitSteer ? "cancelled" : undefined);
-            assert.equal(read.type === "dynamic_tool" && read.output === refusal, explicitSteer);
+            assert.equal(read.status, "completed");
+            assert.isUndefined(read.toolNonExecutionKind);
           }
           assert.equal(offers.length, 2);
           assert.equal(
-            offers.filter((offer) => offer.priority === "now").length,
-            explicitSteer ? 1 : 0,
+            offers.filter((offer) => offer.priority === "next").length,
+            activeSteer ? 1 : 0,
           );
-          if (!explicitSteer) {
+          if (delivery === "scheduled message") {
             assert.equal(after.runs.length, 2);
-            if (delivery === "child completion") {
-              assert.equal(after.messages.filter((message) => message.id === messageId).length, 1);
-              assert.equal(after.subagents[0]?.completionDelivery?.state, "delivered");
-            } else {
-              assert.equal(
-                after.messages.filter((message) => message.scheduledTaskId !== undefined).length,
-                1,
-              );
-            }
+            assert.equal(
+              after.messages.filter((message) => message.scheduledTaskId !== undefined).length,
+              1,
+            );
+          } else if (delivery === "child completion") {
+            assert.equal(after.runs.length, 1);
+            assert.equal(after.messages.filter((message) => message.id === messageId).length, 1);
+            assert.equal(after.subagents[0]?.completionDelivery?.state, "delivered");
           }
           yield* orchestrator.recoverDelegatedTasks;
           yield* orchestrator.resumeQueuedRuns;

@@ -219,7 +219,6 @@ export const OrchestrationV2TurnCapabilities = Schema.Struct({
   supportsInterrupt: Schema.Boolean,
   supportsActiveSteering: Schema.Boolean,
   // Some native steering mechanisms cancel pending tools before consuming the message.
-  activeSteeringInterruptsTools: Schema.optional(Schema.Boolean),
   supportsSteeringByInterruptRestart: Schema.Boolean,
   supportsQueuedMessages: Schema.Boolean,
   terminalStatusQuality: Schema.Literals(["strong", "weak", "none"]),
@@ -3422,6 +3421,20 @@ const OrchestrationV2InternalCommand = Schema.Union([
     commandId: CommandId,
     threadId: ThreadId,
     reason: Schema.optional(Schema.String),
+  }),
+  /**
+   * Restores a queued message after its provider rejected a promotion steer.
+   * The original queue position and hold state travel with the durable effect.
+   */
+  Schema.Struct({
+    type: Schema.Literal("queued-message.restore-after-steer-rejection"),
+    commandId: CommandId,
+    threadId: ThreadId,
+    queuedRunId: RunId,
+    targetRunId: RunId,
+    messageId: MessageId,
+    queuePosition: PositiveInt,
+    queueHeld: Schema.optional(Schema.Boolean),
   }),
   /**
    * Records or updates a secret an agent asked the user for. Internal so no

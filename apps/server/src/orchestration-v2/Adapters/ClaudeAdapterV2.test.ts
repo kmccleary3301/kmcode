@@ -1783,7 +1783,8 @@ describe("ClaudeAdapterV2 attachments", () => {
           },
         });
 
-        assert.equal(offeredMessages[1]?.priority, "now");
+        assert.equal(offeredMessages[1]?.priority, "next");
+        assert.isString(offeredMessages[1]?.uuid);
         assert.deepEqual(offeredMessages[1]?.message.content, [
           expectedImageBlock,
           {
@@ -2189,7 +2190,11 @@ describe("ClaudeAdapterV2 background wake turns", () => {
     uuid: "00000000-0000-4000-8000-000000000101",
     session_id: WAKE_NATIVE_SESSION,
   });
-  const makeAssistantTextFrame = (input: { readonly uuid: string; readonly text: string }) =>
+  const makeAssistantTextFrame = (input: {
+    readonly uuid: string;
+    readonly text: string;
+    readonly userMessageUuids?: ReadonlyArray<string>;
+  }) =>
     claudeSdkFrame({
       type: "assistant",
       message: {
@@ -2208,6 +2213,9 @@ describe("ClaudeAdapterV2 background wake turns", () => {
         },
       },
       parent_tool_use_id: null,
+      ...(input.userMessageUuids === undefined
+        ? {}
+        : { user_message_uuids: [...input.userMessageUuids] }),
       uuid: input.uuid,
       session_id: WAKE_NATIVE_SESSION,
     });
@@ -2247,6 +2255,7 @@ describe("ClaudeAdapterV2 background wake turns", () => {
     readonly isError?: boolean;
     readonly errors?: ReadonlyArray<string>;
     readonly apiErrorStatus?: number;
+    readonly userMessageUuids?: ReadonlyArray<string>;
     // null omits the field, as the CLI does on a zero-turn result.
     readonly terminalReason?: SDKResultMessage["terminal_reason"] | null;
   }) =>
@@ -2270,6 +2279,9 @@ describe("ClaudeAdapterV2 background wake turns", () => {
       permission_denials: [],
       uuid: input.uuid,
       session_id: WAKE_NATIVE_SESSION,
+      ...(input.userMessageUuids === undefined
+        ? {}
+        : { user_message_uuids: [...input.userMessageUuids] }),
       ...(input.origin === undefined ? {} : { origin: input.origin }),
       ...(input.errors === undefined ? {} : { errors: input.errors }),
       ...(input.apiErrorStatus === undefined ? {} : { api_error_status: input.apiErrorStatus }),
@@ -3152,16 +3164,12 @@ describe("ClaudeAdapterV2 background wake turns", () => {
       ),
   );
 
-  it.effect.each(
-    (["aborted_tools", "aborted_streaming"] as const).flatMap((terminalReason) =>
-      [true, false].map((steered) => ({ terminalReason, steered })),
-    ),
-  )("handles $terminalReason with active steering=$steered", ({ terminalReason, steered }) =>
+  it.effect("attributes a steer folded between Claude tool rounds to the active provider run", () =>
     Effect.scoped(
       Effect.gen(function* () {
         const harness = yield* makeWakeHarness;
         const idAllocator = yield* IdAllocator.IdAllocatorV2;
-        const attemptId = RunAttemptId.make("attempt-steering-abort");
+        const attemptId = RunAttemptId.make("attempt-claude-steer-folded");
         const input = makeClaudeTestTurnInput({
           threadId: harness.threadId,
           providerThread: harness.providerThread,
@@ -3170,56 +3178,390 @@ describe("ClaudeAdapterV2 background wake turns", () => {
           text: "Audit the settings pages.",
           attachments: [],
         });
+        const providerTurnId = idAllocator.derive.providerTurn({
+          driver: ClaudeAdapterV2.CLAUDE_PROVIDER,
+          nativeTurnId: `turn:${attemptId}`,
+        });
         yield* harness.runtime.startTurn(input);
-        if (steered) {
-          yield* harness.runtime.steerTurn({
-            threadId: harness.threadId,
-            runId: input.runId,
-            providerThread: harness.providerThread,
-            providerTurnId: idAllocator.derive.providerTurn({
-              driver: ClaudeAdapterV2.CLAUDE_PROVIDER,
-              nativeTurnId: `turn:${attemptId}`,
-            }),
-            message: {
-              createdBy: "user",
-              creationSource: "web",
-              messageId: MessageId.make("message-steering-abort"),
-              text: "Include the hierarchy mock.",
-              attachments: [],
-            },
-          });
-          assert.equal(harness.offeredMessages[1]?.priority, "now");
+        const promptUuid = harness.promptUuid(0);
+        yield* harness.runtime.steerTurn({
+          threadId: harness.threadId,
+          runId: input.runId,
+          providerThread: harness.providerThread,
+          providerTurnId,
+          message: {
+            createdBy: "user",
+            creationSource: "web",
+            messageId: MessageId.make("message-claude-steer-folded"),
+            text: "Include the hierarchy mock.",
+            attachments: [],
+          },
+        });
+        const steerUuid = harness.offeredMessages[1]?.uuid;
+        if (steerUuid === undefined) {
+          return yield* Effect.die("Claude steering did not include a message uuid.");
         }
-        yield* Queue.offer(
-          harness.sdkMessages,
-          makeResultFrame({
-            uuid: "00000000-0000-4000-8000-000000000901",
-            result: "",
-            terminalReason,
+        assert.equal(harness.offeredMessages[1]?.priority, "next");
+        const answer = "Audit finished with the hierarchy mock.";
+        yield* harness.offerAndWait(
+          makeAssistantTextFrame({
+            uuid: "00000000-0000-4000-8000-000000000911",
+            text: answer,
+            userMessageUuids: [promptUuid, steerUuid],
           }),
         );
-        if (steered) {
-          yield* Queue.offer(harness.sdkMessages, wakeAssistant);
-          yield* Queue.offer(
-            harness.sdkMessages,
-            makeResultFrame({
-              uuid: "00000000-0000-4000-8000-000000000902",
-              result: "Audit finished after the steer.",
-            }),
-          );
-        }
-        const terminal = yield* Queue.take(harness.terminalReceipts);
-        assert.equal(terminal.status, steered ? "completed" : "interrupted");
-        if (steered) {
-          assert.isTrue(
+        yield* harness.offerAndWait(
+          makeResultFrame({
+            uuid: "00000000-0000-4000-8000-000000000912",
+            result: answer,
+            userMessageUuids: [promptUuid, steerUuid],
+          }),
+        );
+        yield* awaitUntil(
+          () =>
             harness.events.some(
               (event) =>
                 event.type === "turn_item.updated" &&
                 event.turnItem.type === "assistant_message" &&
-                event.turnItem.text === WAKE_ASSISTANT_TEXT,
+                event.turnItem.text === answer,
             ),
-          );
+          "folded steer assistant message",
+        );
+
+        const assistant = harness.events.findLast(
+          (event) =>
+            event.type === "turn_item.updated" &&
+            event.turnItem.type === "assistant_message" &&
+            event.turnItem.text === answer,
+        );
+        assert.equal(
+          assistant?.type === "turn_item.updated" ? assistant.turnItem.runId : undefined,
+          input.runId,
+        );
+        assert.equal(
+          assistant?.type === "turn_item.updated" ? assistant.turnItem.providerTurnId : undefined,
+          providerTurnId,
+        );
+        assert.equal(harness.terminalEvents()[0]?.status, "completed");
+        assert.lengthOf(harness.terminalEvents(), 1);
+      }).pipe(Effect.provide(Layer.merge(IdAllocator.layer, NodeServices.layer))),
+    ),
+  );
+
+  it.effect("keeps a Claude run open when its turn ends before the queued steer is folded", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const harness = yield* makeWakeHarness;
+        const idAllocator = yield* IdAllocator.IdAllocatorV2;
+        const attemptId = RunAttemptId.make("attempt-claude-steer-next-turn");
+        const input = makeClaudeTestTurnInput({
+          threadId: harness.threadId,
+          providerThread: harness.providerThread,
+          now: yield* DateTime.now,
+          attemptId,
+          text: "Audit the settings pages.",
+          attachments: [],
+        });
+        const providerTurnId = idAllocator.derive.providerTurn({
+          driver: ClaudeAdapterV2.CLAUDE_PROVIDER,
+          nativeTurnId: `turn:${attemptId}`,
+        });
+        yield* harness.runtime.startTurn(input);
+        const promptUuid = harness.promptUuid(0);
+        yield* harness.runtime.steerTurn({
+          threadId: harness.threadId,
+          runId: input.runId,
+          providerThread: harness.providerThread,
+          providerTurnId,
+          message: {
+            createdBy: "user",
+            creationSource: "web",
+            messageId: MessageId.make("message-claude-steer-next-turn"),
+            text: "Include the hierarchy mock.",
+            attachments: [],
+          },
+        });
+        const steerUuid = harness.offeredMessages[1]?.uuid;
+        if (steerUuid === undefined) {
+          return yield* Effect.die("Claude steering did not include a message uuid.");
         }
+        assert.equal(harness.offeredMessages[1]?.priority, "next");
+        yield* harness.offerAndWait(
+          makeResultFrame({
+            uuid: "00000000-0000-4000-8000-000000000913",
+            result: "The original Claude turn ended.",
+            userMessageUuids: [promptUuid],
+          }),
+        );
+        assert.lengthOf(harness.terminalEvents(), 0);
+
+        const answer = "The queued steer was handled in the next Claude turn.";
+        yield* harness.offerAndWait(
+          makeAssistantTextFrame({
+            uuid: "00000000-0000-4000-8000-000000000914",
+            text: answer,
+            userMessageUuids: [steerUuid],
+          }),
+        );
+        yield* harness.offerAndWait(
+          makeResultFrame({
+            uuid: "00000000-0000-4000-8000-000000000915",
+            result: answer,
+            userMessageUuids: [steerUuid],
+          }),
+        );
+        yield* awaitUntil(
+          () =>
+            harness.events.some(
+              (event) =>
+                event.type === "turn_item.updated" &&
+                event.turnItem.type === "assistant_message" &&
+                event.turnItem.text === answer,
+            ),
+          "queued steer assistant message",
+        );
+
+        const assistant = harness.events.findLast(
+          (event) =>
+            event.type === "turn_item.updated" &&
+            event.turnItem.type === "assistant_message" &&
+            event.turnItem.text === answer,
+        );
+        assert.equal(
+          assistant?.type === "turn_item.updated" ? assistant.turnItem.runId : undefined,
+          input.runId,
+        );
+        assert.equal(
+          assistant?.type === "turn_item.updated" ? assistant.turnItem.providerTurnId : undefined,
+          providerTurnId,
+        );
+        assert.equal(harness.terminalEvents()[0]?.providerTurnId, providerTurnId);
+        assert.equal(harness.terminalEvents()[0]?.status, "completed");
+        assert.lengthOf(harness.terminalEvents(), 1);
+      }).pipe(Effect.provide(Layer.merge(IdAllocator.layer, NodeServices.layer))),
+    ),
+  );
+
+  it.effect("redirects immediately while Claude awaits tool approval", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const harness = yield* makeWakeHarness;
+        const idAllocator = yield* IdAllocator.IdAllocatorV2;
+        const attemptId = RunAttemptId.make("attempt-claude-steer-approval");
+        const input = makeClaudeTestTurnInput({
+          threadId: harness.threadId,
+          providerThread: harness.providerThread,
+          now: yield* DateTime.now,
+          attemptId,
+          text: "Build the project.",
+          attachments: [],
+          runtimePolicy: ProviderAdapterV2RuntimePolicy.make({
+            runtimeMode: "approval-required",
+            interactionMode: "default",
+            cwd: "/workspace",
+          }),
+        });
+        const providerTurnId = idAllocator.derive.providerTurn({
+          driver: ClaudeAdapterV2.CLAUDE_PROVIDER,
+          nativeTurnId: `turn:${attemptId}`,
+        });
+        yield* harness.runtime.startTurn(input);
+        const canUseTool = harness.getOpenedOptions()?.canUseTool;
+        if (canUseTool === undefined) {
+          return yield* Effect.die("The Claude query has no permission callback.");
+        }
+        const toolUseId = "tool-permission-steer";
+        const approvalSignal = new AbortController();
+        const permission = yield* Effect.promise(() =>
+          canUseTool(
+            "Bash",
+            { command: "make" },
+            {
+              signal: approvalSignal.signal,
+              toolUseID: toolUseId,
+              requestId: "request-permission-steer",
+              description: "Run make",
+            },
+          ),
+        ).pipe(Effect.forkScoped);
+        const pendingRequest = () =>
+          harness.events.findLast(
+            (event) =>
+              event.type === "runtime_request.updated" && event.runtimeRequest.status === "pending",
+          );
+        yield* awaitUntil(() => pendingRequest() !== undefined, "pending Bash approval");
+        if (pendingRequest()?.type !== "runtime_request.updated") {
+          return yield* Effect.die("Claude did not publish its Bash approval request.");
+        }
+
+        const promptUuid = harness.promptUuid(0);
+        yield* harness.runtime.steerTurn({
+          threadId: harness.threadId,
+          runId: input.runId,
+          providerThread: harness.providerThread,
+          providerTurnId,
+          message: {
+            createdBy: "user",
+            creationSource: "web",
+            messageId: MessageId.make("message-claude-steer-approval"),
+            text: "After the build, report the hierarchy mock.",
+            attachments: [],
+          },
+        });
+        const steerUuid = harness.offeredMessages[1]?.uuid;
+        if (steerUuid === undefined) {
+          return yield* Effect.die("Claude steering did not include a message uuid.");
+        }
+        assert.equal(harness.offeredMessages[1]?.priority, "now");
+        assert.isFalse(approvalSignal.signal.aborted);
+        assert.lengthOf(harness.terminalEvents(), 0);
+
+        // Model the SDK's "now" priority aborting the pending callback before the tool starts.
+        approvalSignal.abort();
+        const permissionResult = yield* Fiber.join(permission);
+        if (permissionResult === null || permissionResult.behavior !== "deny") {
+          assert.fail("Claude did not cancel the pending tool permission request.");
+        }
+        assert.equal(permissionResult.message, "User cancelled tool execution.");
+        yield* harness.offerAndWait(
+          makeResultFrame({
+            uuid: "00000000-0000-4000-8000-000000000919",
+            result: "The permission-gated build did not start.",
+            subtype: "error_during_execution",
+            isError: true,
+            terminalReason: "aborted_tools",
+            userMessageUuids: [promptUuid],
+          }),
+        );
+        assert.lengthOf(harness.terminalEvents(), 0);
+
+        const answer = "The redirect was handled in the next Claude turn.";
+        yield* harness.offerAndWait(
+          makeAssistantTextFrame({
+            uuid: "00000000-0000-4000-8000-000000000917",
+            text: answer,
+            userMessageUuids: [steerUuid],
+          }),
+        );
+        yield* harness.offerAndWait(
+          makeResultFrame({
+            uuid: "00000000-0000-4000-8000-000000000918",
+            result: answer,
+            userMessageUuids: [steerUuid],
+          }),
+        );
+        yield* awaitUntil(
+          () =>
+            harness.events.some(
+              (event) =>
+                event.type === "turn_item.updated" &&
+                event.turnItem.type === "assistant_message" &&
+                event.turnItem.text === answer,
+            ),
+          "redirect assistant message",
+        );
+
+        const assistant = harness.events.findLast(
+          (event) =>
+            event.type === "turn_item.updated" &&
+            event.turnItem.type === "assistant_message" &&
+            event.turnItem.text === answer,
+        );
+        assert.equal(
+          assistant?.type === "turn_item.updated" ? assistant.turnItem.runId : undefined,
+          input.runId,
+        );
+        assert.equal(
+          assistant?.type === "turn_item.updated" ? assistant.turnItem.providerTurnId : undefined,
+          providerTurnId,
+        );
+        assert.equal(harness.terminalEvents()[0]?.status, "completed");
+        assert.lengthOf(harness.terminalEvents(), 1);
+      }).pipe(Effect.provide(Layer.merge(IdAllocator.layer, NodeServices.layer))),
+    ),
+  );
+
+  it.effect("closes the Claude query after interrupting a run with a queued steer", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const closeGate = yield* Deferred.make<void>();
+        const testScope = yield* Scope.Scope;
+        yield* Scope.addFinalizer(testScope, Deferred.succeed(closeGate, undefined));
+        const interruptStarted = yield* Deferred.make<void>();
+        let interruptCount = 0;
+        let closeCount = 0;
+        const harness = yield* makeWakeHarnessWithOptions({
+          interrupt: Deferred.succeed(interruptStarted, undefined).pipe(
+            Effect.tap(() =>
+              Effect.sync(() => {
+                interruptCount += 1;
+              }),
+            ),
+          ),
+          close: (queue) =>
+            Deferred.await(closeGate).pipe(
+              Effect.andThen(Queue.shutdown(queue)),
+              Effect.tap(() =>
+                Effect.sync(() => {
+                  closeCount += 1;
+                }),
+              ),
+            ),
+        });
+        const idAllocator = yield* IdAllocator.IdAllocatorV2;
+        const attemptId = RunAttemptId.make("attempt-claude-steer-stop");
+        const input = makeClaudeTestTurnInput({
+          threadId: harness.threadId,
+          providerThread: harness.providerThread,
+          now: yield* DateTime.now,
+          attemptId,
+          text: "Audit the settings pages.",
+          attachments: [],
+        });
+        const providerTurnId = idAllocator.derive.providerTurn({
+          driver: ClaudeAdapterV2.CLAUDE_PROVIDER,
+          nativeTurnId: `turn:${attemptId}`,
+        });
+        yield* harness.runtime.startTurn(input);
+        yield* harness.runtime.steerTurn({
+          threadId: harness.threadId,
+          runId: input.runId,
+          providerThread: harness.providerThread,
+          providerTurnId,
+          message: {
+            createdBy: "user",
+            creationSource: "web",
+            messageId: MessageId.make("message-claude-steer-stop"),
+            text: "Include the hierarchy mock.",
+            attachments: [],
+          },
+        });
+        assert.equal(harness.offeredMessages[1]?.priority, "next");
+        const stop = yield* harness.runtime
+          .interruptTurn({
+            providerThread: harness.providerThread,
+            providerTurnId,
+            requestRuntimeRestart: true,
+          })
+          .pipe(Effect.forkScoped);
+        yield* Deferred.await(interruptStarted);
+        yield* Queue.offer(
+          harness.sdkMessages,
+          makeResultFrame({
+            uuid: "00000000-0000-4000-8000-000000000920",
+            result: "Stop interrupted the queued steer.",
+            subtype: "error_during_execution",
+            isError: true,
+            terminalReason: "aborted_tools",
+            userMessageUuids: [harness.promptUuid(0)],
+          }),
+        );
+        yield* awaitUntil(() => harness.terminalEvents().length === 1, "interrupted terminal");
+        yield* Deferred.succeed(closeGate, undefined);
+        yield* Fiber.join(stop);
+        assert.equal(interruptCount, 1);
+        assert.equal(closeCount, 1);
+        assert.equal(harness.terminalEvents()[0]?.status, "interrupted");
         assert.lengthOf(harness.terminalEvents(), 1);
       }).pipe(Effect.provide(Layer.merge(IdAllocator.layer, NodeServices.layer))),
     ),

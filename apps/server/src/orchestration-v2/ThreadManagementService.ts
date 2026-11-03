@@ -721,7 +721,11 @@ const make = Effect.gen(function* () {
 
   const sendToThread: ThreadManagementServiceShape["sendToThread"] = (input) =>
     Effect.gen(function* () {
-      const target = yield* getProjectThreadRecords(input, ["runs", "providerTurns"]);
+      const target = yield* getProjectThreadRecords(input, [
+        "runs",
+        "providerTurns",
+        "providerThreads",
+      ]);
       if (target.thread.archivedAt !== null) {
         return yield* new ThreadManagementThreadArchivedError({
           threadId: input.threadId,
@@ -729,6 +733,20 @@ const make = Effect.gen(function* () {
       }
 
       const steerableRun = latestSteerableRun(target);
+      const canAutoSteer = yield* Effect.gen(function* () {
+        if (input.mode !== "auto" || steerableRun === undefined) return false;
+        const providerThread = target.providerThreads.find(
+          (candidate) => candidate.id === steerableRun.providerThreadId,
+        );
+        if (providerThread?.providerSessionId == null) return false;
+        const session = yield* sessions
+          .get(providerThread.providerSessionId)
+          .pipe(Effect.orElseSucceed(() => Option.none()));
+        return (
+          Option.isSome(session) &&
+          session.value.providerSession.capabilities.turns.supportsActiveSteering
+        );
+      });
       let dispatchMode: Extract<
         OrchestrationV2Command,
         { readonly type: "message.dispatch" }
@@ -744,11 +762,15 @@ const make = Effect.gen(function* () {
           type: input.mode === "steer" ? "steer_active" : "restart_active",
           targetRunId: steerableRun.id,
         };
-      } else if (input.mode === "auto" && steerableRun !== undefined) {
+      } else if (canAutoSteer && steerableRun !== undefined) {
         dispatchMode = { type: "steer_active", targetRunId: steerableRun.id };
       } else {
         dispatchMode = {
-          type: input.mode === "queue" ? "queue_after_active" : "start_immediately",
+          type:
+            input.mode === "queue" ||
+            (input.mode === "auto" && latestActiveRun(target) !== undefined)
+              ? "queue_after_active"
+              : "start_immediately",
         };
       }
 

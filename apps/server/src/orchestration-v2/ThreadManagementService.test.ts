@@ -13,10 +13,12 @@ import {
   ProviderInstanceId,
   ProviderSessionId,
   ProviderThreadId,
+  RunAttemptId,
   RunId,
   ThreadId,
   type OrchestrationV2ProviderThread,
 } from "@t3tools/contracts";
+import * as DateTime from "effect/DateTime";
 import * as Deferred from "effect/Deferred";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
@@ -24,6 +26,7 @@ import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
 import * as Queue from "effect/Queue";
 import * as Stream from "effect/Stream";
+import * as Ref from "effect/Ref";
 import * as Option from "effect/Option";
 import * as TestClock from "effect/testing/TestClock";
 
@@ -34,6 +37,8 @@ import * as CommandReceiptStore from "./CommandReceiptStore.ts";
 import * as ProviderSessionManager from "./ProviderSessionManager.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import * as ThreadCommandExecutor from "./ThreadCommandExecutor.ts";
+import { CodexProviderCapabilitiesV2 } from "./Adapters/CodexAdapterV2.ts";
+import type { ProviderAdapterV2SessionRuntime } from "./ProviderAdapter.ts";
 
 const layerManagementDependencies = (
   options: {
@@ -55,6 +60,152 @@ const layerManagementDependencies = (
         Effect.succeed(options.hasReceipt ? Option.some({} as never) : Option.none()),
     }),
   );
+
+it.effect.each([true, false])(
+  "routes auto sends according to the active provider's steering capability",
+  (supportsActiveSteering) =>
+    Effect.gen(function* () {
+      const projectId = ProjectId.make("project:thread-management:auto-steer");
+      const threadId = ThreadId.make("thread:thread-management:auto-steer");
+      const messageId = MessageId.make("message:thread-management:auto-steer");
+      const runId = RunId.make("run:thread-management:auto-steer");
+      const attemptId = RunAttemptId.make("run-attempt:thread-management:auto-steer");
+      const providerInstanceId = ProviderInstanceId.make("codex");
+      const providerSessionId = ProviderSessionId.make("provider-session:auto-steer");
+      const providerThreadId = ProviderThreadId.make("provider-thread:auto-steer");
+      const driver = ProviderDriverKind.make("codex");
+      const now = yield* DateTime.now;
+      const capabilities = {
+        ...CodexProviderCapabilitiesV2,
+        turns: {
+          ...CodexProviderCapabilitiesV2.turns,
+          supportsActiveSteering,
+        },
+      };
+      const session: ProviderAdapterV2SessionRuntime = {
+        instanceId: providerInstanceId,
+        driver,
+        providerSessionId,
+        providerSession: {
+          id: providerSessionId,
+          driver,
+          providerInstanceId,
+          status: "ready",
+          cwd: "/tmp",
+          model: "test-model",
+          capabilities,
+          createdAt: now,
+          updatedAt: now,
+          lastError: null,
+        },
+        events: Stream.empty,
+        ensureThread: () => Effect.die("unused ensureThread"),
+        resumeThread: () => Effect.die("unused resumeThread"),
+        startTurn: () => Effect.die("unused startTurn"),
+        steerTurn: () => Effect.die("unused steerTurn"),
+        interruptTurn: () => Effect.die("unused interruptTurn"),
+        respondToRuntimeRequest: () => Effect.die("unused respondToRuntimeRequest"),
+        readThreadSnapshot: () => Effect.die("unused readThreadSnapshot"),
+        rollbackThread: () => Effect.die("unused rollbackThread"),
+        forkThread: () => Effect.die("unused forkThread"),
+      };
+      const providerThread: OrchestrationV2ProviderThread = {
+        id: providerThreadId,
+        appThreadId: threadId,
+        providerSessionId,
+        providerInstanceId,
+        driver,
+        ownerNodeId: null,
+        nativeThreadRef: null,
+        nativeConversationHeadRef: null,
+        status: "active",
+        firstRunOrdinal: 1,
+        lastRunOrdinal: 1,
+        handoffIds: [],
+        forkedFrom: null,
+        createdAt: now,
+        updatedAt: now,
+      };
+      const projection = {
+        thread: { id: threadId, projectId, archivedAt: null, deletedAt: null },
+        runs: [
+          {
+            id: runId,
+            ordinal: 1,
+            status: "running",
+            activeAttemptId: attemptId,
+            providerThreadId,
+          },
+        ],
+        providerTurns: [{ runAttemptId: attemptId, status: "running" }],
+        providerThreads: [providerThread],
+        messages: [
+          {
+            id: messageId,
+            threadId,
+            runId,
+            nodeId: null,
+            role: "user",
+            text: "follow up",
+            attachments: [],
+            createdBy: "agent",
+            creationSource: "mcp",
+            streaming: false,
+            createdAt: now,
+            updatedAt: now,
+          },
+        ],
+        turnItems: [
+          {
+            type: "user_message",
+            messageId,
+            inputIntent: "steer",
+          },
+        ],
+      } as unknown as OrchestrationV2ThreadProjection;
+      const dispatchModes = yield* Ref.make<ReadonlyArray<string>>([]);
+      const layerTest = ThreadManagementService.layer.pipe(
+        Layer.provide(
+          Layer.mergeAll(
+            Layer.mock(Orchestrator.OrchestratorV2)({
+              getThreadRecords: () => Effect.succeed(projection),
+              dispatch: (command) =>
+                Ref.update(dispatchModes, (modes) => [
+                  ...modes,
+                  command.type === "message.dispatch" ? command.dispatchMode.type : "other",
+                ]).pipe(Effect.as({ sequence: 1, storedEvents: [] })),
+            }),
+            Layer.mock(LegacyV1ThreadImporter.LegacyV1ThreadImporter)({
+              ensureTranscript: () =>
+                Effect.succeed({ importedThreadCount: 0, importedMessageCount: 0 }),
+            }),
+            layerManagementDependencies({
+              getSession: () => Effect.succeed(Option.some(session)),
+            }),
+          ),
+        ),
+      );
+      const service = yield* ThreadManagementService.ThreadManagementService.pipe(
+        Effect.provide(layerTest),
+      );
+
+      yield* service.sendToThread({
+        projectId,
+        commandId: CommandId.make("command:thread-management:auto-steer"),
+        threadId,
+        messageId,
+        text: "follow up",
+        attachments: [],
+        mode: "auto",
+        createdBy: "agent",
+        creationSource: "mcp",
+      });
+
+      expect((yield* Ref.get(dispatchModes))[0]).toBe(
+        supportsActiveSteering ? "steer_active" : "queue_after_active",
+      );
+    }),
+);
 
 it("stamps authoritative provenance on commands that create threads or messages", () => {
   const command: OrchestrationV2Command = {

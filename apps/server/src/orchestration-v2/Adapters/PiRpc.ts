@@ -20,8 +20,10 @@ import * as Clock from "effect/Clock";
 import * as Deferred from "effect/Deferred";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
+import * as FileSystem from "effect/FileSystem";
 import * as Option from "effect/Option";
 import * as Predicate from "effect/Predicate";
+import * as Path from "effect/Path";
 import * as Queue from "effect/Queue";
 import * as Scope from "effect/Scope";
 import * as Schema from "effect/Schema";
@@ -33,10 +35,17 @@ import { resolveSpawnCommand } from "@t3tools/shared/shell";
 import type { PiDialect } from "../../provider/piDialect.ts";
 import { OmpChunkAssembler } from "./OmpChunkAssembler.ts";
 import { signalProcessGroup } from "../../process/processGroup.ts";
+import * as ServerConfig from "../../config.ts";
+import {
+  extractBunPanicSignature,
+  PiStderrTail,
+  writePiCrashStderr,
+} from "./PiCrashDiagnostics.ts";
 
 export class PiRpcError extends Schema.TaggedError<PiRpcError>()("PiRpcError", {
   operation: Schema.String,
   detail: Schema.optional(Schema.String),
+  crashSignature: Schema.optional(Schema.String),
   cause: Schema.optional(Schema.Defect()),
 }) {
   override get message(): string {
@@ -128,6 +137,10 @@ interface PendingPiRequest {
   readonly deferred: Deferred.Deferred<unknown, PiRpcError>;
 }
 
+type PiProcessExit =
+  | { readonly kind: "code"; readonly code: number }
+  | { readonly kind: "signal"; readonly signal: string };
+
 const MAX_PI_RECORD_CHARS = 8 * 1024 * 1024;
 
 function makeJsonlFramer() {
@@ -180,15 +193,31 @@ function summarizePiError(error: unknown): string {
 
 /**
  * Stdout closure is not enough to diagnose an early crash: Pi 0.84+ can exit
- * 1 on import before writing any protocol line. The numeric exit code is
- * sanitized; stderr stays out of public details because it can carry
- * credentials or prompt text.
+ * 1 on import before writing any protocol line. Public details include only
+ * the exit code or signal and a recognized, sanitized Bun panic signature;
+ * full stderr is kept in a bounded tail and saved to a local file with mode
+ * 0600 because stderr can carry credentials or prompt text.
  */
-function describePiStdoutClosure(exitCode: number | undefined): string {
-  if (exitCode === undefined || !Number.isFinite(exitCode)) {
+function describePiStdoutClosure(
+  exit: PiProcessExit | undefined,
+  crashSignature?: string,
+  crashFilePath?: string,
+): string {
+  if (exit === undefined || (exit.kind === "code" && !Number.isFinite(exit.code))) {
     return "pi process closed stdout";
   }
-  return `pi process exited with code ${exitCode}`;
+  const summary =
+    exit.kind === "signal"
+      ? `pi process exited with signal ${exit.signal}`
+      : `pi process exited with code ${exit.code}`;
+  if (crashSignature === undefined) {
+    return crashFilePath === undefined
+      ? summary
+      : `${summary} (stderr saved to ${crashFilePath})`;
+  }
+  return crashFilePath === undefined
+    ? `${summary} (${crashSignature})`
+    : `${summary} (${crashSignature}; stderr saved to ${crashFilePath})`;
 }
 
 function parsePiRecord(line: string): PiRpcRecord | undefined {
@@ -227,7 +256,7 @@ export const makePiRpcConnection = (
     const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
     const platform = yield* HostProcessPlatform;
     const scope = yield* Effect.scope;
-
+    const serverConfig = yield* Effect.serviceOption(ServerConfig.ServerConfig);
     const spawnCommand = yield* resolveSpawnCommand(options.command, [...options.args], {
       env: options.env,
     }).pipe(Effect.mapError((cause) => new PiRpcError({ operation: "spawn", cause })));
@@ -244,8 +273,8 @@ export const makePiRpcConnection = (
       .pipe(Effect.mapError((cause) => new PiRpcError({ operation: "spawn", cause })));
 
     let childExited = false;
+    let stopRequested = false;
     let diagnosingStdoutClose = false;
-
     const killProcessGroup = (signal: NodeJS.Signals): boolean => {
       try {
         if (platform === "win32") {
@@ -253,6 +282,7 @@ export const makePiRpcConnection = (
         } else {
           signalProcessGroup(Number(child.pid), signal);
         }
+        stopRequested = true;
         return true;
       } catch {
         return false;
@@ -278,6 +308,7 @@ export const makePiRpcConnection = (
      */
     const terminateWindowsTree = Effect.gen(function* () {
       if (hasExited()) return;
+      stopRequested = true;
       const taskkill = yield* spawner.spawn(
         ChildProcess.make("taskkill", ["/PID", String(child.pid), "/T", "/F"]),
       );
@@ -296,7 +327,9 @@ export const makePiRpcConnection = (
     const events = yield* Queue.unbounded<PiRpcRecord, PiRpcError>();
     const outgoing = yield* Queue.unbounded<Uint8Array, PiRpcError>();
     const transportDown = yield* Deferred.make<never, PiRpcError>();
-    const exitDeferred = yield* Deferred.make<number, PiRpcError>();
+    const exitDeferred = yield* Deferred.make<PiProcessExit, PiRpcError>();
+    const stderrTail = new PiStderrTail();
+    const stderrDone = yield* Deferred.make<void>();
     let nextRequestId = 0;
     const isOmp = options.dialect.binary === "omp";
     const readyDeferred = isOmp ? yield* Deferred.make<PiRpcRecord, PiRpcError>() : undefined;
@@ -357,11 +390,21 @@ export const makePiRpcConnection = (
     yield* child.exitCode.pipe(
       Effect.matchEffect({
         onFailure: (cause) =>
-          Deferred.fail(exitDeferred, new PiRpcError({ operation: "exit", cause })),
+          Effect.suspend(() => {
+            childExited = true;
+            const causeMessage =
+              cause.reason.cause instanceof Error ? cause.reason.cause.message : cause.message;
+            const signal = /Process interrupted due to receipt of signal: '([A-Z][A-Z0-9]*)'$/.exec(
+              causeMessage,
+            )?.[1];
+            return signal === undefined
+              ? Deferred.fail(exitDeferred, new PiRpcError({ operation: "exit", cause }))
+              : Deferred.succeed(exitDeferred, { kind: "signal", signal });
+          }),
         onSuccess: (code) =>
           Effect.suspend(() => {
             childExited = true;
-            return Deferred.succeed(exitDeferred, Number(code));
+            return Deferred.succeed(exitDeferred, { kind: "code", code: Number(code) });
           }),
       }),
       Effect.forkIn(scope),
@@ -430,10 +473,10 @@ export const makePiRpcConnection = (
             // writer cannot replace the exit diagnosis with a write error.
             diagnosingStdoutClose = true;
             const polled = yield* Deferred.poll(exitDeferred);
-            const maybeExitCode = Option.isSome(polled)
+            const maybeExit = Option.isSome(polled)
               ? yield* polled.value.pipe(
                   Effect.map(Option.some),
-                  Effect.orElseSucceed(() => Option.none<number>()),
+                  Effect.orElseSucceed(() => Option.none<PiProcessExit>()),
                 )
               : yield* Deferred.await(exitDeferred).pipe(
                   Effect.timeoutOption(Duration.millis(250)),
@@ -441,14 +484,51 @@ export const makePiRpcConnection = (
                   // without an exit, for example Stop-with-restart, must not wait
                   // on that clock or the transport never fails.
                   Effect.provideService(Clock.Clock, Clock.Clock.defaultValue()),
-                  Effect.orElseSucceed(() => Option.none<number>()),
+                  Effect.orElseSucceed(() => Option.none<PiProcessExit>()),
                 );
+            let crashSignature: string | undefined;
+            let crashFilePath: string | undefined;
+            if (
+              isOmp &&
+              Option.isSome(maybeExit) &&
+              !stopRequested &&
+              (maybeExit.value.kind === "signal" || maybeExit.value.code !== 0)
+            ) {
+              yield* Deferred.await(stderrDone).pipe(
+                Effect.timeoutOption(Duration.millis(250)),
+                Effect.provideService(Clock.Clock, Clock.Clock.defaultValue()),
+                Effect.ignore,
+              );
+              const stderrBytes = stderrTail.toBytes();
+              crashSignature = extractBunPanicSignature(new TextDecoder().decode(stderrBytes));
+              if (Option.isSome(serverConfig)) {
+                const fileSystem = yield* Effect.serviceOption(FileSystem.FileSystem);
+                const pathService = yield* Effect.serviceOption(Path.Path);
+                if (Option.isSome(fileSystem) && Option.isSome(pathService)) {
+                  const timestampMillis = yield* Clock.currentTimeMillis;
+                  crashFilePath = yield* writePiCrashStderr({
+                    logsDir: serverConfig.value.logsDir,
+                    timestampMillis,
+                    pid: Number(child.pid),
+                    stderr: stderrBytes,
+                  }).pipe(
+                    Effect.provideService(FileSystem.FileSystem, fileSystem.value),
+                    Effect.provideService(Path.Path, pathService.value),
+                  );
+                } else {
+                  yield* Effect.logWarning("Could not save pi crash stderr.");
+                }
+              }
+            }
             return yield* failTransport(
               new PiRpcError({
                 operation: "read",
                 detail: describePiStdoutClosure(
-                  Option.isSome(maybeExitCode) ? maybeExitCode.value : undefined,
+                  Option.isSome(maybeExit) ? maybeExit.value : undefined,
+                  crashSignature,
+                  crashFilePath,
                 ),
+                ...(crashSignature === undefined ? {} : { crashSignature }),
               }),
             );
           }),
@@ -456,16 +536,20 @@ export const makePiRpcConnection = (
       Effect.forkIn(scope),
     );
 
-    // Surface stderr as debug logs; pi reserves stdout for the protocol.
+    const stderrDecoder = new TextDecoder();
     yield* child.stderr.pipe(
-      Stream.decodeText(),
       Stream.runForEach((chunk) =>
-        chunk.trim().length === 0
-          ? Effect.void
-          : // Length only: pi's stderr is unbounded remote output and can carry
-            // credentials or prompt text, so it never enters a log annotation.
-            Effect.logDebug("pi stderr", { stderrLength: chunk.length }),
+        Effect.gen(function* () {
+          stderrTail.append(chunk);
+          const decoded = stderrDecoder.decode(chunk, { stream: true });
+          if (decoded.trim().length > 0) {
+            // Length only: stderr can carry credentials or prompt text; its
+            // full bounded tail is saved locally only when OMP crashes.
+            yield* Effect.logDebug("pi stderr", { stderrLength: decoded.length });
+          }
+        }),
       ),
+      Effect.ensuring(Deferred.succeed(stderrDone, undefined).pipe(Effect.asVoid)),
       Effect.ignore,
       Effect.forkIn(scope),
     );
@@ -579,7 +663,18 @@ export const makePiRpcConnection = (
       send,
       request,
       events,
-      exited: Deferred.await(exitDeferred),
+      exited: Deferred.await(exitDeferred).pipe(
+        Effect.flatMap((exit) =>
+          exit.kind === "code"
+            ? Effect.succeed(exit.code)
+            : Effect.fail(
+                new PiRpcError({
+                  operation: "exit",
+                  detail: `pi process exited with signal ${exit.signal}`,
+                }),
+              ),
+        ),
+      ),
       terminate: failTransport(
         new PiRpcError({ operation: "terminate", detail: "pi process was stopped" }),
       ).pipe(Effect.andThen(terminateProcess), Effect.ignore, Effect.uninterruptible),

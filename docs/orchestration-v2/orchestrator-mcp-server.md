@@ -420,18 +420,27 @@ the primary linked pull request.
 
 Sends a message to any ordinary or delegated thread in the environment:
 
-- `auto` starts an idle thread, steers a fully active turn, or queues behind a
-  turn that is not yet steerable;
-- `queue` creates a separate follow-up run after active work;
+- `auto` (default) starts an idle thread or delivers at the target's next tool
+  boundary; it queues only if the provider cannot inject mid-turn;
+- `queue` waits for the target's entire current run to finish (possibly hours);
+  use it only to start a separate task afterwards;
 - `steer` requires a steerable active provider turn; and
-- `restart` requires an active provider turn and uses the orchestrator's
-  interrupt-and-restart path.
+- `restart` requires an active provider turn and interrupts it before restarting.
 
 The target runtime and interaction modes may not be broader than the caller's.
 Stable command and message IDs are derived from `clientRequestId` for
 idempotent retries.
 When the message creates a new delegated follow-up, the result includes its
 fresh `taskId`.
+
+### `t3_thread_broadcast`
+
+Sends one message to 1–32 unique thread IDs using the same modes and caller
+limits as `t3_thread_send`. The ordered `results` array contains each target's
+full `t3_thread_send` result, including `runId`, `status`, `delivery`, and any
+`taskId`, or a per-target `error`. One target's failure does not stop delivery
+to the others. Reuse `clientRequestId` to retry the same broadcast; each target
+has its own stable message and command IDs.
 
 ### `t3_thread_wait`
 

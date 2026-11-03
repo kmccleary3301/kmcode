@@ -4883,6 +4883,29 @@ describe("PiAdapterV2", () => {
       yield* startTurn(runtime, providerThread, "default", [], "/goal Ship it");
       yield* fake.takeRequest("goal");
       yield* fake.takeRequest("goal");
+      let echoedObjective = false;
+      const notesEcho = (event: ProviderAdapterV2Event) => {
+        if (
+          event.type === "turn_item.updated" &&
+          event.turnItem.type === "assistant_message" &&
+          event.turnItem.text.includes("Ship it")
+        ) {
+          echoedObjective = true;
+        }
+      };
+      const goalRow = yield* takeEvent((event) => {
+        notesEcho(event);
+        return (
+          event.type === "turn_item.updated" &&
+          event.turnItem.type === "dynamic_tool" &&
+          event.turnItem.toolName === "goal"
+        );
+      });
+      if (goalRow.type !== "turn_item.updated" || goalRow.turnItem.type !== "dynamic_tool") {
+        return yield* Effect.die("Expected the goal change as a tool row");
+      }
+      assert.equal(goalRow.turnItem.title, "Set goal");
+      assert.deepEqual(goalRow.turnItem.input, { objective: "Ship it" });
       // OMP does not continue goals for RPC hosts, so the turn starts the goal's work itself.
       const kickoff = yield* fake.takeRequest("prompt");
       assert.equal(
@@ -4891,8 +4914,12 @@ describe("PiAdapterV2", () => {
       );
       yield* fake.emit({ type: "agent_start" });
       yield* fake.emit({ type: "agent_end", isTerminal: true, willRetry: false });
-      const terminal = yield* takeEvent((event) => event.type === "turn.terminal");
+      const terminal = yield* takeEvent((event) => {
+        notesEcho(event);
+        return event.type === "turn.terminal";
+      });
       assert.isTrue(terminal.type === "turn.terminal" && terminal.status === "completed");
+      assert.isFalse(echoedObjective, "the objective must not be repeated as a reply");
     }).pipe(Effect.scoped, Effect.provide(layerTest)),
   );
 

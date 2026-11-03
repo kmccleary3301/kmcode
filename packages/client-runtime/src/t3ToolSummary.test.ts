@@ -119,6 +119,52 @@ describe("summarizeT3ToolCalls", () => {
       failedCount: 0,
     });
   });
+  it("summarizes broadcast destinations and counts partial target failures", () => {
+    const call = completed(
+      {
+        threadIds: ["thread-1", "thread-2", "thread-3"],
+        clientRequestId: "broadcast-1",
+      },
+      {
+        results: [
+          {
+            threadId: "thread-1",
+            messageId: "message-1",
+            runId: "run-1",
+            status: "running",
+            delivery: "started",
+          },
+          {
+            threadId: "thread-2",
+            messageId: "message-2",
+            runId: "run-2",
+            status: "completed",
+            delivery: "started",
+          },
+          {
+            threadId: "thread-3",
+            error: { code: "thread_not_found", message: "Missing target." },
+          },
+        ],
+      },
+    );
+    expect(summarizeT3ToolCalls("thread-broadcast", [call, call])).toEqual({
+      label: "Sent a message to 2 of 3 threads",
+      failedCount: 2,
+    });
+    expect(
+      summarizeT3ToolCalls("thread-broadcast", [
+        {
+          input: { threadIds: ["thread-1", "thread-2", "thread-3"] },
+          output: undefined,
+          outcome: "failed",
+        },
+      ]),
+    ).toEqual({
+      label: "Tried to send a message to 3 threads",
+      failedCount: 1,
+    });
+  });
 
   it("reads provider result envelopes without treating JSON in the message as result data", () => {
     const result = { messageId: "message-1", threadId: "actual-thread" };

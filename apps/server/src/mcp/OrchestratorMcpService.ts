@@ -44,6 +44,8 @@ import {
   type OrchestratorMcpThreadReadInput,
   type OrchestratorMcpThreadPullRequest,
   type OrchestratorMcpThreadReadResult,
+  type OrchestratorMcpThreadBroadcastInput,
+  type OrchestratorMcpThreadBroadcastResult,
   type OrchestratorMcpThreadRun,
   type OrchestratorMcpThreadSendInput,
   type OrchestratorMcpThreadSendResult,
@@ -188,6 +190,10 @@ export interface OrchestratorMcpServiceShape {
     scope: McpInvocationScope,
     input: OrchestratorMcpThreadSendInput,
   ) => Effect.Effect<OrchestratorMcpThreadSendResult, OrchestratorMcpFailure>;
+  readonly broadcastToThreads: (
+    scope: McpInvocationScope,
+    input: OrchestratorMcpThreadBroadcastInput,
+  ) => Effect.Effect<OrchestratorMcpThreadBroadcastResult, OrchestratorMcpFailure>;
   readonly waitForThread: (
     scope: McpInvocationScope,
     input: OrchestratorMcpThreadWaitInput,
@@ -1618,6 +1624,74 @@ const make = Effect.gen(function* () {
       }
       return task;
     });
+  const sendThread = (
+    scope: McpInvocationScope,
+    input: OrchestratorMcpThreadSendInput,
+    idempotency: { readonly operation: string; readonly requestKey?: string } = {
+      operation: "thread-send",
+    },
+  ): Effect.Effect<OrchestratorMcpThreadSendResult, OrchestratorMcpFailure> =>
+    Effect.gen(function* () {
+      const { parent, limits, target } = yield* loadScopedThread(scope, input.threadId);
+      yield* assertLiveCallerForOtherThread(scope, parent, target);
+      yield* resolveRuntimeMode(limits.runtimeMode, target.thread.runtimeMode);
+      yield* resolveInteractionMode(limits.interactionMode, target.thread.interactionMode);
+
+      const key = idempotency.requestKey ?? (yield* requestKey(input.clientRequestId));
+      const messageId = stableOperationMessageId({
+        scope,
+        requestKey: key,
+        operation: idempotency.operation,
+      });
+      const refused = yield* Ref.make<DispatchModeRefusal | undefined>(undefined);
+      const result = yield* threadManagement
+        .sendToThread({
+          projectId: target.thread.projectId,
+          commandId: stableCommandId({
+            scope,
+            requestKey: key,
+            operation: idempotency.operation,
+          }),
+          threadId: input.threadId,
+          ...(parent === undefined ? {} : { senderThreadId: parent.thread.id }),
+          messageId,
+          text: input.message,
+          attachments: [],
+          mode: input.mode ?? "auto",
+          createdBy: "agent",
+          creationSource: "mcp",
+        })
+        .pipe(
+          Effect.provideService(DispatchModeLimit, { ...limits, refused }),
+          Effect.catch((error) =>
+            Effect.flatMap(Ref.get(refused), (refusal) =>
+              Effect.fail(
+                refusal === undefined
+                  ? isThreadManagementError(error)
+                    ? threadManagementFailure(error)
+                    : failure(
+                        "orchestration_error",
+                        `Unable to send to thread ${input.threadId}: ${errorMessage(error)}`,
+                      )
+                  : failure(
+                      refusal.mode === "runtime"
+                        ? "runtime_mode_escalation_denied"
+                        : "interaction_mode_escalation_denied",
+                      `Thread ${refusal.threadId} now runs in ${refusal.runtimeMode}/${refusal.interactionMode} mode, above this caller's. Its user changed it while this call ran.`,
+                    ),
+              ),
+            ),
+          ),
+        );
+      return {
+        threadId: input.threadId,
+        messageId,
+        runId: result.run.id,
+        ...(result.run.delegatedTaskId === undefined ? {} : { taskId: result.run.delegatedTaskId }),
+        status: result.run.status,
+        delivery: result.delivery,
+      } satisfies OrchestratorMcpThreadSendResult;
+    });
 
   return OrchestratorMcpService.of({
     scheduleTask: (scope, input) =>
@@ -2626,57 +2700,35 @@ const make = Effect.gen(function* () {
           hasMore: timeline.hasMore,
         } satisfies OrchestratorMcpThreadReadResult;
       }),
-    sendToThread: (scope, input) =>
+    sendToThread: (scope, input) => sendThread(scope, input),
+    broadcastToThreads: (scope, input) =>
       Effect.gen(function* () {
-        const { parent, limits, target } = yield* loadScopedThread(scope, input.threadId);
-        yield* assertLiveCallerForOtherThread(scope, parent, target);
-        yield* resolveRuntimeMode(limits.runtimeMode, target.thread.runtimeMode);
-        yield* resolveInteractionMode(limits.interactionMode, target.thread.interactionMode);
-
-        const mode = input.mode ?? "auto";
         const key = yield* requestKey(input.clientRequestId);
-        const messageId = stableOperationMessageId({
-          scope,
-          requestKey: key,
-          operation: "thread-send",
-        });
-        const result = yield* threadManagement
-          .sendToThread({
-            projectId: target.thread.projectId,
-            commandId: stableCommandId({
+        const results = yield* Effect.forEach(
+          input.threadIds,
+          (threadId) =>
+            sendThread(
               scope,
-              requestKey: key,
-              operation: "thread-send",
-            }),
-            threadId: input.threadId,
-            ...(parent === undefined ? {} : { senderThreadId: parent.thread.id }),
-            messageId,
-            text: input.message,
-            attachments: [],
-            mode,
-            createdBy: "agent",
-            creationSource: "mcp",
-          })
-          .pipe(
-            Effect.mapError((error) =>
-              isThreadManagementError(error)
-                ? threadManagementFailure(error)
-                : failure(
-                    "orchestration_error",
-                    `Unable to send to thread ${input.threadId}: ${errorMessage(error)}`,
-                  ),
+              {
+                threadId,
+                message: input.message,
+                ...(input.mode === undefined ? {} : { mode: input.mode }),
+              },
+              {
+                operation: "thread-broadcast-send",
+                requestKey: `${key}:${stablePart(threadId)}`,
+              },
+            ).pipe(
+              Effect.catch((error) =>
+                Effect.succeed({
+                  threadId,
+                  error: { code: error.code, message: error.message },
+                }),
+              ),
             ),
-          );
-        return {
-          threadId: input.threadId,
-          messageId,
-          runId: result.run.id,
-          ...(result.run.delegatedTaskId === undefined
-            ? {}
-            : { taskId: result.run.delegatedTaskId }),
-          status: result.run.status,
-          delivery: result.delivery,
-        } satisfies OrchestratorMcpThreadSendResult;
+          { concurrency: 1 },
+        );
+        return { results } satisfies OrchestratorMcpThreadBroadcastResult;
       }),
     waitForThread: (scope, input) =>
       Effect.gen(function* () {

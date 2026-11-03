@@ -16,6 +16,7 @@ import {
   type OrchestrationV2ProviderThread,
   type OrchestrationV2ThreadProjection,
   OrchestratorMcpCreateThreadsResult,
+  OrchestratorMcpThreadBroadcastResult,
   OrchestratorMcpDelegateTaskResult,
   OrchestratorMcpTaskCancelResult,
   OrchestratorMcpThreadInterruptResult,
@@ -123,6 +124,9 @@ const decodeThreadListResult = Schema.decodeUnknownEffect(OrchestratorMcpThreadL
 const decodeThreadReadResult = Schema.decodeUnknownEffect(OrchestratorMcpThreadReadResult);
 const decodeThreadSendResult = Schema.decodeUnknownEffect(OrchestratorMcpThreadSendResult);
 const decodeThreadWaitResult = Schema.decodeUnknownEffect(OrchestratorMcpThreadWaitResult);
+const decodeThreadBroadcastResult = Schema.decodeUnknownEffect(
+  OrchestratorMcpThreadBroadcastResult,
+);
 const decodeThreadUpdateResult = Schema.decodeUnknownEffect(ThreadMetadataMcpUpdateResult);
 
 const codexSelection = {
@@ -1456,6 +1460,12 @@ describe("orchestrator MCP toolkit", () => {
             });
             const threadSendTool = server.tools.find(({ tool }) => tool.name === "t3_thread_send");
             expect(threadSendTool?.tool.annotations?.destructiveHint).toBe(true);
+            expect(threadSendTool?.tool.description).toContain("next tool boundary");
+            expect(threadSendTool?.tool.description).toContain("possibly hours");
+            const threadBroadcastTool = server.tools.find(
+              ({ tool }) => tool.name === "t3_thread_broadcast",
+            );
+            expect(threadBroadcastTool?.tool.annotations?.destructiveHint).toBe(true);
             const threadWaitTool = server.tools.find(({ tool }) => tool.name === "t3_thread_wait");
             expect(threadWaitTool?.tool.annotations?.readOnlyHint).toBe(true);
             const threadInterruptTool = server.tools.find(
@@ -2578,6 +2588,113 @@ describe("orchestrator MCP toolkit", () => {
             expect(
               (yield* orchestrator.getThreadProjection(emptyThread.threadId)).runs,
             ).toHaveLength(1);
+            const broadcastPrompt = "Deliver this update to every selected thread.";
+            const broadcastInput = {
+              threadIds: [emptyThread.threadId, promptedThread.threadId],
+              message: broadcastPrompt,
+              clientRequestId: "thread-broadcast-retry-1",
+            };
+            const emptyRunCountBeforeBroadcast = (yield* orchestrator.getThreadProjection(
+              emptyThread.threadId,
+            )).runs.length;
+            const promptedRunCountBeforeBroadcast = (yield* orchestrator.getThreadProjection(
+              promptedThread.threadId,
+            )).runs.length;
+            const broadcastCall = yield* invoke("t3_thread_broadcast", broadcastInput);
+            expect(broadcastCall.isError).toBe(false);
+            const broadcast = yield* decodeThreadBroadcastResult(
+              broadcastCall.structuredContent,
+            ).pipe(Effect.orDie);
+            expect(broadcast.results).toMatchObject([
+              {
+                threadId: emptyThread.threadId,
+                messageId: expect.any(String),
+                runId: expect.any(String),
+                status: expect.any(String),
+                delivery: "started",
+              },
+              {
+                threadId: promptedThread.threadId,
+                messageId: expect.any(String),
+                runId: expect.any(String),
+                status: expect.any(String),
+                delivery: "started",
+              },
+            ]);
+            const repeatedBroadcastCall = yield* invoke("t3_thread_broadcast", broadcastInput);
+            const repeatedBroadcast = yield* decodeThreadBroadcastResult(
+              repeatedBroadcastCall.structuredContent,
+            ).pipe(Effect.orDie);
+            expect(repeatedBroadcast.results).toHaveLength(broadcast.results.length);
+            expect(
+              repeatedBroadcast.results.every((result, index) => {
+                const original = broadcast.results[index];
+                return (
+                  original !== undefined &&
+                  "messageId" in result &&
+                  "messageId" in original &&
+                  result.threadId === original.threadId &&
+                  result.messageId === original.messageId
+                );
+              }),
+            ).toBe(true);
+            expect(
+              (yield* orchestrator.getThreadProjection(emptyThread.threadId)).runs,
+            ).toHaveLength(emptyRunCountBeforeBroadcast + 1);
+            expect(
+              (yield* orchestrator.getThreadProjection(promptedThread.threadId)).runs,
+            ).toHaveLength(promptedRunCountBeforeBroadcast + 1);
+            for (const threadId of [emptyThread.threadId, promptedThread.threadId]) {
+              const projection = yield* orchestrator.getThreadProjection(threadId);
+              expect(
+                projection.messages.filter((message) => message.text === broadcastPrompt),
+              ).toHaveLength(1);
+              expect(
+                projection.messages.find((message) => message.text === broadcastPrompt),
+              ).toMatchObject({
+                createdBy: "agent",
+                creationSource: "mcp",
+                senderThreadId: parentThreadId,
+              });
+            }
+
+            const duplicateBroadcastArgs = {
+              threadIds: [emptyThread.threadId, emptyThread.threadId],
+              message: "This duplicate-target message must be rejected.",
+            };
+            const duplicateBroadcastError = yield* Effect.flip(
+              invoke("t3_thread_broadcast", {
+                ...duplicateBroadcastArgs,
+                clientRequestId: "thread-broadcast-duplicate-1",
+              }),
+            );
+            expect(duplicateBroadcastError).toMatchObject({ _tag: "InvalidParams" });
+            expect(
+              (yield* orchestrator.getThreadProjection(emptyThread.threadId)).messages.filter(
+                (message) => message.text === duplicateBroadcastArgs.message,
+              ),
+            ).toHaveLength(0);
+
+            const missingBroadcastThreadId = ThreadId.make("thread:mcp-broadcast-missing");
+            const partialBroadcastCall = yield* invoke("t3_thread_broadcast", {
+              threadIds: [missingBroadcastThreadId, emptyThread.threadId],
+              message: "Continue delivering after an unavailable target.",
+              clientRequestId: "thread-broadcast-partial-1",
+            });
+            expect(partialBroadcastCall.isError).toBe(false);
+            const partialBroadcast = yield* decodeThreadBroadcastResult(
+              partialBroadcastCall.structuredContent,
+            ).pipe(Effect.orDie);
+            expect(partialBroadcast.results).toMatchObject([
+              { threadId: missingBroadcastThreadId, error: { code: "thread_not_found" } },
+              {
+                threadId: emptyThread.threadId,
+                messageId: expect.any(String),
+                runId: expect.any(String),
+                status: "queued",
+                delivery: "queued",
+              },
+            ]);
 
             const activeThreadCall = yield* invoke("create_threads", {
               threads: [{ prompt: cancellationPrompt, title: "Managed active thread" }],

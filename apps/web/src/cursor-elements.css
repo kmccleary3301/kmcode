@@ -534,9 +534,14 @@
   color: var(--popover-foreground);
   box-shadow: var(--shadow-composer);
 }
+/* Both composer popups scroll vertically only: `overflow-y: auto` alone makes
+   overflow-x auto too, so a row a few pixels too wide drew a horizontal
+   scrollbar. Long unbroken tokens wrap instead of being clipped. */
 .cursor-composer-hub-panel {
   max-height: min(24rem, 55dvh);
+  overflow-x: hidden;
   overflow-y: auto;
+  overflow-wrap: anywhere;
   padding: 0.5rem 0.75rem 0.6rem;
 }
 /* Positioned so its rows' sr-only labels (absolute) scroll and clip with it;
@@ -544,7 +549,9 @@
 .cursor-composer-status-panel {
   position: relative;
   max-height: min(24rem, 55dvh);
+  overflow-x: hidden;
   overflow-y: auto;
+  overflow-wrap: anywhere;
   padding: 0.625rem 0.75rem;
   font-family: var(--font-sans);
   font-size: 0.8125rem;

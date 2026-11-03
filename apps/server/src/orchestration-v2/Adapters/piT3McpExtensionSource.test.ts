@@ -2,7 +2,21 @@ import * as NodeModule from "node:module";
 import * as NodeVM from "node:vm";
 import { assert, describe, it } from "@effect/vitest";
 
-import { PI_T3_MCP_EXTENSION_SOURCE } from "./piT3McpExtensionSource.ts";
+import {
+  PI_T3_MCP_EXTENSION_SOURCE,
+  T3_MCP_BEARER_ENV,
+  T3_MCP_URL_ENV,
+  T3_PI_RUNTIME_INSTRUCTIONS_ENV,
+} from "./piT3McpExtensionSource.ts";
+import { T3_CODE_ORCHESTRATION_INSTRUCTIONS } from "../../provider/T3OrchestrationInstructions.ts";
+
+// The shipped extension, runnable in a VM: Typebox is only needed for MCP tools.
+const RUNNABLE_SOURCE = NodeModule.stripTypeScriptTypes(
+  PI_T3_MCP_EXTENSION_SOURCE.replace('import { Type } from "typebox";', "").replace(
+    "export default async function",
+    "async function",
+  ),
+);
 
 type RequestHook = (
   event: { payload: unknown },
@@ -20,13 +34,7 @@ type TrustHook = (
 async function loadRequestHook(): Promise<RequestHook> {
   const handlers = new Map<string, RequestHook>();
   // Execute the shipped extension with MCP disabled; this path needs no Typebox.
-  const source = NodeModule.stripTypeScriptTypes(
-    PI_T3_MCP_EXTENSION_SOURCE.replace('import { Type } from "typebox";', "").replace(
-      "export default async function",
-      "async function",
-    ),
-  );
-  await NodeVM.runInNewContext(`${source}\nt3McpExtension(pi)`, {
+  await NodeVM.runInNewContext(`${RUNNABLE_SOURCE}\nt3McpExtension(pi)`, {
     process: { env: {} },
     pi: { on: (name: string, handler: RequestHook) => handlers.set(name, handler) },
   });
@@ -37,13 +45,7 @@ async function loadRequestHook(): Promise<RequestHook> {
 
 async function loadTrustHook(argv: ReadonlyArray<string>): Promise<TrustHook> {
   const handlers: Array<(event: unknown, ctx: unknown) => unknown> = [];
-  const source = NodeModule.stripTypeScriptTypes(
-    PI_T3_MCP_EXTENSION_SOURCE.replace('import { Type } from "typebox";', "").replace(
-      "export default async function",
-      "async function",
-    ),
-  );
-  await NodeVM.runInNewContext(`${source}\nt3McpExtension(pi)`, {
+  await NodeVM.runInNewContext(`${RUNNABLE_SOURCE}\nt3McpExtension(pi)`, {
     process: { env: {}, argv },
     pi: {
       on: (name: string, handler: (event: unknown, ctx: unknown) => unknown) => {
@@ -106,5 +108,41 @@ describe("Pi project trust", () => {
     assert.equal(sent.length, notices * 2);
     for (const message of sent)
       assert.include(message, "for /repo because the folder is not trusted");
+  });
+});
+
+describe("Pi system prompt", () => {
+  async function systemPromptFor(env: Record<string, string>): Promise<ReadonlyArray<string>> {
+    const handlers: Array<(event: { systemPrompt: string }, ctx: unknown) => unknown> = [];
+    await NodeVM.runInNewContext(`${RUNNABLE_SOURCE}\nt3McpExtension(pi)`, {
+      process: { env, argv: [] },
+      fetch: () => Promise.reject(new Error("offline")),
+      pi: {
+        on: (name: string, handler: (event: { systemPrompt: string }, ctx: unknown) => unknown) => {
+          if (name === "before_agent_start") handlers.push(handler);
+        },
+      },
+    });
+    const ctx = { cwd: "/repo", isProjectTrusted: () => true, ui: { notify: () => undefined } };
+    return handlers.flatMap((handler) => {
+      const result = handler({ systemPrompt: "BASE" }, ctx);
+      return typeof result === "object" && result !== null && "systemPrompt" in result
+        ? [String(result.systemPrompt)]
+        : [];
+    });
+  }
+
+  it("appends launch runtime guidance even without the MCP bridge", async () => {
+    const prompts = await systemPromptFor({ [T3_PI_RUNTIME_INSTRUCTIONS_ENV]: "RUNTIME" });
+    assert.deepEqual(prompts, ["BASE\n\nRUNTIME"]);
+  });
+
+  it("adds orchestration guidance after runtime guidance only with the MCP bridge", async () => {
+    const prompts = await systemPromptFor({
+      [T3_PI_RUNTIME_INSTRUCTIONS_ENV]: "RUNTIME",
+      [T3_MCP_URL_ENV]: "http://127.0.0.1:1/mcp",
+      [T3_MCP_BEARER_ENV]: "token",
+    });
+    assert.deepEqual(prompts, [`BASE\n\nRUNTIME\n\n${T3_CODE_ORCHESTRATION_INSTRUCTIONS.trim()}`]);
   });
 });

@@ -7,10 +7,13 @@ import * as Option from "effect/Option";
 import * as Path from "effect/Path";
 import * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
-import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process";
+import { ChildProcess, ChildProcessSpawner } from "effect/process";
 
 import { buildSshChildEnvironment, type SshAuthOptions } from "./auth.ts";
 import { SshCommandError, SshInvalidTargetError } from "./errors.ts";
+import { remoteStateKey, targetConnectionKey } from "./remote-scripts.ts";
+
+export { remoteStateKey, targetConnectionKey };
 
 const DEFAULT_SSH_COMMAND_TIMEOUT_MS = 60_000;
 const MAX_SSH_ERROR_OUTPUT_LENGTH = 4_000;
@@ -64,10 +67,6 @@ export function parseSshResolveOutput(alias: string, stdout: string): DesktopSsh
     username,
     port: Number.isInteger(parsedPort) ? parsedPort : null,
   };
-}
-
-export function targetConnectionKey(target: DesktopSshEnvironmentTarget): string {
-  return `${target.alias}\u0000${target.hostname}\u0000${target.username ?? ""}\u0000${target.port ?? ""}`;
 }
 
 function buildSshHostSpec(target: DesktopSshEnvironmentTarget): string {

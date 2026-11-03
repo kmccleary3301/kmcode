@@ -4,9 +4,9 @@ import { classifyFiles } from "./classify-ci-change.ts";
 
 it("sends provider, decoder, projector, and fixture changes to replay and budget gates", () => {
   const result = classifyFiles([
-    "apps/server/src/provider/piFamily/StrictJsonlDecoder.ts",
-    "apps/server/src/orchestration/Layers/ProjectionPipeline.ts",
-    "apps/server/src/provider/piFamily/testFixtures/native/omp.json",
+    "apps/server/src/provider/PiRpc.ts",
+    "apps/server/src/orchestration-v2/Adapters/PiAdapterV2.ts",
+    "apps/server/src/orchestration-v2/testkit/ReplayFixtureWorkspace.ts",
   ]);
   assert.equal(result.replayGate, true);
   assert.equal(result.budgetGate, true);

@@ -106,7 +106,7 @@ export function createMobileThemePairPatch(value: MobileThemeId) {
   };
 }
 
-function nativeColors(colors: ThemeColors): ThemeColors {
+export function nativeColors(colors: ThemeColors): ThemeColors {
   return Object.fromEntries(
     Object.entries(colors).map(([role, color]) => [role, themeColorToNativeColor(color)]),
   ) as ThemeColors;

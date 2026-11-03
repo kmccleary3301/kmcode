@@ -28,34 +28,32 @@ const runtimeIdentity = (binary) => {
   return { name: NodePath.basename(path), sha256: sha256(path), versionOutput };
 };
 
+/** Both runtimes are stock npm packages pinned by version and registry integrity. */
+const packageProvenance = (runtime) => {
+  const prefix = `T3_NATIVE_${runtime.toUpperCase()}`;
+  const packageRoot = NodeFS.realpathSync(required(`${prefix}_PACKAGE_ROOT`));
+  const manifest = JSON.parse(
+    NodeFS.readFileSync(NodePath.join(packageRoot, "package.json"), "utf8"),
+  );
+  const version = required(`${prefix}_VERSION`);
+  if (manifest.version !== version) {
+    throw new Error(
+      `${runtime} package version mismatch: expected ${version}, got ${manifest.version}`,
+    );
+  }
+  const integrity = required(`${prefix}_INTEGRITY`);
+  if (!/^sha512-[A-Za-z0-9+/]+={0,2}$/u.test(integrity)) {
+    throw new Error(`${runtime} package integrity is not a sha512 SRI value`);
+  }
+  return {
+    package: manifest.name,
+    version: manifest.version,
+    integrity,
+    binary: runtimeIdentity(required(`${prefix}_BINARY`)),
+  };
+};
+
 const outputPath = required("T3_NATIVE_PROVENANCE_REPORT");
-const piPackageRoot = NodeFS.realpathSync(required("T3_NATIVE_PI_PACKAGE_ROOT"));
-const piPackage = JSON.parse(
-  NodeFS.readFileSync(NodePath.join(piPackageRoot, "package.json"), "utf8"),
-);
-const piVersion = required("T3_NATIVE_PI_VERSION");
-if (piPackage.version !== piVersion) {
-  throw new Error(`Pi package version mismatch: expected ${piVersion}, got ${piPackage.version}`);
-}
-const piIntegrity = required("T3_NATIVE_PI_INTEGRITY");
-if (!/^sha512-[A-Za-z0-9+/]+={0,2}$/u.test(piIntegrity)) {
-  throw new Error("Pi package integrity is not a sha512 SRI value");
-}
-
-const ompSourceHead = required("T3_NATIVE_OMP_SOURCE_HEAD");
-if (!/^[0-9a-f]{40}$/u.test(ompSourceHead)) {
-  throw new Error("OMP source head is not a full Git SHA");
-}
-const ompAddonDirectory = NodeFS.realpathSync(required("T3_NATIVE_OMP_ADDON_DIR"));
-const ompAddons = NodeFS.readdirSync(ompAddonDirectory)
-  .filter((name) => name.endsWith(".node"))
-  .sort()
-  .map((name) => {
-    const path = NodePath.join(ompAddonDirectory, name);
-    return { name, sha256: sha256(path), size: NodeFS.statSync(path).size };
-  });
-if (ompAddons.length === 0) throw new Error("No built OMP native addons were found");
-
 const sourceHead = required("T3_EVIDENCE_SOURCE_HEAD");
 if (!/^[0-9a-f]{40}$/u.test(sourceHead)) {
   throw new Error("Evidence source head is not a full Git SHA");
@@ -72,7 +70,7 @@ if (
 }
 
 const report = {
-  schemaVersion: 1,
+  schemaVersion: 2,
   sourceHead,
   platform,
   architecture,
@@ -84,18 +82,8 @@ const report = {
           previousTag: lifecyclePreviousTag,
         }
       : null,
-  pi: {
-    package: piPackage.name,
-    version: piPackage.version,
-    integrity: piIntegrity,
-    binary: runtimeIdentity(required("T3_NATIVE_PI_BINARY")),
-  },
-  omp: {
-    sourceRepository: required("T3_NATIVE_OMP_SOURCE_REPOSITORY"),
-    sourceHead: ompSourceHead,
-    binary: runtimeIdentity(required("T3_NATIVE_OMP_BINARY")),
-    nativeAddons: ompAddons,
-  },
+  pi: packageProvenance("pi"),
+  omp: packageProvenance("omp"),
 };
 NodeFS.mkdirSync(NodePath.dirname(outputPath), { recursive: true });
 NodeFS.writeFileSync(outputPath, `${JSON.stringify(report, null, 2)}\n`);

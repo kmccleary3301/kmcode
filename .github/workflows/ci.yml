@@ -158,6 +158,16 @@ jobs:
             !/.repos/
           sparse-checkout-cone-mode: false
 
+      # Blacksmith boots GitHub's Ubuntu runner image (gcc is usually present),
+      # but ACP process-tree live tests compile a small pthread fixture with `cc`
+      # and soft-skip when it is missing. Install build-essential so that path
+      # always runs in CI instead of silently no-oping.
+      - name: Install C toolchain for process-tree fixtures
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends build-essential
+          command -v cc
+
       - uses: ./.github/actions/setup-apt-mirrors
 
       # The desktop tests compile the browser secret helper. The install runs in
@@ -255,6 +265,9 @@ jobs:
       # No Electron setup here: `t3` (apps/server) has no Electron dependency
       # and none of its tests touch the runtime. Only the non-server `test`
       # job, which covers @t3tools/desktop, needs the download.
+      - name: Install Chromium for server browser integration tests
+        run: node apps/server/node_modules/playwright-core/cli.js install --with-deps --only-shell chromium
+
       - name: Test
         env:
           T3CODE_TRANSFER_BUDGET_REPORT_PATH: ${{ runner.temp }}/t3code-transfer-budget.md
@@ -262,7 +275,7 @@ jobs:
           T3CODE_TRANSFER_BUDGET_SOURCE_HEAD: ${{ github.event.pull_request.head.sha || github.sha }}
         run: vp run --filter t3 test --shard ${{ matrix.shard }}/${{ strategy.job-total }}
 
-      # src/server.test.ts writes the budget report, so exactly one shard
+      # integration/transferBudgetV2.integration.test.ts writes the report; exactly one shard
       # produces these files. Gating the upload on their presence keeps a
       # single `thread-transfer-results` artifact per run, which is the name
       # thread-transfer-report.yml resolves.
@@ -293,6 +306,18 @@ jobs:
           path: ${{ runner.temp }}/thread-transfer-result.json
           if-no-files-found: ignore
           retention-days: 30
+
+  transfer-report:
+    name: Transfer report artifact
+    needs: test_server
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Require transfer measurements
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: thread-transfer-results
+          path: ${{ runner.temp }}/thread-transfer
 
   # Split out of Check and Test: both paid ~7-9s to install a Rust toolchain
   # for checks that take under 3s, on the critical path of every PR.
@@ -353,76 +378,37 @@ jobs:
           T3_CHANGE_HEAD: ${{ github.sha }}
         run: vp run classify-ci-change
 
-      - name: Checkout pinned OMP runtime
-        if: steps.classify.outputs.replay_gate == 'true'
-        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
-        with:
-          repository: kmccleary3301/oh-my-pi
-          ref: c53cd2c2bf521f6eb70cac5484e6474d827498d6
-          path: .native/omp
-
-      - name: Build pinned extended Pi and OMP runtimes
+      - name: Install stock Pi and OMP runtimes
         if: steps.classify.outputs.replay_gate == 'true'
         run: |
-          npm install --global bun@1.3.14 @earendil-works/pi-coding-agent@0.84.2
-          bun install --cwd .native/omp --frozen-lockfile
-          bun --cwd=.native/omp/packages/natives run build
-          bun --cwd=.native/omp/packages/coding-agent run build
-
-      - name: Install current stock Pi and OMP runtimes
-        if: steps.classify.outputs.replay_gate == 'true'
-        run: |
+          npm install --global bun@1.3.14
           npm install --prefix .native/current --no-package-lock --no-save \
             @earendil-works/pi-coding-agent@0.84.4 \
-            @oh-my-pi/pi-coding-agent@18.0.10
+            @oh-my-pi/pi-coding-agent@18.8.4
           test "$(.native/current/node_modules/.bin/pi --version)" = "0.84.4"
-          test "$(.native/current/node_modules/.bin/omp --version)" = "omp/18.0.10"
+          test "$(.native/current/node_modules/.bin/omp --version)" = "omp/18.8.4"
           test "$(npm view @earendil-works/pi-coding-agent@0.84.4 dist.integrity)" = \
             "sha512-jmOlrqUmvhh/siNWFRXjYLJzhKFIHNsAQaysRwzQPQFnPAaV/vhqHsLH/MBsIISA1Rjj7WTUFR3nJrpXoLx39w=="
-          test "$(npm view @oh-my-pi/pi-coding-agent@18.0.10 dist.integrity)" = \
-            "sha512-6rvQdBKcwYO8qKQisVsOUVR4IjBVcaMZ7/xxUq4PqWGLH8utmZdVi4GQXFhteajNiHC1xisCsFZBRFR/WzU90g=="
+          test "$(npm view @oh-my-pi/pi-coding-agent@18.8.4 dist.integrity)" = \
+            "sha512-MIiecZZbQT45Lnn1fJwq2gCG2+LBJwQ0cyQodqIPxnzcIRgawapLEaYZn/zXBo+0tn2oCZO6QiJrgKHe1OrsHg=="
 
-      - name: Run current stock native compatibility matrix
+      - name: Run stock native lifecycle matrix
         if: steps.classify.outputs.replay_gate == 'true'
         env:
           T3_NATIVE_PI_BINARY: ${{ github.workspace }}/.native/current/node_modules/.bin/pi
+          T3_NATIVE_PI_PACKAGE_ROOT: ${{ github.workspace }}/.native/current/node_modules/@earendil-works/pi-coding-agent
+          T3_NATIVE_PI_VERSION: 0.84.4
           T3_NATIVE_OMP_BINARY: ${{ github.workspace }}/.native/current/node_modules/.bin/omp
-          T3_NATIVE_CURRENT_REPORT: ${{ runner.temp }}/current-native-compatibility-ci.raw.json
-        run: |
-          vp test run \
-            apps/server/src/server.test.ts \
-            apps/server/integration/orchestrationEngine.integration.test.ts \
-            -t "projects configured (pi|omp) native process through T3 HTTP and WebSocket|runs configured (pi|omp) through the native T3 lifecycle matrix" \
-            --reporter=default \
-            --reporter=json \
-            --outputFile.json="$T3_NATIVE_CURRENT_REPORT"
-
-      - name: Run pinned extended native matrix
-        if: steps.classify.outputs.replay_gate == 'true'
-        env:
-          T3_NATIVE_ROOT_REPORT: ${{ runner.temp }}/stock-native-root-ci.raw.json
+          T3_NATIVE_OMP_PACKAGE_ROOT: ${{ github.workspace }}/.native/current/node_modules/@oh-my-pi/pi-coding-agent
+          T3_NATIVE_OMP_VERSION: 18.8.4
           T3_NATIVE_MATRIX_REPORT: ${{ runner.temp }}/stock-native-matrix-ci.raw.json
           T3_NATIVE_PROVENANCE_REPORT: ${{ runner.temp }}/stock-native-provenance-ci.json
           T3_EVIDENCE_SOURCE_HEAD: ${{ github.event.pull_request.head.sha || github.sha }}
         run: |
-          export T3_NATIVE_PI_BINARY="$(command -v pi)"
-          export T3_NATIVE_OMP_BINARY="$PWD/.native/omp/packages/coding-agent/dist/omp"
-          export T3_NATIVE_PI_PACKAGE_ROOT="$(npm root --global)/@earendil-works/pi-coding-agent"
-          export T3_NATIVE_PI_VERSION=0.84.2
-          export T3_NATIVE_PI_INTEGRITY="$(npm view @earendil-works/pi-coding-agent@0.84.2 dist.integrity)"
-          export T3_NATIVE_OMP_SOURCE_REPOSITORY=kmccleary3301/oh-my-pi
-          export T3_NATIVE_OMP_SOURCE_HEAD="$(git -C .native/omp rev-parse HEAD)"
-          export T3_NATIVE_OMP_ADDON_DIR="$PWD/.native/omp/packages/natives/native"
+          export T3_NATIVE_PI_INTEGRITY="$(npm view @earendil-works/pi-coding-agent@0.84.4 dist.integrity)"
+          export T3_NATIVE_OMP_INTEGRITY="$(npm view @oh-my-pi/pi-coding-agent@18.8.4 dist.integrity)"
           node scripts/native-runtime-provenance.mjs
-          vp test run \
-            apps/server/src/server.test.ts \
-            -t "projects configured (pi|omp) native process through T3 HTTP and WebSocket|matches configured (pi|omp) live and exact replay through T3 HTTP and WebSocket" \
-            --reporter=default \
-            --reporter=json \
-            --outputFile.json="$T3_NATIVE_ROOT_REPORT"
-          vp test run \
-            apps/server/integration/orchestrationEngine.integration.test.ts \
-            -t "runs configured (pi|omp) through the native T3 lifecycle matrix|recovers configured (pi|omp) after an isolated stock native process crash" \
+          vp test run apps/server/integration/nativeRuntimeLifecycle.integration.test.ts \
             --reporter=default \
             --reporter=json \
             --outputFile.json="$T3_NATIVE_MATRIX_REPORT"
@@ -433,47 +419,27 @@ jobs:
           T3_EVIDENCE_SOURCE_HEAD: ${{ github.event.pull_request.head.sha || github.sha }}
         run: |
           set -euo pipefail
-          sanitize() {
-            local input="$1"
-            local output="$2"
-            local kind="$3"
-            if [[ -f "$input" ]]; then
-              node apps/server/scripts/sanitize-vitest-evidence.mjs \
-                "$input" "$output" "$kind" "$T3_EVIDENCE_SOURCE_HEAD"
-            fi
-          }
-          sanitize \
-            "$RUNNER_TEMP/stock-native-root-ci.raw.json" \
-            "$RUNNER_TEMP/stock-native-root-ci.json" \
-            stock-native-root
-          sanitize \
-            "$RUNNER_TEMP/stock-native-matrix-ci.raw.json" \
-            "$RUNNER_TEMP/stock-native-matrix-ci.json" \
-            stock-native-matrix
-          sanitize \
-            "$RUNNER_TEMP/current-native-compatibility-ci.raw.json" \
-            "$RUNNER_TEMP/current-native-compatibility-ci.json" \
-            current-native-compatibility
+          if [[ -f "$RUNNER_TEMP/stock-native-matrix-ci.raw.json" ]]; then
+            node apps/server/scripts/sanitize-vitest-evidence.mjs \
+              "$RUNNER_TEMP/stock-native-matrix-ci.raw.json" \
+              "$RUNNER_TEMP/stock-native-matrix-ci.json" \
+              stock-native-matrix \
+              "$T3_EVIDENCE_SOURCE_HEAD"
+          fi
 
-      - name: Replay scrubbed Pi and OMP traces
+      - name: Run Pi and OMP adapter and native-session tests
         if: steps.classify.outputs.replay_gate == 'true'
         run: >-
           vp test run
-          apps/server/src/provider/piFamily/NativeTraceCorpus.test.ts
-          apps/server/src/provider/piFamily/NativeTraceReplay.test.ts
+          apps/server/src/orchestration-v2/Adapters/PiAdapterV2.test.ts
+          apps/server/src/orchestration-v2/Adapters/OmpAdapterV2.test.ts
+          apps/server/src/orchestration-v2/Adapters/piT3McpInjection.test.ts
+          apps/server/src/provider/NativeSessionStore.test.ts
+          apps/server/src/provider/PiProvider.test.ts
+          apps/server/src/provider/PiCommands.test.ts
+          apps/server/src/textGeneration/PiTextGeneration.test.ts
 
-      - name: Run native replay through T3 HTTP and WebSocket
-        if: steps.classify.outputs.replay_gate == 'true'
-        run: >-
-          vp test run apps/server/src/server.test.ts
-          -t "projects scrubbed .* native replay"
-      - name: Run credential-free native process smoke
-        if: steps.classify.outputs.replay_gate == 'true'
-        run: >-
-          vp test run apps/server/src/provider/piFamily/NativeAdapter.test.ts
-          -t "starts pi, negotiates capabilities, and completes a prompt|starts omp, negotiates capabilities, and completes a prompt"
-
-      - name: Run transfer and convergence gates
+      - name: Run transfer budget gates
         if: steps.classify.outputs.budget_gate == 'true'
         env:
           T3CODE_TRANSFER_BUDGET_REPORT_PATH: ${{ runner.temp }}/t3code-transfer-budget.md
@@ -482,8 +448,7 @@ jobs:
         run: >-
           vp test run
           apps/server/integration/TransferBudgetReport.integration.test.ts
-          apps/server/src/server.test.ts
-          -t "reports thread HTTP and WebSocket transfer budgets|keeps authenticated .* thread subscribers converged across bounded reconnect replay"
+          apps/server/integration/transferBudgetV2.integration.test.ts
 
       - name: Measure deterministic performance baseline
         if: steps.classify.outputs.replay_gate == 'true'
@@ -501,10 +466,8 @@ jobs:
             ${{ runner.temp }}/t3code-transfer-budget.md
             ${{ runner.temp }}/thread-transfer-result.json
             ${{ runner.temp }}/pi-omp-performance.json
-            ${{ runner.temp }}/stock-native-root-ci.json
             ${{ runner.temp }}/stock-native-matrix-ci.json
             ${{ runner.temp }}/stock-native-provenance-ci.json
-            ${{ runner.temp }}/current-native-compatibility-ci.json
           if-no-files-found: ignore
           retention-days: 30
 
@@ -580,6 +543,7 @@ jobs:
         test,
         test_web,
         test_server,
+        transfer-report,
         rust,
         focused_pi_omp_gate,
         mobile_native_changes,

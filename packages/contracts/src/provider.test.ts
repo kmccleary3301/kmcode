@@ -6,7 +6,6 @@ import {
   ProviderEvent,
   ProviderNativeSessionArchiveInput,
   ProviderNativeSessionForkInput,
-  ProviderNativeSessionListInput,
   ProviderNativeSessionListRequest,
   ProviderNativeSessionOpenInput,
   ProviderNativeSessionRenameInput,
@@ -26,9 +25,6 @@ const decodeProviderSession = Schema.decodeUnknownSync(ProviderSession);
 const decodeProviderEvent = Schema.decodeUnknownSync(ProviderEvent);
 const decodeProviderNativeSessionListRequest = Schema.decodeUnknownSync(
   ProviderNativeSessionListRequest,
-);
-const decodeProviderNativeSessionListInput = Schema.decodeUnknownSync(
-  ProviderNativeSessionListInput,
 );
 const decodeProviderNativeSessionSummary = Schema.decodeUnknownSync(ProviderNativeSessionSummary);
 const decodeProviderNativeSessionOpenInput = Schema.decodeUnknownSync(
@@ -61,9 +57,7 @@ describe("ProviderNativeSessionListRequest", () => {
     expect(decodeProviderNativeSessionListRequest({ providerInstanceId: "omp" })).toEqual({
       providerInstanceId: "omp",
     });
-    expect(decodeProviderNativeSessionListInput({ providerInstanceId: "omp" })).toEqual({
-      providerInstanceId: "omp",
-    });
+    expect(() => decodeProviderNativeSessionListRequest({})).toThrow();
   });
 });
 
@@ -87,13 +81,6 @@ describe("Provider native session management", () => {
         sessionId: "session-1",
       }),
     ).toEqual({ providerInstanceId: "pi", sessionId: "session-1" });
-    expect(
-      decodeProviderNativeSessionOpenInput({
-        providerInstanceId: "omp",
-        sessionId: "session-2",
-        indexOnly: true,
-      }),
-    ).toEqual({ providerInstanceId: "omp", sessionId: "session-2", indexOnly: true });
     expect(
       decodeProviderNativeSessionRenameInput({
         providerInstanceId: "pi",

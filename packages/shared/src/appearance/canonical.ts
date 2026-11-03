@@ -1,5 +1,5 @@
 import { sha256 } from "@noble/hashes/sha2";
-import * as Encoding from "effect/Encoding";
+import * as Hex from "effect/encoding/Hex";
 import * as Schema from "effect/Schema";
 
 import {
@@ -58,10 +58,10 @@ export function canonicalAppearanceJson(value: unknown): string {
 }
 
 export function appearanceSha256(value: unknown): string {
-  return Encoding.encodeHex(sha256(new TextEncoder().encode(canonicalAppearanceJson(value))));
+  return Hex.encode(sha256(new TextEncoder().encode(canonicalAppearanceJson(value))));
 }
 export function appearanceBytesSha256(bytes: Uint8Array): string {
-  return Encoding.encodeHex(sha256(bytes));
+  return Hex.encode(sha256(bytes));
 }
 
 export function hashNormalizedAppearanceProfile(profile: NormalizedAppearanceProfile): string {

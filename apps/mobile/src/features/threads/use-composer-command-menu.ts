@@ -1,17 +1,21 @@
-import { useAtomValue } from "@effect/atom-react";
 import type {
   EnvironmentId,
-  OrchestrationThreadActivity,
   ProjectId,
   ProviderInteractionMode,
   ServerProvider,
-  ServerProviderSlashCommand,
+  ThreadId,
 } from "@t3tools/contracts";
-import { COMPOSER_CONTEXT_MAX_RECORDS } from "@t3tools/contracts";
-import * as Cause from "effect/Cause";
+import { matchComposerThreadItems } from "@t3tools/client-runtime/composerThreadItems";
+import type { EnvironmentThreadShell } from "@t3tools/client-runtime/state/models";
+
+const EMPTY_THREAD_SHELLS: ReadonlyArray<EnvironmentThreadShell> = [];
+import {
+  COMPOSER_CONTEXT_MAX_RECORDS,
+  PROVIDER_WORKSPACE_SNAPSHOT_TTL_MS,
+} from "@t3tools/contracts";
 import { Alert } from "react-native";
 import { formatComposerContextReference } from "@t3tools/shared/composerContextReferences";
-import { pullRequestComposerContext } from "../../lib/composerContext";
+import { pullRequestComposerContext, threadComposerContext } from "../../lib/composerContext";
 import { uuidv4 } from "../../lib/uuid";
 import {
   getComposerDraftSnapshot,
@@ -26,18 +30,18 @@ import {
   serializeComposerFileLink,
   type ComposerTrigger,
 } from "@t3tools/shared/composerTrigger";
-import { providerSlashCommandsFromActivities } from "@t3tools/shared/providerSlashCommandCompletion";
 import {
   insertRankedSearchResult,
   normalizeSearchQuery,
   scoreQueryMatch,
 } from "@t3tools/shared/searchRanking";
-import { AsyncResult, Atom } from "effect/unstable/reactivity";
 import {
   dedupeProviderSkillsByName,
   getProviderSkillsForSlashMenu,
   getProviderSlashCommandsForSlashMenu,
   isProviderSkillUserInvocable,
+  hasCompleteProviderWorkspaceSnapshot,
+  hasCurrentProviderWorkspaceSnapshot,
   resolveProviderSkillsForCwd,
   resolveProviderSlashCommandsForCwd,
 } from "@t3tools/client-runtime/providerSkills";
@@ -50,10 +54,6 @@ import { useComposerPathSearch, useComposerPullRequestSearch } from "../../state
 import type { ComposerCommandItem } from "./ComposerCommandPopover";
 import { matchesSlashSkillQuery } from "./composerSlashSkillSearch";
 import { buildMobileSlashCommandItems } from "./composerSlashCommandItems";
-
-const EMPTY_NATIVE_COMMANDS_ATOM = Atom.make(
-  AsyncResult.initial<ReadonlyArray<ServerProviderSlashCommand>, never>(false),
-).pipe(Atom.withLabel("mobile:composer-native-commands:empty"));
 
 const WORKSPACE_SNAPSHOT_RETRY_COOLDOWN_MS = 10_000;
 
@@ -178,11 +178,12 @@ export function useComposerCommandMenu({
   draftMessage,
   ownerKey,
   environmentId,
+  threadShells = EMPTY_THREAD_SHELLS,
+  currentThreadId = null,
   projectCwd,
   pullRequestProjectId = null,
   pullRequestRepository = null,
   selectedProviderStatus,
-  threadActivities,
   hasThread,
   hasCompactableConversation,
   offersUsageLimits = false,
@@ -194,11 +195,14 @@ export function useComposerCommandMenu({
   readonly draftMessage: string;
   readonly ownerKey: string | null;
   readonly environmentId: EnvironmentId | null;
+  /** Candidates for `@` thread suggestions; the caller reads them from the entity store. */
+  readonly threadShells?: ReadonlyArray<EnvironmentThreadShell>;
+  /** Left out of `@` thread suggestions: a thread is never context for itself. */
+  readonly currentThreadId?: ThreadId | null;
   readonly projectCwd: string | null;
   readonly pullRequestProjectId?: ProjectId | null;
   readonly pullRequestRepository?: string | null;
   readonly selectedProviderStatus: ServerProvider | null;
-  readonly threadActivities?: ReadonlyArray<OrchestrationThreadActivity> | null;
   readonly hasThread: boolean;
   readonly hasCompactableConversation: boolean;
   /** Whether T3 itself offers /usage-limits for the selected provider. */
@@ -250,39 +254,73 @@ export function useComposerCommandMenu({
     reportFailure: false,
   });
   const selectedProviderInstanceId = selectedProviderStatus?.instanceId;
-  const hasWorkspaceSnapshot = Boolean(
-    projectCwd &&
-    selectedProviderStatus?.workspaceSnapshots?.some((snapshot) => snapshot.cwd === projectCwd),
+  const hasWorkspaceSnapshot = hasCompleteProviderWorkspaceSnapshot(
+    selectedProviderStatus,
+    projectCwd,
   );
-  const workspaceRefreshKeyRef = useRef<string | null>(null);
-  const workspaceRefreshRetryRef = useRef<{ key: string; notBefore: number } | null>(null);
+  // The last scan this composer asked for. A request inside the TTL is not
+  // repeated, so a client clock ahead of the server's cannot loop rescans.
+  const workspaceRefreshKeyRef = useRef<{ key: string; requestedAt: number } | null>(null);
+  const [workspaceRefreshRetry, setWorkspaceRefreshRetry] = useState<{
+    key: string;
+    notBefore: number;
+  } | null>(null);
+  const workspaceRefreshScopeKey =
+    environmentId && projectCwd && selectedProviderInstanceId
+      ? `${environmentId}:${selectedProviderInstanceId}:${projectCwd}`
+      : null;
+  const workspaceSlashCommandsPending =
+    selectedProviderStatus?.workspaceSnapshots?.some(
+      (snapshot) => snapshot.cwd === projectCwd && snapshot.slashCommandsPending === true,
+    ) ?? false;
+  useEffect(() => {
+    if (
+      !workspaceSlashCommandsPending ||
+      !workspaceRefreshRetry ||
+      workspaceRefreshRetry.key !== workspaceRefreshScopeKey
+    )
+      return;
+    const timeout = setTimeout(
+      () => {
+        setWorkspaceRefreshRetry((current) => (current === workspaceRefreshRetry ? null : current));
+      },
+      Math.max(0, workspaceRefreshRetry.notBefore - Date.now()),
+    );
+    return () => clearTimeout(timeout);
+  }, [workspaceRefreshRetry, workspaceRefreshScopeKey, workspaceSlashCommandsPending]);
   const hadWorkspaceSnapshotRef = useRef(false);
   useEffect(() => {
     if (hadWorkspaceSnapshotRef.current && !hasWorkspaceSnapshot) {
       workspaceRefreshKeyRef.current = null;
-      workspaceRefreshRetryRef.current = null;
+      setWorkspaceRefreshRetry(null);
     }
     hadWorkspaceSnapshotRef.current = hasWorkspaceSnapshot;
   }, [hasWorkspaceSnapshot]);
   useEffect(() => {
     if (!environmentId || !projectCwd || !selectedProviderInstanceId) return;
     const key = `${environmentId}:${selectedProviderInstanceId}:${projectCwd}`;
-    if (workspaceRefreshKeyRef.current === key) return;
-    if (hasWorkspaceSnapshot) {
-      workspaceRefreshKeyRef.current = key;
-      workspaceRefreshRetryRef.current = null;
+    const now = Date.now();
+    const lastRequest = workspaceRefreshKeyRef.current;
+    if (
+      lastRequest?.key === key &&
+      now - lastRequest.requestedAt < PROVIDER_WORKSPACE_SNAPSHOT_TTL_MS
+    )
+      return;
+    if (hasCurrentProviderWorkspaceSnapshot(selectedProviderStatus, projectCwd, now)) {
+      setWorkspaceRefreshRetry(null);
       return;
     }
-    const retry = workspaceRefreshRetryRef.current;
-    if (retry?.key === key && Date.now() < retry.notBefore) return;
-    workspaceRefreshKeyRef.current = key;
+    const retry = workspaceRefreshRetry;
+    if (retry?.key === key && now < retry.notBefore) return;
+    const request = { key, requestedAt: now };
+    workspaceRefreshKeyRef.current = request;
     const retryLater = () => {
-      if (workspaceRefreshKeyRef.current !== key) return;
+      if (workspaceRefreshKeyRef.current !== request) return;
       workspaceRefreshKeyRef.current = null;
-      workspaceRefreshRetryRef.current = {
+      setWorkspaceRefreshRetry({
         key,
         notBefore: Date.now() + WORKSPACE_SNAPSHOT_RETRY_COOLDOWN_MS,
-      };
+      });
     };
     void refreshProviders({
       environmentId,
@@ -290,20 +328,22 @@ export function useComposerCommandMenu({
     }).then((result) => {
       const refreshed =
         result._tag === "Success" &&
-        result.value.providers
-          .find((provider) => provider.instanceId === selectedProviderInstanceId)
-          ?.workspaceSnapshots?.some((snapshot) => snapshot.cwd === projectCwd);
-      if (!refreshed && workspaceRefreshKeyRef.current === key) {
-        retryLater();
-      }
+        hasCompleteProviderWorkspaceSnapshot(
+          result.value.providers.find(
+            (provider) => provider.instanceId === selectedProviderInstanceId,
+          ),
+          projectCwd,
+        );
+      if (!refreshed) retryLater();
     }, retryLater);
   }, [
     draftMessage,
     environmentId,
-    hasWorkspaceSnapshot,
     projectCwd,
     refreshProviders,
     selectedProviderInstanceId,
+    selectedProviderStatus,
+    workspaceRefreshRetry,
   ]);
 
   const trigger = useMemo(() => {
@@ -319,52 +359,6 @@ export function useComposerCommandMenu({
   });
   const nativeProviderSelected =
     selectedProviderStatus?.driver === "pi" || selectedProviderStatus?.driver === "omp";
-  const nativeProviderInstanceId = nativeProviderSelected
-    ? (selectedProviderStatus?.instanceId ?? null)
-    : null;
-  const sessionCommands = useMemo(
-    () =>
-      nativeProviderSelected &&
-      nativeProviderInstanceId !== null &&
-      threadActivities !== null &&
-      threadActivities !== undefined
-        ? providerSlashCommandsFromActivities(threadActivities, nativeProviderInstanceId)
-        : undefined,
-    [nativeProviderSelected, nativeProviderInstanceId, threadActivities],
-  );
-  const nativeCommandsAtom = useMemo(
-    () =>
-      nativeProviderSelected &&
-      sessionCommands === undefined &&
-      environmentId !== null &&
-      nativeProviderInstanceId !== null &&
-      projectCwd !== null
-        ? serverEnvironment.nativeCommands({
-            environmentId,
-            input: {
-              providerInstanceId: nativeProviderInstanceId,
-              workspaceRoot: projectCwd,
-            },
-          })
-        : EMPTY_NATIVE_COMMANDS_ATOM,
-    [environmentId, nativeProviderSelected, projectCwd, nativeProviderInstanceId, sessionCommands],
-  );
-  const nativeCommandsResult = useAtomValue(nativeCommandsAtom);
-  const nativeCommands =
-    sessionCommands ??
-    (nativeProviderSelected && AsyncResult.isSuccess(nativeCommandsResult)
-      ? nativeCommandsResult.value
-      : undefined);
-  const nativeCommandError =
-    nativeProviderSelected && nativeCommands === undefined
-      ? environmentId === null || nativeProviderInstanceId === null || projectCwd === null
-        ? "Select a workspace and provider to discover native commands."
-        : AsyncResult.isFailure(nativeCommandsResult)
-          ? Cause.pretty(nativeCommandsResult.cause)
-          : null
-      : null;
-  const nativeCommandsLoading =
-    nativeProviderSelected && nativeCommands === undefined && nativeCommandError === null;
   const pullRequestSearch = useComposerPullRequestSearch({
     environmentId,
     projectId: pullRequestProjectId,
@@ -394,10 +388,9 @@ export function useComposerCommandMenu({
     }
 
     if (trigger.kind === "slash-command") {
-      if (nativeProviderSelected) {
-        if (nativeCommands === undefined) return [];
+      if (nativeProviderSelected && selectedProviderStatus) {
         const commandItems = buildMobileSlashCommandItems({
-          commands: nativeCommands,
+          commands: resolveProviderSlashCommandsForCwd(selectedProviderStatus, projectCwd),
           query: trigger.query,
           includeInteractionModeCommands:
             onUpdateInteractionMode !== undefined &&
@@ -545,25 +538,38 @@ export function useComposerCommandMenu({
     }
 
     if (trigger.kind === "path") {
-      return pathSearch.entries.map((entry) => {
-        const parts = entry.path.split("/");
-        return {
-          id: `path:${entry.path}`,
-          type: "path" as const,
-          path: entry.path,
-          kind: entry.kind,
-          label: parts[parts.length - 1] ?? entry.path,
-          description: parts.length > 1 ? parts.slice(0, -1).join("/") : "",
-        };
-      });
+      const threadItems = environmentId
+        ? matchComposerThreadItems({
+            shells: threadShells,
+            environmentId,
+            excludeThreadId: currentThreadId,
+            query: trigger.query,
+          })
+        : [];
+      return [
+        ...threadItems,
+        ...pathSearch.entries.map((entry) => {
+          const parts = entry.path.split("/");
+          return {
+            id: `path:${entry.path}`,
+            type: "path" as const,
+            path: entry.path,
+            kind: entry.kind,
+            label: parts[parts.length - 1] ?? entry.path,
+            description: parts.length > 1 ? parts.slice(0, -1).join("/") : "",
+          };
+        }),
+      ];
     }
 
     return [];
   }, [
+    currentThreadId,
+    environmentId,
+    threadShells,
     hasThread,
     hasCompactableConversation,
     hasThread,
-    nativeCommands,
     nativeProviderSelected,
     offersUsageLimits,
     onUpdateInteractionMode,
@@ -578,6 +584,41 @@ export function useComposerCommandMenu({
   const onSelect = useCallback(
     (item: ComposerCommandItem) => {
       if (!trigger) return;
+      if (item.type === "thread") {
+        if (!ownerKey || trigger.kind !== "path") return;
+        const shell = threadShells.find(
+          (candidate) =>
+            candidate.environmentId === item.thread.environmentId &&
+            candidate.id === item.thread.threadId,
+        );
+        if (!shell) return;
+        const record = threadComposerContext(item.thread, shell.title);
+        const existing = getComposerDraftSnapshot(ownerKey).context?.records ?? [];
+        const alreadyAttached = existing.some((entry) => entry.contextId === record.contextId);
+        if (!alreadyAttached && existing.length >= COMPOSER_CONTEXT_MAX_RECORDS) {
+          Alert.alert(
+            "Too many context items",
+            "Remove some context from the draft and try again.",
+          );
+          return;
+        }
+        const result = replaceTextRange(
+          draftMessage,
+          trigger.rangeStart,
+          trigger.rangeEnd,
+          `${formatComposerContextReference(record)} `,
+        );
+        onChangeDraftMessage(result.text);
+        if (!alreadyAttached) {
+          const draft = getComposerDraftSnapshot(ownerKey);
+          setComposerDraftContext(ownerKey, {
+            version: 1,
+            records: [...(draft.context?.records ?? []), record],
+          });
+        }
+        setSelection({ start: result.cursor, end: result.cursor });
+        return;
+      }
       if (item.type === "pull-request") {
         if (
           !ownerKey ||
@@ -646,6 +687,7 @@ export function useComposerCommandMenu({
       onUpdateInteractionMode,
       onUsageLimits,
       selectedProviderStatus?.showInteractionModeToggle,
+      threadShells,
       trigger,
     ],
   );
@@ -657,19 +699,13 @@ export function useComposerCommandMenu({
     items,
     skills,
     isLoading:
-      trigger?.kind === "slash-command"
-        ? nativeCommandsLoading
-        : trigger?.kind === "pull-request"
-          ? pullRequestSearch.isPending
-          : pathSearch.isPending,
+      trigger?.kind === "pull-request" ? pullRequestSearch.isPending : pathSearch.isPending,
     error:
-      trigger?.kind === "slash-command"
-        ? nativeCommandError
-        : trigger?.kind === "pull-request"
-          ? pullRequestProjectId === null || pullRequestRepository === null
-            ? "Pull requests are unavailable for this project."
-            : pullRequestSearch.error
-          : null,
+      trigger?.kind === "pull-request"
+        ? pullRequestProjectId === null || pullRequestRepository === null
+          ? "Pull requests are unavailable for this project."
+          : pullRequestSearch.error
+        : null,
     onSelect,
   };
 }

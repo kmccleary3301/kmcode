@@ -103,13 +103,13 @@ const staticAuditAllowances: readonly StaticAuditAllowance[] = [
     reason: "Pierre preview icon consumes renderer-provided theme colors",
   },
   {
-    file: "components/ProviderInstanceIcon.tsx",
+    file: "components/chat/ProviderInstanceIcon.tsx",
     rule: "inline appearance property",
     match: "boxShadow: `0 0 0 2px ${indicatorBackground}`",
     reason: "provider identity accent is a renderer adapter boundary",
   },
   {
-    file: "components/ProviderInstanceIcon.tsx",
+    file: "components/chat/ProviderInstanceIcon.tsx",
     rule: "inline appearance property",
     match: "borderColor: indicatorBackground",
     reason: "provider identity accent is a renderer adapter boundary",
@@ -265,12 +265,28 @@ const staticAuditAllowances: readonly StaticAuditAllowance[] = [
     reason: "Pierre file-link reveal bridge owns third-party markup",
   },
   {
-    file: "components/chat/TraitsPicker.tsx",
+    file: "components/chat/TraitsSpeed.tsx",
     rule: "arbitrary Tailwind raw appearance",
     match: "text-[#d97757]",
     reason:
       "Claude fast mode uses the provider brand color; no semantic provider-color token exists",
   },
+  ...[
+    "text-[#d97757]",
+    "text-[#26251E]",
+    "dark:text-[#EDECEC]",
+    "text-[#0F0F0F]",
+    "dark:text-[#F5F5F5]",
+    "text-[#211E1E]",
+    "dark:text-[#F1ECEC]",
+    "text-[#5b87bf]",
+  ].map((match) => ({
+    file: "components/chat/ProviderInstanceIcon.tsx",
+    rule: "arbitrary Tailwind raw appearance",
+    match,
+    reason:
+      "provider brand marks keep their vendor colors; no semantic provider-color token exists",
+  })),
 ];
 
 function ruleMatches(line: string, pattern: RegExp): ReadonlyArray<string> {
@@ -478,7 +494,7 @@ describe("T3 stable selector contract", () => {
       ),
     ).toBe(true);
     expect(staticAuditAllowances).toContainEqual({
-      file: "components/chat/TraitsPicker.tsx",
+      file: "components/chat/TraitsSpeed.tsx",
       rule: "arbitrary Tailwind raw appearance",
       match: "text-[#d97757]",
       reason:
@@ -501,12 +517,12 @@ describe("T3 stable selector contract", () => {
 
     expect(
       auditAuthoredFiles([
-        ["components/chat/TraitsPicker.tsx", '<span className="text-[#d97757]">'],
+        ["components/chat/TraitsSpeed.tsx", '<span className="text-[#d97757]">'],
       ]),
     ).toEqual([]);
     expect(
       auditAuthoredFiles([
-        ["components/chat/TraitsPicker.tsx", '<span className="hover:text-[#d97757]">'],
+        ["components/chat/TraitsSpeed.tsx", '<span className="hover:text-[#d97757]">'],
       ]),
     ).toHaveLength(1);
     expect(
@@ -514,10 +530,10 @@ describe("T3 stable selector contract", () => {
     ).toHaveLength(1);
     expect(
       auditAuthoredFiles([
-        ["components/chat/TraitsPicker.tsx", '<span className="text-[#d97757] text-[#d97758]">'],
+        ["components/chat/TraitsSpeed.tsx", '<span className="text-[#d97757] text-[#d97758]">'],
       ]),
     ).toEqual([
-      'components/chat/TraitsPicker.tsx: arbitrary Tailwind raw appearance: <span className="text-[#d97757] text-[#d97758]">',
+      'components/chat/TraitsSpeed.tsx: arbitrary Tailwind raw appearance: <span className="text-[#d97757] text-[#d97758]">',
     ]);
     expect(
       auditAuthoredFiles([

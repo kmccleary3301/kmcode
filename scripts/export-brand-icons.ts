@@ -10,8 +10,8 @@ import * as Option from "effect/Option";
 import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
-import { Command, Flag } from "effect/unstable/cli";
-import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process";
+import { Command, Flag } from "effect/cli";
+import { ChildProcess, ChildProcessSpawner } from "effect/process";
 import { Resvg } from "@resvg/resvg-js";
 import { BRAND_ASSET_PATHS, DEVELOPMENT_PUBLIC_ICON_OVERRIDES } from "./lib/brand-assets.ts";
 import {
@@ -798,7 +798,7 @@ export const exportBrandIcons = Effect.fn("exportBrandIcons")(function* (checkOn
   const fs = yield* FileSystem.FileSystem;
   const repositoryRoot = yield* RepositoryRoot;
   const tool = yield* resolveIconComposerTool().pipe(
-    Effect.catchTag("IconExportToolResolutionError", () => Effect.succeed(null)),
+    Effect.catchTags({ IconExportToolResolutionError: () => Effect.succeed(null) }),
   );
   const temporaryDirectory = yield* fs
     .makeTempDirectoryScoped({

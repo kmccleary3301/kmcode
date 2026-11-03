@@ -1,5 +1,5 @@
 import * as Console from "effect/Console";
-import { Command } from "effect/unstable/cli";
+import { Command } from "effect/cli";
 import { KM_CODE_ANSI_BANNER } from "./bannerText.ts";
 
 export const bannerCommand = Command.make("banner").pipe(

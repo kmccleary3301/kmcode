@@ -60,6 +60,7 @@ function MenuPopup({
           )}
           data-slot="menu-popup"
           data-t3-part="menu"
+          {...props}
         >
           <div className="max-h-(--available-height) w-full overflow-y-auto p-1">{children}</div>
         </MenuPrimitive.Popup>

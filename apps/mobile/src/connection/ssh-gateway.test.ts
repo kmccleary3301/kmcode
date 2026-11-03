@@ -1,16 +1,17 @@
 import { EnvironmentId, type DesktopSshEnvironmentTarget } from "@t3tools/contracts";
 import { describe, expect, it } from "@effect/vitest";
 import * as Cause from "effect/Cause";
+import * as Crypto from "effect/Crypto";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
 import * as Fiber from "effect/Fiber";
-import { HttpClient } from "effect/unstable/http";
+import { HttpClient } from "effect/http";
 
 import {
   ConnectionBlockedError,
   ConnectionTransientError,
 } from "@t3tools/client-runtime/connection";
-import { ClientPresentation, type MobileSshCredentials } from "@t3tools/client-runtime/platform";
+import { ClientCapabilities } from "@t3tools/client-runtime/platform";
 import { remoteStateKey } from "@t3tools/ssh/remote-scripts";
 import type { MobileSecureStorage } from "../persistence/mobile-secure-storage";
 import type { MobileSshNative } from "./nativeSsh";
@@ -37,7 +38,7 @@ const SESSION: NativeSession = {
   sessionId: "session-1",
   fingerprint: EXPECTED_FINGERPRINT,
 };
-const CREDENTIALS: MobileSshCredentials = {
+const CREDENTIALS: ClientCapabilities.MobileSshCredentials = {
   password: "ssh-password",
   expectedFingerprint: EXPECTED_FINGERPRINT,
 };
@@ -100,6 +101,16 @@ function makeStorage(initial: ReadonlyMap<string, string>): MobileSecureStorage[
   };
 }
 
+const TEST_CRYPTO = Crypto.make({
+  randomBytes: (size) => globalThis.crypto.getRandomValues(new Uint8Array(size)),
+  digest: (algorithm, data) =>
+    Effect.promise(async () => {
+      const input = new Uint8Array(data.length);
+      input.set(data);
+      return new Uint8Array(await globalThis.crypto.subtle.digest(algorithm, input));
+    }),
+});
+
 function makeGateway(
   native: MobileSshNative,
   storage: MobileSecureStorage["Service"] = makeStorage(new Map()),
@@ -107,10 +118,10 @@ function makeGateway(
   return makeMobileSshGateway({
     storage,
     httpClient: HttpClient.make(() => Effect.die("Unexpected HTTP request")),
-    presentation: ClientPresentation.of({
+    presentation: ClientCapabilities.ClientPresentation.of({
       metadata: { label: "KM Code Test", deviceType: "mobile" },
-      scopes: [],
     }),
+    crypto: TEST_CRYPTO,
     native,
   });
 }
@@ -128,7 +139,9 @@ describe("mobile SSH gateway", () => {
       });
       const gateway = makeGateway(native.native);
 
-      const error = yield* Effect.flip(gateway.provision(TARGET, { credentials: CREDENTIALS }));
+      const error = yield* Effect.flip(
+        gateway.provision(TARGET, undefined, { credentials: CREDENTIALS }),
+      );
 
       expect(error).toBeInstanceOf(ConnectionTransientError);
       expect(error.reason).toBe("remote-unavailable");
@@ -145,7 +158,9 @@ describe("mobile SSH gateway", () => {
       });
       const gateway = makeGateway(native.native);
 
-      const error = yield* Effect.flip(gateway.provision(TARGET, { credentials: CREDENTIALS }));
+      const error = yield* Effect.flip(
+        gateway.provision(TARGET, undefined, { credentials: CREDENTIALS }),
+      );
 
       expect(error).toBeInstanceOf(ConnectionTransientError);
       expect(error.reason).toBe("remote-unavailable");
@@ -168,7 +183,7 @@ describe("mobile SSH gateway", () => {
       });
       const gateway = makeGateway(native.native);
       const connecting = yield* Effect.forkChild(
-        gateway.provision(TARGET, { credentials: CREDENTIALS }),
+        gateway.provision(TARGET, undefined, { credentials: CREDENTIALS }),
         { startImmediately: true },
       );
 
@@ -194,7 +209,9 @@ describe("mobile SSH gateway", () => {
   it.effect("blocks corrupt saved credentials without echoing their secret content", () =>
     Effect.gen(function* () {
       const secret = "corrupt-saved-ssh-secret";
-      const credentialsKey = `t3code.ssh.credentials.${remoteStateKey(TARGET)}`;
+      const credentialsKey = `t3code.ssh.credentials.${yield* remoteStateKey(TARGET).pipe(
+        Effect.provideService(Crypto.Crypto, TEST_CRYPTO),
+      )}`;
       const gateway = makeGateway(
         makeNativeFixture().native,
         makeStorage(new Map([[credentialsKey, `{"password":"${secret}"`]])),

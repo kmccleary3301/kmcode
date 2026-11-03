@@ -206,12 +206,31 @@ export const ProviderInstanceConfig = Schema.Struct({
       ) ||
       containsStoredPiFamilyCredential(input.config)
     ) {
-      return "Pi and OMP credentials and credential flags belong in native profiles, not T3 settings.";
+      return "Pi and OMP credentials and credential flags belong in native profiles, not KM Code settings.";
     }
     return true;
   }),
 );
 export type ProviderInstanceConfig = typeof ProviderInstanceConfig.Type;
+
+/** Atomic mutation for one provider-instance map entry. */
+export const ProviderInstanceMutation = Schema.Union([
+  Schema.Struct({
+    operation: Schema.Literal("create"),
+    instanceId: ProviderInstanceId,
+    instance: ProviderInstanceConfig,
+  }),
+  Schema.Struct({
+    operation: Schema.Literal("upsert"),
+    instanceId: ProviderInstanceId,
+    instance: ProviderInstanceConfig,
+  }),
+  Schema.Struct({
+    operation: Schema.Literal("remove"),
+    instanceId: ProviderInstanceId,
+  }),
+]);
+export type ProviderInstanceMutation = typeof ProviderInstanceMutation.Type;
 
 /**
  * Map shape for `ServerSettings.providerInstances`. Keyed by

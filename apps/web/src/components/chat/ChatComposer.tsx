@@ -1681,6 +1681,8 @@ export interface ChatComposerProps {
 
   // Queued runs strip rendered above the composer (v2 queue/steer).
   queuedRunsControl?: ReactNode;
+  // The thread's pull request checks, docked under the banners and above the input.
+  pullRequestChecksDock?: ReactNode;
   // Queued-message edit mode: attachments already stored on the message being
   // edited. Rendered in the attachment strip with a remove control; removal is
   // client state in ChatView until the edit is saved.
@@ -6847,6 +6849,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
             items={bannerStackItems}
             attachedAbove={props.queuedRunsControl}
           />
+          {props.pullRequestChecksDock}
           {!activityStackItem && shownSyncPhase ? (
             <ComposerBanner.Attachment>
               <ComposerBanner.Root data-chat-composer-activity-strip="true">

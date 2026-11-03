@@ -1601,6 +1601,8 @@ function toCheckEntries(
   return (raw ?? []).flatMap((check) => {
     const name = trimmed(check.name) ?? trimmed(check.context);
     if (name === null) return [];
+    const startedAt = realTimestamp(check.startedAt);
+    const completedAt = realTimestamp(check.completedAt);
     return [
       {
         check: {
@@ -1609,9 +1611,11 @@ function toCheckEntries(
           description: trimmed(check.description),
           url: trimmed(check.detailsUrl) ?? trimmed(check.targetUrl),
           ...(typeof check.isRequired === "boolean" ? { required: check.isRequired } : {}),
+          ...(startedAt === null ? {} : { startedAt }),
+          ...(completedAt === null ? {} : { completedAt }),
         },
         workflowName: trimmed(check.workflowName),
-        at: realTimestamp(check.completedAt) ?? realTimestamp(check.startedAt),
+        at: completedAt ?? startedAt,
       },
     ];
   });

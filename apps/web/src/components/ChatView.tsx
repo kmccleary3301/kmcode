@@ -24,7 +24,10 @@ import {
 import { useLoadBalancedEnvironment } from "../hooks/useLoadBalancedEnvironment";
 import { useScratchProject } from "../hooks/useScratchProject";
 import { isScratchProject } from "@t3tools/client-runtime/state/projects";
-import { visibleThreadPullRequests } from "@t3tools/shared/threadPullRequests";
+import {
+  resolveThreadCurrentPullRequestLink,
+  visibleThreadPullRequests,
+} from "@t3tools/shared/threadPullRequests";
 import {
   latestExecutedRun,
   latestRootProviderFailure,
@@ -505,6 +508,7 @@ import {
   type QueuedRunsControlHandle,
   type EditQueuedRunRequest,
 } from "./chat/QueuedRunsControl";
+import { PullRequestChecksDock } from "./chat/PullRequestChecksDock";
 import { useLinkedThreadPullRequest } from "./ThreadStatusIndicators";
 import type { ComposerBannerStackItem } from "./chat/ComposerBannerStack";
 import type { ComposerBackgroundWorkStatus, ComposerGoalStatus } from "./chat/ComposerStatusBumps";
@@ -5974,6 +5978,14 @@ export default function ChatView(props: ChatViewProps) {
   ]);
   const linkedThreadPullRequest =
     replacementLinkedThreadPullRequest ?? persistedLinkedThreadPullRequest;
+  // The checks dock follows the pull request the details panel shows: the current link where the
+  // server tracks links, otherwise the legacy linked pull request.
+  const checksDockLink = supportsThreadPullRequests
+    ? resolveThreadCurrentPullRequestLink((activeThreadShell ?? activeThread)?.pullRequests ?? [])
+    : null;
+  const checksDockNumber = supportsThreadPullRequests
+    ? (checksDockLink?.number ?? null)
+    : (linkedThreadPullRequest?.number ?? null);
   const linkedThreadPullRequestKey = linkedThreadPullRequest
     ? JSON.stringify([
         linkedThreadPullRequest.projectId,
@@ -12110,6 +12122,20 @@ export default function ChatView(props: ChatViewProps) {
                                     }
                                     onEditQueuedRun={beginEditingQueuedRun}
                                     onCancelEdit={cancelEditingQueuedRun}
+                                  />
+                                ) : null
+                              }
+                              pullRequestChecksDock={
+                                isServerThread && activeThreadRef && checksDockNumber !== null ? (
+                                  <PullRequestChecksDock
+                                    key={`${activeThreadRef.threadId}:${checksDockNumber}`}
+                                    environmentId={activeThreadRef.environmentId}
+                                    threadRef={activeThreadRef}
+                                    project={activeProject ?? null}
+                                    reference={checksDockLink}
+                                    number={checksDockNumber}
+                                    fallbackState={checksDockLink?.snapshot?.state}
+                                    onFix={sendAppMessage}
                                   />
                                 ) : null
                               }

@@ -1,5 +1,6 @@
 import { preloadPatchFile } from "@pierre/diffs/ssr";
 import { useCallback, useEffect, useRef, useState } from "react";
+import ChatMarkdown from "../ChatMarkdown";
 import { ComposerPromptEditor, type ComposerPromptEditorHandle } from "../ComposerPromptEditor";
 import { EMPTY_COMPOSER_CONTEXT_RECORDS } from "../composerContextPresentation";
 import { terminalThemeFromApp } from "../ThreadTerminalDrawer";
@@ -50,6 +51,18 @@ export function PromptFontPreview() {
         className="max-h-42 min-h-14"
         onChange={onChange}
         onPaste={noop}
+      />
+    </div>
+  );
+}
+
+/** Use the same Markdown component as messages and the turn preview. */
+export function TextFontPreview() {
+  return (
+    <div className="mt-1 mb-2 rounded-lg border border-border bg-background px-3 py-2">
+      <ChatMarkdown
+        text={"A request with **emphasis**, a [link](https://example.com), and `inline code`."}
+        cwd={undefined}
       />
     </div>
   );

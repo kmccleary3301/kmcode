@@ -2,8 +2,8 @@ import * as Equal from "effect/Equal";
 import * as Schema from "effect/Schema";
 import "culori/css";
 import { converter, parse } from "culori/fn";
+import { APP_THEME_CATALOG } from "@t3tools/shared/themeCatalog";
 import {
-  BUILT_IN_THEMES,
   EMBER_THEME,
   GROVE_THEME,
   IRIS_THEME,
@@ -1080,7 +1080,7 @@ export function updateThemeColorFamily(
   }
 }
 
-const BUILT_IN_THEME_DEFINITIONS: ReadonlyArray<ThemeDefinition> = BUILT_IN_THEMES;
+const BUILT_IN_THEME_DEFINITIONS: ReadonlyArray<ThemeDefinition> = APP_THEME_CATALOG;
 
 export function getThemeDefinition(theme: ThemePreference): ThemeDefinition | null {
   const themeId = themeIdFromPreference(theme);

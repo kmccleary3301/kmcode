@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vite-plus/test";
+import { afterEach, describe, expect, it } from "vite-plus/test";
 import { T3_CHAT_THEME } from "@t3tools/shared/themePalettes";
 import { normalizeThemeDefinition } from "@t3tools/shared/appearance";
 import {
@@ -8,7 +8,11 @@ import {
   syntaxAppearanceVariables,
   terminalAppearanceVariables,
 } from "./lib/appearanceAdapters";
-import { registerNormalizedSyntaxTheme } from "./lib/syntaxHighlighting";
+import {
+  clearNormalizedSyntaxTheme,
+  getSyntaxHighlighterPromise,
+  registerNormalizedSyntaxTheme,
+} from "./lib/syntaxHighlighting";
 import { clerkAppearance, CLERK_PORTAL_RENDERER_OWNER } from "./components/clerk/clerkAppearance";
 import {
   PREVIEW_ANNOTATION_THEME_CHANNEL,
@@ -20,8 +24,13 @@ const profile = normalizeThemeDefinition(T3_CHAT_THEME, { platform: "web" });
 const variant =
   profile.variants.find((candidate) => candidate.id === "dark") ?? profile.variants[0];
 if (variant === undefined) throw new Error("Conformance fixture has no variant.");
+const lightVariant = profile.variants.find((candidate) => candidate.appearance === "light");
+if (lightVariant === undefined) throw new Error("Conformance fixture has no light variant.");
 
 describe("normalized web appearance adapters", () => {
+  afterEach(() => {
+    clearNormalizedSyntaxTheme();
+  });
   it("feeds every renderer adapter from terminal, syntax, and diff roles", () => {
     const declarations = appearanceVariantDeclarations(variant);
     expect(declarations).toContain(`--terminal-background:${variant.terminal.background};`);
@@ -39,6 +48,26 @@ describe("normalized web appearance adapters", () => {
     expect(Object.keys(syntaxAppearanceVariables(variant.syntax))).toHaveLength(
       variant.syntax.tokens.length * 3,
     );
+  });
+
+  it("keeps keyword, string, and comment colors when syntax scopes are absent", async () => {
+    for (const candidate of [variant, lightVariant]) {
+      const themeName = registerNormalizedSyntaxTheme(profile, candidate);
+      const highlighter = await getSyntaxHighlighterPromise("typescript", themeName);
+      const tokens = highlighter
+        .codeToTokens("const value = 'hello'; // comment", {
+          lang: "typescript",
+          theme: themeName,
+        })
+        .tokens.flat();
+      const keywordColor = tokens.find((token) => token.content.includes("const"))?.color;
+      const stringColor = tokens.find((token) => token.content.includes("'hello'"))?.color;
+      const commentColor = tokens.find((token) => token.content.includes("// comment"))?.color;
+      const colors = [keywordColor, stringColor, commentColor];
+
+      expect(colors.every((color) => typeof color === "string")).toBe(true);
+      expect(new Set(colors).size).toBe(3);
+    }
   });
 
   it("keeps third-party and isolated preview bridges on explicit ownership boundaries", () => {

@@ -72,6 +72,8 @@ const RPC_AGGREGATES = {
   [WS_METHODS.serverForkNativeSession]: "server",
   [WS_METHODS.serverStopNativeSession]: "server",
   [WS_METHODS.serverArchiveNativeSession]: "server",
+  [WS_METHODS.providerModelRoles]: "provider",
+  [WS_METHODS.providerSetModelRole]: "provider",
   [WS_METHODS.serverGetTraceDiagnostics]: "server",
   [WS_METHODS.serverGetProcessDiagnostics]: "server",
   [WS_METHODS.serverGetHostResources]: "server",

@@ -79,6 +79,7 @@ type TypographySettings = Pick<
   UnifiedSettings,
   | "fontFamilySans"
   | "fontFamilyComposer"
+  | "fontFamilyText"
   | "fontFamilyCode"
   | "fontFamilyTerminal"
   | "fontSizeInterface"
@@ -94,6 +95,7 @@ export function getChangedTypographySettingLabels(settings: TypographySettings):
     settings.fontSizeInterface !== DEFAULT_UNIFIED_SETTINGS.fontSizeInterface
       ? ["Interface font"]
       : []),
+    ...(settings.fontFamilyText !== DEFAULT_UNIFIED_SETTINGS.fontFamilyText ? ["Text font"] : []),
     ...(settings.fontFamilyComposer !== DEFAULT_UNIFIED_SETTINGS.fontFamilyComposer ||
     settings.fontSizePrompt !== DEFAULT_UNIFIED_SETTINGS.fontSizePrompt
       ? ["Prompt font"]

@@ -89,31 +89,37 @@ function argumentValue(args: ReadonlyArray<string>, name: string): string | unde
   return undefined;
 }
 
-export function resolveNativeSessionDirectory(location: NativeSessionLocation): string {
-  const resolve = (directory: string) =>
-    NodePath.isAbsolute(directory) ? directory : NodePath.resolve(location.cwd, directory);
-  const explicit =
-    argumentValue(location.launchArguments, "--session-dir") ??
-    location.environment.PI_CODING_AGENT_SESSION_DIR;
-  if (explicit !== undefined && explicit.length > 0) return resolve(explicit);
+function resolveIn(location: NativeSessionLocation, directory: string): string {
+  return NodePath.isAbsolute(directory) ? directory : NodePath.resolve(location.cwd, directory);
+}
 
+/** The harness agent directory (`config.yml`, `agent.db`, default `sessions/`). */
+export function resolveNativeAgentDirectory(location: NativeSessionLocation): string {
   const agentDirectory = location.environment.PI_CODING_AGENT_DIR;
   if (agentDirectory !== undefined && agentDirectory.length > 0) {
-    return NodePath.join(resolve(agentDirectory), "sessions");
+    return resolveIn(location, agentDirectory);
   }
   const configuredHome = location.environment.HOME;
   const home =
     configuredHome === undefined || configuredHome.length === 0
       ? NodeOS.homedir()
-      : resolve(configuredHome);
-  if (location.runtime === "pi") return NodePath.join(home, ".pi", "agent", "sessions");
+      : resolveIn(location, configuredHome);
+  if (location.runtime === "pi") return NodePath.join(home, ".pi", "agent");
   const profile =
     argumentValue(location.launchArguments, "--profile") ??
     location.environment.OMP_PROFILE ??
     location.environment.PI_PROFILE;
   return profile !== undefined && profile.length > 0
-    ? NodePath.join(home, ".omp", "profiles", profile, "agent", "sessions")
-    : NodePath.join(home, ".omp", "agent", "sessions");
+    ? NodePath.join(home, ".omp", "profiles", profile, "agent")
+    : NodePath.join(home, ".omp", "agent");
+}
+
+export function resolveNativeSessionDirectory(location: NativeSessionLocation): string {
+  const explicit =
+    argumentValue(location.launchArguments, "--session-dir") ??
+    location.environment.PI_CODING_AGENT_SESSION_DIR;
+  if (explicit !== undefined && explicit.length > 0) return resolveIn(location, explicit);
+  return NodePath.join(resolveNativeAgentDirectory(location), "sessions");
 }
 
 function parseSessionHeader(prefix: string): SessionHeader | undefined {

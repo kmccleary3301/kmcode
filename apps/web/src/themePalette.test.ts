@@ -118,6 +118,19 @@ describe("theme files", () => {
     });
   });
 
+  it("resolves curated workbench themes through the same catalog as core themes", () => {
+    expect(getThemeDefinition("tokyo-night")).toMatchObject({
+      id: "tokyo-night",
+      label: "Tokyo Night",
+      appearance: "dark",
+    });
+    expect(getThemeDefinition("ayu-light")).toMatchObject({
+      id: "ayu-light",
+      label: "Ayu Light",
+      appearance: "light",
+    });
+  });
+
   it("derives readable, distinctive vivid palettes from exact seeds", () => {
     const seeds: ReadonlyArray<["light" | "dark", string, string]> = [
       ["light", "#f4f9f2", "#1d8a4e"],

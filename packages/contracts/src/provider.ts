@@ -171,6 +171,71 @@ export class ProviderNativeSessionError extends Schema.TaggedError<ProviderNativ
   },
 ) {}
 
+/**
+ * Harness-native model role bindings (OMP `modelRoles`). A role maps to a
+ * model selector; the harness resolves the role when it needs a model for
+ * that job (subagents, commits, plan mode, vision...).
+ */
+export const ProviderModelRoleId = TrimmedNonEmptyString.check(
+  Schema.isPattern(/^[A-Za-z0-9_-]{1,64}$/),
+);
+export type ProviderModelRoleId = typeof ProviderModelRoleId.Type;
+
+export const ProviderModelRoleBinding = Schema.Struct({
+  role: ProviderModelRoleId,
+  /** Built-in harness role (always listed, even when unbound). */
+  builtIn: Schema.Boolean,
+  /** Raw selector from config, e.g. `openai-codex/gpt-5.4:high`, `@slow`, `a/b, c/d`. */
+  selector: Schema.NullOr(TrimmedNonEmptyString),
+  /** First concrete `provider/modelId` in the selector; null for aliases or unbound roles. */
+  model: Schema.NullOr(TrimmedNonEmptyString),
+  /** Thinking suffix of the first selector entry (`high`, `max`, ...). */
+  thinkingLevel: Schema.NullOr(TrimmedNonEmptyString),
+  /** Target role when the selector is an alias such as `@slow`. */
+  aliasOf: Schema.NullOr(ProviderModelRoleId),
+});
+export type ProviderModelRoleBinding = typeof ProviderModelRoleBinding.Type;
+
+export const ProviderModelUsage = Schema.Struct({
+  /** `provider/modelId`, matching the harness model slug. */
+  model: TrimmedNonEmptyString,
+  usedAt: IsoDateTime,
+});
+export type ProviderModelUsage = typeof ProviderModelUsage.Type;
+
+export const ProviderModelRolesInput = Schema.Struct({
+  providerInstanceId: ProviderInstanceId,
+});
+export type ProviderModelRolesInput = typeof ProviderModelRolesInput.Type;
+
+export const ProviderModelRolesResult = Schema.Struct({
+  providerInstanceId: ProviderInstanceId,
+  /** Config file the bindings were read from and are written to. */
+  configPath: TrimmedNonEmptyString,
+  /** Built-in roles in harness order, then custom roles in config order. */
+  roles: Schema.Array(ProviderModelRoleBinding),
+  /** Harness-native model usage history, most recent first. */
+  recentModels: Schema.Array(ProviderModelUsage),
+});
+export type ProviderModelRolesResult = typeof ProviderModelRolesResult.Type;
+
+export const ProviderSetModelRoleInput = Schema.Struct({
+  providerInstanceId: ProviderInstanceId,
+  role: ProviderModelRoleId,
+  /** `provider/modelId` to bind, or null to remove the binding. */
+  model: Schema.NullOr(TrimmedNonEmptyString),
+  thinkingLevel: Schema.optional(TrimmedNonEmptyString),
+});
+export type ProviderSetModelRoleInput = typeof ProviderSetModelRoleInput.Type;
+
+export class ProviderModelRoleError extends Schema.TaggedError<ProviderModelRoleError>()(
+  "ProviderModelRoleError",
+  {
+    code: Schema.Literals(["unknown", "unsupported", "invalid", "io"]),
+    message: TrimmedNonEmptyString,
+  },
+) {}
+
 export const ProviderSendTurnInput = Schema.Struct({
   threadId: ThreadId,
   /** Internal recovery signal. Allows an empty turn only for adapters that

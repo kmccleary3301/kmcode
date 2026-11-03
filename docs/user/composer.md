@@ -79,6 +79,23 @@ messages while disconnected. Uploads resume when you reconnect. Drafts and queue
 messages survive app restarts. Signing out of T3 Connect keeps that work on your
 device until you sign back into the same account.
 
+## Choosing a model on web and desktop
+
+The model picker lists harnesses on the left. **Recent** shows the last 20 models you picked
+across all harnesses, newest first. Each harness list starts with up to five of its recent models,
+followed by favorites and the rest of its catalog. Oh My Pi recents also include models used in OMP
+outside KM Code. When search matches score equally, recent models come first. Hover a row and
+select the star to add or remove a favorite. Press `Cmd+1` through `Cmd+9` on macOS, or `Ctrl+1`
+through `Ctrl+9` on Windows and Linux, to pick one of the first nine rows.
+
+In the composer picker, each ready Oh My Pi harness has a **Roles** entry below it. It lists OMP's
+built-in roles, such as Default, Fast, and Thinking, followed by custom roles from
+`~/.omp/agent/config.yml`. Model rows show the roles bound to them. Select a role's model to
+choose a new one; press `Esc` to go back without changing it. You can also change a role's thinking
+level, use its model in the composer, or clear the role. KM Code updates only that role's entry
+under `modelRoles`: comments, other settings, and fallback models after the first entry are kept.
+New OMP sessions use the change; sessions already running keep their models.
+
 ## Custom models
 
 On web and desktop, use Settings → Providers → **Models** to add an unlisted model with a custom

@@ -307,6 +307,7 @@ function GlassAppearanceSync() {
 
 function FontAppearanceSync() {
   const fontFamilySans = useClientSettings((settings) => settings.fontFamilySans);
+  const fontFamilyText = useClientSettings((settings) => settings.fontFamilyText);
   const fontFamilyCode = useClientSettings((settings) => settings.fontFamilyCode);
   const fontFamilyComposer = useClientSettings((settings) => settings.fontFamilyComposer);
   const fontSizeInterface = useClientSettings((settings) => settings.fontSizeInterface);
@@ -317,6 +318,7 @@ function FontAppearanceSync() {
   useEffect(() => {
     applyAppearanceFontVariables(document.documentElement, {
       sans: fontFamilySans,
+      text: fontFamilyText,
       code: fontFamilyCode,
       composer: fontFamilyComposer,
       sizeInterface: fontSizeInterface,
@@ -328,6 +330,7 @@ function FontAppearanceSync() {
     fontFamilyCode,
     fontFamilyComposer,
     fontFamilySans,
+    fontFamilyText,
     fontSizeCode,
     fontSizeInterface,
     fontSizePrompt,

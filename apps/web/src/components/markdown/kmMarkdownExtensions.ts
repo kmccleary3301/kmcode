@@ -11,7 +11,7 @@ import type { InlineExtension } from "@stream-mdx/core";
 import type { EngineExtensions } from "@stream-mdx/worker/engine";
 import type { DocumentPlugin } from "@stream-mdx/plugins";
 
-export const KM_MARKDOWN_EXTENSION_ID = "km-markdown-stream-mdx-1.1-v2";
+export const KM_MARKDOWN_EXTENSION_ID = "km-markdown-stream-mdx-1.1-v3";
 
 interface ParsedDirectiveAttributes {
   readonly attributes: Readonly<Record<string, string | null>>;
@@ -250,6 +250,62 @@ function createPullRequestReferenceExtension(): InlineExtension {
   };
 }
 
+// GFM autolinking needs a dotted domain, so `http://localhost:3166/x` and other
+// single-label hosts stay plain text. Dotted hosts fail the lookahead and stay
+// with the stock autolinker.
+const DOTLESS_HOST_URL = /^https?:\/\/[A-Za-z0-9-]+(?!\.?[\w-])(?::\d+)?(?:[/?#][^\s<]*)?/iu;
+
+function dotlessHostUrlLength(source: string, start: number): number {
+  const previous = source[start - 1];
+  if (previous !== undefined && /\w/u.test(previous)) return -1;
+  const url = DOTLESS_HOST_URL.exec(source.slice(start))?.[0];
+  if (url === undefined) return -1;
+  // As in GFM, trailing punctuation and an unbalanced `)` belong to the prose.
+  let end = url.length;
+  for (;;) {
+    const kept = url.slice(0, end);
+    const last = kept.at(-1) ?? "";
+    if (
+      /[?!.,:*_~]/u.test(last) ||
+      (last === ")" && kept.split(")").length > kept.split("(").length)
+    ) {
+      end -= 1;
+    } else {
+      return end;
+    }
+  }
+}
+
+function createDotlessHostUrlExtension(): InlineExtension {
+  const nodeName = "DotlessHostUrl";
+  return {
+    name: "dotless-host-url",
+    lezer: {
+      defineNodes: [nodeName],
+      parseInline: [
+        {
+          name: nodeName,
+          before: "Link",
+          parse(context, next, position) {
+            // Only `h`/`H` can start a match; a link label must not nest a link.
+            if ((next !== 104 && next !== 72) || context.hasOpenLink) return -1;
+            const localPosition = position - context.offset;
+            if (localPosition < 0) return -1;
+            const length = dotlessHostUrlLength(context.text, localPosition);
+            return length < 0
+              ? -1
+              : context.addElement(context.elt(nodeName, position, position + length));
+          },
+        },
+      ],
+    },
+    toInline(element, text) {
+      const url = text.slice(element.from, element.to);
+      return { kind: "link", href: url, children: [{ kind: "text", text: url }], autolink: true };
+    },
+  };
+}
+
 function templatePresentationAttrs(template: CodexArtifactTemplate): Readonly<Record<string, string>> {
   return {
     artifact_kind: template.artifactKind,
@@ -316,7 +372,11 @@ function createArtifactTemplatePlugin(): DocumentPlugin {
 
 export function createKmMarkdownExtensions(): EngineExtensions {
   return {
-    inline: [createFileCitationExtension(), createPullRequestReferenceExtension()],
+    inline: [
+      createFileCitationExtension(),
+      createPullRequestReferenceExtension(),
+      createDotlessHostUrlExtension(),
+    ],
     documentPlugins: [createArtifactTemplatePlugin()],
   };
 }

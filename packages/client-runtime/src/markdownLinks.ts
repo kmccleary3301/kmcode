@@ -1,4 +1,7 @@
+import { mediaMimeTypeFromExtension } from "@t3tools/shared/filePreview";
 import { isWindowsAbsolutePath } from "@t3tools/shared/path";
+
+import { languageFromPath } from "./fileLanguage.ts";
 
 const SLASH_PREFIXED_WINDOWS_DRIVE_PATTERN = /^\/[A-Za-z]:[\\/]/;
 const RELATIVE_PATH_PREFIX_PATTERN = /^(~\/|\.{1,2}\/)/;
@@ -17,6 +20,19 @@ const FILE_EXTENSION_PATTERN = /\.[A-Za-z0-9_-]+$/;
 // A final dot between digits marks a version or model id (`glm-5.3`,
 // `Qwen2.5-Coder`), not an extension. `ls.1` and `libfoo.so.1` stay files.
 const VERSION_SUFFIX_PATTERN = /\d\.\d[^.]*$/;
+// Bare names in code spans become chips only with a file-type extension. Omits
+// extensions that double as member names (`console.log`, `process.env`,
+// `mutex.lock`, `schema.properties`).
+const INLINE_CODE_COMMON_FILE_EXTENSIONS: Readonly<Record<string, true | undefined>> = {
+  cfg: true,
+  conf: true,
+  csv: true,
+  ini: true,
+  jsonc: true,
+  toml: true,
+  tsv: true,
+  txt: true,
+};
 const NUMERIC_DOTTED_PATTERN = /^\d+(?:\.\d+)+$/;
 // Standard OS and dev-container roots; deliberately excludes app-route-ish
 // prefixes like /app/ or /chat/ so SPA routes never read as files.
@@ -164,24 +180,38 @@ export function inlineCodeFilePathCandidate(codeText: string): string | null {
 
   const candidate = isWindowsAbsolutePath(trimmed) ? trimmed : trimmed.replaceAll("\\", "/");
   const hasPosition = POSITION_SUFFIX_PATTERN.test(candidate);
-  if (!hasPosition && !PATH_SEPARATOR_PATTERN.test(candidate)) return null;
+  const withoutPosition = candidate.replace(POSITION_SUFFIX_PATTERN, "");
+  if (
+    withoutPosition.startsWith("/") &&
+    !SLASH_PREFIXED_WINDOWS_DRIVE_PATTERN.test(candidate) &&
+    /^\/[^/]+\/?$/.test(withoutPosition)
+  ) {
+    return null;
+  }
+  const basename =
+    withoutPosition
+      .replace(/[/\\]+$/, "")
+      .split(/[\\/]/)
+      .at(-1) ?? "";
+  const extension = basename.slice(basename.lastIndexOf(".") + 1).toLowerCase();
+  const hasKnownExtension =
+    languageFromPath(basename) !== null ||
+    INLINE_CODE_COMMON_FILE_EXTENSIONS[extension] === true ||
+    (extension.length > 0 && mediaMimeTypeFromExtension(`.${extension}`) !== null);
+  const hasPathSeparator = PATH_SEPARATOR_PATTERN.test(candidate);
+  if (!hasPosition && !hasPathSeparator && !hasKnownExtension) return null;
 
   const hasExplicitPathShape =
     RELATIVE_PATH_PREFIX_PATTERN.test(candidate) ||
     candidate.startsWith("/") ||
     isWindowsAbsolutePath(candidate);
   if (!hasExplicitPathShape) {
-    const withoutPosition = candidate.replace(POSITION_SUFFIX_PATTERN, "");
     const firstSegment = withoutPosition.split("/")[0] ?? withoutPosition;
     if (looksLikeHostname(firstSegment, hasPosition)) return null;
-    const basename =
-      withoutPosition
-        .replace(/[/\\]+$/, "")
-        .split(/[\\/]/)
-        .at(-1) ?? "";
     if (VERSION_SUFFIX_PATTERN.test(basename)) return null;
     if (!hasPosition && !FILE_EXTENSION_PATTERN.test(basename)) return null;
   }
+
   return candidate;
 }
 

@@ -52,3 +52,16 @@ export function pickWorkspaceBasenameMatch(
   );
   return foldedMatches.length === 1 ? (foldedMatches[0]?.path ?? null) : null;
 }
+
+export function pickWorkspacePathSuffixMatch(
+  writtenPath: string,
+  entries: ReadonlyArray<WorkspaceEntryCandidate>,
+): string | null {
+  const suffix = `/${writtenPath.replaceAll("\\", "/").replace(/^\.\//, "").replace(/\/+/g, "/")}`;
+  if (suffix === "/" || suffix.startsWith("//")) return null;
+  return (
+    entries
+      .filter((entry) => entry.kind === "file" && entry.path.replaceAll("\\", "/").endsWith(suffix))
+      .toSorted((left, right) => left.path.length - right.path.length)[0]?.path ?? null
+  );
+}

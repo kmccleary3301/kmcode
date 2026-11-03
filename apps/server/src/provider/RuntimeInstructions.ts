@@ -3,6 +3,16 @@ Link each PR you create, take over, or push to: one link_pull_request per PR, fu
 </pull_request_linking>`;
 
 /**
+ * KM Code turns a Markdown link to an absolute path into a file chip that opens
+ * on the host. `~`, bare names, and paths relative to some other directory
+ * often resolve wrong or not at all, and a slash-led code span such as a route
+ * becomes a broken chip.
+ */
+const FILE_LINK_INSTRUCTIONS = `<file_links>
+Write every file you mention as a Markdown link to its absolute path, labelled with its name or repo path: [REVIEW.md](/home/me/qc/REVIEW.md), [src/app.ts:42](/home/me/repo/src/app.ts:42). Never use ~, a bare filename, or a relative path; only those links open. Keep code spans for code and commands, and give a non-file path context, like \`GET /favicon.ico\`.
+</file_links>`;
+
+/**
  * Shared runtime context; omit model and effort when the harness manages them dynamically.
  * `modelName` is the display name users see in the model picker; `model` is the slug.
  */
@@ -20,7 +30,7 @@ export function buildRuntimeInstructions(runtime: {
     modelName && modelName !== model ? `${modelName} (model slug: ${model})` : model;
   const modelInfo = model && model !== "auto" && model !== "default" ? `, as ${modelLabel}` : "";
   const effortInfo = effort ? ` with ${effort} reasoning effort` : "";
-  return `<runtime_info>In case you're asked: you are running in KM Code through the ${harness} harness${modelInfo}${effortInfo}. No need to mention this otherwise. You can embed images and videos in your response using Markdown with absolute file paths.</runtime_info>\n\n${PULL_REQUEST_LINKING_INSTRUCTIONS}`;
+  return `<runtime_info>In case you're asked: you are running in KM Code through the ${harness} harness${modelInfo}${effortInfo}. No need to mention this otherwise. You can embed images and videos in your response using Markdown with absolute file paths.</runtime_info>\n\n${FILE_LINK_INSTRUCTIONS}\n\n${PULL_REQUEST_LINKING_INSTRUCTIONS}`;
 }
 
 function toSingleLine(value: string): string {

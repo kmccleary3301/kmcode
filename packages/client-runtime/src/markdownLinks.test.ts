@@ -55,6 +55,19 @@ describe("inlineCodeFilePathCandidate", () => {
     ["usr/lib/libfoo.so.1", "usr/lib/libfoo.so.1"],
     ["vendor/jquery-3.6.0.min.js", "vendor/jquery-3.6.0.min.js"],
     ["./models/glm-5.3", "./models/glm-5.3"],
+    ["package.json", "package.json"],
+    ["Cargo.toml", "Cargo.toml"],
+    ["RESUME-ON-VPS.md", "RESUME-ON-VPS.md"],
+    ["client.raw", null],
+    ["event.systemPrompt", null],
+    ["os.path", null],
+    ["console.log", null],
+    ["process.env", null],
+    ["mutex.lock", null],
+    ["v1.2", null],
+    ["/favicon.ico", null],
+    ["/health", null],
+    ["/home/kyle/scratch/qc/", "/home/kyle/scratch/qc/"],
   ])("distinguishes file paths from code and hostnames in %s", (source, candidate) => {
     expect(inlineCodeFilePathCandidate(source)).toBe(candidate);
   });
@@ -108,6 +121,7 @@ describe("parseMarkdownFileLink", () => {
     ["/home/me/notes.md", "/home/me/notes.md"],
     ["/usr/local/bin/tool", "/usr/local/bin/tool"],
     ["/workspace/Makefile", "/workspace/Makefile"],
+    ["/favicon.ico", "/favicon.ico"],
     ["/tmp/favicons/", "/tmp/favicons/"],
     ["C:\\Users\\mike\\project\\src\\main.ts", "C:\\Users\\mike\\project\\src\\main.ts"],
     ["C:%5Crepo%5Cimage.png", "C:\\repo\\image.png"],

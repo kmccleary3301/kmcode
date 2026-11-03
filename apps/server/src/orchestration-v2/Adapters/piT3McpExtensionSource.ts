@@ -15,6 +15,7 @@ export const PI_T3_MCP_EXTENSION_FILENAME = "pi-t3-mcp-extension.ts";
 export const T3_MCP_URL_ENV = "T3_MCP_URL";
 export const T3_MCP_BEARER_ENV = "T3_MCP_BEARER_TOKEN";
 export const T3_PI_RUNTIME_MODE_ENV = "T3_PI_RUNTIME_MODE";
+export const T3_PI_RUNTIME_INSTRUCTIONS_ENV = "T3_PI_RUNTIME_INSTRUCTIONS";
 
 /**
  * Pi tools whose confirmations the bridge raises as file-change approvals.
@@ -30,6 +31,7 @@ const URL_ENV = ${JSON.stringify(T3_MCP_URL_ENV)};
 const TOKEN_ENV = ${JSON.stringify(T3_MCP_BEARER_ENV)};
 const RUNTIME_MODE_ENV = ${JSON.stringify(T3_PI_RUNTIME_MODE_ENV)};
 const ORCHESTRATION_INSTRUCTIONS = ${JSON.stringify(T3_CODE_ORCHESTRATION_INSTRUCTIONS.trim())};
+const RUNTIME_INSTRUCTIONS_ENV = ${JSON.stringify(T3_PI_RUNTIME_INSTRUCTIONS_ENV)};
 const PROTOCOL = "2025-06-18";
 const READ_ONLY_TOOLS = new Set(["read", "grep", "find", "ls"]);
 const FILE_CHANGE_TOOLS = new Set(${JSON.stringify(PI_FILE_CHANGE_TOOLS)});
@@ -269,7 +271,22 @@ export default async function t3McpExtension(pi: ExtensionAPI) {
 
   const endpoint = env(URL_ENV);
   const token = env(TOKEN_ENV);
-  if (endpoint === undefined || token === undefined) {
+  const hasMcp = endpoint !== undefined && token !== undefined;
+
+  const runtimeInstructions = env(RUNTIME_INSTRUCTIONS_ENV);
+
+  // Deliver KM guidance through pi's real system-prompt channel. Wrapping the
+  // first user message instead would stop it from starting with "/" and
+  // silently break slash-command expansion. Runtime guidance applies without MCP too.
+  pi.on("before_agent_start", (event) => ({
+    systemPrompt: [
+      event.systemPrompt,
+      ...(runtimeInstructions === undefined ? [] : [runtimeInstructions]),
+      ...(hasMcp ? [ORCHESTRATION_INSTRUCTIONS] : []),
+    ].join("\\n\\n"),
+  }));
+
+  if (!hasMcp) {
     pi.on("session_start", async (_event, ctx) => {
       ctx.ui.notify(
         "t3-code MCP unavailable: T3_MCP_URL or T3_MCP_BEARER_TOKEN is missing.",
@@ -338,12 +355,5 @@ export default async function t3McpExtension(pi: ExtensionAPI) {
       ctx.ui.notify(\`t3-code MCP unavailable: \${message}\`, "warning");
     }
   });
-
-  // Deliver orchestration guidance through pi's real system-prompt channel.
-  // Wrapping the first user message instead would stop it from starting
-  // with "/" and silently break slash-command expansion.
-  pi.on("before_agent_start", (event) => ({
-    systemPrompt: event.systemPrompt + "\\n\\n" + ORCHESTRATION_INSTRUCTIONS,
-  }));
 }
 `;

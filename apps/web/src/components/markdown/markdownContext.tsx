@@ -620,11 +620,14 @@ export function useChatMarkdownState({
         mediaMimeTypeFromExtension(
           fileLinkMeta.basename.slice(fileLinkMeta.basename.lastIndexOf(".")),
         ) !== null;
-      // Media outside the workspace keeps the expanded preview; other host
-      // files (a report in a temp dir) open read-only in the files panel.
+      // Explicit trailing separators identify directories even when the name has
+      // a media extension; other host media keeps its expanded preview.
       const panelPath =
         fileLinkMeta.workspaceRelativePath ??
-        (!canPreviewMedia && isAbsolutePath(fileLinkMeta.filePath) ? fileLinkMeta.filePath : null);
+        ((!canPreviewMedia || /[\\/]+$/.test(fileLinkMeta.filePath)) &&
+        isAbsolutePath(fileLinkMeta.filePath)
+          ? fileLinkMeta.filePath
+          : null);
 
       return (
         <MarkdownFileLink

@@ -4,6 +4,7 @@ import {
   claimWorkspaceBasenameLookup,
   needsWorkspaceBasenameLookup,
   pickWorkspaceBasenameMatch,
+  pickWorkspacePathSuffixMatch,
 } from "./workspaceBasenameLookup";
 
 describe("needsWorkspaceBasenameLookup", () => {
@@ -73,6 +74,27 @@ describe("pickWorkspaceBasenameMatch", () => {
         { path: "apps/web/src/components/ChatHeader.tsx", kind: "file" },
       ]),
     ).toBeNull();
+  });
+});
+
+describe("pickWorkspacePathSuffixMatch", () => {
+  it("resolves a written subpackage path when one workspace suffix matches", () => {
+    expect(
+      pickWorkspacePathSuffixMatch("kit/plot/index.ts", [
+        { path: "apps/web/src/kit/plot/index.ts", kind: "file" },
+        { path: "apps/server/src/index.ts", kind: "file" },
+        { path: "apps/web/src/kit/plot", kind: "directory" },
+      ]),
+    ).toBe("apps/web/src/kit/plot/index.ts");
+  });
+
+  it("chooses the shortest path when several workspace suffixes match", () => {
+    expect(
+      pickWorkspacePathSuffixMatch("kit/plot/index.ts", [
+        { path: "packages/app/src/kit/plot/index.ts", kind: "file" },
+        { path: "apps/web/src/kit/plot/index.ts", kind: "file" },
+      ]),
+    ).toBe("apps/web/src/kit/plot/index.ts");
   });
 });
 

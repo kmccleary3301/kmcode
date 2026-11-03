@@ -1,5 +1,7 @@
 import type { OrchestrationV2ProjectedTurnItem, OrchestrationV2TurnItem } from "@t3tools/contracts";
 
+import { languageFromPath } from "./fileLanguage.ts";
+
 export type ActivityDetailInput =
   | OrchestrationV2TurnItem
   | OrchestrationV2ProjectedTurnItem
@@ -314,44 +316,6 @@ function compactPreview(value: string, maxLength = 140): string {
   if (!plain) return "";
   if (value.length <= maxLength && plain.length <= maxLength) return plain;
   return `${plain.slice(0, maxLength - 1)}…`;
-}
-
-function languageFromPath(path: string | null): string | null {
-  if (path === null) return null;
-  const normalized = path.toLowerCase().split(/[\\/]/).at(-1) ?? path.toLowerCase();
-  if (normalized === "dockerfile") return "dockerfile";
-  const extension = normalized.slice(normalized.lastIndexOf(".") + 1);
-  if (!extension || extension === normalized) return null;
-  const languages: Record<string, string> = {
-    c: "c",
-    cc: "cpp",
-    cpp: "cpp",
-    css: "css",
-    go: "go",
-    h: "c",
-    hpp: "cpp",
-    html: "html",
-    java: "java",
-    js: "javascript",
-    json: "json",
-    jsx: "jsx",
-    md: "markdown",
-    mdx: "mdx",
-    mjs: "javascript",
-    py: "python",
-    rb: "ruby",
-    rs: "rust",
-    sh: "bash",
-    sql: "sql",
-    swift: "swift",
-    ts: "typescript",
-    tsx: "tsx",
-    vue: "vue",
-    xml: "xml",
-    yaml: "yaml",
-    yml: "yaml",
-  };
-  return languages[extension] ?? null;
 }
 
 function languageFromText(value: string): string | null {

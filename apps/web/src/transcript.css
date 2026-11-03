@@ -1161,6 +1161,12 @@
     line-height: 1.7143;
     text-align: left;
   }
+  /* Chat cells wrap inside their cap (index.css), so a full-width table would
+     squeeze every column into the lane; size to content and scroll instead. */
+  .chat-markdown table {
+    width: max-content;
+    min-width: 100%;
+  }
   .markdown-renderer th,
   .markdown-renderer td,
   .markdown-v2-output th,

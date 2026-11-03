@@ -122,6 +122,7 @@ describe("resolveMarkdownFileLinkTarget", () => {
     expect(resolveMarkdownFileLinkTarget("/Users/julius/project/AGENTS.md")).toBe(
       "/Users/julius/project/AGENTS.md",
     );
+    expect(resolveMarkdownFileLinkTarget("/favicon.ico")).toBe("/favicon.ico");
   });
 
   it("resolves relative file paths against cwd", () => {
@@ -350,6 +351,17 @@ describe("resolveInlineCodeFileLinkMeta", () => {
     });
   });
 
+  it("resolves bare known-extension filenames as workspace-relative paths", () => {
+    expect(resolveInlineCodeFileLinkMeta("package.json", "/repo")).toMatchObject({
+      filePath: "/repo/package.json",
+      workspaceRelativePath: "package.json",
+      basename: "package.json",
+    });
+    expect(resolveInlineCodeFileLinkMeta("Cargo.toml", "/repo")).toMatchObject({
+      workspaceRelativePath: "Cargo.toml",
+    });
+  });
+
   it("links absolute posix paths", () => {
     expect(resolveInlineCodeFileLinkMeta("/Users/julius/project/AGENTS.md")).toMatchObject({
       targetPath: "/Users/julius/project/AGENTS.md",
@@ -378,12 +390,14 @@ describe("resolveInlineCodeFileLinkMeta", () => {
     });
   });
 
-  it("links bare filenames only when a line suffix marks them as file references", () => {
+  it("links bare filenames with known extensions or explicit line suffixes", () => {
     expect(resolveInlineCodeFileLinkMeta("script.ts:10", "/Users/julius/project")).toMatchObject({
       targetPath: "/Users/julius/project/script.ts:10",
       line: 10,
     });
-    expect(resolveInlineCodeFileLinkMeta("AGENTS.md", "/Users/julius/project")).toBeNull();
+    expect(resolveInlineCodeFileLinkMeta("AGENTS.md", "/Users/julius/project")).toMatchObject({
+      workspaceRelativePath: "AGENTS.md",
+    });
   });
 
   it("links extensionless bare filenames with a line suffix", () => {

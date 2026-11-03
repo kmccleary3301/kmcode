@@ -110,6 +110,7 @@ import {
   resolvePiLaunchArgs,
 } from "./piT3McpInjection.ts";
 import { PI_FILE_CHANGE_TOOLS } from "./piT3McpExtensionSource.ts";
+import { buildRuntimeInstructions } from "../../provider/RuntimeInstructions.ts";
 import * as ThreadLiveOverlay from "../ThreadLiveOverlay.ts";
 
 export const PI_PROVIDER = ProviderDriverKind.make("pi");
@@ -783,6 +784,7 @@ export function makePiAdapterV2(
         mcpSession,
         extensionPath,
         runtimeMode: input.runtimePolicy.runtimeMode,
+        runtimeInstructions: buildRuntimeInstructions({ harness: driver === "omp" ? "OMP" : "Pi" }),
       });
       const spawnConnection = Effect.suspend(() =>
         makePiRpcConnection({

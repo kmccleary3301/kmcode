@@ -8,6 +8,7 @@ import {
   PI_T3_MCP_EXTENSION_SOURCE,
   T3_MCP_BEARER_ENV,
   T3_MCP_URL_ENV,
+  T3_PI_RUNTIME_INSTRUCTIONS_ENV,
   T3_PI_RUNTIME_MODE_ENV,
 } from "./piT3McpExtensionSource.ts";
 
@@ -256,6 +257,8 @@ export function buildPiRpcLaunch(input: {
   readonly disableExtensions?: boolean;
   readonly disableTools?: boolean;
   readonly runtimeMode?: "approval-required" | "auto-accept-edits" | "auto" | "full-access";
+  /** KM runtime guidance the extension appends to the system prompt each turn. */
+  readonly runtimeInstructions?: string;
 }): {
   readonly args: ReadonlyArray<string>;
   readonly env: NodeJS.ProcessEnv;
@@ -301,6 +304,9 @@ export function buildPiRpcLaunch(input: {
             [T3_PI_RUNTIME_MODE_ENV]:
               input.runtimeMode === "auto" ? "approval-required" : input.runtimeMode,
           }
+        : {}),
+      ...(hasT3Extension && input.runtimeInstructions !== undefined
+        ? { [T3_PI_RUNTIME_INSTRUCTIONS_ENV]: input.runtimeInstructions }
         : {}),
       ...(hasT3Mcp && input.mcpSession !== undefined
         ? {

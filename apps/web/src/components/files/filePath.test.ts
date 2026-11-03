@@ -18,6 +18,14 @@ describe("fileBreadcrumbs", () => {
     ]);
   });
 
+  it("marks the trailing path segment as a directory", () => {
+    expect(fileBreadcrumbs("t3code", "apps/web/src/").at(-1)).toEqual({
+      label: "src",
+      path: "apps/web/src",
+      kind: "directory",
+    });
+  });
+
   it("normalizes repeated separators", () => {
     expect(fileBreadcrumbs("workspace", "src//index.ts").map((crumb) => crumb.label)).toEqual([
       "workspace",

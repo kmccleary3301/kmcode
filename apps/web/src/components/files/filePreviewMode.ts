@@ -9,6 +9,11 @@ export function resolveFilePreviewPath(path: string | null, cwd: string): string
   return path === "." || workspaceRelativeFilePath(path, cwd) === "." ? null : path;
 }
 
+export function getDirectoryPreviewState(path: string | null, isNotFile: boolean) {
+  const isDirectory = path !== null && (isNotFile || /[\\/]+$/.test(path));
+  return { isDirectory, previewPath: isDirectory ? null : path };
+}
+
 export const isMarkdownPreviewFile = (path: string): boolean => /\.(?:md|mdx)$/i.test(path);
 
 /** Describe existing failure codes without exposing the underlying platform cause. */

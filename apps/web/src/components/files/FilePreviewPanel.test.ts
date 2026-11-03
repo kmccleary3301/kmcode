@@ -11,6 +11,7 @@ import {
 } from "./fileCommentAnnotations";
 import {
   filePreviewReadErrorMessage,
+  getDirectoryPreviewState,
   isMarkdownPreviewFile,
   resolveFilePreviewPath,
   setMarkdownTaskChecked,
@@ -272,5 +273,18 @@ describe("resolveFilePreviewPath", () => {
         shouldShowFileExplorer({ relativePath, explorerOpen: false, attachmentOpen: false }),
       ).toBe(true);
     }
+  });
+});
+
+describe("directory preview state", () => {
+  it("shows directory view state for trailing separators and path-not-file reads", () => {
+    expect(getDirectoryPreviewState("/home/kyle/scratch/qc/", false)).toEqual({
+      isDirectory: true,
+      previewPath: null,
+    });
+    expect(getDirectoryPreviewState("kit/plot", true)).toEqual({
+      isDirectory: true,
+      previewPath: null,
+    });
   });
 });

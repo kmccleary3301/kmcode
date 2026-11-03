@@ -24,6 +24,7 @@ export function isHostHomePath(path: string): boolean {
  */
 export function fileBreadcrumbs(projectName: string, relativePath: string): FileBreadcrumb[] {
   const hostPath = isAbsolutePath(relativePath) || isHostHomePath(relativePath);
+  const isDirectory = /[\\/]+$/.test(relativePath);
   const separator = isWindowsAbsolutePath(relativePath) ? "\\" : "/";
   const parts = relativePath.split(/[\\/]/).filter(Boolean);
   const root = relativePath.startsWith("\\\\") ? "\\\\" : relativePath.startsWith("/") ? "/" : "";
@@ -35,7 +36,8 @@ export function fileBreadcrumbs(projectName: string, relativePath: string): File
       return {
         label: part,
         path: breadcrumbPath,
-        kind: index === parts.length - 1 ? ("file" as const) : ("directory" as const),
+        kind:
+          index === parts.length - 1 && !isDirectory ? ("file" as const) : ("directory" as const),
       };
     }),
   ];

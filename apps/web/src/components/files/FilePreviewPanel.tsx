@@ -69,6 +69,7 @@ import { type DraftId, useComposerDraftStore } from "~/composerDraftStore";
 import { buildFileReviewComment } from "~/reviewCommentContext";
 import { appAtomRegistry } from "~/rpc/atomRegistry";
 import { assetEnvironment } from "~/state/assets";
+import { projectEnvironment } from "~/state/projects";
 import { usePreviewAvailable } from "~/browser/previewRuntime";
 import {
   useEnvironment,
@@ -113,12 +114,17 @@ import { DiffCommentAnnotation } from "../diffs/DiffCommentAnnotation";
 import { projectFileCacheKey } from "./fileContentRevision";
 import {
   filePreviewReadErrorMessage,
+  getDirectoryPreviewState,
   isMarkdownPreviewFile,
   resolveFilePreviewPath,
   setMarkdownTaskChecked,
   shouldShowFileExplorer,
 } from "./filePreviewMode";
 import { findThreadFilePathCandidates } from "./threadFilePathResolver";
+import {
+  WORKSPACE_BASENAME_LOOKUP_LIMIT,
+  pickWorkspacePathSuffixMatch,
+} from "~/workspaceBasenameLookup";
 import { useFileSaveCoordinator } from "./useFileSaveCoordinator";
 import {
   getOptimisticProjectFileQueryData,
@@ -161,7 +167,8 @@ type ThreadFileResolution = ThreadFileResolutionIdentity &
     | { readonly status: "resolving" }
     | {
         readonly status: "resolved";
-        readonly absolutePath: string;
+        readonly source: "thread" | "workspace";
+        readonly resolvedPath: string;
         readonly triedPaths: ReadonlyArray<string>;
       }
     | { readonly status: "failed"; readonly triedPaths: ReadonlyArray<string> }
@@ -1072,7 +1079,7 @@ export default function FilePreviewPanel({
       : null;
   const resolvedPath =
     currentThreadFileResolution?.status === "resolved"
-      ? currentThreadFileResolution.absolutePath
+      ? currentThreadFileResolution.resolvedPath
       : null;
   const relativePath = resolvedPath ?? requestedPreviewPath;
   const { resolvedTheme } = useTheme();
@@ -1104,6 +1111,9 @@ export default function FilePreviewPanel({
   const fileAccess = useFilesystemReadAccess(environmentId);
   const { canReadFiles } = fileAccess;
   const canWriteFiles = useEnvironmentScope(environmentId, AuthFilesystemWriteScope);
+  const searchProjectEntries = useAtomQueryRunner(projectEnvironment.searchEntries, {
+    reportFailure: false,
+  });
   // Media and PDFs render from their absolute path, so their contents are never
   // shown. The read still runs: a folder named `assets.png` is only knowable as a
   // folder from the read failure, and the server stats before reading, so a folder
@@ -1171,7 +1181,8 @@ export default function FilePreviewPanel({
           setThreadFileResolution({
             ...resolutionIdentity,
             status: "resolved",
-            absolutePath,
+            source: "thread",
+            resolvedPath: absolutePath,
             triedPaths,
           });
           return;
@@ -1185,10 +1196,41 @@ export default function FilePreviewPanel({
           setThreadFileResolution({
             ...resolutionIdentity,
             status: "resolved",
-            absolutePath,
+            source: "thread",
+            resolvedPath: absolutePath,
             triedPaths,
           });
           return;
+        }
+      }
+
+      const basename = requestedPreviewPath.split(/[\\/]/).at(-1) ?? "";
+      if (basename && cwd) {
+        const result = await searchProjectEntries({
+          environmentId,
+          input: {
+            cwd,
+            query: basename,
+            limit: WORKSPACE_BASENAME_LOOKUP_LIMIT,
+            kind: "file",
+          },
+        });
+        if (controller.signal.aborted) return;
+        if (result._tag === "Success") {
+          const workspacePath = pickWorkspacePathSuffixMatch(
+            requestedPreviewPath,
+            result.value.entries,
+          );
+          if (workspacePath !== null) {
+            setThreadFileResolution({
+              ...resolutionIdentity,
+              status: "resolved",
+              source: "workspace",
+              resolvedPath: workspacePath,
+              triedPaths,
+            });
+            return;
+          }
         }
       }
 
@@ -1200,28 +1242,31 @@ export default function FilePreviewPanel({
     cwd,
     environmentId,
     requestedPreviewPath,
+    searchProjectEntries,
     shouldResolveFromThread,
     threadEnvironmentId,
     threadId,
   ]);
   const attemptedPath = file.readError?.resolvedPath ?? file.readError?.operationPath;
-  // A chat link cannot tell a folder from a file, so a folder arrives here as
-  // a file surface and the read fails. Keep the breadcrumbs, drop the preview
-  // pane, and let the tree fill the surface with the folder revealed. Mutation
-  // refresh stays on so the surface notices if the path becomes a file. A host
-  // path cannot be revealed in the workspace tree, so it keeps the read error.
+  // Trailing separators identify folders before a read completes; a path-not-file
+  // read identifies other directories. Workspace folders reveal in the tree,
+  // while host folders use the existing filesystem browse RPC.
   const isResolvingThreadPath =
     shouldResolveFromThread &&
     (currentThreadFileResolution === null || currentThreadFileResolution.status === "resolving");
-  const isDirectory = file.isNotFile && !isHostFile;
-  // Everything preview-related keys off previewPath; a folder has no preview.
-  const previewPath = isDirectory ? null : relativePath;
+  const { isDirectory, previewPath } = getDirectoryPreviewState(relativePath, file.isNotFile);
+  const isHostDirectory = isDirectory && isHostFile;
+  // A host folder outside the project opens as its own tree, rooted at the folder.
+  const hostDirectoryRoot =
+    isHostDirectory && relativePath ? relativePath.replace(/(?<=.)[\\/]+$/, "") : null;
   const [explorerOpen, setExplorerOpen] = useState(initialExplorerOpen);
-  const showExplorer = shouldShowFileExplorer({
-    relativePath: previewPath,
-    explorerOpen,
-    attachmentOpen: attachment !== undefined,
-  });
+  const showExplorer =
+    !isHostDirectory &&
+    shouldShowFileExplorer({
+      relativePath: previewPath,
+      explorerOpen,
+      attachmentOpen: attachment !== undefined,
+    });
   // Reading markdown rendered is a preference, not a property of one file. Keeping
   // it on the panel meant a thread switch dropped it and forced source back.
   const [renderMarkdownPreferred, setRenderMarkdownPreferred] = useLocalStorage(
@@ -1407,7 +1452,11 @@ export default function FilePreviewPanel({
                 environmentId={environmentId}
                 onOpenFile={onOpenFile}
                 projectName={projectName}
-                relativePath={relativePath}
+                relativePath={
+                  isDirectory && !/[\\/]+$/.test(relativePath)
+                    ? `${relativePath}${relativePath.includes("\\") ? "\\" : "/"}`
+                    : relativePath
+                }
                 workspaceMutationId={workspaceMutationId}
               />
             </div>
@@ -1469,9 +1518,11 @@ export default function FilePreviewPanel({
       ) : null}
       {currentThreadFileResolution?.status === "resolved" ? (
         <div className="shrink-0 border-b px-3 py-1.5 text-2xs text-muted-foreground">
-          Resolved from thread:{" "}
+          {currentThreadFileResolution.source === "thread"
+            ? "Resolved from thread: "
+            : "Resolved in workspace: "}
           <code className="break-all font-mono select-all">
-            {currentThreadFileResolution.absolutePath}
+            {currentThreadFileResolution.resolvedPath}
           </code>
         </div>
       ) : null}
@@ -1660,7 +1711,22 @@ export default function FilePreviewPanel({
             )
           ) : null}
         </div>
-        {showExplorer ? (
+        {hostDirectoryRoot !== null ? (
+          <FileExplorerPane resizable={false}>
+            <FileBrowserPanel
+              key={`${environmentId}:${hostDirectoryRoot}`}
+              environmentId={environmentId}
+              cwd={hostDirectoryRoot}
+              projectName={hostDirectoryRoot.split(/[\\/]/).at(-1) || hostDirectoryRoot}
+              selectedPath={null}
+              selectedPathRevealId={revealRequestId}
+              onOpenFile={(path) =>
+                onOpenFile(`${hostDirectoryRoot.replace(/[\\/]$/, "")}/${path}`)
+              }
+              workspaceMutationId={workspaceMutationId}
+            />
+          </FileExplorerPane>
+        ) : showExplorer ? (
           <FileExplorerPane resizable={Boolean(previewPath)}>
             <FileBrowserPanel
               key={`${environmentId}:${cwd}`}

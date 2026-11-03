@@ -6,7 +6,7 @@ on:
       repository:
         description: Owner-controlled release repository
         required: true
-        default: kmccleary3301/t3code
+        default: kmccleary3301/kmcode
         type: string
       release_tag:
         description: Current stable fork release tag

@@ -78,7 +78,7 @@ it("fails when frame, decoded, or fanout ceilings regress", () => {
         measuredTurnWebSocket: webSocketMeasurement({
           wireBytes: 8_001,
           decodedBytes: 68_001,
-          largestMessageBytes: 12_001,
+          largestMessageBytes: 18_001,
         }),
         fanoutClients: 3,
       }),
@@ -86,7 +86,7 @@ it("fails when frame, decoded, or fanout ceilings regress", () => {
     [
       "codex: measured-turn WebSocket wire bytes was 8001, maximum 8000",
       "codex: measured-turn WebSocket decoded bytes was 68001, maximum 68000",
-      "codex: measured-turn largest WebSocket message bytes was 12001, maximum 12000",
+      "codex: measured-turn largest WebSocket message bytes was 18001, maximum 18000",
       "codex: fanout clients was 3, maximum 2",
     ],
   );

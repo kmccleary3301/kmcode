@@ -112,7 +112,7 @@ function validateResult(value) {
     }
   }
   assertExactKeys(value.scenario, SCENARIO_KEYS, "result.scenario");
-  if (value.scenario.id !== "thread-transfer-v1") {
+  if (!["thread-transfer-v1", "thread-transfer-v2"].includes(value.scenario.id)) {
     throw new Error("result.scenario.id is not supported");
   }
   for (const key of SCENARIO_KEYS.slice(1)) {
@@ -233,6 +233,7 @@ function renderComment(input) {
       );
 
       if (
+        comparable &&
         baselineProvider &&
         baselineProvider.ceiling[metric.key] !== undefined &&
         baselineProvider.ceiling[metric.key] !== ceiling

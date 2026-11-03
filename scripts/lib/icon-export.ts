@@ -1,5 +1,6 @@
-const PNG_SIGNATURE = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+import * as Schema from "effect/Schema";
 
+const PNG_SIGNATURE = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
 export const WINDOWS_ICON_SIZES = [16, 24, 32, 48, 64, 128, 256] as const;
 
 export interface PngIconImage {
@@ -69,4 +70,66 @@ export function encodePngIco(images: ReadonlyArray<PngIconImage>): Buffer {
   });
 
   return Buffer.concat([header, ...images.map((image) => image.contents)]);
+}
+export class IconExportSourceMissingError extends Schema.TaggedError<IconExportSourceMissingError>()(
+  "IconExportSourceMissingError",
+  {
+    sourcePath: Schema.String,
+  },
+) {
+  override get message(): string {
+    return `Missing Icon Composer source project: ${this.sourcePath}`;
+  }
+}
+
+export const PortableIconLayer = Schema.Struct({
+  "image-name": Schema.String,
+  opacity: Schema.optional(Schema.Number),
+  hidden: Schema.optional(Schema.Boolean),
+  position: Schema.optional(
+    Schema.Struct({
+      scale: Schema.optional(Schema.Number),
+      "translation-in-points": Schema.optional(Schema.Tuple([Schema.Number, Schema.Number])),
+    }),
+  ),
+});
+
+export const decodePortableIconProject = Schema.decodeUnknownSync(
+  Schema.fromJsonString(
+    Schema.Struct({
+      groups: Schema.Array(Schema.Struct({ layers: Schema.Array(PortableIconLayer) })),
+    }),
+  ),
+);
+
+export function portableIconSvg(
+  iconJson: string,
+  layerSources: ReadonlyMap<string, Buffer>,
+  safeArea: boolean,
+): string {
+  const project = decodePortableIconProject(iconJson);
+  const layers = project.groups
+    .flatMap((group) => group.layers)
+    .toReversed()
+    .filter((layer) => !layer.hidden);
+  const fill = "#171411";
+  const inset = safeArea ? 100 : 0;
+  const bodySize = safeArea ? 824 : 1024;
+  const children = layers.flatMap((layer) => {
+    const source = layerSources.get(layer["image-name"]);
+    if (source === undefined) {
+      throw new IconExportSourceMissingError({ sourcePath: layer["image-name"] });
+    }
+    const isPng = layer["image-name"].endsWith(".png");
+    const mime = isPng ? "image/png" : "image/svg+xml";
+    const encoded = source.toString("base64");
+    const scale = (layer.position?.scale ?? 8.5) / 8.5;
+    const translation = layer.position?.["translation-in-points"] ?? [0, 0];
+    const translateX = (translation[0] * bodySize) / 1024;
+    const translateY = (translation[1] * bodySize) / 1024;
+    return [
+      `<image href="data:${mime};base64,${encoded}" x="${inset}" y="${inset}" width="${bodySize}" height="${bodySize}" opacity="${layer.opacity ?? 1}" transform="translate(${translateX} ${translateY}) scale(${scale})" preserveAspectRatio="none"/>`,
+    ];
+  });
+  return `<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024"><defs><clipPath id="body-clip"><rect x="${inset}" y="${inset}" width="${bodySize}" height="${bodySize}" rx="${Math.round(bodySize * 0.22)}"/></clipPath></defs><rect x="${inset}" y="${inset}" width="${bodySize}" height="${bodySize}" rx="${Math.round(bodySize * 0.22)}" fill="${fill}"/><g clip-path="url(#body-clip)">${children.join("")}</g></svg>`;
 }

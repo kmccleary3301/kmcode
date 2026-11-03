@@ -7,7 +7,7 @@ Pod::Spec.new do |s|
   s.version = package['version']
   s.summary = 'Host-key verified SSH transport for KM Code mobile.'
   s.description = 'Native SSH session and local forwarding bridge used by KM Code mobile.'
-  s.homepage = 'https://github.com/kmccleary3301/t3code'
+  s.homepage = 'https://github.com/kmccleary3301/kmcode'
   s.license = { :type => 'MIT' }
   s.author = 'KM Code contributors'
   s.platforms = { :ios => '16.1' }

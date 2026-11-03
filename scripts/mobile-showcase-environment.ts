@@ -24,7 +24,14 @@ export interface ShowcaseSeedManifest {
 }
 export const SHOWCASE_TERMINAL_ID = "term-1";
 
-export const SHOWCASE_SCENES = ["threads", "thread", "terminal", "review", "environments"] as const;
+export const SHOWCASE_SCENES = [
+  "threads",
+  "thread",
+  "terminal",
+  "review",
+  "environments",
+  "agent-activity",
+] as const;
 export type ShowcaseScene = (typeof SHOWCASE_SCENES)[number];
 
 const PROJECTOR_NAMES = [
@@ -130,7 +137,7 @@ export const SHOWCASE_PROJECTS = [
     id: "t3code",
     title: "KM Code",
     directory: "t3code",
-    repositoryUrl: "https://github.com/kmccleary3301/t3code.git",
+    repositoryUrl: "https://github.com/kmccleary3301/kmcode.git",
     favicon: PROJECT_FAVICONS.t3code,
   },
   {
@@ -322,7 +329,7 @@ async function seedT3CodeWorkspace(workspaceRoot: string): Promise<void> {
   );
   await initializeRepository({
     workspaceRoot,
-    repositoryUrl: "https://github.com/kmccleary3301/t3code.git",
+    repositoryUrl: "https://github.com/kmccleary3301/kmcode.git",
     commitMessage: "Show connected environments",
   });
   await runGit(workspaceRoot, ["checkout", "-b", "feat/remote-command-center"]);

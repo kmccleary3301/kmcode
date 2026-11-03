@@ -14,7 +14,13 @@ import { Command, Flag } from "effect/unstable/cli";
 import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process";
 import { Resvg } from "@resvg/resvg-js";
 import { BRAND_ASSET_PATHS, DEVELOPMENT_PUBLIC_ICON_OVERRIDES } from "./lib/brand-assets.ts";
-import { encodePngIco, readPngDimensions, WINDOWS_ICON_SIZES } from "./lib/icon-export.ts";
+import {
+  encodePngIco,
+  IconExportSourceMissingError,
+  portableIconSvg,
+  readPngDimensions,
+  WINDOWS_ICON_SIZES,
+} from "./lib/icon-export.ts";
 const DESIGN_GENERATION = 26;
 const ICON_COMPOSER_EXECUTABLE_PARTS = [
   "Contents",
@@ -72,7 +78,7 @@ interface CommandResult {
   readonly exitCode: number;
 }
 
-export class IconExportFileSystemError extends Schema.TaggedErrorClass<IconExportFileSystemError>()(
+export class IconExportFileSystemError extends Schema.TaggedError<IconExportFileSystemError>()(
   "IconExportFileSystemError",
   {
     operation: Schema.Literals([
@@ -95,7 +101,7 @@ export class IconExportFileSystemError extends Schema.TaggedErrorClass<IconExpor
   }
 }
 
-export class IconExportProcessError extends Schema.TaggedErrorClass<IconExportProcessError>()(
+export class IconExportProcessError extends Schema.TaggedError<IconExportProcessError>()(
   "IconExportProcessError",
   {
     operation: Schema.Literals(["spawn", "collect-stdout", "collect-stderr", "wait-for-exit"]),
@@ -109,7 +115,7 @@ export class IconExportProcessError extends Schema.TaggedErrorClass<IconExportPr
   }
 }
 
-export class IconExportCommandFailedError extends Schema.TaggedErrorClass<IconExportCommandFailedError>()(
+export class IconExportCommandFailedError extends Schema.TaggedError<IconExportCommandFailedError>()(
   "IconExportCommandFailedError",
   {
     command: Schema.String,
@@ -126,7 +132,7 @@ export class IconExportCommandFailedError extends Schema.TaggedErrorClass<IconEx
   }
 }
 
-export class IconExportToolResolutionError extends Schema.TaggedErrorClass<IconExportToolResolutionError>()(
+export class IconExportToolResolutionError extends Schema.TaggedError<IconExportToolResolutionError>()(
   "IconExportToolResolutionError",
   {
     reason: Schema.Literals(["configured-invalid", "configured-outdated", "not-found"]),
@@ -147,18 +153,9 @@ export class IconExportToolResolutionError extends Schema.TaggedErrorClass<IconE
   }
 }
 
-export class IconExportSourceMissingError extends Schema.TaggedErrorClass<IconExportSourceMissingError>()(
-  "IconExportSourceMissingError",
-  {
-    sourcePath: Schema.String,
-  },
-) {
-  override get message(): string {
-    return `Missing Icon Composer source project: ${this.sourcePath}`;
-  }
-}
+export { IconExportSourceMissingError };
 
-export class IconExportRenditionError extends Schema.TaggedErrorClass<IconExportRenditionError>()(
+export class IconExportRenditionError extends Schema.TaggedError<IconExportRenditionError>()(
   "IconExportRenditionError",
   {
     sourcePath: Schema.String,
@@ -178,7 +175,7 @@ export class IconExportRenditionError extends Schema.TaggedErrorClass<IconExport
   }
 }
 
-export class IconExportEncodingError extends Schema.TaggedErrorClass<IconExportEncodingError>()(
+export class IconExportEncodingError extends Schema.TaggedError<IconExportEncodingError>()(
   "IconExportEncodingError",
   {
     variant: Schema.String,
@@ -190,7 +187,7 @@ export class IconExportEncodingError extends Schema.TaggedErrorClass<IconExportE
   }
 }
 
-export class IconExportAssetsStaleError extends Schema.TaggedErrorClass<IconExportAssetsStaleError>()(
+export class IconExportAssetsStaleError extends Schema.TaggedError<IconExportAssetsStaleError>()(
   "IconExportAssetsStaleError",
   {
     paths: Schema.Array(Schema.String),
@@ -474,55 +471,6 @@ const resolveIconComposerTool = Effect.fn("iconExport.resolveIconComposerTool")(
   });
 });
 
-const PortableIconLayer = Schema.Struct({
-  "image-name": Schema.String,
-  opacity: Schema.optional(Schema.Number),
-  hidden: Schema.optional(Schema.Boolean),
-  position: Schema.optional(
-    Schema.Struct({
-      scale: Schema.optional(Schema.Number),
-      "translation-in-points": Schema.optional(Schema.Tuple([Schema.Number, Schema.Number])),
-    }),
-  ),
-});
-const decodePortableIconProject = Schema.decodeUnknownSync(
-  Schema.fromJsonString(
-    Schema.Struct({
-      groups: Schema.Array(Schema.Struct({ layers: Schema.Array(PortableIconLayer) })),
-    }),
-  ),
-);
-
-function portableIconSvg(
-  iconJson: string,
-  layerSources: ReadonlyMap<string, string>,
-  safeArea: boolean,
-): string {
-  const project = decodePortableIconProject(iconJson);
-  const layers = project.groups
-    .flatMap((group) => group.layers)
-    .toReversed()
-    .filter((layer) => !layer.hidden);
-  const fill = "#171411";
-  const inset = safeArea ? 100 : 0;
-  const bodySize = safeArea ? 824 : 1024;
-  const children = layers.flatMap((layer) => {
-    const source = layerSources.get(layer["image-name"]);
-    if (source === undefined) {
-      throw new IconExportSourceMissingError({ sourcePath: layer["image-name"] });
-    }
-    const encoded = Buffer.from(source, "utf8").toString("base64");
-    const scale = (layer.position?.scale ?? 8.5) / 8.5;
-    const translation = layer.position?.["translation-in-points"] ?? [0, 0];
-    const translateX = (translation[0] * bodySize) / 1024;
-    const translateY = (translation[1] * bodySize) / 1024;
-    return [
-      `<image href="data:image/svg+xml;base64,${encoded}" x="${inset}" y="${inset}" width="${bodySize}" height="${bodySize}" opacity="${layer.opacity ?? 1}" transform="translate(${translateX} ${translateY}) scale(${scale})" preserveAspectRatio="none"/>`,
-    ];
-  });
-  return `<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024"><defs><clipPath id="body-clip"><rect x="${inset}" y="${inset}" width="${bodySize}" height="${bodySize}" rx="${Math.round(bodySize * 0.22)}"/></clipPath></defs><rect x="${inset}" y="${inset}" width="${bodySize}" height="${bodySize}" rx="${Math.round(bodySize * 0.22)}" fill="${fill}"/><g clip-path="url(#body-clip)">${children.join("")}</g></svg>`;
-}
-
 const renderSvg = Effect.fn("iconExport.renderSvg")(function* (
   sourcePath: string,
   outputPath: string,
@@ -576,18 +524,20 @@ const renderPortableIcon = Effect.fn("iconExport.renderPortableIcon")(function* 
         }),
     ),
   );
-  const layerSources = new Map<string, string>();
-  for (const assetName of assetNames.filter((name) => name.endsWith(".svg"))) {
+  const layerSources = new Map<string, Buffer>();
+  for (const assetName of assetNames.filter(
+    (name) => name.endsWith(".svg") || name.endsWith(".png"),
+  )) {
     const assetPath = path.join(sourceDirectory, assetName);
     const asset = yield* fs
-      .readFileString(assetPath)
+      .readFile(assetPath)
       .pipe(
         Effect.mapError(
           (cause) =>
             new IconExportFileSystemError({ operation: "read-file", path: assetPath, cause }),
         ),
       );
-    layerSources.set(assetName, asset);
+    layerSources.set(assetName, Buffer.from(asset));
   }
   const wrapper = portableIconSvg(iconJson, layerSources, safeArea);
   return yield* renderSvg(sourceRelativePath, outputPath, size, wrapper);
@@ -890,6 +840,11 @@ export const exportBrandIcons = Effect.fn("exportBrandIcons")(function* (checkOn
 
   const androidAssets = [
     {
+      source: BRAND_ASSET_PATHS.androidAdaptiveBackgroundSvg,
+      output: BRAND_ASSET_PATHS.androidAdaptiveBackgroundPng,
+      size: 432,
+    },
+    {
       source: BRAND_ASSET_PATHS.androidAdaptiveForegroundSvg,
       output: BRAND_ASSET_PATHS.androidAdaptiveForegroundPng,
       size: 432,
@@ -958,7 +913,7 @@ export const exportBrandIcons = Effect.fn("exportBrandIcons")(function* (checkOn
 export const exportBrandIconsCommand = Command.make(
   "export-brand-icons",
   {
-    check: Flag.boolean("check").pipe(
+    check: Flag.Boolean("check").pipe(
       Flag.withDescription("Verify generated icon assets without modifying files."),
       Flag.withDefault(false),
     ),

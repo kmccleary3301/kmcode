@@ -27,6 +27,7 @@ import type {
   ProviderStopSessionInput,
   ProviderUploadFeedbackInput,
   ProviderUploadFeedbackResult,
+  MessageId,
   ThreadId,
   ProviderTurnStartResult,
   ServerProviderSlashCommand,
@@ -57,6 +58,12 @@ export interface ProviderServiceShape {
   readonly sendTurn: (
     input: ProviderSendTurnInput,
   ) => Effect.Effect<ProviderTurnStartResult, ProviderServiceError>;
+
+  readonly compactThread: (
+    threadId: ThreadId,
+    modelSelection?: ProviderSendTurnInput["modelSelection"],
+    requestId?: MessageId,
+  ) => Effect.Effect<void, ProviderServiceError>;
 
   /**
    * Interrupt a running provider turn.
@@ -134,6 +141,13 @@ export interface ProviderServiceShape {
   readonly forkNativeSession?: (input: {
     readonly threadId: ThreadId;
   }) => Effect.Effect<{ readonly sessionId: string }, ProviderServiceError>;
+
+  /**
+   * Reject unsupported rewind before files change, without resuming the session.
+   */
+  readonly assertConversationRollbackSupported: (
+    threadId: ThreadId,
+  ) => Effect.Effect<void, ProviderServiceError>;
 
   /**
    * Roll back provider conversation state by a number of turns.

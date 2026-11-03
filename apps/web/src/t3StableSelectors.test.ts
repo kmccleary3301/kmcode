@@ -217,6 +217,12 @@ const staticAuditAllowances: readonly StaticAuditAllowance[] = [
     reason: "provider usage chart consumes provider adapter colors",
   },
   {
+    file: "components/usage/UsageLimitsPooled.tsx",
+    rule: "inline appearance property",
+    match: "backgroundColor: `oklch(0.85 0.08 ${hue})`",
+    reason: "account chips derive a stable per-address hue; no theme token can encode it",
+  },
+  {
     file: "components/clerk/T3ConnectSidebarSignIn.tsx",
     rule: "Clerk appearance branch",
     match: "appearance={{",
@@ -229,13 +235,31 @@ const staticAuditAllowances: readonly StaticAuditAllowance[] = [
     reason: "Pierre diff renderer bridge combines audited base and caller CSS",
   },
   {
+    file: "components/DiffPanel.tsx",
+    rule: "renderer unsafe CSS escape",
+    match: "unsafeCSSExtra:",
+    reason: "lazy diffs hide Pierre's own line counts in favour of the panel's file stats",
+  },
+  {
     file: "components/files/FileBrowserPanel.tsx",
     rule: "renderer unsafe CSS escape",
-    match: "unsafeCSS: TREE_UNSAFE_CSS",
+    match: "unsafeCSS: PIERRE_TREE_UNSAFE_CSS",
+    reason: "Pierre tree renderer bridge owns file-tree internals",
+  },
+  {
+    file: "components/diffs/DiffFileTree.tsx",
+    rule: "renderer unsafe CSS escape",
+    match: "unsafeCSS: PIERRE_TREE_UNSAFE_CSS",
     reason: "Pierre tree renderer bridge owns file-tree internals",
   },
   {
     file: "components/files/FilePreviewPanel.tsx",
+    rule: "renderer unsafe CSS escape",
+    match: "unsafeCSS: FILE_LINK_REVEAL_UNSAFE_CSS",
+    reason: "Pierre file-link reveal bridge owns third-party markup",
+  },
+  {
+    file: "components/files/ReadOnlySourcePreview.tsx",
     rule: "renderer unsafe CSS escape",
     match: "unsafeCSS: FILE_LINK_REVEAL_UNSAFE_CSS",
     reason: "Pierre file-link reveal bridge owns third-party markup",
@@ -325,7 +349,6 @@ const requiredRenderedHooks = [
   "tooltip",
   "toast",
   "switch",
-  "field",
   "slider",
   "auth",
   "pairing",

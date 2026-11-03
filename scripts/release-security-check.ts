@@ -23,7 +23,7 @@ const posixLifecycle = NodeFS.readFileSync(
   NodePath.join(root, "scripts/release-lifecycle-posix.sh"),
   "utf8",
 );
-const installer = NodeFS.readFileSync(NodePath.join(root, "scripts/install.sh"), "utf8");
+const installer = NodeFS.readFileSync(NodePath.join(root, "scripts/release-installer.sh"), "utf8");
 const installedNativeTest = NodeFS.readFileSync(
   NodePath.join(root, "apps/server/integration/installedArtifactNative.integration.test.ts"),
   "utf8",

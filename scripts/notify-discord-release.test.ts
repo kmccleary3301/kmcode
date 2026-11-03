@@ -3,11 +3,7 @@ import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import { HttpClient, HttpClientError, HttpClientResponse } from "effect/unstable/http";
 
-import {
-  buildDiscordReleaseAnnouncement,
-  isDiscordReleaseAnnouncementError,
-  postDiscordWebhook,
-} from "./notify-discord-release.ts";
+import { buildDiscordReleaseAnnouncement, postDiscordWebhook } from "./notify-discord-release.ts";
 
 const latestAnnouncement = {
   target: "latest",
@@ -69,7 +65,6 @@ it.effect("preserves webhook request context and the full client cause chain", (
     assert.equal(error.cause, clientError);
     assert.equal((error.cause as HttpClientError.HttpClientError).cause, requestCause);
     assert.ok(!error.message.includes(requestCause.message));
-    assert.equal(isDiscordReleaseAnnouncementError(error), true);
   });
 });
 
@@ -103,6 +98,5 @@ it.effect("preserves a non-success response error with structured status context
     }
     assert.equal(error.cause.reason._tag, "StatusCodeError");
     assert.ok(!error.message.includes(error.cause.message));
-    assert.equal(isDiscordReleaseAnnouncementError(error), true);
   });
 });

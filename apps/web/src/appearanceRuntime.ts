@@ -1096,13 +1096,11 @@ let librarySync: Promise<void> = Promise.resolve();
 async function syncEnvironmentPackages(runtime: AppearanceRuntime): Promise<void> {
   await runtime.execute({
     type: "environment-packages",
-    packages: getEnvironmentThemes().map(
-      (theme): AppearancePackageInput => ({
-        input: theme,
-        sourceId: theme.id,
-        trust: ENVIRONMENT_TRUST,
-      }),
-    ),
+    packages: getEnvironmentThemes().map((theme): AppearancePackageInput => ({
+      input: theme,
+      sourceId: theme.id,
+      trust: ENVIRONMENT_TRUST,
+    })),
   });
 }
 

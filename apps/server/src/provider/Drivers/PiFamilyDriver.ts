@@ -219,10 +219,12 @@ function makeSnapshot(
     } satisfies ServerProvider;
   }).pipe(Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, dependencies.spawner));
   return {
-    maintenanceCapabilities: maintenance(provider),
+    resolveMaintenance: () => Effect.succeed(maintenance(provider)),
     getSnapshot: check,
     refresh: check,
     streamChanges: Stream.empty,
+    // Pi and OMP publish no provider rate-limit windows to merge.
+    applyUsageLimits: () => Effect.void,
   };
 }
 export function resolvePiFamilyEnvironment(

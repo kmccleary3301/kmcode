@@ -4,18 +4,25 @@ import { storage } from "@clerk/electron/storage";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 import * as Scope from "effect/Scope";
 
+import { codexAuthDeliveryUrl, readCodexAuthHandoff } from "@t3tools/shared/codexAuthHandoff";
+import { receiveCodexAuthCallback, CodexAuthCallbackError } from "./CodexAuthCallback.ts";
+import * as ElectronShell from "../electron/ElectronShell.ts";
+import { providerAuthReturnUrl } from "@t3tools/shared/providerAuthReturnUrl";
+import { HostProcessArguments } from "@t3tools/shared/hostProcess";
 import { clerkFrontendApiHostnameFromPublishableKey } from "@t3tools/shared/relayAuth";
 import * as ElectronApp from "../electron/ElectronApp.ts";
 import * as ElectronProtocol from "../electron/ElectronProtocol.ts";
+import * as ElectronWindow from "../electron/ElectronWindow.ts";
 import * as DesktopAppIdentity from "./DesktopAppIdentity.ts";
 import * as DesktopEnvironment from "./DesktopEnvironment.ts";
 
 declare const __T3CODE_BUILD_CLERK_PUBLISHABLE_KEY__: string | undefined;
 
-export class DesktopClerkBridgeInitializationError extends Schema.TaggedErrorClass<DesktopClerkBridgeInitializationError>()(
+export class DesktopClerkBridgeInitializationError extends Schema.TaggedError<DesktopClerkBridgeInitializationError>()(
   "DesktopClerkBridgeInitializationError",
   {
     stateDir: Schema.String,
@@ -28,7 +35,7 @@ export class DesktopClerkBridgeInitializationError extends Schema.TaggedErrorCla
   }
 }
 
-export class DesktopClerkBridgeCleanupError extends Schema.TaggedErrorClass<DesktopClerkBridgeCleanupError>()(
+export class DesktopClerkBridgeCleanupError extends Schema.TaggedError<DesktopClerkBridgeCleanupError>()(
   "DesktopClerkBridgeCleanupError",
   {
     stateDir: Schema.String,
@@ -44,11 +51,15 @@ export class DesktopClerkBridgeCleanupError extends Schema.TaggedErrorClass<Desk
 export class DesktopClerk extends Context.Service<
   DesktopClerk,
   {
-    readonly configure: Effect.Effect<void, never, ElectronApp.ElectronApp | Scope.Scope>;
+    readonly configure: Effect.Effect<
+      void,
+      never,
+      ElectronApp.ElectronApp | ElectronWindow.ElectronWindow | Scope.Scope
+    >;
   }
 >()("@t3tools/desktop/app/DesktopClerk") {}
 
-export function resolveDesktopClerkFrontendApiHostname(
+function resolveDesktopClerkFrontendApiHostname(
   publishableKey: string | undefined,
 ): string | undefined {
   const normalizedKey = publishableKey?.trim();
@@ -82,9 +93,11 @@ export function createDesktopClerkBridge(
   });
 }
 
+/** @public Service construction is part of the canonical Effect module API. */
 export const make = Effect.gen(function* () {
   const environment = yield* DesktopEnvironment.DesktopEnvironment;
   const electronApp = yield* ElectronApp.ElectronApp;
+  const shell = yield* ElectronShell.ElectronShell;
 
   // Electron scopes the single-instance lock to the userData directory and
   // creates that directory when the lock is acquired. The SDK bridge takes
@@ -125,6 +138,9 @@ export const make = Effect.gen(function* () {
   return DesktopClerk.of({
     configure: Effect.gen(function* () {
       const electronApp = yield* ElectronApp.ElectronApp;
+      const electronWindow = yield* ElectronWindow.ElectronWindow;
+      const context = yield* Effect.context<ElectronWindow.ElectronWindow>();
+      const runPromise = Effect.runPromiseWith(context);
 
       // The SDK bridge holds Electron's single-instance lock (acquired at
       // bridge creation) so OAuth deep-link callbacks on Windows/Linux are
@@ -135,6 +151,64 @@ export const make = Effect.gen(function* () {
         yield* electronApp.quit;
         return yield* Effect.interrupt;
       }
+
+      const startProviderAuthHandoff = (value: string | undefined) => {
+        if (!value) return false;
+        const request = readCodexAuthHandoff(value, environment.isDevelopment);
+        if (!request) return false;
+        void runPromise(
+          Effect.gen(function* () {
+            yield* electronApp.whenReady;
+            yield* Effect.tryPromise({
+              try: () =>
+                receiveCodexAuthCallback(
+                  request.authorizationUrl,
+                  (url) => runPromise(shell.openExternal(url)),
+                  (callbackUrl) => codexAuthDeliveryUrl(request, callbackUrl),
+                ),
+              catch: () =>
+                new CodexAuthCallbackError({
+                  detail:
+                    "Could not receive hosted web ChatGPT sign-in. Retry or use the redirect URL in the web app.",
+                }),
+            });
+          }).pipe(
+            Effect.catch(() => Effect.logWarning("Could not complete ChatGPT desktop handoff.")),
+          ),
+        );
+        return true;
+      };
+      const resumeProviderAuth = (value: string | undefined) => {
+        const destination = providerAuthReturnUrl(value);
+        const expectedOrigin = `${ElectronProtocol.getDesktopScheme(
+          environment.isDevelopment,
+          environment.productProfile,
+        )}://app`;
+        if (!destination?.startsWith(`${expectedOrigin}/`)) return false;
+        void runPromise(
+          Effect.gen(function* () {
+            const mainWindow = yield* electronWindow.currentMainOrFirst;
+            if (Option.isNone(mainWindow)) return;
+            yield* Effect.promise(() => mainWindow.value.loadURL(destination));
+            yield* electronWindow.reveal(mainWindow.value);
+          }).pipe(
+            Effect.catchCause((cause) =>
+              Effect.logWarning("Could not return to provider setup", cause),
+            ),
+          ),
+        );
+        return true;
+      };
+      const args = yield* HostProcessArguments;
+      args.some((value) => startProviderAuthHandoff(value));
+      yield* electronApp.on("open-url", (event: { preventDefault: () => void }, url: string) => {
+        if (startProviderAuthHandoff(url) || resumeProviderAuth(url)) event.preventDefault();
+      });
+      // DesktopLifecycle reveals the main window on "second-instance"; this
+      // listener only routes provider auth callbacks carried in argv.
+      yield* electronApp.on("second-instance", (_event: unknown, argv: readonly string[]) => {
+        argv?.some((value) => startProviderAuthHandoff(value) || resumeProviderAuth(value));
+      });
     }).pipe(Effect.withSpan("desktop.clerk.configure")),
   });
 });

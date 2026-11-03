@@ -179,13 +179,13 @@ workflow allows that; pull-request CI does not test signing.
 
 The published `fork-v0.0.47` release contains every target in the matrix above plus the
 profile-specific CLI/web tarball. Release workflow run
-[`32718276003`](https://github.com/kmccleary3301/t3code/actions/runs/32718276003) built Linux
+[`32718276003`](https://github.com/kmccleary3301/kmcode/actions/runs/32718276003) built Linux
 arm64/x64, macOS arm64/x64, and Windows x64 on matching GitHub-hosted runners. GitHub provenance
 attestations cover the release assets. Platform-signing credentials were not configured, so the
 desktop artifacts are unsigned and the macOS artifacts are unnotarized.
 
 The current `fork-v0.0.47` lifecycle run
-[`32721583970`](https://github.com/kmccleary3301/t3code/actions/runs/32721583970) passed all five
+[`32721583970`](https://github.com/kmccleary3301/kmcode/actions/runs/32721583970) passed all five
 target-host jobs. POSIX jobs exercised CLI install/upgrade/rollback/uninstall and native-config
 preservation on macOS arm64/x64 and Linux arm64/x64, plus desktop artifact install/upgrade/identity/
 rollback/uninstall and tampered-checksum, partial-download, missing-asset, and missing-release

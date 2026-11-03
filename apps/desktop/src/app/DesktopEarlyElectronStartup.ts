@@ -1,4 +1,8 @@
-import { parseProductProfile, resolveProductIdentity } from "@t3tools/contracts";
+import {
+  parseProductProfile,
+  resolveProductIdentity,
+  type ProductProfile,
+} from "@t3tools/contracts";
 import { fromLenientJson } from "@t3tools/shared/schemaJson";
 import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
@@ -26,9 +30,21 @@ interface EarlyDesktopSettingsInput {
 type EarlyLinuxElectronOptionsInput = EarlyDesktopSettingsInput;
 
 export interface EarlyLinuxElectronOptions {
+  readonly profile: ProductProfile;
+  readonly isDevelopment: boolean;
   readonly linuxWmClass: string;
+  readonly linuxDesktopEntryName: string;
   readonly passwordStore: LinuxPasswordStoreSwitch | null;
 }
+
+// Reverse-DNS names double as the Linux app id (window capture portals match on it).
+export const resolveLinuxDesktopEntryName = (
+  isDevelopment: boolean,
+  profile: ProductProfile = "upstream",
+): string => {
+  const entryName = resolveProductIdentity(profile).linuxDesktopEntryName;
+  return isDevelopment ? entryName.replace(/\.desktop$/u, ".Development.desktop") : entryName;
+};
 
 const trimNonEmpty = (value: string | undefined): string | null => {
   const trimmed = value?.trim();
@@ -86,10 +102,12 @@ export function resolveEarlyLinuxElectronOptions(
 ): EarlyLinuxElectronOptions {
   const preference = resolveEarlyLinuxPasswordStorePreference(input);
   const identity = resolveProductIdentity(parseProductProfile(input.env.T3_PRODUCT_PROFILE));
+  const isDevelopment = isDevelopmentEnvironment(input.env);
   return {
-    linuxWmClass: isDevelopmentEnvironment(input.env)
-      ? `${identity.linuxWmClass}-dev`
-      : identity.linuxWmClass,
+    profile: identity.profile,
+    isDevelopment,
+    linuxWmClass: isDevelopment ? `${identity.linuxWmClass}-dev` : identity.linuxWmClass,
+    linuxDesktopEntryName: resolveLinuxDesktopEntryName(isDevelopment, identity.profile),
     passwordStore: resolveLinuxPasswordStoreSwitch({
       preference,
       env: input.env,

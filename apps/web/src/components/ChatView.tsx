@@ -57,6 +57,7 @@ import {
   type ChatFileAttachment,
   CommandId,
   DEFAULT_MODEL,
+  isOrchestrationV2WorkActive,
   isProviderNativeSubagentThread,
   type ChatAttachment as ContractChatAttachment,
   EnvironmentAuthorizationError,
@@ -180,6 +181,7 @@ import { isElectron } from "../env";
 import { readLocalApi } from "../localApi";
 import { useDiffPanelStore } from "../diffPanelStore";
 import { useActiveThreadRef } from "../hooks/useActiveThreadRef";
+import { AgentsPanel, type SubagentTurnItem } from "./AgentsPanel";
 import {
   type ComposerSubmissionIntent,
   collapseExpandedComposerCursor,
@@ -1731,6 +1733,31 @@ export default function ChatView(props: ChatViewProps) {
   }, [serverProjection?.providerTurns]);
   const serverVisibleTurnItems = useThreadVisibleTurnItems(routeThreadDetailRef);
   const serverThreadHistory = useThreadHistory(routeThreadDetailRef);
+  const subagents = useMemo(
+    () =>
+      (serverProjection?.turnItems ?? []).filter(
+        (item): item is SubagentTurnItem => item.type === "subagent",
+      ),
+    [serverProjection?.turnItems],
+  );
+  const liveAgentCount = useMemo(
+    () => subagents.filter((item) => isOrchestrationV2WorkActive(item.status)).length,
+    [subagents],
+  );
+  const activeSubagentLiveContent = useMemo(() => {
+    let latestItem: SubagentTurnItem | null = null;
+    let latestTime = -Infinity;
+    for (const item of subagents) {
+      if (isOrchestrationV2WorkActive(item.status) && item.liveContent) {
+        const time = DateTime.toEpochMillis(item.updatedAt);
+        if (latestItem === null || time >= latestTime) {
+          latestItem = item;
+          latestTime = time;
+        }
+      }
+    }
+    return latestItem?.liveContent ?? null;
+  }, [subagents]);
   const threadHistoryControls = useMemo<MessagesTimelineHistoryControls | undefined>(() => {
     if (routeThreadDetailRef === null || !shouldShowLoadEarlierControl(serverThreadHistory)) {
       return undefined;
@@ -5508,6 +5535,10 @@ export default function ChatView(props: ChatViewProps) {
     if (!activeThreadRef || !activeProject) return;
     useRightPanelStore.getState().open(activeThreadRef, "files");
   }, [activeProject, activeThreadRef]);
+  const addAgentsSurface = useCallback(() => {
+    if (!activeThreadRef) return;
+    useRightPanelStore.getState().open(activeThreadRef, "agents");
+  }, [activeThreadRef]);
   const supportsThreadPullRequests =
     serverConfig?.environment.capabilities.threadPullRequests === true;
   const visiblePullRequests = visibleThreadPullRequests(
@@ -11050,6 +11081,12 @@ export default function ChatView(props: ChatViewProps) {
       />
     ) : renderedRightPanelSurface?.kind === "pull-requests" && activeThreadRef ? (
       <ThreadPullRequestsPanel threadRef={activeThreadRef} />
+    ) : renderedRightPanelSurface?.kind === "agents" ? (
+      <AgentsPanel
+        subagents={subagents}
+        environmentId={activeThreadRef?.environmentId ?? null}
+        threadId={activeThreadRef?.threadId ?? null}
+      />
     ) : renderedRightPanelSurface?.kind === "device" ? (
       <Suspense fallback={null}>
         <DevicePanel
@@ -11499,14 +11536,16 @@ export default function ChatView(props: ChatViewProps) {
               inert={isRevertingCheckpoint}
               data-chat-composer-overlay="true"
               data-t3-surface="composer"
+              data-chat-draft-hero={isDraftHeroState ? "true" : undefined}
               className={
                 isDraftHeroState
-                  ? "pointer-events-none absolute inset-0 z-20 flex items-center"
+                  ? "pointer-events-none absolute inset-0 z-20 flex items-center [container-type:size]"
                   : "pointer-events-none absolute inset-x-0 bottom-0 z-20 pt-1.5 sm:pt-2"
               }
             >
               <div
                 ref={draftHeroTransition.transitionGroupRef}
+                data-draft-hero-layout={isDraftHeroState ? "true" : undefined}
                 className="chat-composer-lane w-full"
               >
                 <div
@@ -11514,7 +11553,7 @@ export default function ChatView(props: ChatViewProps) {
                   className="group/composer-stack pointer-events-auto relative z-10 mx-auto w-full max-w-(--chat-content-max-width)"
                 >
                   {isDraftHeroState ? (
-                    <div className="absolute inset-x-0 bottom-full">
+                    <div data-draft-hero-headline className="absolute inset-x-0 bottom-full">
                       <div
                         className="pb-4 group-has-data-[composer-shoulder-tab]/composer-stack:pb-0"
                         style={
@@ -11566,6 +11605,8 @@ export default function ChatView(props: ChatViewProps) {
                                   ? () => onOpenRelatedThread(parentThreadLink.threadId)
                                   : null
                               }
+                              onOpenAgents={addAgentsSurface}
+                              liveContent={activeSubagentLiveContent}
                             />
                           ) : null}
                           {!composerMounted ? null : (
@@ -11955,6 +11996,9 @@ export default function ChatView(props: ChatViewProps) {
           pullRequestAvailable={pullRequestSurfaceAvailable}
           pullRequestsAvailable={pullRequestsSurfaceAvailable}
           deviceAvailable={activeThreadRef !== null}
+          onAddAgents={addAgentsSurface}
+          agentsAvailable={activeThreadRef !== null}
+          liveAgentCount={liveAgentCount}
         >
           {rightPanelContent}
         </RightPanelTabs>
@@ -12013,6 +12057,9 @@ export default function ChatView(props: ChatViewProps) {
             pullRequestAvailable={pullRequestSurfaceAvailable}
             pullRequestsAvailable={pullRequestsSurfaceAvailable}
             deviceAvailable={activeThreadRef !== null}
+            onAddAgents={addAgentsSurface}
+            agentsAvailable={activeThreadRef !== null}
+            liveAgentCount={liveAgentCount}
           >
             {rightPanelContent}
           </RightPanelTabs>

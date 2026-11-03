@@ -356,6 +356,15 @@ export function resolveDefaultFamilyLabel(stack: string): string | null {
       if (resolved !== null) return resolved;
       continue;
     }
+    // A face the app bundles via @font-face will render, but canvas metrics
+    // only see it once loaded - probing before then names the fallback.
+    if (typeof document !== "undefined" && document.fonts) {
+      for (const face of document.fonts) {
+        if (face.status !== "error" && face.family.replace(/^(['"])(.*)\1$/, "$2") === family) {
+          return family;
+        }
+      }
+    }
     if (isFontFamilyAvailable(family)) return family;
   }
   return null;

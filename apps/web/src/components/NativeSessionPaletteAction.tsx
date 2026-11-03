@@ -13,6 +13,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { inferProjectTitleFromPath } from "../lib/projectPaths";
 import { deriveProviderInstanceEntries, type ProviderInstanceEntry } from "../providerInstances";
+import { waitForThreadShell } from "../state/entities";
 import { useEnvironments, usePrimaryEnvironmentId } from "../state/environments";
 import { primaryServerProvidersAtom, serverEnvironment } from "../state/server";
 import { useAtomCommand } from "../state/use-atom-command";
@@ -245,12 +246,24 @@ export function useNativeSessionPaletteAction(input: {
                     }
                     return;
                   }
+                  const threadRef = scopeThreadRef(target.environmentId, result.value.threadId);
+                  // The thread route redirects home while the shell lacks the thread, so
+                  // wait for the server's shell event before navigating.
+                  if (!(await waitForThreadShell(threadRef, 15_000))) {
+                    toastManager.add(
+                      stackedThreadToast({
+                        type: "error",
+                        title: "Could not open native session",
+                        description:
+                          "The session was imported, but its thread did not reach this client. Open it from the sidebar.",
+                      }),
+                    );
+                    return;
+                  }
                   input.closePalette();
                   await navigate({
                     to: "/$environmentId/$threadId",
-                    params: buildThreadRouteParams(
-                      scopeThreadRef(target.environmentId, result.value.threadId),
-                    ),
+                    params: buildThreadRouteParams(threadRef),
                   });
                 },
               };

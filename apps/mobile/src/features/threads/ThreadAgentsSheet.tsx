@@ -17,10 +17,12 @@ import { useSafeAreaInsets } from "react-native-safe-area-context";
 
 import { AndroidSheetHeader } from "../../components/AndroidScreenHeader";
 import { AppText as Text } from "../../components/AppText";
+import { SymbolView } from "../../components/AppSymbol";
 import { useUniwindTheme } from "../../lib/useUniwindTheme";
 import { environmentThreadDetails } from "../../state/threads";
 import { nativeHeaderScrollEdgeEffects } from "../../native/StackHeader";
 import { SubagentRow } from "./SubagentRow";
+import { SubagentTranscript } from "./SubagentTranscript";
 
 const HEADER_SCROLL_EDGE_EFFECTS = nativeHeaderScrollEdgeEffects(Platform.OS, Platform.Version);
 
@@ -38,6 +40,14 @@ export function ThreadAgentsSheet({ route }: StaticScreenProps<AgentsTarget>) {
   const turn = useThreadTurnSubagents(target);
   const subagents = turn?.subagents ?? [];
   const hasLiveAgent = (turn?.liveCount ?? 0) > 0;
+  const [selectedSubagentId, setSelectedSubagentId] = useState<string | null>(null);
+  useEffect(() => {
+    setSelectedSubagentId(null);
+  }, [target.environmentId, target.threadId]);
+  const selectedSubagent =
+    selectedSubagentId === null
+      ? null
+      : (subagents.find((subagent) => subagent.id === selectedSubagentId) ?? null);
 
   const openChildThread = (childThreadId: ThreadId) => {
     void Haptics.selectionAsync();
@@ -60,7 +70,30 @@ export function ThreadAgentsSheet({ route }: StaticScreenProps<AgentsTarget>) {
       contentContainerClassName="px-5 pb-6"
       contentContainerStyle={{ paddingBottom: Math.max(insets.bottom, 16) + 8 }}
     >
-      {subagents.length === 0 ? (
+      {selectedSubagentId !== null ? (
+        <View className="gap-3">
+          <Pressable
+            accessibilityRole="button"
+            accessibilityLabel="Back to agents"
+            onPress={() => setSelectedSubagentId(null)}
+            className="flex-row items-center gap-1.5 py-2 active:opacity-70"
+          >
+            <SymbolView
+              name="chevron.left"
+              size={16}
+              tintColorClassName="accent-foreground"
+              type="monochrome"
+            />
+            <Text className="text-sm font-t3-medium text-foreground">Agents</Text>
+          </Pressable>
+          <SubagentTranscript
+            environmentId={target.environmentId}
+            threadId={target.threadId}
+            subagentId={selectedSubagentId}
+            live={selectedSubagent ? isOrchestrationV2WorkActive(selectedSubagent.status) : false}
+          />
+        </View>
+      ) : subagents.length === 0 ? (
         <Text className="pt-6 text-center text-sm text-foreground-muted">
           No agents in this turn.
         </Text>
@@ -72,6 +105,7 @@ export function ThreadAgentsSheet({ route }: StaticScreenProps<AgentsTarget>) {
             environmentId={target.environmentId}
             tickSeconds={hasLiveAgent}
             onOpen={openChildThread}
+            onSelect={setSelectedSubagentId}
           />
         ))
       )}
@@ -123,6 +157,7 @@ function AgentRow(props: {
   readonly subagent: OrchestrationV2Subagent;
   readonly tickSeconds: boolean;
   readonly onOpen: (childThreadId: ThreadId) => void;
+  readonly onSelect: (subagentId: string) => void;
 }) {
   const { subagent } = props;
   const childThreadId = subagent.childThreadId;
@@ -139,12 +174,14 @@ function AgentRow(props: {
 
   if (childThreadId === null) {
     return (
-      <View
-        accessible
-        accessibilityHint="Provider-managed agent. Its work appears in the transcript."
+      <Pressable
+        accessibilityRole="button"
+        accessibilityHint="Shows this agent's transcript"
+        onPress={() => props.onSelect(subagent.id)}
+        className="active:opacity-70"
       >
         {row}
-      </View>
+      </Pressable>
     );
   }
 

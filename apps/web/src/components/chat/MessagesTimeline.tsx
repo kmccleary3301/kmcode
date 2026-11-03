@@ -276,7 +276,9 @@ import {
   formatUpcomingTimestamp,
 } from "../../timestampFormat";
 import { FetchedToolOutput, V2ItemInspector } from "./V2ItemInspector";
+import { ToolWorkEntryCard } from "./ToolWorkEntryCard";
 import { useV2ItemSupport } from "../../state/v2ItemSupport";
+import { useStreamingReveal } from "@t3tools/client-runtime/streaming-reveal/react";
 import { Collapsible, CollapsibleTrigger, CollapsiblePanel } from "../ui/collapsible";
 import {
   isV2LifecycleItem,
@@ -1402,77 +1404,80 @@ export const MessagesTimeline = memo(function MessagesTimeline({
   return (
     <TimelineRowCtx value={sharedState}>
       <TimelineRowActivityCtx value={activityState}>
-        <TooltipScrollDismissArea
-          ref={setTimelineViewportElement}
-          className="relative h-full min-h-0"
-          data-assistant-citation-viewport="true"
-        >
-          {onCiteAssistantText && citationThreadRef ? (
-            <AssistantSelectionToolbar
-              viewport={timelineViewportElement}
-              threadRef={citationThreadRef}
-              onCite={onCiteAssistantText}
+        <div className="km-transcript relative h-full min-h-0">
+          <TooltipScrollDismissArea
+            ref={setTimelineViewportElement}
+            className="relative h-full min-h-0"
+            data-t3-surface="timeline"
+            data-assistant-citation-viewport="true"
+          >
+            {onCiteAssistantText && citationThreadRef ? (
+              <AssistantSelectionToolbar
+                viewport={timelineViewportElement}
+                threadRef={citationThreadRef}
+                onCite={onCiteAssistantText}
+              />
+            ) : null}
+            <LegendList<MessagesTimelineRow>
+              ref={setTimelineList}
+              data={rows}
+              extraData={`${listIdentityKey}:${rows.length}`}
+              keyExtractor={keyExtractor}
+              getItemType={getItemType}
+              renderItem={renderItem}
+              estimatedItemSize={90}
+              initialScrollAtEnd={citationRequest === null && rememberedPosition?.atEnd !== false}
+              // Legend needs a data refresh to mount new pins without a scroll event.
+              dataVersion={readyCitationRequest?.key ?? listIdentityKey}
+              {...(alwaysRender ? { alwaysRender } : {})}
+              onLoad={onCitationListLoad}
+              {...(anchoredEndSpace ? { anchoredEndSpace } : {})}
+              contentInsetEndAdjustment={anchoredEndSpace ? contentInsetEndAdjustment : 0}
+              maintainScrollAtEnd={
+                citationPositioning ||
+                (restoringThreadPosition && rememberedPosition?.atEnd === false) ||
+                anchoredEndSpace ||
+                !liveFollowEnabled ||
+                fullscreenAppRowId !== null ||
+                disclosureToggleSettling
+                  ? false
+                  : isWorking && !prefersReducedMotion && settlingListIdentity === null
+                    ? TIMELINE_MAINTAIN_SCROLL_AT_END_SMOOTH
+                    : TIMELINE_MAINTAIN_SCROLL_AT_END
+              }
+              maintainVisibleContentPosition={
+                citationPositioning ||
+                (restoringThreadPosition && rememberedPosition?.atEnd === false)
+                  ? false
+                  : maintainVisibleContentPosition
+              }
+              maintainScrollAtEndThreshold={1}
+              onScroll={handleScroll}
+              onItemSizeChanged={reportContentOverflow}
+              className={cn(
+                "messages-timeline-scroll scrollbar-gutter-both h-full min-h-0 overflow-x-hidden overscroll-y-contain [overflow-anchor:none]",
+                topFadeEnabled && "topbar-scroll-fade",
+              )}
+              ListHeaderComponent={listHeader}
+              ListFooterComponent={timelineListFooter}
             />
-          ) : null}
-          <LegendList<MessagesTimelineRow>
-            ref={setTimelineList}
-            data={rows}
-            extraData={`${listIdentityKey}:${rows.length}`}
-            keyExtractor={keyExtractor}
-            getItemType={getItemType}
-            renderItem={renderItem}
-            estimatedItemSize={90}
-            initialScrollAtEnd={citationRequest === null && rememberedPosition?.atEnd !== false}
-            // Legend needs a data refresh to mount new pins without a scroll event.
-            dataVersion={readyCitationRequest?.key ?? listIdentityKey}
-            {...(alwaysRender ? { alwaysRender } : {})}
-            onLoad={onCitationListLoad}
-            {...(anchoredEndSpace ? { anchoredEndSpace } : {})}
-            contentInsetEndAdjustment={anchoredEndSpace ? contentInsetEndAdjustment : 0}
-            maintainScrollAtEnd={
-              citationPositioning ||
-              (restoringThreadPosition && rememberedPosition?.atEnd === false) ||
-              anchoredEndSpace ||
-              !liveFollowEnabled ||
-              fullscreenAppRowId !== null ||
-              disclosureToggleSettling
-                ? false
-                : isWorking && !prefersReducedMotion && settlingListIdentity === null
-                  ? TIMELINE_MAINTAIN_SCROLL_AT_END_SMOOTH
-                  : TIMELINE_MAINTAIN_SCROLL_AT_END
-            }
-            maintainVisibleContentPosition={
-              citationPositioning ||
-              (restoringThreadPosition && rememberedPosition?.atEnd === false)
-                ? false
-                : maintainVisibleContentPosition
-            }
-            maintainScrollAtEndThreshold={1}
-            onScroll={handleScroll}
-            onItemSizeChanged={reportContentOverflow}
-            className={cn(
-              "messages-timeline-scroll scrollbar-gutter-both h-full min-h-0 overflow-x-hidden overscroll-y-contain [overflow-anchor:none]",
-              topFadeEnabled && "topbar-scroll-fade",
-            )}
-            ListHeaderComponent={listHeader}
-            ListFooterComponent={timelineListFooter}
-          />
-          <TimelineMinimap
-            items={minimapItems}
-            hasPersistentGutter={minimapHasPersistentGutter}
-            hitStripWidth={minimapHitStripWidth}
-            currentIndex={minimapCurrentIndex}
-            stripMap={minimapStripMap}
-            onSelect={(item) => {
-              onManualNavigation();
-              void listRef.current?.scrollToIndex({
-                index: item.rowIndex,
-                animated: true,
-                viewOffset: 24,
-              });
-            }}
-          />
-        </TooltipScrollDismissArea>
+            <TimelineMinimap
+              items={minimapItems}
+              hasPersistentGutter={minimapHasPersistentGutter}
+              hitStripWidth={minimapHitStripWidth}
+              currentIndex={minimapCurrentIndex}
+              stripMap={minimapStripMap}
+              onSelect={(item) => {
+                onManualNavigation();
+                void listRef.current?.scrollToIndex({
+                  index: item.rowIndex,
+                  animated: true,
+                  viewOffset: 24,
+                });
+              }}
+            />
+          </TooltipScrollDismissArea>
+        </div>
       </TimelineRowActivityCtx>
     </TimelineRowCtx>
   );
@@ -1846,6 +1851,7 @@ const TimelineRowContent = memo(function TimelineRowContent({ row }: { row: Time
   return (
     <div
       className={cn(
+        "km-transcript-row",
         // Commentary (non-terminal assistant) rows carry no metadata row, so
         // they sit closer to the work that follows them.
         isWorkLogRow || isSubagentGroup
@@ -1906,6 +1912,9 @@ const TimelineRowContent = memo(function TimelineRowContent({ row }: { row: Time
       {row.kind === "message" && row.message.role === "user" ? <UserTimelineRow row={row} /> : null}
       {row.kind === "message" && row.message.role === "assistant" ? (
         <AssistantTimelineRow row={row} />
+      ) : null}
+      {row.kind === "message" && (row.message.role as string) === "reasoning" ? (
+        <ReasoningTimelineRow row={row} />
       ) : null}
       {row.kind === "assistant-meta" ? <AssistantMetaTimelineRow row={row} /> : null}
       {row.kind === "proposed-plan" ? <ProposedPlanTimelineRow row={row} /> : null}
@@ -2578,9 +2587,74 @@ function AttemptFoldTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "at
   );
 }
 
+function ReasoningTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "message" }> }) {
+  const ctx = use(TimelineRowCtx);
+  const reducedMotion = useMediaQuery("(prefers-reduced-motion: reduce)");
+  const [expanded, setExpanded] = useState(Boolean(row.message.streaming));
+  const visibleText = useStreamingReveal(row.message.text, {
+    identity: row.message.id,
+    streaming: Boolean(row.message.streaming),
+    boundaryKey: row.message.streaming ? "streaming" : "complete",
+    reducedMotion,
+  });
+  const lineCount = visibleText.split("\n").length;
+  const contentId = `${row.id}-reasoning`;
+
+  useEffect(() => {
+    if (row.message.streaming) setExpanded(true);
+  }, [row.message.streaming]);
+
+  return (
+    <div
+      className={cn("thinking-accordion assistant-trace", expanded && "expanded")}
+      data-t3-part="timeline-reasoning"
+      data-streaming={row.message.streaming === true ? "true" : undefined}
+    >
+      <button
+        type="button"
+        className="thinking-summary"
+        aria-expanded={expanded}
+        aria-controls={contentId}
+        onClick={() => setExpanded((current) => !current)}
+      >
+        <span className="thinking-chevron">
+          <ChevronRightIcon className="icon" />
+        </span>
+        <BrainIcon className="icon" />
+        <span>
+          Thinking · {lineCount} {lineCount === 1 ? "line" : "lines"}
+        </span>
+        <time dateTime={row.message.createdAt}>
+          {formatDayAwareTimestamp(row.message.createdAt, ctx.timestampFormat)}
+        </time>
+      </button>
+      {expanded ? (
+        <div id={contentId} className="cell-body thinking-content">
+          <ChatMarkdown
+            text={visibleText}
+            cwd={ctx.markdownCwd}
+            threadRef={ctx.threadRef ?? undefined}
+            isStreaming={Boolean(row.message.streaming)}
+            lineBreaks={shouldPreserveAssistantLineBreaks(visibleText)}
+            skills={ctx.skills}
+            onUseArtifactTemplate={ctx.onUseArtifactTemplate}
+            onImageExpand={ctx.onImageExpand}
+          />
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
 function AssistantTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "message" }> }) {
   const ctx = use(TimelineRowCtx);
   const messageText = row.message.text || (row.message.streaming ? "" : "(empty response)");
+  const reducedMotion = useMediaQuery("(prefers-reduced-motion: reduce)");
+  const visibleText = useStreamingReveal(messageText, {
+    identity: row.message.id,
+    streaming: Boolean(row.message.streaming),
+    reducedMotion,
+  });
 
   return (
     <>
@@ -2598,7 +2672,7 @@ function AssistantTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "mess
           listRef={ctx.listRef}
         >
           <ChatMarkdown
-            text={messageText}
+            text={visibleText}
             cwd={ctx.markdownCwd}
             threadRef={ctx.threadRef ?? undefined}
             isStreaming={Boolean(row.message.streaming)}
@@ -5187,26 +5261,49 @@ function remarkThoughtPreview(fallback: string) {
   };
 }
 
-function ReasoningTraceContent({ entries }: { entries: ReadonlyArray<TimelineWorkEntry> }) {
+function ReasoningEntryContent(props: {
+  readonly entry: TimelineWorkEntry;
+  readonly isStreaming: boolean;
+  readonly reducedMotion: boolean;
+}) {
   const ctx = use(TimelineRowCtx);
+  const text = props.entry.detail ?? "";
+  const visibleText = useStreamingReveal(text, {
+    identity: props.entry.id,
+    streaming: props.isStreaming,
+    boundaryKey: props.isStreaming ? "streaming" : "complete",
+    reducedMotion: props.reducedMotion,
+  });
+  return (
+    <ChatMarkdown
+      key={props.entry.id}
+      className="text-foreground"
+      text={visibleText}
+      cwd={ctx.markdownCwd}
+      threadRef={ctx.threadRef ?? undefined}
+      skills={ctx.skills}
+      isStreaming={props.isStreaming}
+      headingLevelOffset={MESSAGE_HEADING_LEVEL}
+      onUseArtifactTemplate={ctx.onUseArtifactTemplate}
+      onImageExpand={ctx.onImageExpand}
+      lineBreaks
+    />
+  );
+}
+
+function ReasoningTraceContent({ entries }: { entries: ReadonlyArray<TimelineWorkEntry> }) {
   const { isWorking, latestRunId } = use(TimelineRowActivityCtx);
+  const reducedMotion = useMediaQuery("(prefers-reduced-motion: reduce)");
   return (
     <WorkLogDetails>
       {entries.map((entry) => (
-        <ChatMarkdown
+        <ReasoningEntryContent
           key={entry.id}
-          className="text-foreground"
-          text={entry.detail ?? ""}
-          cwd={ctx.markdownCwd}
-          threadRef={ctx.threadRef ?? undefined}
-          skills={ctx.skills}
+          entry={entry}
           isStreaming={
             isWorking && entry.runId === latestRunId && entry.toolLifecycleStatus === "inProgress"
           }
-          headingLevelOffset={MESSAGE_HEADING_LEVEL}
-          onUseArtifactTemplate={ctx.onUseArtifactTemplate}
-          onImageExpand={ctx.onImageExpand}
-          lineBreaks
+          reducedMotion={reducedMotion}
         />
       ))}
     </WorkLogDetails>
@@ -5219,27 +5316,102 @@ type WorkEntryRowProps = {
   displayLabel?: string | undefined;
   onToggleEntry?: ((collapsed: boolean) => void) | undefined;
 };
+function isToolWorkEntry(workEntry: TimelineWorkEntry): boolean {
+  if (workEntry.nativeTerminalFallback !== undefined) return false;
+  if (workEntry.questionAnswer !== undefined) return false;
+  const itemType = workEntry.itemType ?? workEntry.projectedItem?.item.type;
+  if (
+    itemType === "command_execution" ||
+    itemType === "file_change" ||
+    itemType === "dynamic_tool" ||
+    itemType === "subagent" ||
+    itemType === "web_search" ||
+    itemType === "file_search"
+  ) {
+    return true;
+  }
+  return Boolean(
+    workEntry.command !== undefined ||
+    workEntry.toolData !== undefined ||
+    (workEntry.itemType !== undefined &&
+      workEntry.itemType !== "reasoning" &&
+      workEntry.itemType !== "notification" &&
+      workEntry.itemType !== "error" &&
+      workEntry.itemType !== "user_input_request" &&
+      workEntry.itemType !== "checkpoint" &&
+      workEntry.itemType !== "compaction" &&
+      workEntry.itemType !== "thread_created" &&
+      workEntry.itemType !== "handoff" &&
+      workEntry.itemType !== "fork"),
+  );
+}
+
+function TimelineToolWorkEntryCard(props: {
+  readonly workEntry: TimelineWorkEntry;
+  readonly workspaceRoot: string | undefined;
+}) {
+  const { timestampFormat, onImageExpand, activeThreadEnvironmentId } = use(TimelineRowCtx);
+  const { workEntry } = props;
+  const icon = (
+    <ToolActivityIconView
+      icon={workEntry.toolIcon ?? workEntry.toolSource?.icon}
+      fallbackName={
+        workEntryDisplayIndicatesToolFailure(workEntry)
+          ? "circle-alert"
+          : workEntryIconName(workEntry)
+      }
+      className="icon size-4 shrink-0"
+      muted
+    />
+  );
+  const detailSource =
+    workEntry.projectedItem !== undefined
+      ? {
+          kind: "projected" as const,
+          projectedItem: workEntry.projectedItem,
+          environmentId: activeThreadEnvironmentId,
+        }
+      : undefined;
+
+  return (
+    <ToolWorkEntryCard
+      entry={workEntry}
+      workspaceRoot={props.workspaceRoot}
+      timestampFormat={timestampFormat}
+      icon={icon}
+      detailSource={detailSource}
+      onImageExpand={(source, alt) =>
+        onImageExpand({ images: [{ src: source, name: alt }], index: 0 })
+      }
+    />
+  );
+}
 
 const SimpleWorkEntryRow = memo(function SimpleWorkEntryRow(props: WorkEntryRowProps) {
   const ctx = use(TimelineRowCtx);
   const item = props.workEntry.projectedItem?.item;
   const childThreadId =
     item?.type === "notification" ? notificationChildThreadId(item.source) : undefined;
-  if (item?.type !== "notification" || childThreadId === undefined) {
-    return <WorkEntryLogRow {...props} />;
+  if (item?.type === "notification" && childThreadId !== undefined) {
+    return (
+      <SubagentNotificationLink
+        parentRef={scopeThreadRef(ctx.activeThreadEnvironmentId, item.threadId)}
+        childThreadId={childThreadId}
+        outcome={item.outcome}
+        createdAt={props.workEntry.createdAt}
+        timestampFormat={ctx.timestampFormat}
+        providerStatuses={ctx.providerStatuses}
+        onOpenThread={ctx.onOpenThread}
+        fallback={<WorkEntryLogRow {...props} />}
+      />
+    );
   }
-  return (
-    <SubagentNotificationLink
-      parentRef={scopeThreadRef(ctx.activeThreadEnvironmentId, item.threadId)}
-      childThreadId={childThreadId}
-      outcome={item.outcome}
-      createdAt={props.workEntry.createdAt}
-      timestampFormat={ctx.timestampFormat}
-      providerStatuses={ctx.providerStatuses}
-      onOpenThread={ctx.onOpenThread}
-      fallback={<WorkEntryLogRow {...props} />}
-    />
-  );
+  if (isToolWorkEntry(props.workEntry)) {
+    return (
+      <TimelineToolWorkEntryCard workEntry={props.workEntry} workspaceRoot={props.workspaceRoot} />
+    );
+  }
+  return <WorkEntryLogRow {...props} />;
 });
 
 function WorkEntryLogRow(props: WorkEntryRowProps) {

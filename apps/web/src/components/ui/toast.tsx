@@ -543,6 +543,8 @@ function Toasts({ position }: { position: ToastPosition }) {
       }
     }
   }, [toasts]);
+  // An empty fixed viewport still costs a portal and a compositing layer.
+  if (visibleToastLayout.items.length === 0) return null;
 
   return (
     <Toast.Portal data-slot="toast-portal">

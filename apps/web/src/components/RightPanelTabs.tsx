@@ -15,6 +15,7 @@ import type {
 } from "@t3tools/contracts";
 import { getTerminalLabel } from "@t3tools/shared/terminalLabels";
 import {
+  Bot,
   Smartphone,
   ChevronDown,
   ChevronLeft,
@@ -129,6 +130,9 @@ interface RightPanelTabsProps {
   onAddPullRequests: () => void;
   onAddDevice: () => void;
   browserAvailable: boolean;
+  onAddAgents?: (() => void) | undefined;
+  agentsAvailable?: boolean | undefined;
+  liveAgentCount?: number | undefined;
   terminalAvailable: boolean;
   diffAvailable: boolean;
   filesAvailable: boolean;
@@ -326,6 +330,9 @@ function RightPanelEmptyState(props: {
   onAddPullRequests: () => void;
   onAddDevice: () => void;
   browserAvailable: boolean;
+  onAddAgents?: (() => void) | undefined;
+  agentsAvailable?: boolean | undefined;
+  liveAgentCount?: number | undefined;
   terminalAvailable: boolean;
   diffAvailable: boolean;
   filesAvailable: boolean;
@@ -394,6 +401,15 @@ function RightPanelEmptyState(props: {
       disabledReason: SURFACE_UNAVAILABLE_HINTS.device,
       onClick: props.onAddDevice,
     },
+    {
+      label: "Agents",
+      icon: Bot,
+      shortcut: "A",
+      available: props.agentsAvailable ?? true,
+      disabledReason: "Agents are only available from a thread.",
+      onClick: props.onAddAgents ?? (() => {}),
+      badgeCount: props.liveAgentCount,
+    },
   ] as const;
 
   type SurfaceAction = (typeof actions)[number];
@@ -406,22 +422,19 @@ function RightPanelEmptyState(props: {
   // is focused; focus moves around too easily (stray clicks) to carry them.
   // Capture phase so app-level key handlers cannot swallow the event first;
   // typing contexts and already-handled events are left alone.
-  const shortcutActionsRef = useRef(availableActions);
-  useEffect(() => {
-    shortcutActionsRef.current = availableActions;
+  const runShortcutAction = useEffectEvent((event: KeyboardEvent) => {
+    const action = surfaceShortcutActionForKey(availableActions, event);
+    if (!action) return;
+    if (document.querySelector(LAUNCHER_SHORTCUT_BLOCKING_LAYERS)) return;
+    // The composed path starts at the real target, which may sit inside a shadow root.
+    const target = event.composedPath()[0] ?? event.target;
+    if (target instanceof Element && surfaceShortcutTargetsTypingContext(target)) return;
+    event.preventDefault();
+    event.stopPropagation();
+    action.onClick();
   });
   useEffect(() => {
-    const handler = (event: KeyboardEvent) => {
-      const action = surfaceShortcutActionForKey(shortcutActionsRef.current, event);
-      if (!action) return;
-      if (document.querySelector(LAUNCHER_SHORTCUT_BLOCKING_LAYERS)) return;
-      // The composed path starts at the real target, which may sit inside a shadow root.
-      const target = event.composedPath()[0] ?? event.target;
-      if (target instanceof Element && surfaceShortcutTargetsTypingContext(target)) return;
-      event.preventDefault();
-      event.stopPropagation();
-      action.onClick();
-    };
+    const handler = (event: KeyboardEvent) => runShortcutAction(event);
     window.addEventListener("keydown", handler, true);
     return () => window.removeEventListener("keydown", handler, true);
   }, []);
@@ -604,6 +617,8 @@ function surfaceTitle(
       return "Pull requests";
     case "device":
       return surface.title ?? surface.target?.name ?? "Device";
+    case "agents":
+      return "Agents";
     case "preview": {
       const snapshot = surface.resourceId ? sessions[surface.resourceId] : null;
       if (!snapshot || snapshot.navStatus._tag === "Idle") return "Browser";
@@ -693,6 +708,8 @@ function SurfaceIcon({
       ) : (
         <Smartphone className="size-3 shrink-0" />
       );
+    case "agents":
+      return <Bot className="size-3 shrink-0" />;
   }
 }
 
@@ -919,6 +936,14 @@ export function RightPanelTabs(props: RightPanelTabsProps) {
       available: props.deviceAvailable,
       disabledReason: SURFACE_DISABLED_REASONS.device,
       onClick: props.onAddDevice,
+    },
+    {
+      label: "Agents",
+      icon: Bot,
+      shortcut: "A",
+      available: props.agentsAvailable ?? true,
+      disabledReason: "Available from a thread.",
+      onClick: props.onAddAgents ?? (() => {}),
     },
   ] as const;
 
@@ -1410,13 +1435,16 @@ export function RightPanelTabs(props: RightPanelTabsProps) {
             onAddPullRequest={props.onAddPullRequest}
             onAddPullRequests={props.onAddPullRequests}
             onAddDevice={props.onAddDevice}
-            browserAvailable={props.browserAvailable}
+            onAddAgents={props.onAddAgents}
+            agentsAvailable={props.agentsAvailable}
+            liveAgentCount={props.liveAgentCount}
             terminalAvailable={props.terminalAvailable}
             diffAvailable={props.diffAvailable}
             filesAvailable={props.filesAvailable}
             pullRequestAvailable={props.pullRequestAvailable}
             pullRequestsAvailable={props.pullRequestsAvailable}
             deviceAvailable={props.deviceAvailable}
+            browserAvailable={props.browserAvailable}
           />
         ) : (
           props.children

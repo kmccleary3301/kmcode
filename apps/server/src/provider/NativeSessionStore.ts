@@ -38,11 +38,33 @@ export interface NativeSessionFile {
   readonly summary: ProviderNativeSessionSummary;
 }
 
-export interface NativeHistoryMessage {
-  readonly role: "user" | "assistant";
-  readonly text: string;
-  readonly createdAt: string;
-}
+export type NativeHistoryMessage =
+  | {
+      readonly role: "user" | "assistant";
+      readonly text: string;
+      readonly createdAt: string;
+    }
+  | {
+      readonly role: "reasoning";
+      readonly text: string;
+      readonly createdAt: string;
+    }
+  | {
+      readonly role: "tool";
+      readonly toolCallId: string;
+      readonly toolName: string;
+      readonly args: unknown;
+      /** Absent while the call has no recorded result. */
+      readonly result:
+        | {
+            readonly outputText: string;
+            readonly details: unknown;
+            readonly isError: boolean;
+            readonly completedAt: string;
+          }
+        | undefined;
+      readonly createdAt: string;
+    };
 
 interface SessionHeader {
   readonly id: string;
@@ -374,7 +396,11 @@ async function readTree(filePath: string): Promise<{
   return { nodes, leafId };
 }
 
-/** User and assistant text along the active branch, oldest first. */
+/**
+ * The active branch, oldest first: prompts, then each assistant message's
+ * thinking, text, and tool calls in content order. Tool results attach to
+ * their call.
+ */
 export async function readNativeHistory(
   filePath: string,
 ): Promise<ReadonlyArray<NativeHistoryMessage>> {
@@ -391,15 +417,67 @@ export async function readNativeHistory(
   }
   branch.reverse();
   const history: NativeHistoryMessage[] = [];
+  const toolIndexes: Record<string, number> = {};
   for (const record of branch) {
     const message = asRecord(record.message);
-    if (record.type !== "message" || (message?.role !== "user" && message?.role !== "assistant")) {
+    const createdAt = isoTimestamp(record.timestamp ?? message?.timestamp);
+    if (record.type !== "message" || message === undefined || createdAt === undefined) continue;
+    if (message.role === "user") {
+      const text = contentText(message.content, false);
+      if (text !== undefined) history.push({ role: "user", text, createdAt });
       continue;
     }
-    const text = contentText(message.content, false);
-    const createdAt = isoTimestamp(record.timestamp ?? message.timestamp);
-    if (text === undefined || createdAt === undefined) continue;
-    history.push({ role: message.role, text, createdAt });
+    if (message.role === "toolResult") {
+      const toolCallId = nonEmpty(message.toolCallId);
+      const index = toolCallId === undefined ? undefined : toolIndexes[toolCallId];
+      const call = index === undefined ? undefined : history[index];
+      if (index === undefined || call?.role !== "tool") continue;
+      history[index] = {
+        ...call,
+        result: {
+          outputText: contentText(message.content, false) ?? "",
+          details: message.details,
+          isError: message.isError === true,
+          completedAt: createdAt,
+        },
+      };
+      continue;
+    }
+    if (message.role !== "assistant") continue;
+    if (typeof message.content === "string") {
+      const text = nonEmpty(message.content);
+      if (text !== undefined) history.push({ role: "assistant", text, createdAt });
+      continue;
+    }
+    if (!Array.isArray(message.content)) continue;
+    for (const content of message.content) {
+      const block = asRecord(content);
+      const text =
+        block?.type === "text" ? block.text : block?.type === "thinking" ? block.thinking : null;
+      if (typeof text === "string") {
+        if (text.trim().length === 0) continue;
+        const role = block?.type === "thinking" ? "reasoning" : "assistant";
+        const previous = history.at(-1);
+        // Adjacent blocks of one kind read as one message.
+        if (previous?.role === role && previous.createdAt === createdAt) {
+          history[history.length - 1] = { ...previous, text: `${previous.text}\n\n${text}` };
+        } else {
+          history.push({ role, text, createdAt });
+        }
+        continue;
+      }
+      const toolCallId = block?.type === "toolCall" ? nonEmpty(block.id) : undefined;
+      if (block === undefined || toolCallId === undefined) continue;
+      toolIndexes[toolCallId] = history.length;
+      history.push({
+        role: "tool",
+        toolCallId,
+        toolName: nonEmpty(block.name) ?? "tool",
+        args: block.arguments,
+        result: undefined,
+        createdAt,
+      });
+    }
   }
   return history;
 }

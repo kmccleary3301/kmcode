@@ -86,6 +86,8 @@ import { notificationChildThreadId } from "@t3tools/client-runtime/state/thread-
 import type { MarkdownImageRenderer } from "../../native/SelectableMarkdownText";
 import type { FilePreviewSource } from "../../components/FilePreviewModal";
 import { ThreadMarkdownImage } from "./ThreadMarkdownImage";
+import { ToolActivityPresenter } from "./tool-activity-presenter";
+import { parseActivityDetail } from "@t3tools/client-runtime/activity-details";
 import Animated, {
   cancelAnimation,
   Easing,
@@ -854,6 +856,15 @@ const ThreadWorkLogRow = memo(function ThreadWorkLogRow(
       ? { environmentId: props.environmentId, row: row.projectedItem }
       : null,
   );
+  const fetchedItem = fetchedDetail.data?.item ?? null;
+  // Expanded tool calls use the shared tool-detail model once their complete
+  // item is available; loading and error states keep the plain text path.
+  const richDetail = useMemo(() => {
+    if (!expanded || !row.toolLike || row.projectedItem.item.type === "reasoning") return null;
+    if (row.fetchesDetail && fetchedItem === null) return null;
+    const detail = parseActivityDetail(fetchedItem ?? row.projectedItem.item);
+    return detail.sections.length > 0 ? detail : null;
+  }, [expanded, fetchedItem, row]);
   const failureItem = row.projectedItem.item;
   if (failureItem.type === "error" && failureItem.status === "failed") {
     const warning = failureItem.failure.class === "usage_limit";
@@ -935,7 +946,6 @@ const ThreadWorkLogRow = memo(function ThreadWorkLogRow(
       : undefined;
   const canExpand = row.canExpand && notifiedSubagentThreadId === undefined;
   const reasoning = row.projectedItem.item.type === "reasoning" ? row.projectedItem.item : null;
-  const fetchedItem = fetchedDetail.data?.item ?? null;
   // Reads keep their path list; the fetched file contents show as output.
   const isRead = toolGroupAction(row.workEntry) === "read";
   // Tool calls show the call in the foreground and the result muted below it.
@@ -1122,6 +1132,7 @@ const ThreadWorkLogRow = memo(function ThreadWorkLogRow(
 
       {expanded &&
       (reasoning ||
+        richDetail ||
         fullDetail ||
         call ||
         fetchedOutput ||
@@ -1155,53 +1166,60 @@ const ThreadWorkLogRow = memo(function ThreadWorkLogRow(
               />
             </View>
           ))}
-          <ScrollView
-            nestedScrollEnabled
-            directionalLockEnabled
-            showsVerticalScrollIndicator
-            className="max-h-60"
-            contentContainerStyle={{ paddingRight: 8 }}
-          >
-            {reasoning ? (
-              props.renderReasoning(reasoning.text)
-            ) : call ? (
-              [
-                call.command,
-                ...(call.args ?? []).map(([key, value]) => `${key} ${value}`),
-                call.argsText,
-              ]
-                .filter((line): line is string => Boolean(line))
-                .map((line, index) => (
-                  <Text
-                    key={`${index}:${line}`}
-                    selectable
-                    className="font-mono text-2xs leading-normal text-foreground"
-                  >
-                    {line}
-                  </Text>
-                ))
-            ) : fullDetail ? (
-              <Text selectable className="font-mono text-2xs leading-normal text-foreground-muted">
-                {fullDetail}
-              </Text>
-            ) : null}
-            {fetchedOutput ? (
-              <Text
-                selectable
-                className={cn(
-                  "font-mono text-2xs leading-normal text-foreground-muted",
-                  (!call || call.command || call.args || call.argsText) && "mt-1.5",
-                )}
-              >
-                {fetchedOutput}
-              </Text>
-            ) : null}
-            {failedExitCode !== null ? (
-              <Text className="mt-1.5 font-mono text-2xs leading-normal text-danger-foreground">
-                exit {failedExitCode}
-              </Text>
-            ) : null}
-          </ScrollView>
+          {richDetail ? (
+            <ToolActivityPresenter detail={richDetail} onPressPreview={props.onPressPreview} />
+          ) : (
+            <ScrollView
+              nestedScrollEnabled
+              directionalLockEnabled
+              showsVerticalScrollIndicator
+              className="max-h-60"
+              contentContainerStyle={{ paddingRight: 8 }}
+            >
+              {reasoning ? (
+                props.renderReasoning(reasoning.text)
+              ) : call ? (
+                [
+                  call.command,
+                  ...(call.args ?? []).map(([key, value]) => `${key} ${value}`),
+                  call.argsText,
+                ]
+                  .filter((line): line is string => Boolean(line))
+                  .map((line, index) => (
+                    <Text
+                      key={`${index}:${line}`}
+                      selectable
+                      className="font-mono text-2xs leading-normal text-foreground"
+                    >
+                      {line}
+                    </Text>
+                  ))
+              ) : fullDetail ? (
+                <Text
+                  selectable
+                  className="font-mono text-2xs leading-normal text-foreground-muted"
+                >
+                  {fullDetail}
+                </Text>
+              ) : null}
+              {fetchedOutput ? (
+                <Text
+                  selectable
+                  className={cn(
+                    "font-mono text-2xs leading-normal text-foreground-muted",
+                    (!call || call.command || call.args || call.argsText) && "mt-1.5",
+                  )}
+                >
+                  {fetchedOutput}
+                </Text>
+              ) : null}
+              {failedExitCode !== null ? (
+                <Text className="mt-1.5 font-mono text-2xs leading-normal text-danger-foreground">
+                  exit {failedExitCode}
+                </Text>
+              ) : null}
+            </ScrollView>
+          )}
         </Animated.View>
       ) : null}
     </Animated.View>

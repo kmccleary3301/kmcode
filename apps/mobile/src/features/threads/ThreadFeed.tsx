@@ -12,6 +12,7 @@ import { useViewabilityAmount, type LegendListRef } from "@legendapp/list/react-
 import { scopeThreadRef } from "@t3tools/client-runtime/environment";
 import { resolveUserMessagePresentation } from "@t3tools/client-runtime/user-message";
 import { canForkProjectedAssistantItem } from "@t3tools/client-runtime/state/thread-workflows";
+import { useStreamingReveal } from "@t3tools/client-runtime/streaming-reveal/react";
 import {
   type OrchestrationMessageContext,
   ThreadId,
@@ -90,6 +91,7 @@ import {
   StyleSheet,
   Text as NativeText,
   type ColorValue,
+  TextInput,
   useWindowDimensions,
   View,
 } from "react-native";
@@ -98,7 +100,12 @@ import { isPdfFile } from "../../lib/filePreview";
 import { flattenThemeColor } from "../../lib/mobileTheme";
 import { PresentationSource } from "../../components/NativePresentation";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
-import Animated, { FadeIn, FadeInUp, type SharedValue } from "react-native-reanimated";
+import Animated, {
+  FadeIn,
+  FadeInUp,
+  useReducedMotion,
+  type SharedValue,
+} from "react-native-reanimated";
 import { useUniwindTheme } from "../../lib/useUniwindTheme";
 import { IOS_NAV_BAR_HEIGHT } from "../../lib/layoutMetrics";
 import { useFontFamily } from "../../lib/useFontFamily";
@@ -169,6 +176,12 @@ import {
   type ThreadFeedLatestRun,
 } from "../../lib/threadActivity";
 import type { ThreadContentPresentation } from "./threadContentPresentation";
+import {
+  deriveThreadFeedNavigationItems,
+  filterThreadFeedNavigationItems,
+  resolveThreadFeedNavigationIndex,
+  type ThreadFeedNavigationItem,
+} from "./threadFeedNavigation";
 import {
   resolveThreadFeedLiveFollow,
   type ThreadFeedLiveFollowEvent,
@@ -905,16 +918,26 @@ interface MarkdownLinkHandlers {
 }
 
 const AssistantMarkdownContent = memo(function AssistantMarkdownContent(props: {
+  readonly identity?: string | undefined;
   readonly markdown: string;
   readonly markdownStyles: MarkdownStyleSet;
   readonly linkHandlers: MarkdownLinkHandlers;
   readonly onUseArtifactTemplate?: ((template: CodexArtifactTemplate) => void) | undefined;
+  readonly reducedMotion?: boolean | undefined;
   readonly renderImage: MarkdownImageRenderer;
   readonly skills?: ReadonlyArray<SelectableMarkdownSkill> | undefined;
+  readonly streaming?: boolean | undefined;
 }) {
+  const reanimatedReducedMotion = useReducedMotion();
+  const reducedMotion = props.reducedMotion ?? reanimatedReducedMotion;
+  const revealedMarkdown = useStreamingReveal(props.markdown, {
+    identity: props.identity ?? props.markdown,
+    reducedMotion,
+    streaming: Boolean(props.streaming),
+  });
   const segments = useMemo(
-    () => splitCodexArtifactTemplateMarkdown(props.markdown),
-    [props.markdown],
+    () => splitCodexArtifactTemplateMarkdown(revealedMarkdown),
+    [revealedMarkdown],
   );
 
   return segments.map((segment) => {
@@ -1905,6 +1928,8 @@ function renderFeedEntry(
         {renderedText.trim().length > 0 ? (
           <MarkdownImageAvailableWidthContext value={props.markdownContentWidth}>
             <AssistantMarkdownContent
+              identity={message.id}
+              streaming={message.streaming}
               markdown={renderedText}
               markdownStyles={styles}
               linkHandlers={props.markdownLinkHandlers}
@@ -2172,6 +2197,123 @@ function ThreadFeedPlaceholder(props: {
   );
 }
 
+function ThreadFeedNavigationOverlay(props: {
+  readonly open: boolean;
+  readonly query: string;
+  readonly results: ReadonlyArray<ThreadFeedNavigationItem>;
+  readonly topInset: number;
+  readonly horizontalPadding: number;
+  readonly onOpen: () => void;
+  readonly onClose: () => void;
+  readonly onQueryChange: (query: string) => void;
+  readonly onNavigate: (item: ThreadFeedNavigationItem) => void;
+}) {
+  const theme = useUniwindTheme();
+  return (
+    <View pointerEvents="box-none" style={StyleSheet.absoluteFill} testID="thread-feed-navigation">
+      <View
+        pointerEvents="box-none"
+        style={{
+          position: "absolute",
+          top: props.topInset + 8,
+          right: props.horizontalPadding,
+          left: props.horizontalPadding,
+          alignItems: "flex-end",
+        }}
+      >
+        {props.open ? (
+          <View className="w-full max-w-[420px] rounded-2xl border border-border bg-card p-2 shadow-lg">
+            <View className="flex-row items-center gap-2 rounded-xl border border-border bg-subtle px-3">
+              <SymbolView
+                name="magnifyingglass"
+                size={16}
+                tintColorClassName="accent-foreground-muted"
+                type="monochrome"
+              />
+              <TextInput
+                autoFocus
+                accessibilityLabel="Search transcript"
+                autoCapitalize="none"
+                autoCorrect={false}
+                className="h-11 flex-1 text-base text-foreground"
+                onChangeText={props.onQueryChange}
+                onSubmitEditing={() => {
+                  const first = props.results[0];
+                  if (first) props.onNavigate(first);
+                }}
+                placeholder="Search transcript"
+                placeholderTextColor={theme["--color-foreground-muted"]}
+                returnKeyType="search"
+                value={props.query}
+              />
+              <Pressable
+                accessibilityLabel="Close transcript search"
+                accessibilityRole="button"
+                hitSlop={8}
+                onPress={props.onClose}
+              >
+                <SymbolView
+                  name="xmark"
+                  size={16}
+                  tintColorClassName="accent-foreground-muted"
+                  type="monochrome"
+                />
+              </Pressable>
+            </View>
+            <ScrollView
+              keyboardShouldPersistTaps="handled"
+              nestedScrollEnabled
+              style={{ maxHeight: 320 }}
+            >
+              {props.results.length === 0 ? (
+                <Text className="px-3 py-4 text-center text-sm text-foreground-muted">
+                  No matching transcript entries.
+                </Text>
+              ) : (
+                props.results.map((item) => (
+                  <Pressable
+                    key={item.id}
+                    accessibilityLabel={`Jump to ${item.label.toLocaleLowerCase()}: ${item.title}`}
+                    accessibilityRole="button"
+                    className="flex-row items-center gap-2 rounded-xl px-3 py-2.5 active:bg-subtle"
+                    onPress={() => props.onNavigate(item)}
+                  >
+                    <View className="size-2 rounded-full bg-accent" />
+                    <View className="min-w-0 flex-1">
+                      <Text className="text-sm text-foreground" numberOfLines={1}>
+                        {item.title}
+                      </Text>
+                      <Text className="text-xs text-foreground-muted" numberOfLines={1}>
+                        {item.label}
+                        {item.subtitle ? ` · ${item.subtitle}` : ""}
+                      </Text>
+                    </View>
+                  </Pressable>
+                ))
+              )}
+            </ScrollView>
+          </View>
+        ) : (
+          <Pressable
+            accessibilityLabel="Search transcript"
+            accessibilityRole="button"
+            className="flex-row items-center gap-1.5 rounded-full border border-border bg-card px-3 py-2 shadow-sm active:bg-subtle"
+            onPress={props.onOpen}
+          >
+            <SymbolView
+              name="magnifyingglass"
+              size={14}
+              tintColorClassName="accent-foreground-muted"
+              type="monochrome"
+            />
+            <Text className="text-xs text-foreground-muted">Search</Text>
+          </Pressable>
+        )}
+      </View>
+    </View>
+  );
+}
+
 export const ThreadFeed = memo(function ThreadFeed(props: ThreadFeedProps) {
   const navigation = useNavigation();
   const { themeAppearance } = useAppearancePreferences();
@@ -2243,6 +2385,11 @@ export const ThreadFeed = memo(function ThreadFeed(props: ThreadFeedProps) {
     expandedTurnIds: new Set(),
   });
   const { copiedRowId, expandedWorkGroups, expandedWorkRows, expandedTurnIds } = interactionState;
+  const [transcriptSearchOpen, setTranscriptSearchOpen] = useState(false);
+  const [transcriptSearchQuery, setTranscriptSearchQuery] = useState("");
+  const [pendingTranscriptNavigation, setPendingTranscriptNavigation] =
+    useState<ThreadFeedNavigationItem | null>(null);
+  const reducedMotion = useReducedMotion();
   const [expandedFile, setExpandedFile] = useState<FilePreviewSource | null>(null);
   const [expandedVideo, setExpandedVideo] = useState<VideoPreviewSource | null>(null);
   const fileShareSourceIdentifier = useId();
@@ -2701,6 +2848,75 @@ export const ThreadFeed = memo(function ThreadFeed(props: ThreadFeedProps) {
       props.latestRun,
     ],
   );
+  const transcriptSearchResults = useMemo(
+    () =>
+      transcriptSearchOpen
+        ? filterThreadFeedNavigationItems(
+            deriveThreadFeedNavigationItems(props.feed),
+            transcriptSearchQuery,
+          )
+        : [],
+    [props.feed, transcriptSearchOpen, transcriptSearchQuery],
+  );
+  const navigateTranscript = useCallback(
+    (item: ThreadFeedNavigationItem) => {
+      setEndFollow(false);
+      const sourceGroup = props.feed.find(
+        (entry) =>
+          entry.type === "activity-group" &&
+          entry.activities.some((activity) => activity.id === item.targetId),
+      );
+      // Unfold the target's run and work group, and open the target row.
+      setInteractionState((current) => {
+        const runs = new Set(current.expandedTurnIds);
+        if (item.runId !== null) runs.add(item.runId);
+        const workGroups = { ...current.expandedWorkGroups };
+        if (sourceGroup !== undefined) {
+          const visible = deriveThreadFeedPresentation(
+            props.feed,
+            props.latestRun,
+            runs,
+            new Set(Object.keys(workGroups).filter((id) => workGroups[id])),
+            props.activeWorkStartedAt,
+            props.runlessWorkActive ?? false,
+          );
+          for (const entry of visible) {
+            if (
+              entry.type === "work-toggle" &&
+              entry.runId === item.runId &&
+              entry.createdAt === sourceGroup.createdAt
+            ) {
+              workGroups[entry.groupId] = true;
+            }
+          }
+        }
+        return {
+          ...current,
+          expandedTurnIds: runs,
+          expandedWorkGroups: workGroups,
+          expandedWorkRows:
+            sourceGroup === undefined
+              ? current.expandedWorkRows
+              : { ...current.expandedWorkRows, [item.targetId]: true },
+        };
+      });
+      setPendingTranscriptNavigation(item);
+      setTranscriptSearchOpen(false);
+      setTranscriptSearchQuery("");
+    },
+    [props.activeWorkStartedAt, props.feed, props.latestRun, props.runlessWorkActive, setEndFollow],
+  );
+  useLayoutEffect(() => {
+    if (pendingTranscriptNavigation === null) return;
+    const index = resolveThreadFeedNavigationIndex(presentedFeed, pendingTranscriptNavigation);
+    if (index === null) return;
+    void props.listRef.current?.scrollToIndex({
+      index,
+      animated: !reducedMotion,
+      viewPosition: 0.25,
+    });
+    setPendingTranscriptNavigation(null);
+  }, [pendingTranscriptNavigation, presentedFeed, props.listRef, reducedMotion]);
   const setupAnchorIndex = presentedFeed.findIndex(
     (entry) => entry.type === "message" && entry.message.role === "user",
   );
@@ -3227,6 +3443,22 @@ export const ThreadFeed = memo(function ThreadFeed(props: ThreadFeedProps) {
             }}
           />
         </View>
+        {presentedFeed.length > 0 ? (
+          <ThreadFeedNavigationOverlay
+            open={transcriptSearchOpen}
+            query={transcriptSearchQuery}
+            results={transcriptSearchResults}
+            topInset={topContentInset}
+            horizontalPadding={horizontalPadding}
+            onOpen={() => setTranscriptSearchOpen(true)}
+            onClose={() => {
+              setTranscriptSearchOpen(false);
+              setTranscriptSearchQuery("");
+            }}
+            onQueryChange={setTranscriptSearchQuery}
+            onNavigate={navigateTranscript}
+          />
+        ) : null}
         {presentedFeed.length === 0 &&
         !props.worktreeSetup &&
         props.activeWorkStartedAt === null &&

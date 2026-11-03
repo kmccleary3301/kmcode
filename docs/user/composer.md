@@ -12,6 +12,10 @@ becomes an attachment when inserting it would exceed the message limit. On a
 hardware keyboard, use `Cmd+Shift+V` on Apple devices or `Ctrl+Shift+V` elsewhere
 to keep a large paste editable in the composer instead.
 
+On a new thread in a narrow browser window, the portrait hides when the available height is
+short, including when the keyboard resizes the page. The headline and project selector stay
+available.
+
 ## Formatting
 
 The composer writes Markdown and shows it styled as you type. Markers such as

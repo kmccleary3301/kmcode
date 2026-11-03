@@ -1,5 +1,6 @@
 import * as Effect from "effect/Effect";
 import type * as FileSystem from "effect/FileSystem";
+import * as Option from "effect/Option";
 import type * as Path from "effect/Path";
 import * as EffectAcpErrors from "effect-acp/errors";
 import type * as EffectAcpSchema from "effect-acp/compat";
@@ -20,8 +21,11 @@ function isInsideRoot(path: Path.Path, root: string, candidate: string): boolean
  * Resolves an agent-supplied path and rejects anything outside the session
  * roots. Symlinks resolve before the check, including the final component, so
  * a link inside the workspace cannot read or write through to a file outside
- * it. An entry that exists but cannot be resolved, like a dangling link, is
- * rejected rather than written through.
+ * it. A new path resolves through its nearest existing ancestor, so a write
+ * into not-yet-created directories under a symlinked root (macOS `/var` →
+ * `/private/var`) still compares against the resolved root. Any entry that
+ * exists but cannot be resolved, like a dangling link, is rejected rather than
+ * written through.
  */
 const resolveClientFilePath = Effect.fn("AntigravityClientFiles.resolveClientFilePath")(
   function* (input: {
@@ -38,18 +42,25 @@ const resolveClientFilePath = Effect.fn("AntigravityClientFiles.resolveClientFil
     const real = yield* input.fileSystem.realPath(resolved).pipe(
       Effect.catch(() =>
         Effect.gen(function* () {
-          // Only a missing file (a new write) falls back to its parent; a
-          // dangling or unreadable link must not be followed on write.
-          const entryExists = yield* input.fileSystem.readLink(resolved).pipe(
-            Effect.as(true),
-            Effect.catch(() => input.fileSystem.exists(resolved)),
-            Effect.orElseSucceed(() => true),
-          );
-          if (entryExists) return yield* outside;
-          const parent = yield* input.fileSystem
-            .realPath(path.dirname(resolved))
-            .pipe(Effect.orElseSucceed(() => path.dirname(resolved)));
-          return path.join(parent, path.basename(resolved));
+          // Only missing entries (a new write, possibly into new directories)
+          // fall back to an ancestor; a dangling or unreadable link must not
+          // be followed on write.
+          const missing: Array<string> = [];
+          let current = resolved;
+          for (;;) {
+            const entryExists = yield* input.fileSystem.readLink(current).pipe(
+              Effect.as(true),
+              Effect.catch(() => input.fileSystem.exists(current)),
+              Effect.orElseSucceed(() => true),
+            );
+            if (entryExists) return yield* outside;
+            missing.unshift(path.basename(current));
+            const parent = path.dirname(current);
+            if (parent === current) return yield* outside;
+            const realParent = yield* input.fileSystem.realPath(parent).pipe(Effect.option);
+            if (Option.isSome(realParent)) return path.join(realParent.value, ...missing);
+            current = parent;
+          }
         }),
       ),
     );

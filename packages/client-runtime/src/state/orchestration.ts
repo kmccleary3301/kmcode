@@ -51,6 +51,10 @@ export function createOrchestrationEnvironmentAtoms<R, E>(
       staleTimeMs: 60_000,
       idleTtlMs: 60_000,
     }),
+    subagentTranscript: createEnvironmentRpcQueryAtomFamily(runtime, {
+      label: "environment-data:orchestration:subagent-transcript",
+      tag: ORCHESTRATION_V2_WS_METHODS.getSubagentTranscript,
+    }),
     fullThreadDiff: createEnvironmentRpcQueryAtomFamily(runtime, {
       label: "environment-data:orchestration:full-thread-diff",
       tag: ORCHESTRATION_V2_WS_METHODS.getFullThreadDiff,

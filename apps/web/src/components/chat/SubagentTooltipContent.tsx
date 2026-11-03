@@ -6,6 +6,7 @@ import type {
   ProviderDriverKind,
   ProviderInstanceId,
   OrchestrationV2Subagent,
+  OrchestrationV2SubagentLiveContent,
 } from "@t3tools/contracts";
 import {
   resolveSubagentMetadata,
@@ -49,6 +50,7 @@ export function SubagentTooltipContent(props: {
   status: OrchestrationV2TurnItemStatus;
   result?: string | null | undefined;
   progress?: string | null | undefined;
+  liveContent?: OrchestrationV2SubagentLiveContent | null | undefined;
 }) {
   const { modelLabel, workspace: metadata } = resolveSubagentMetadata(props);
   const preview = subagentDetailPreview(props);
@@ -179,7 +181,21 @@ export function SubagentTooltipContent(props: {
           </div>
         );
       })}
-      {preview ? (
+      {props.liveContent ? (
+        <div className="flex min-w-0 items-start gap-2 text-xs text-muted-foreground">
+          <TerminalIcon aria-hidden className="mt-0.5 size-3 shrink-0" />
+          <div className="min-w-0">
+            <span className="font-mono text-3xs uppercase text-muted-foreground/80">
+              {props.liveContent.kind}:{" "}
+            </span>
+            <span className="break-words">
+              {props.liveContent.text.length > 120
+                ? `${props.liveContent.text.slice(0, 117)}…`
+                : props.liveContent.text}
+            </span>
+          </div>
+        </div>
+      ) : preview ? (
         <div className="flex min-w-0 items-center gap-2">
           <TerminalIcon aria-hidden className="size-3 shrink-0" />
           <MiddleTruncate value={preview} className="flex" showTitle={false} />

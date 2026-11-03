@@ -1,4 +1,5 @@
 import * as NodeModule from "node:module";
+import * as NodeURL from "node:url";
 
 import type {
   DirItem,
@@ -11,6 +12,7 @@ import type {
   Result,
   SearchResult,
 } from "@ff-labs/fff-node";
+import type * as FffModule from "@ff-labs/fff-node";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
@@ -31,8 +33,22 @@ import { isWorkspaceImagePreviewPath } from "@t3tools/shared/filePreview";
 // library. A static `import` of an external package is a hard error inside a
 // Node single-executable (only built-ins resolve there), so load it through
 // `require`, which reads from the real filesystem in every runtime.
+// The `require` export comes from our pnpm patch; npm installs of the fork
+// CLI get the stock import-only export map, so resolve the entry the way
+// `import` would and require that file directly.
 const requireForFff = NodeModule.createRequire(import.meta.url);
-const { FileFinder } = requireForFff("@ff-labs/fff-node") as typeof import("@ff-labs/fff-node");
+let fff: typeof FffModule;
+try {
+  fff = requireForFff("@ff-labs/fff-node");
+} catch (error) {
+  if (
+    !(error instanceof Error && "code" in error && error.code === "ERR_PACKAGE_PATH_NOT_EXPORTED")
+  ) {
+    throw error;
+  }
+  fff = requireForFff(NodeURL.fileURLToPath(import.meta.resolve("@ff-labs/fff-node")));
+}
+const { FileFinder } = fff;
 
 const WORKSPACE_INDEX_MAX_ENTRIES = 25_000;
 const WORKSPACE_INDEX_PAGE_SIZE = WORKSPACE_INDEX_MAX_ENTRIES + 2;

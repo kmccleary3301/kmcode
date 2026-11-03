@@ -25,8 +25,8 @@ import {
   type AppearanceDiagnostic,
   type NormalizedAppearanceVariant,
 } from "@t3tools/shared/appearance";
+import { APP_THEME_CATALOG } from "@t3tools/shared/themeCatalog";
 import {
-  BUILT_IN_THEMES,
   KM_CODE_THEME,
   THEME_COLOR_ROLES,
   type ThemeAppearance,
@@ -1158,7 +1158,7 @@ async function createWebAppearanceRuntime(): Promise<AppearanceRuntime> {
         ? "dark"
         : "light",
     legacy: {
-      read: async () => [...BUILT_IN_THEMES, ...getCustomThemes()],
+      read: async () => [...APP_THEME_CATALOG, ...getCustomThemes()],
       readPreference: async () => readLegacyPreference(),
     },
   });

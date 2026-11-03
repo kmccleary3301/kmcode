@@ -267,8 +267,8 @@ set -eu
 @@T3_NODE_ENV_SCRIPT@@
 T3_NODE_SCRIPT_PATH=@@T3_NODE_SCRIPT_PATH@@
 if [ -n "$T3_NODE_SCRIPT_PATH" ]; then
-  # Dev mode: a source checkout on the remote. This is the only path that
-  # needs Node, so Node discovery runs here and nowhere else.
+  # Dev mode: a source checkout on the remote. Node discovery runs here and
+  # for installed CLIs, never for the self-contained archive.
   ensure_remote_node_path || true
   if ! command -v node >/dev/null 2>&1; then
     printf 'Remote host is missing node on PATH. Install Node or configure a supported version manager for non-interactive shells.\\n' >&2
@@ -279,7 +279,10 @@ fi
 T3_ARCHIVE_VERSION=@@T3_ARCHIVE_VERSION@@
 if [ -z "$T3_ARCHIVE_VERSION" ]; then
   # Installed-CLI mode: the builder only omits a version when the caller
-  # opted into whatever CLI is already on the remote PATH.
+  # opted into whatever CLI is already on the remote PATH. Installers put
+  # that CLI (a Node script) under ~/.local/bin or a version manager, which
+  # a non-interactive ssh shell often lacks, so discover both first.
+  ensure_remote_node_path || true
   T3_INSTALLED_CLI=@@T3_INSTALLED_CLI@@
   if command -v "$T3_INSTALLED_CLI" >/dev/null 2>&1; then
     exec "$T3_INSTALLED_CLI" "$@"

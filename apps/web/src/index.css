@@ -2579,12 +2579,14 @@ form[data-t3-surface="composer"] {
 }
 
 /* Diagnostics-style tables: row separators only, and a scroll-fade container
-   for horizontal overflow. Cells wrap and the table fits its lane. The root
-   chat-markdown wrapping rules (overflow-wrap: anywhere) would let columns
-   shrink to single characters, so restore word-boundary wrapping: the min
-   column width is the longest word, and only wider content scrolls. */
+   for horizontal overflow. Each column takes its content's width up to the
+   cell cap below, and longer content wraps inside the cap, so a wide table
+   scrolls instead of squeezing every column to fit the lane. The root
+   chat-markdown wrapping rules (overflow-wrap: anywhere) would break words
+   mid-way, so restore word-boundary wrapping. */
 .chat-markdown table {
-  width: 100%;
+  width: max-content;
+  min-width: 100%;
   border-collapse: collapse;
   overflow-wrap: normal;
   word-break: normal;
@@ -2595,6 +2597,7 @@ form[data-t3-surface="composer"] {
 .chat-markdown td {
   padding: 0.45rem 0.75rem;
   text-align: left;
+  vertical-align: top;
 }
 
 .chat-markdown thead th {
@@ -2611,15 +2614,6 @@ form[data-t3-surface="composer"] {
 .chat-markdown :is(th, td) {
   max-width: 24rem;
   overflow-wrap: break-word;
-}
-
-/* Collapsed (default): single-line cells truncate so arbitrary chat content
-   cannot blow the column out; the footer toggle expands cells to wrap. */
-.chat-markdown .chat-markdown-table-container[data-expanded="false"] th,
-.chat-markdown .chat-markdown-table-container[data-expanded="false"] td {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
 }
 
 :root {

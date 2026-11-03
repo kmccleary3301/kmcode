@@ -461,6 +461,11 @@
   .group\/timeline-row .tool-intent-tag {
     margin-inline-end: 1.6rem;
   }
+  /* A live step hugs its text; one with an intent spans the line like a settled
+     step, or its tag has no room to reach the edge and ellipsizes early. */
+  [data-live-activity-intent] {
+    width: 100%;
+  }
 }
 
 .km-transcript:is(

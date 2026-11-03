@@ -1294,8 +1294,9 @@ export function ToolWorkEntryCard(props: {
           >
             {verbView}
             {objectView}
-            {minimalLook ? <ToolIntentTag intent={summaryData.intent} /> : null}
             {rowMeta}
+            {/* Last, so Minimal can hold it against the line's right edge. */}
+            {minimalLook ? <ToolIntentTag intent={summaryData.intent} /> : null}
           </div>
           {failureLine ? (
             <div

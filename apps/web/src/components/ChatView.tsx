@@ -426,7 +426,7 @@ import {
   serverEnvironment,
 } from "../state/server";
 import { terminalEnvironment } from "../state/terminal";
-import { threadEnvironment } from "../state/threads";
+import { reviveDeletedThreadDetail, threadEnvironment } from "../state/threads";
 import { orchestrationEnvironment } from "../state/orchestration";
 import { workspacePreparationRetryRunIds } from "@t3tools/client-runtime/state/turn-item-presentation";
 import { resolveProviderSkillsForCwd } from "@t3tools/client-runtime/providerSkills";
@@ -1761,6 +1761,17 @@ export default function ChatView(props: ChatViewProps) {
     status: threadStatus,
   });
   const threadDetailLoading = threadSyncPhase === "loading";
+  // A snapshot load that raced this thread's creation parks its detail as
+  // deleted. The shell proves the thread exists, so restart the detail once.
+  const shellListsThread = serverThread !== null && serverThread.deletedAt == null;
+  const revivedThreadKeyRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (routeThreadDetailRef === null || !shellListsThread || threadStatus !== "deleted") return;
+    const key = scopedThreadKey(routeThreadDetailRef);
+    if (revivedThreadKeyRef.current === key) return;
+    revivedThreadKeyRef.current = key;
+    reviveDeletedThreadDetail(routeThreadDetailRef);
+  }, [routeThreadDetailRef, shellListsThread, threadStatus]);
   // Latest provider-reported context usage (#8144): the newest turn that has
   // a report wins; stale turns keep the meter alive between turns.
   const activeThreadLiveTokenUsage = useMemo(() => {

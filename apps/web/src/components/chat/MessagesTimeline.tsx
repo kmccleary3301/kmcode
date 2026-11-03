@@ -4690,6 +4690,7 @@ function LiveActivityRow({
     <div
       ref={animated ? observeVisibleAnimation : undefined}
       className="relative min-h-6 w-fit max-w-full min-w-0 overflow-hidden rounded-md text-sm leading-relaxed"
+      data-live-activity-intent={intent ? "" : undefined}
     >
       <LiveActivityContent
         label={label}

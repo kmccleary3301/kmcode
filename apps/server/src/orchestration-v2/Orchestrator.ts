@@ -3088,6 +3088,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
             settledOverride:
               thread.settledOverride === "settled" ? "active" : thread.settledOverride,
             settledAt: thread.settledOverride === "settled" ? null : thread.settledAt,
+            ...(thread.settledOverride === "settled" ? { unsettledAt: now } : {}),
             snoozedUntil: null,
             snoozedAt: null,
             updatedAt: alreadyPinned && !promotes ? thread.updatedAt : now,

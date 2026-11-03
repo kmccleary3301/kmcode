@@ -1,5 +1,5 @@
 import { useMemo, useState } from "react";
-import { ListTodoIcon, TargetIcon } from "lucide-react";
+import { ListTodoIcon, TargetIcon, TriangleAlertIcon } from "lucide-react";
 import type { EnvironmentId, OrchestrationV2ProviderGoal, ThreadId } from "@t3tools/contracts";
 import type {
   PendingBackgroundWorkItem,
@@ -38,15 +38,22 @@ export interface ComposerBackgroundWorkStatus {
   readonly onStop: () => void;
 }
 
+export interface ComposerForceStopStatus {
+  readonly stopping: boolean;
+  readonly onForceStop: () => void;
+}
+
 export function ComposerStatusBumps({
   backgroundWork,
   environmentId,
+  forceStopBump,
   goal,
   threadId,
   todoPlan,
 }: {
   readonly backgroundWork: ComposerBackgroundWorkStatus | null;
   readonly environmentId?: EnvironmentId | undefined;
+  readonly forceStopBump: ComposerForceStopStatus | null;
   readonly goal: ComposerGoalStatus | null;
   readonly threadId?: ThreadId | null;
   readonly todoPlan: NativeTodoPlan | null;
@@ -60,9 +67,36 @@ export function ComposerStatusBumps({
         environmentId={environmentId}
         threadId={threadId}
       />
+      {forceStopBump === null ? null : <ComposerForceStopBump status={forceStopBump} />}
       {backgroundWork === null ? null : <ComposerBackgroundWorkBump status={backgroundWork} />}
       {goal === null ? null : <ComposerGoalBump goal={goal} />}
     </div>
+  );
+}
+
+function ComposerForceStopBump({ status }: { readonly status: ComposerForceStopStatus }) {
+  return (
+    <button
+      type="button"
+      aria-label="Force stop unresponsive background run"
+      title="Stop was requested, but this background run did not stop."
+      data-composer-status-bump="force-stop"
+      className={cn(
+        "border-warning/30 bg-warning-surface text-warning-foreground hover:bg-warning/12",
+        status.stopping && "cursor-wait",
+      )}
+      disabled={status.stopping}
+      onClick={status.onForceStop}
+    >
+      <TriangleAlertIcon aria-hidden className="size-3 shrink-0 text-warning" />
+      <span className="min-w-0 truncate">Stop unresponsive</span>
+      <span aria-hidden="true" className="shrink-0 text-muted-foreground">
+        ·
+      </span>
+      <span className="shrink-0 font-medium">
+        {status.stopping ? "Force stopping..." : "Force stop"}
+      </span>
+    </button>
   );
 }
 

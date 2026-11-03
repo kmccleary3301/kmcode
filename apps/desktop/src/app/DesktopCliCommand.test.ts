@@ -170,11 +170,17 @@ it.layer(NodeServices.layer)("DesktopCliCommand", (it) => {
       const fs = yield* FileSystem.FileSystem;
       const path = yield* Path.Path;
       const home = yield* fs.makeTempDirectoryScoped();
+      const directory = path.join(home, "directory");
+      const plain = path.join(home, "plain");
       const shadow = path.join(home, "shadow");
+      yield* fs.makeDirectory(path.join(directory, "t3"), { recursive: true });
+      yield* fs.makeDirectory(plain);
+      yield* fs.writeFileString(path.join(plain, "t3"), "not executable\n");
+      yield* fs.chmod(path.join(plain, "t3"), process.getuid?.() === 0 ? 0o600 : 0o601);
       yield* fs.makeDirectory(shadow);
       yield* fs.writeFileString(path.join(shadow, "t3"), "#!/bin/sh\n", { mode: 0o755 });
       const previous = process.env.PATH;
-      process.env.PATH = [shadow, path.join(home, ".local", "bin")].join(":");
+      process.env.PATH = [directory, plain, shadow, path.join(home, ".local", "bin")].join(":");
       yield* Effect.addFinalizer(() => Effect.sync(() => (process.env.PATH = previous)));
 
       const command = yield* commandIn({ home });
@@ -183,6 +189,33 @@ it.layer(NodeServices.layer)("DesktopCliCommand", (it) => {
       expect(installed.onPath).toBe(false);
       yield* fs.remove(path.join(shadow, "t3"));
       expect((yield* command.state).onPath).toBe(true);
+    }).pipe(Effect.scoped),
+  );
+
+  it.effect("recognizes its launcher when that directory is first on PATH", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const home = yield* fs.makeTempDirectoryScoped();
+      const launcher = path.join(home, ".t3", "bin", "t3");
+      const previous = process.env.PATH;
+      process.env.PATH = [path.dirname(launcher), path.join(home, ".local", "bin")].join(":");
+      yield* Effect.addFinalizer(() => Effect.sync(() => (process.env.PATH = previous)));
+
+      const command = yield* commandIn({ home });
+      const installed = yield* command.install;
+      expect(yield* fs.exists(launcher)).toBe(true);
+      expect(installed).toMatchObject({
+        onPath: true,
+        installedPath: path.join(home, ".local", "bin", "t3"),
+      });
+      expect(yield* command.state).toEqual(installed);
+
+      const removed = yield* command.uninstall;
+      expect(removed.installedPath).toBeNull();
+      expect(removed.onPath).toBe(true);
+      expect(yield* fs.exists(path.join(home, ".local", "bin", "t3"))).toBe(false);
+      expect(yield* fs.exists(launcher)).toBe(true);
     }).pipe(Effect.scoped),
   );
 

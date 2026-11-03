@@ -240,6 +240,48 @@ const makeOpenCodeRuntimeHarness = Effect.fn("makeOpenCodeRuntimeHarness")(funct
 });
 
 describe("OpenCodeAdapterV2", () => {
+  it.effect("classifies APIError 429 as a usage limit", () =>
+    Effect.gen(function* () {
+      const nativeEvents = asyncEventStream();
+      const harness = yield* makeOpenCodeRuntimeHarness("usage-limit", "root", {
+        event: { subscribe: async () => ({ stream: nativeEvents.stream }) },
+        session: {
+          create: async () => ({ data: { id: "root", time: { created: 1, updated: 1 } } }),
+          promptAsync: async () => ({ data: true }),
+          abort: async () => ({ data: true }),
+          children: async () => ({ data: [] }),
+        },
+      });
+      yield* harness.startTurn();
+      const received = yield* harness.runtime.events.pipe(
+        Stream.takeUntil((event) => event.type === "turn.terminal"),
+        Stream.runCollect,
+        Effect.forkScoped,
+      );
+      yield* Effect.promise(() =>
+        nativeEvents.push({
+          type: "session.error",
+          properties: {
+            sessionID: "root",
+            error: {
+              name: "APIError",
+              data: {
+                message: "Provider rejected request",
+                statusCode: 429,
+                isRetryable: true,
+              },
+            },
+          },
+        }),
+      );
+      const terminal = (yield* Fiber.join(received)).find(
+        (event) => event.type === "turn.terminal",
+      );
+      assert.equal(terminal?.status, "failed");
+      assert.equal(terminal?.failure?.class, "usage_limit");
+    }).pipe(Effect.provide(IdAllocator.layer), Effect.scoped),
+  );
+
   it.effect.each(["completed", "failed", "unresolved", "unavailable", "reconnect"] as const)(
     "normalizes OpenCode step usage for %s turns",
     (ending) =>
@@ -812,125 +854,126 @@ describe("OpenCodeAdapterV2", () => {
 
   it.effect(
     "projects OpenCode descriptions as intent while titling reads and searches from input",
-    () => Effect.gen(function* () {
-      const nativeEvents = asyncEventStream();
-      const nativeSessionId = "native-opencode-search";
-      const harness = yield* makeOpenCodeRuntimeHarness("search-projection", nativeSessionId, {
-        event: {
-          subscribe: async (_input: unknown, options: { signal?: AbortSignal }) => {
-            options.signal?.addEventListener("abort", () => nativeEvents.close(), { once: true });
-            return { stream: nativeEvents.stream };
+    () =>
+      Effect.gen(function* () {
+        const nativeEvents = asyncEventStream();
+        const nativeSessionId = "native-opencode-search";
+        const harness = yield* makeOpenCodeRuntimeHarness("search-projection", nativeSessionId, {
+          event: {
+            subscribe: async (_input: unknown, options: { signal?: AbortSignal }) => {
+              options.signal?.addEventListener("abort", () => nativeEvents.close(), { once: true });
+              return { stream: nativeEvents.stream };
+            },
           },
-        },
-        session: {
-          create: async () => ({
-            data: { id: nativeSessionId, time: { created: 1, updated: 1 } },
-          }),
-          promptAsync: async () => ({ data: true }),
-        },
-      });
-      yield* harness.startTurn();
-      const received = yield* harness.runtime.events.pipe(
-        Stream.takeUntil(
-          (event) => event.type === "turn_item.updated" && event.turnItem.type === "compaction",
-        ),
-        Stream.runCollect,
-        Effect.forkScoped,
-      );
-      for (const [tool, input, output] of [
-        [
-          "read",
-          { filePath: "src/env.ts", description: "  Inspect source file  " },
-          "---\nfile body",
-        ],
-        ["grep", { pattern: "TODO", path: "apps/web" }, "---\nfile body"],
-        ["websearch", { query: "OpenCode documentation" }, "---\nfile body"],
-        ["glob", { pattern: "missing", path: "apps/web" }, ""],
-        ["codesearch", {}, " \n\t"],
-        [
-          "bash",
-          {
-            command: "git status",
-            description: "  Inspect repository status  ",
+          session: {
+            create: async () => ({
+              data: { id: nativeSessionId, time: { created: 1, updated: 1 } },
+            }),
+            promptAsync: async () => ({ data: true }),
           },
-          "clean",
-        ],
-        [
-          "edit",
-          {
-            filePath: "src/env.ts",
-            oldString: "before",
-            newString: "after",
-            description: "  Update environment settings  ",
-          },
-          "",
-        ],
-      ] as const) {
-        yield* Effect.promise(() =>
-          nativeEvents.push({
-            type: "message.part.updated",
-            properties: {
-              sessionID: nativeSessionId,
-              part: {
-                id: `part-${tool}`,
+        });
+        yield* harness.startTurn();
+        const received = yield* harness.runtime.events.pipe(
+          Stream.takeUntil(
+            (event) => event.type === "turn_item.updated" && event.turnItem.type === "compaction",
+          ),
+          Stream.runCollect,
+          Effect.forkScoped,
+        );
+        for (const [tool, input, output] of [
+          [
+            "read",
+            { filePath: "src/env.ts", description: "  Inspect source file  " },
+            "---\nfile body",
+          ],
+          ["grep", { pattern: "TODO", path: "apps/web" }, "---\nfile body"],
+          ["websearch", { query: "OpenCode documentation" }, "---\nfile body"],
+          ["glob", { pattern: "missing", path: "apps/web" }, ""],
+          ["codesearch", {}, " \n\t"],
+          [
+            "bash",
+            {
+              command: "git status",
+              description: "  Inspect repository status  ",
+            },
+            "clean",
+          ],
+          [
+            "edit",
+            {
+              filePath: "src/env.ts",
+              oldString: "before",
+              newString: "after",
+              description: "  Update environment settings  ",
+            },
+            "",
+          ],
+        ] as const) {
+          yield* Effect.promise(() =>
+            nativeEvents.push({
+              type: "message.part.updated",
+              properties: {
                 sessionID: nativeSessionId,
-                messageID: "assistant-search",
-                type: "tool",
-                callID: `call-${tool}`,
-                tool,
-                state: {
-                  status: "completed",
-                  input,
-                  output,
-                  title: tool,
-                  metadata: {},
-                  time: { start: 1, end: 2 },
+                part: {
+                  id: `part-${tool}`,
+                  sessionID: nativeSessionId,
+                  messageID: "assistant-search",
+                  type: "tool",
+                  callID: `call-${tool}`,
+                  tool,
+                  state: {
+                    status: "completed",
+                    input,
+                    output,
+                    title: tool,
+                    metadata: {},
+                    time: { start: 1, end: 2 },
+                  },
                 },
               },
-            },
+            }),
+          );
+        }
+        yield* Effect.promise(() =>
+          nativeEvents.push({
+            type: "session.compacted",
+            properties: { sessionID: nativeSessionId },
           }),
         );
-      }
-      yield* Effect.promise(() =>
-        nativeEvents.push({
-          type: "session.compacted",
-          properties: { sessionID: nativeSessionId },
-        }),
-      );
-      const items = (yield* Fiber.join(received)).flatMap((event) =>
-        event.type === "turn_item.updated" ? [event.turnItem] : [],
-      );
-      const read = items.find((item) => item.type === "dynamic_tool");
-      assert.equal(read?.title, "Read src/env.ts");
-      assert.equal(read?.intent, "Inspect source file");
-      const bash = items.find((item) => item.type === "command_execution");
-      assert.equal(bash?.intent, "Inspect repository status");
-      const edit = items.find((item) => item.type === "file_change");
-      assert.equal(edit?.intent, "Update environment settings");
-      const grep = items.find((item) => item.type === "file_search");
-      assert.equal(grep?.title, "Searched TODO in web");
-      assert.equal(grep?.type === "file_search" ? grep.pattern : null, "TODO");
-      assert.deepEqual(grep?.type === "file_search" ? grep.results : null, [
-        { fileName: "apps/web", preview: "---\nfile body" },
-      ]);
-      const webSearch = items.find((item) => item.type === "web_search");
-      assert.deepEqual(webSearch?.type === "web_search" ? webSearch.patterns : null, [
-        "OpenCode documentation",
-      ]);
-      assert.deepEqual(webSearch?.type === "web_search" ? webSearch.results : null, [
-        { snippet: "---\nfile body" },
-      ]);
-      const emptyFileSearch = items.find(
-        (item) => item.type === "file_search" && item.pattern === "missing",
-      );
-      assert.ok(emptyFileSearch?.type === "file_search");
-      assert.equal(emptyFileSearch.results, undefined);
-      const emptyWebSearch = items.find(
-        (item) => item.type === "web_search" && item.patterns === undefined,
-      );
-      assert.ok(emptyWebSearch?.type === "web_search");
-      assert.equal(emptyWebSearch.results, undefined);
-    }).pipe(Effect.provide(IdAllocator.layer), Effect.scoped),
+        const items = (yield* Fiber.join(received)).flatMap((event) =>
+          event.type === "turn_item.updated" ? [event.turnItem] : [],
+        );
+        const read = items.find((item) => item.type === "dynamic_tool");
+        assert.equal(read?.title, "Read src/env.ts");
+        assert.equal(read?.intent, "Inspect source file");
+        const bash = items.find((item) => item.type === "command_execution");
+        assert.equal(bash?.intent, "Inspect repository status");
+        const edit = items.find((item) => item.type === "file_change");
+        assert.equal(edit?.intent, "Update environment settings");
+        const grep = items.find((item) => item.type === "file_search");
+        assert.equal(grep?.title, "Searched TODO in web");
+        assert.equal(grep?.type === "file_search" ? grep.pattern : null, "TODO");
+        assert.deepEqual(grep?.type === "file_search" ? grep.results : null, [
+          { fileName: "apps/web", preview: "---\nfile body" },
+        ]);
+        const webSearch = items.find((item) => item.type === "web_search");
+        assert.deepEqual(webSearch?.type === "web_search" ? webSearch.patterns : null, [
+          "OpenCode documentation",
+        ]);
+        assert.deepEqual(webSearch?.type === "web_search" ? webSearch.results : null, [
+          { snippet: "---\nfile body" },
+        ]);
+        const emptyFileSearch = items.find(
+          (item) => item.type === "file_search" && item.pattern === "missing",
+        );
+        assert.ok(emptyFileSearch?.type === "file_search");
+        assert.equal(emptyFileSearch.results, undefined);
+        const emptyWebSearch = items.find(
+          (item) => item.type === "web_search" && item.patterns === undefined,
+        );
+        assert.ok(emptyWebSearch?.type === "web_search");
+        assert.equal(emptyWebSearch.results, undefined);
+      }).pipe(Effect.provide(IdAllocator.layer), Effect.scoped),
   );
 
   it.effect("presents OpenCode MCP calls without treating remote tools as local edits", () =>

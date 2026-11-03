@@ -26,12 +26,13 @@ Switching providers uses portable conversation context. Extension
 dialogs appear in the T3 Code composer, and the composer context meter follows Pi's own usage
 reporting while a response streams and after it settles.
 
-Pi skills appear in the composer's `$` menu. This includes user skills and project skills that Pi
-loads for the current workspace; selecting one uses Pi's native skill expansion.
+Pi skills appear in the composer's `$` menu. User skills load normally; project skills load only
+after the worktree folder is trusted in Pi. Selecting a skill uses Pi's native expansion.
 
-Pi loads its normal user and project extensions. Blocking `select`, `confirm`, `input`, and `editor`
-dialogs work in T3 Code. Notifications appear in the work log. Arbitrary terminal-only
-decoration is not mirrored; supported structured OMP displays are described below.
+Pi loads its normal user extensions, and project extensions once the folder is trusted in Pi.
+Blocking `select`, `confirm`, `input`, and `editor` dialogs work in KM Code. Notifications appear in
+the work log. Arbitrary terminal-only decoration is not mirrored; supported structured OMP displays
+are described below.
 
 ## Permission Modes
 
@@ -92,7 +93,12 @@ OMP is still running through OMP, not the separate Codex harness.
 - If no models appear, open Pi directly and confirm its authentication and model configuration.
 - If discovery cannot complete, T3 Code keeps Pi available with the `Pi default` model. Start a
   thread to let the interactive Pi session handle any startup prompt.
-- If a project extension is missing, approve the project in Pi, then start a fresh provider session.
-- If a project skill is missing from the `$` menu, approve the project in Pi and refresh the provider.
+- If Pi skips project settings, extensions, skills, prompts, MCP servers, or system prompt files
+  because the folder is not trusted, the thread shows a notice on the first turn. To load them, run
+  the configured Pi binary in that worktree on the server with the same provider environment,
+  including `PI_CODING_AGENT_DIR` if set. Trust the folder or its parent with `/trust`, then start a
+  new thread in that same worktree.
+- Launch arguments with `--no-approve` deliberately keep project resources off without the notice.
+  Add `--approve` to Pi's launch arguments in KM Code settings to trust every project.
 - The context meter appears once Pi reports usage for the thread. Some model providers only
   report usage when a response completes, so the meter can wait for the first reply.

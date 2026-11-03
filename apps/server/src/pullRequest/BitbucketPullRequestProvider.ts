@@ -159,6 +159,7 @@ export const make = Effect.gen(function* () {
   const provider: PullRequestProviderApi = {
     kind: "bitbucket",
     capabilities: CAPABILITIES,
+    servesHost: api.servesHost,
 
     // Bitbucket credentials come from the server's environment rather than a checkout, so the
     // account is the same whichever workspace asks.

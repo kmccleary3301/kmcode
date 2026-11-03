@@ -19,7 +19,10 @@ import * as ServerSettings from "../serverSettings.ts";
 
 const NOW = Date.parse("2026-10-05T12:00:00.000Z");
 
-function harness(respond: (request: HttpClientRequest.HttpClientRequest) => Response) {
+function harness(
+  respond: (request: HttpClientRequest.HttpClientRequest) => Response,
+  source: GitHubCredentials.GitHubCredentialSource = "gh",
+) {
   const requests: Array<HttpClientRequest.HttpClientRequest> = [];
   let tokens = ["first", "second"];
   let invalidations = 0;
@@ -30,7 +33,7 @@ function harness(respond: (request: HttpClientRequest.HttpClientRequest) => Resp
         Effect.sync(() => ({
           host,
           token: Redacted.make(tokens[0]!),
-          source: "gh" as const,
+          source,
           fingerprint: `${host}:${tokens[0]}`,
         })),
       invalidate: () =>
@@ -193,6 +196,28 @@ describe("GitHubApi", () => {
       );
       expect(error._tag).toBe("GitHubApiResponseError");
       expect(error.message).toContain("Resource not accessible");
+    }).pipe(Effect.provide(layer));
+  });
+
+  it.effect("records which credential received a GitHub not-found answer", () => {
+    const { layer } = harness(
+      () => json({ data: { repository: null }, errors: [{ type: "NOT_FOUND" }] }),
+      "settings",
+    );
+    return Effect.gen(function* () {
+      const api = yield* GitHubApi.GitHubApi;
+      const error = yield* Effect.flip(
+        api.graphql({
+          host: "github.com",
+          operation: "listPullRequests",
+          query: "query { repository { id } }",
+        }),
+      );
+
+      expect(error).toMatchObject({
+        _tag: "GitHubApiNotFoundError",
+        credential: "settings",
+      });
     }).pipe(Effect.provide(layer));
   });
 

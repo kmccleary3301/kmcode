@@ -1,8 +1,8 @@
 import { describe, expect, it } from "vite-plus/test";
+import { ATTACHMENT_ONLY_BOOTSTRAP_PROMPT } from "@t3tools/shared/composerContextReferences";
 
 import { buildPlanImplementationPrompt } from "../../proposedPlan";
 import {
-  ATTACHMENT_ONLY_BOOTSTRAP_PROMPT,
   buildComposerPromptHistoryEntries,
   recallableComposerPrompt,
   stepComposerPromptHistory,
@@ -95,6 +95,9 @@ describe("recallableComposerPrompt", () => {
   it("returns an empty string for app-composed sends", () => {
     expect(recallableComposerPrompt("   ")).toBe("");
     expect(recallableComposerPrompt(ATTACHMENT_ONLY_BOOTSTRAP_PROMPT)).toBe("");
+    expect(
+      recallableComposerPrompt(`uLtRaThInK:\r\n\t\u00a0${ATTACHMENT_ONLY_BOOTSTRAP_PROMPT}`),
+    ).toBe("");
     expect(recallableComposerPrompt(buildPlanImplementationPrompt("# Plan\n1. do it"))).toBe("");
   });
 });

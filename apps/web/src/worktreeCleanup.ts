@@ -1,12 +1,5 @@
+import { normalizeProjectPathForComparison } from "@t3tools/shared/path";
 import type { ThreadShell } from "./types";
-
-function normalizeWorktreePath(path: string | null): string | null {
-  const trimmed = path?.trim();
-  if (!trimmed) {
-    return null;
-  }
-  return trimmed;
-}
 
 export function getOrphanedWorktreePathForThread(
   threads: ReadonlyArray<Pick<ThreadShell, "id" | "worktreePath">>,
@@ -17,17 +10,20 @@ export function getOrphanedWorktreePathForThread(
     return null;
   }
 
-  const targetWorktreePath = normalizeWorktreePath(targetThread.worktreePath);
+  const targetWorktreePath = targetThread.worktreePath?.trim();
   if (!targetWorktreePath) {
     return null;
   }
 
-  const isShared = threads.some((thread) => {
-    if (thread.id === threadId) {
-      return false;
-    }
-    return normalizeWorktreePath(thread.worktreePath) === targetWorktreePath;
-  });
+  // Threads can store one worktree as `/repo/wt` and `/repo/wt/`, and
+  // confirming deletion force-removes the checkout for every thread on it.
+  const targetKey = normalizeProjectPathForComparison(targetWorktreePath);
+  const isShared = threads.some(
+    (thread) =>
+      thread.id !== threadId &&
+      thread.worktreePath !== null &&
+      normalizeProjectPathForComparison(thread.worktreePath) === targetKey,
+  );
 
   return isShared ? null : targetWorktreePath;
 }

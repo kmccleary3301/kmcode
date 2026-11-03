@@ -29,6 +29,11 @@ workspace, and `mod+shift+g` for the Git branch. The workspace menu includes the
 current checkout, a new worktree, and the previous worktree when available.
 Use `mod+shift+l` to reuse the previous worktree directly.
 
+To change effort one step without opening the picker, bind
+**Composer: Increase Effort** and **Composer: Decrease Effort** in Keybindings.
+Both are unbound by default. Increase wraps from the highest level to the
+lowest, and decrease wraps from the lowest level to the highest.
+
 In the model picker, press Left in an empty search field or Shift+Tab to reach
 the provider list. Use Up/Down to move and Enter to choose. Right returns to
 model search. `mod+shift+up` and `mod+shift+down` switch providers directly and clear the
@@ -46,14 +51,20 @@ to copy its URL and `mod+shift+k` to copy its number with a `#` prefix.
 Both shortcuts can be changed in Settings. Search for “Copy Link or Thread ID”
 or “Copy Number”. They copy the selected PR and leave terminal input alone.
 
+## Find in a conversation
+
+When viewing a server-backed thread with thread find enabled, press `mod+f` to
+open conversation search. Change this shortcut in **Settings → Keybindings**
+under **Chat: Find**.
+
 ## Find in a diff
 
 Click into a diff in the Diff panel or a pull request's Code tab, then press
 `mod+f` to search every file in it, including folded files and unchanged lines
 hidden between changes. Enter and `Shift+Enter` move between matches, and a
-match in a folded file opens it. Escape closes the search. This shortcut is not
-configurable. A very large uncommitted diff loads its files as you scroll, and
-find only searches the files loaded so far.
+match in a folded file opens it. Escape closes the search. This diff-search
+shortcut is not configurable. A very large uncommitted diff loads its files as
+you scroll, and find only searches the files loaded so far.
 
 ## iPad
 

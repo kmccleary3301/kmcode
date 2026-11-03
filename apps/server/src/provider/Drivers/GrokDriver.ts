@@ -65,7 +65,7 @@ const UPDATE: ProviderMaintenanceCapabilitiesResolver = {
             updateArgs: ["update"],
             updateLockKey: "grok",
             platform: context.platform,
-            env: context.env,
+            env: { ...context.env, npm_config_allow_scripts: GROK_NPM_PACKAGE },
           })
         : makeManualOnlyProviderMaintenanceCapabilities({
             provider: DRIVER_KIND,
@@ -184,6 +184,9 @@ export const GrokDriver: ProviderDriver<GrokSettings, GrokDriverEnv> = {
                 enableProviderUpdateChecks: settings.enableProviderUpdateChecks,
                 publishSnapshot,
                 httpClient,
+                spawner,
+                fileSystem,
+                path,
               }),
             ),
           ),

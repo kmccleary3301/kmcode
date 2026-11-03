@@ -16,6 +16,7 @@ import {
   type SourceControlRepositoryVisibility,
 } from "@t3tools/contracts";
 import { HttpClient, HttpClientRequest, HttpClientResponse } from "effect/http";
+import { parseChangeRequestUrl } from "@t3tools/shared/changeRequestUrl";
 import { sanitizeBranchFragment } from "@t3tools/shared/git";
 import {
   detectSourceControlProviderFromRemoteUrl,
@@ -49,6 +50,14 @@ const BitbucketApiEnvConfig = Config.all({
   email: Config.String("T3CODE_BITBUCKET_EMAIL").pipe(Config.option),
   apiToken: Config.String("T3CODE_BITBUCKET_API_TOKEN").pipe(Config.option),
 });
+
+export const BitbucketServesHost = Config.String("T3CODE_BITBUCKET_API_BASE_URL").pipe(
+  Config.option,
+  Config.map(
+    (customBaseUrl) => (host: string) =>
+      Option.isSome(customBaseUrl) || host === "bitbucket.org" || host.endsWith(".bitbucket.org"),
+  ),
+);
 
 const BitbucketApiOperation = Schema.Literals([
   "resolveRepository",
@@ -327,6 +336,7 @@ export interface BitbucketRepositoryLocator {
 export class BitbucketApi extends Context.Service<
   BitbucketApi,
   {
+    readonly servesHost: (host: string) => boolean;
     readonly probeAuth: Effect.Effect<SourceControlProviderAuth, never>;
 
     /**
@@ -657,6 +667,7 @@ function responseError(
 /** @public Service construction is part of the canonical Effect module API. */
 export const make = Effect.gen(function* () {
   const config = yield* BitbucketApiEnvConfig;
+  const servesHost = yield* BitbucketServesHost;
   const serverSettings = yield* ServerSettings.ServerSettingsService;
   const httpClient = yield* HttpClient.HttpClient;
   const fileSystem = yield* FileSystem.FileSystem;
@@ -664,6 +675,13 @@ export const make = Effect.gen(function* () {
   const vcsRegistry = yield* VcsDriverRegistry.VcsDriverRegistry;
 
   const apiUrl = (path: string) => `${config.baseUrl.replace(/\/+$/u, "")}${path}`;
+  const servesProvider = (baseUrl: string) => {
+    try {
+      return servesHost(new URL(baseUrl).hostname);
+    } catch {
+      return false;
+    }
+  };
 
   // Read on every request so credentials saved in settings apply without a restart.
   const currentCredential = serverSettings.getSettings.pipe(
@@ -726,11 +744,33 @@ export const make = Effect.gen(function* () {
 
   const resolveRepository = Effect.fn("BitbucketApi.resolveRepository")(function* (input: {
     readonly cwd: string;
+    readonly reference?: string;
     readonly context?: SourceControlProvider.SourceControlProviderContext;
     readonly repository?: string;
   }) {
+    if (
+      input.context?.provider.kind === "bitbucket" &&
+      !servesProvider(input.context.provider.baseUrl)
+    ) {
+      return yield* new BitbucketRepositoryRemoteNotFoundError({ cwd: input.cwd });
+    }
+
     if (input.repository !== undefined) {
       return yield* requireRepositoryLocator(input.repository);
+    }
+    const reference = input.reference === undefined ? null : parseChangeRequestUrl(input.reference);
+    const referenceProvider =
+      reference === null
+        ? null
+        : detectSourceControlProviderFromRemoteUrl(
+            `https://${reference.host}/${reference.repository}.git`,
+          );
+    if (
+      reference !== null &&
+      referenceProvider?.kind === "bitbucket" &&
+      servesProvider(referenceProvider.baseUrl)
+    ) {
+      return yield* requireRepositoryLocator(reference.repository);
     }
 
     const fromContext =
@@ -759,7 +799,8 @@ export const make = Effect.gen(function* () {
     );
 
     for (const remote of remotes.remotes) {
-      if (detectSourceControlProviderFromRemoteUrl(remote.url)?.kind !== "bitbucket") continue;
+      const provider = detectSourceControlProviderFromRemoteUrl(remote.url);
+      if (provider?.kind !== "bitbucket" || !servesProvider(provider.baseUrl)) continue;
       const parsed = parseBitbucketRemoteUrl(remote.url);
       if (parsed) return parsed;
     }
@@ -830,19 +871,29 @@ export const make = Effect.gen(function* () {
     readonly sourceRepositoryName: string;
     readonly isCrossRepository: boolean;
   }) {
-    if (
-      input.context?.provider.kind === "bitbucket" &&
-      !input.isCrossRepository &&
-      parseBitbucketRemoteUrl(input.context.remoteUrl) !== null
-    ) {
-      return input.context.remoteName;
-    }
-
     if (!input.isCrossRepository) {
-      const remoteName = yield* git
-        .resolvePrimaryRemoteName(input.cwd)
-        .pipe(Effect.orElseSucceed(() => null));
-      if (remoteName) return remoteName;
+      const context = input.context?.provider.kind === "bitbucket" ? input.context : undefined;
+      const remoteName =
+        context?.remoteName ??
+        (yield* git.resolvePrimaryRemoteName(input.cwd).pipe(Effect.orElseSucceed(() => null)));
+      if (remoteName) {
+        const remoteUrl =
+          context?.remoteUrl ??
+          (yield* readConfigValueNullable(input.cwd, `remote.${remoteName}.url`));
+        const provider = remoteUrl ? detectSourceControlProviderFromRemoteUrl(remoteUrl) : null;
+        const repository =
+          remoteUrl &&
+          (context || (provider?.kind === "bitbucket" && servesProvider(provider.baseUrl)))
+            ? parseBitbucketRemoteUrl(remoteUrl)
+            : null;
+        if (
+          repository &&
+          `${repository.workspace}/${repository.repoSlug}`.toLowerCase() ===
+            input.sourceRepositoryName.toLowerCase()
+        ) {
+          return remoteName;
+        }
+      }
     }
 
     const cloneUrls = yield* getRepository({
@@ -961,6 +1012,7 @@ export const make = Effect.gen(function* () {
     );
 
   return BitbucketApi.of({
+    servesHost,
     request,
     probeAuth: executeJson(
       "probeAuth",

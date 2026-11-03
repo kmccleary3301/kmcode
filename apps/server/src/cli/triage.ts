@@ -35,6 +35,7 @@ import { resolveBaseDir } from "../os-jank.ts";
 import { isProcessAlive, readPersistedServerRuntimeState } from "../serverRuntimeState.ts";
 import { baseDirFlag } from "./config.ts";
 import { resolveCliCommand } from "./invocation.ts";
+import { interactiveStdin } from "./consoleStdin.ts";
 import {
   buildTriageContext,
   buildTriageLaunchPrompt,
@@ -135,7 +136,7 @@ const runInteractiveSession = (input: {
   Effect.callback<number, TriageAgentSpawnError>((resume) => {
     const child = NodeChildProcess.spawn(input.command, [...input.args], {
       cwd: input.cwd,
-      stdio: "inherit",
+      stdio: [interactiveStdin(), "inherit", "inherit"],
       shell: input.shell,
     });
     child.once("error", (cause) =>

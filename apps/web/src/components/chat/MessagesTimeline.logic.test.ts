@@ -45,6 +45,7 @@ import {
   workEntryReadOutput,
   workEntryIsVisibleInGroup,
   timelineRowKey,
+  timelineEntryTurnFoldRunId,
 } from "./MessagesTimeline.logic";
 import type { WorkLogEntry } from "../../session-logic";
 
@@ -816,6 +817,80 @@ describe("deriveMessagesTimelineRows", () => {
       expect(requestGroup).not.toMatchObject({ isExpandedToolGroup: true });
     },
   );
+
+  it("keeps a pending approval in its own timeline row", () => {
+    const fixture = makeStreamingTimelineFixture();
+    const source = fixture.visibleTurnItems[0]!;
+    const requestId = RuntimeRequestId.make("pending-approval");
+    const common = {
+      ...source.item,
+      threadId: fixture.threadId,
+      runId: fixture.runId,
+      nodeId: null,
+      providerThreadId: null,
+      providerTurnId: null,
+      nativeItemRef: null,
+      parentItemId: null,
+      status: "waiting",
+    };
+    const items: OrchestrationV2ProjectedTurnItem["item"][] = [
+      {
+        ...common,
+        status: "waiting",
+        id: TurnItemId.make("pending-command"),
+        type: "command_execution",
+        input: "pwd",
+        output: "",
+      },
+      {
+        ...common,
+        status: "waiting",
+        id: TurnItemId.make("pending-approval"),
+        type: "approval_request",
+        requestId,
+        requestKind: "command",
+        prompt: "Allow pwd?",
+        reason: "This command matched an ask rule.",
+        fullAccessOverride: "ask_rule",
+      },
+    ];
+    const entries = deriveTimelineEntriesFromVisibleTurnItems({
+      visibleTurnItems: items.map((item, position) => ({
+        ...source,
+        item,
+        position,
+        sourceItemId: item.id,
+      })),
+      optimisticMessages: [],
+    });
+    const rows = deriveMessagesTimelineRows({
+      timelineEntries: entries,
+      pendingApprovalRequestIds: new Set([requestId]),
+      isWorking: true,
+      activityStatus: "waiting",
+      runningRunId: fixture.runId,
+      activeTurnStartedAt: fixture.time(0),
+      turnDiffSummaries: [],
+      supportsConversationRollback: false,
+    });
+
+    const approvalRow = rows.find(
+      (row) =>
+        row.kind === "work" &&
+        row.groupedEntries.some((entry) => entry.projectedItem?.item.type === "approval_request"),
+    );
+    if (!approvalRow || approvalRow.kind !== "work") {
+      throw new Error("Expected an approval work row");
+    }
+    expect(approvalRow.groupedEntries).toHaveLength(1);
+    expect(
+      rows.some(
+        (row) =>
+          row.kind === "work-live" &&
+          row.groupedEntries.some((entry) => entry.projectedItem?.item.type === "approval_request"),
+      ),
+    ).toBe(false);
+  });
 
   it.each(["running", "completed", "superseded"] as const)(
     "keeps system notices visible as non-failing warnings through %s work",
@@ -2374,10 +2449,10 @@ describe("deriveMessagesTimelineRows", () => {
     const settled = rows({ resume: "completed", working: false });
     expect(shape(settled)).toEqual([
       "user:launch",
-      "fold:Worked for 8.0s · 1 step",
+      "fold:Worked for 8s · 1 step",
       "assistant:launch-answer",
       "user:resume",
-      "fold:Worked for 8.0s · 1 step",
+      "fold:Worked for 8s · 1 step",
       "assistant:resume-answer",
     ]);
 
@@ -2391,24 +2466,24 @@ describe("deriveMessagesTimelineRows", () => {
     });
     expect(shape(expanded)).toEqual([
       "user:launch",
-      "fold:Worked for 8.0s · 1 step",
+      "fold:Worked for 8s · 1 step",
       "work-toggle",
       "assistant:launch-answer",
       "user:resume",
-      "fold:Worked for 8.0s · 1 step",
+      "fold:Worked for 8s · 1 step",
       "assistant:resume-answer",
     ]);
 
     // While the resume runs, only the settled launch folds.
     const runningShape = shape(rows({ resume: "running", working: true }));
-    expect(runningShape).toContain("fold:Worked for 8.0s · 1 step");
+    expect(runningShape).toContain("fold:Worked for 8s · 1 step");
     expect(runningShape).toContain("work-live");
     expect(runningShape.filter((s) => s.startsWith("fold:")).length).toBe(1);
 
     // A failed run stays open, as on a normal thread.
     expect(shape(rows({ resume: "failed", working: false }))).toEqual([
       "user:launch",
-      "fold:Worked for 8.0s · 1 step",
+      "fold:Worked for 8s · 1 step",
       "assistant:launch-answer",
       "user:resume",
       "work",
@@ -2485,6 +2560,16 @@ describe("deriveMessagesTimelineRows", () => {
     const withoutPrompt = rows([]);
     expect(withoutPrompt).toContain("turn-fold");
     expect(withoutPrompt).not.toContain("assistant:imported-update");
+    expect(
+      timelineEntryTurnFoldRunId(
+        [
+          message("imported-prompt", "user", 0),
+          message("imported-update", "assistant", 4),
+          message("imported-answer", "assistant", 8),
+        ],
+        "imported-update",
+      ),
+    ).toBe(RunId.make("runless:imported-prompt"));
   });
 
   it("shows a provider-native subagent's runless tools as live work while it works", () => {
@@ -2989,9 +3074,7 @@ describe("deriveMessagesTimelineRows", () => {
   it("keeps activity keys stable while reasoning and tools start, finish, and settle", () => {
     const runId = RunId.make("live-work-key");
     type WorkEntry = Extract<TimelineEntry, { kind: "work" }>;
-    const reasoning = (
-      status: "idle" | "inProgress" | "completed",
-    ): WorkEntry => ({
+    const reasoning = (status: "idle" | "inProgress" | "completed"): WorkEntry => ({
       id: "reasoning-entry",
       kind: "work",
       createdAt: "2026-01-01T00:00:01Z",
@@ -3063,7 +3146,6 @@ describe("deriveMessagesTimelineRows", () => {
       "work-toggle:reasoning-entry",
     ]);
   });
-
 
   it("does not fold the session's running turn when latestRun regresses", () => {
     const rows = deriveMessagesTimelineRows({
@@ -5513,7 +5595,6 @@ describe("linked timeline resources", () => {
     expect(visibleWorkIds).not.toContain("same-turn-notification");
     expect(visibleWorkIds).toContain("older-child-notification");
   });
-
 });
 
 it.each([true, false])(
@@ -6005,11 +6086,7 @@ describe("live subagents after their parent turn settles", () => {
     );
     expect(rosters).toHaveLength(1);
     expect(rosters[0]).toMatchObject({
-      subagents: [
-        { item: { id: "alpha" } },
-        { item: { id: "beta" } },
-        { item: { id: "gamma" } },
-      ],
+      subagents: [{ item: { id: "alpha" } }, { item: { id: "beta" } }, { item: { id: "gamma" } }],
     });
   });
 

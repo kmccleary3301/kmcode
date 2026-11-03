@@ -4,6 +4,7 @@ import {
   ThreadId,
   TurnItemId,
   type OrchestrationProjectShell,
+  type OrchestrationV2ProjectedTurnItem,
 } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as Predicate from "effect/Predicate";
@@ -25,6 +26,7 @@ import {
   decodeThreadHistoryCursor,
   InvalidThreadHistoryCursorError,
   selectHistoryPageFromCursor,
+  type SelectTimelinePageResult,
   THREAD_HISTORY_SNAPSHOT_ROW_LIMIT,
   THREAD_HISTORY_PAGE_POLICY,
   OLDER_THREAD_USER_TURN_LIMIT,
@@ -42,10 +44,12 @@ function isThreadNotFound(error: unknown): boolean {
   );
 }
 
-function selectHistoryPageFromCursorOrError(
-  input: Parameters<typeof selectHistoryPageFromCursor>[0],
-):
-  | { readonly _tag: "ok"; readonly page: ReturnType<typeof selectHistoryPageFromCursor> }
+function selectHistoryPageFromCursorOrError<Row extends OrchestrationV2ProjectedTurnItem>(input: {
+  readonly items: ReadonlyArray<Row>;
+  readonly cursor: string;
+  readonly snapshotSequence: number;
+}):
+  | { readonly _tag: "ok"; readonly page: SelectTimelinePageResult<Row> }
   | { readonly _tag: "invalid_cursor" }
   | { readonly _tag: "error"; readonly cause: unknown } {
   try {

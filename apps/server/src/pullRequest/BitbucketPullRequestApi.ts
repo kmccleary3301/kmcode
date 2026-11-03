@@ -1,9 +1,11 @@
 import * as Cache from "effect/Cache";
 import * as Context from "effect/Context";
+import * as DateTime from "effect/DateTime";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
 import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
 import * as Result from "effect/Result";
 import * as Schema from "effect/Schema";
 import type {
@@ -154,6 +156,7 @@ export interface BitbucketPullRequestBatch {
 export class BitbucketPullRequestApi extends Context.Service<
   BitbucketPullRequestApi,
   {
+    readonly servesHost: (host: string) => boolean;
     /** A function rather than a value, so the request is built per call and not at layer time. */
     readonly getViewer: () => Effect.Effect<string, BitbucketPullRequestApiError>;
 
@@ -379,6 +382,15 @@ function searchFilter(query: string): string {
  */
 function filterLiteral(value: string): string {
   return value.replaceAll("\\", "\\\\").replaceAll('"', '\\"');
+}
+
+// Bitbucket keeps microseconds; include the cursor's whole millisecond before excluding seen IDs.
+function updatedBeforeFilter(updatedBefore: string): string {
+  return Option.match(DateTime.make(updatedBefore), {
+    onNone: () => `updated_on <= ${updatedBefore}`,
+    onSome: (instant) =>
+      `updated_on < ${DateTime.formatIso(DateTime.add(instant, { milliseconds: 1 }))}`,
+  });
 }
 
 /** Bitbucket's merge strategies, named differently from the three the contract carries. */
@@ -607,6 +619,7 @@ export const make = Effect.gen(function* () {
   );
 
   return BitbucketPullRequestApi.of({
+    servesHost: bitbucket.servesHost,
     getViewer: () =>
       bitbucket.request({ method: "GET", url: "/user" }).pipe(
         Effect.flatMap((response): Effect.Effect<string, BitbucketPullRequestApiError> => {
@@ -626,13 +639,13 @@ export const make = Effect.gen(function* () {
       withRepository(input.repository, (path) => {
         const search = input.query?.trim() ?? "";
         // Both narrowings share the one `q` Bitbucket takes, so they are ANDed rather than one
-        // replacing the other. The boundary instant is read inclusively — the rows already sent
-        // at it come back and the caller drops them, which is what keeps their neighbours at the
-        // same instant from being skipped. A date is a bare literal in this grammar, and this one
-        // was checked against a timestamp's shape before it got here.
+        // replacing the other. The cursor is widened by one millisecond so Bitbucket's microsecond
+        // precision does not skip unseen rows that share its millisecond. The date remains a bare
+        // literal in this grammar, and the cursor has already been checked against a timestamp's
+        // shape before it got here.
         const predicates = [
           ...(search.length === 0 ? [] : [searchFilter(search)]),
-          ...(input.cursor === undefined ? [] : [`updated_on <= ${input.cursor.updatedBefore}`]),
+          ...(input.cursor === undefined ? [] : [updatedBeforeFilter(input.cursor.updatedBefore)]),
         ];
         return listPage({
           // Reviewers are not on a listing by default, and `viewerReviewRequested` needs them.

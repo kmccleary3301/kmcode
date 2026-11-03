@@ -208,8 +208,9 @@ const dottedPattern = (values: ReadonlyArray<string>): RegExp | undefined => {
           ? JSON.stringify(char).slice(1, -1)
           : `\\x${char.charCodeAt(0).toString(16).padStart(2, "0")}`,
       );
-      return [...new Set([value, json, quoted].flatMap((form) => [form, form.replaceAll("'", "''")]))]
-        .map((form) => ({ form, word: value.length < 4 }));
+      return [
+        ...new Set([value, json, quoted].flatMap((form) => [form, form.replaceAll("'", "''")])),
+      ].map((form) => ({ form, word: value.length < 4 }));
     })
     .toSorted((left, right) => right.form.length - left.form.length)
     .map(({ form, word }) => {
@@ -638,7 +639,8 @@ const NET_ERROR_CODES: Readonly<Record<string, number>> = {
 };
 
 export const parseNetError = (errorText: string) => {
-  const description = /ERR_[A-Z_]+/.exec(errorText)?.[0] ?? errorText;
+  // Names may contain digits, as in ERR_HTTP2_PROTOCOL_ERROR.
+  const description = /ERR_[A-Z\d_]+/.exec(errorText)?.[0] ?? errorText;
   return { description, code: NET_ERROR_CODES[description] ?? -2 };
 };
 

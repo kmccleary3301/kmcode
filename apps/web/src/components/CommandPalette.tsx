@@ -2,8 +2,19 @@
 
 import { threadPullRequestLinkMode } from "@t3tools/client-runtime/thread-pull-request-compatibility";
 import { visibleThreadPullRequests } from "@t3tools/shared/threadPullRequests";
+import {
+  foldSearchQuery,
+  PALETTE_MESSAGE_LIMIT,
+  pickedQuery,
+  rankMessageMatches,
+  threadRecentUse,
+} from "@t3tools/shared/paletteSearch";
 
-import { scopeProjectRef, scopeThreadRef } from "@t3tools/client-runtime/environment";
+import {
+  scopedThreadKey,
+  scopeProjectRef,
+  scopeThreadRef,
+} from "@t3tools/client-runtime/environment";
 import {
   canCreateProjectInEnvironment,
   getCloneDestinationBrowsePath,
@@ -16,7 +27,11 @@ import {
   normalizePastedCloneUrl,
 } from "@t3tools/client-runtime/operations/projects";
 import { connectionStatusText } from "@t3tools/client-runtime/connection";
-import { threadSearchMatchKey } from "@t3tools/client-runtime/state/thread-search";
+import {
+  claimThreadOpen,
+  nextShownOrder,
+  type ShownOrder,
+} from "@t3tools/client-runtime/state/thread-search";
 import { resolveThreadReferenceCopyTarget } from "@t3tools/shared/threadReference";
 import {
   canPreloadBrowsePath,
@@ -37,7 +52,6 @@ import {
   type EnvironmentId,
   type EnvironmentMachineKind,
   type FilesystemBrowseResult,
-  type ProjectId,
   type SourceControlDiscoveryResult,
   type SourceControlProviderKind,
   type SourceControlRepositoryInfo,
@@ -130,6 +144,7 @@ import {
   resolveProjectPathForDispatch,
 } from "../lib/projectPaths";
 import { onOpenCommandPalette } from "../commandPaletteBus";
+import { findForMessageMatch, requestThreadFindQuery } from "./chat/threadFindActionBus";
 import { isPreviewFocused } from "../lib/previewFocus";
 import {
   allocateAppearanceGeneration,
@@ -152,6 +167,7 @@ import {
 } from "../lib/utils";
 import { selectThreadTerminalUiState, useTerminalUiStateStore } from "../terminalUiStateStore";
 import { buildThreadRouteParams, resolveThreadRouteTarget } from "../threadRoutes";
+import { formatRelativeTimeLabel } from "../timestampFormat";
 import { useAvailableSettingsSearchItems } from "./settings/useAvailableSettingsSearchItems";
 import {
   applyWslEnvironmentConfiguration,
@@ -166,6 +182,7 @@ import {
   buildBrowseGroups,
   buildCommandPaletteProjectMetadata,
   buildProjectActionItems,
+  resolveCommandPaletteProject,
   buildRootGroups,
   buildThreadActionItems,
   buildLinkedThreadActionItems,
@@ -184,6 +201,7 @@ import {
   ITEM_ICON_CLASS,
   RECENT_THREAD_LIMIT,
   reduceCommandPaletteUiState,
+  isImeCompositionKey,
   type SearchOverlayMode,
 } from "./CommandPalette.logic";
 import { orderItemsByPreferredIds, sortLogicalProjectsForSidebar } from "./Sidebar.logic";
@@ -711,6 +729,8 @@ function OpenCommandPaletteDialog(props: {
     openIntent?.kind === "search" ? openIntent : null,
   );
   const deferredQuery = useDeferredValue(query);
+  const [searchNow] = useState(() => Date.now());
+  const [shownMessageOrder, setShownMessageOrder] = useState<ShownOrder | null>(null);
   const isActionsOnly = deferredQuery.startsWith(">");
   const [highlightedItemValue, setHighlightedItemValue] = useState<string | null>(null);
   const resultListRef = useRef<LegendListRef | null>(null);
@@ -743,12 +763,13 @@ function OpenCommandPaletteDialog(props: {
   const stopThreadSession = useAtomCommand(threadEnvironment.stopSession, {
     reportFailure: false,
   });
+  const visitThreadMutation = useAtomCommand(threadEnvironment.visit, { reportFailure: false });
   const refreshProviders = useAtomCommand(serverEnvironment.refreshProviders, {
     reportFailure: false,
   });
   const { environments } = useEnvironments();
-  const desktopLocalBootstraps = useDesktopLocalBootstraps();
   const primaryEnvironmentId = usePrimaryEnvironmentId();
+  const desktopLocalBootstraps = useDesktopLocalBootstraps();
   const availableSettingsSearchItems = useAvailableSettingsSearchItems();
   const { activeDraftThread, activeThread, defaultProjectRef, handleNewThread } =
     useHandleNewThread();
@@ -926,7 +947,7 @@ function OpenCommandPaletteDialog(props: {
       // Settings fill the ACP registry identity (agent id, icon URL) the
       // derived entries alone do not carry.
       const entries = serverConfig
-        ? applyProviderInstanceSettings(derived, serverConfig.settings)
+        ? applyProviderInstanceSettings(derived, serverConfig.settings, null)
         : derived;
       for (const entry of entries) {
         map.set(`${environment.environmentId}:${entry.instanceId}`, entry);
@@ -945,17 +966,6 @@ function OpenCommandPaletteDialog(props: {
   );
   const threadSearchQuery = currentView === null && !isActionsOnly ? deferredQuery : "";
   const threadSearch = useThreadSearch(environmentIds, threadSearchQuery);
-  const threadContentMatchByKey = useMemo(
-    () =>
-      new Map(
-        threadSearch.matches.flatMap((match) =>
-          match.source === "user" || match.source === "assistant"
-            ? [[threadSearchMatchKey(match), match] as const]
-            : [],
-        ),
-      ),
-    [threadSearch.matches],
-  );
   const [browseGeneration, setBrowseGeneration] = useState(0);
   const browseNavigationRef = useRef<ReturnType<typeof createBrowseNavigationCoordinator> | null>(
     null,
@@ -1220,17 +1230,8 @@ function OpenCommandPaletteDialog(props: {
     [environments],
   );
 
-  const projectCwdById = useMemo(
-    () =>
-      new Map<ProjectId, string>(projects.map((project) => [project.id, project.workspaceRoot])),
-    [projects],
-  );
   const projectByKey = useMemo(
     () => new Map(projects.map((project) => [`${project.environmentId}:${project.id}`, project])),
-    [projects],
-  );
-  const projectTitleById = useMemo(
-    () => new Map<ProjectId, string>(projects.map((project) => [project.id, project.title])),
     [projects],
   );
 
@@ -1238,14 +1239,14 @@ function OpenCommandPaletteDialog(props: {
   const currentProjectEnvironmentId =
     activeThread?.environmentId ?? activeDraftThread?.environmentId ?? null;
   const currentProjectId = activeThread?.projectId ?? activeDraftThread?.projectId ?? null;
-  // Where "without a project" threads start: the current environment when it
-  // offers them, otherwise the first connected one that does.
-  const scratchTargetEnvironmentId = scratchEnvironmentId(
-    currentProjectEnvironmentId ?? primaryEnvironmentId,
+  // Prefer the primary environment; use the active thread's environment as a fallback.
+  const scratchTargetEnvironmentId = scratchEnvironmentId(currentProjectEnvironmentId);
+  const currentProject = resolveCommandPaletteProject(
+    projectByKey,
+    currentProjectEnvironmentId,
+    currentProjectId,
   );
-  const currentProjectCwd = currentProjectId
-    ? (projectCwdById.get(currentProjectId) ?? null)
-    : null;
+  const currentProjectCwd = currentProject?.workspaceRoot ?? null;
   const currentProjectCwdForBrowse =
     browseEnvironmentId && currentProjectEnvironmentId === browseEnvironmentId
       ? currentProjectCwd
@@ -1512,10 +1513,16 @@ function OpenCommandPaletteDialog(props: {
 
   const allThreadItems = useMemo(
     () =>
-      buildThreadActionItems({
+      buildThreadActionItems<(typeof threads)[number]>({
         threads,
-        ...(activeThreadId ? { activeThreadId } : {}),
-        projectTitleById,
+        ...(activeThread ? { activeThread } : {}),
+        ...(environments.length > 1
+          ? {
+              environmentLabelOf: (thread) =>
+                projectEnvironmentLocationById.get(thread.environmentId)?.label ?? null,
+            }
+          : {}),
+        projectByKey,
         sortOrder: clientSettings.sidebarThreadSortOrder,
         icon: <MessageSquareIcon className={ITEM_ICON_CLASS} />,
         renderLeadingContent: (thread) => <ThreadRowLeadingStatus thread={thread} />,
@@ -1536,7 +1543,10 @@ function OpenCommandPaletteDialog(props: {
               }
               branch={thread.branch}
               worktreePath={thread.worktreePath}
-              isCurrent={thread.id === activeThreadId}
+              isCurrent={
+                activeThread?.id === thread.id &&
+                activeThread?.environmentId === thread.environmentId
+              }
               driverKind={providerEntry?.driverKind ?? null}
               providerDisplayName={
                 thread.runtime?.providerName ?? providerEntry?.displayName ?? modelInstanceId
@@ -1546,22 +1556,27 @@ function OpenCommandPaletteDialog(props: {
             />
           );
         },
-        getContentMatch: (thread) => {
-          const match = threadContentMatchByKey.get(
-            threadSearchMatchKey({
-              environmentId: thread.environmentId,
-              threadId: thread.id,
-            }),
-          );
-          return match && (match.source === "user" || match.source === "assistant")
-            ? {
-                source: match.source,
-                snippet: match.snippet,
-                query: threadSearch.query,
-              }
-            : undefined;
-        },
         runThread: async (thread) => {
+          const query = threadSearchQuery.trim();
+          const isOpen =
+            activeThread?.environmentId === thread.environmentId && activeThread?.id === thread.id;
+          if (query.length > 0 && !isOpen) {
+            const now = Date.now();
+            if (
+              claimThreadOpen(thread.environmentId, thread.id, now) &&
+              thread.lastVisitedAt !== undefined
+            ) {
+              void visitThreadMutation({
+                environmentId: thread.environmentId,
+                input: {
+                  threadId: thread.id,
+                  visitedAt: thread.updatedAt,
+                  opened: true,
+                  searchQuery: pickedQuery(query),
+                },
+              });
+            }
+          }
           await navigate({
             to: "/$environmentId/$threadId",
             params: buildThreadRouteParams(scopeThreadRef(thread.environmentId, thread.id)),
@@ -1569,20 +1584,74 @@ function OpenCommandPaletteDialog(props: {
         },
       }),
     [
-      activeThreadId,
+      activeThread,
       clientSettings.sidebarThreadSortOrder,
+      environments.length,
       navigate,
-      projectCwdById,
       projectByKey,
       projectEnvironmentLocationById,
-      projectTitleById,
       providerEntryByEnvironmentAndInstanceId,
-      threadContentMatchByKey,
-      threadSearch.query,
+      threadSearchQuery,
       threads,
+      visitThreadMutation,
     ],
   );
-  const recentThreadItems = allThreadItems.slice(0, RECENT_THREAD_LIMIT);
+  const activeThreadValue = activeThread
+    ? `thread:${activeThread.environmentId}:${activeThread.id}`
+    : null;
+  const recentThreadItems = allThreadItems
+    .filter((item) => item.value !== activeThreadValue)
+    .toSorted(
+      (left, right) =>
+        (right.threadSearch ? threadRecentUse(right.threadSearch) : 0) -
+        (left.threadSearch ? threadRecentUse(left.threadSearch) : 0),
+    )
+    .slice(0, RECENT_THREAD_LIMIT);
+  const rankedMessageItems = useMemo(() => {
+    const itemByValue = new Map(allThreadItems.map((item) => [item.value, item]));
+    return rankMessageMatches(
+      threadSearch.matches,
+      (match) => itemByValue.get(`thread:${match.environmentId}:${match.threadId}`)?.threadSearch,
+      foldSearchQuery(threadSearch.query),
+      searchNow,
+      { withoutTitleMatches: true },
+    ).flatMap((match) => {
+      const item = itemByValue.get(`thread:${match.environmentId}:${match.threadId}`);
+      if (!item) return [];
+      const { description: _description, ...rest } = item;
+      return [
+        {
+          ...rest,
+          ...(match.messageCreatedAt
+            ? { timestamp: formatRelativeTimeLabel(match.messageCreatedAt) }
+            : {}),
+          threadContentMatch: {
+            source: match.source,
+            snippet: match.snippet,
+            query: threadSearch.query,
+          },
+          run: async () => {
+            await item.run();
+            requestThreadFindQuery(
+              scopedThreadKey(scopeThreadRef(match.environmentId, match.threadId)),
+              findForMessageMatch(match, threadSearch.query),
+            );
+          },
+        },
+      ];
+    });
+  }, [allThreadItems, searchNow, threadSearch.matches, threadSearch.query]);
+  const nextMessageOrder = nextShownOrder(
+    shownMessageOrder,
+    threadSearch.query,
+    rankedMessageItems.map((item) => item.value),
+    PALETTE_MESSAGE_LIMIT,
+  );
+  if (nextMessageOrder !== shownMessageOrder) setShownMessageOrder(nextMessageOrder);
+  const messageItemByValue = new Map(rankedMessageItems.map((item) => [item.value, item]));
+  const threadMessageItems = nextMessageOrder.keys
+    .slice(0, nextMessageOrder.shown)
+    .flatMap((value) => messageItemByValue.get(value) ?? []);
 
   const pushPaletteView = useCallback(
     (view: CommandPaletteView): void => {
@@ -2001,7 +2070,8 @@ function OpenCommandPaletteDialog(props: {
   if (projects.length > 0) {
     const activeProjectTitle =
       projectPickerEntries.find((entry) => entry.isPreferred)?.group.displayName ??
-      (currentProjectId ? (projectTitleById.get(currentProjectId) ?? null) : null);
+      currentProject?.title ??
+      null;
 
     if (activeProjectTitle) {
       actionItems.push({
@@ -2451,6 +2521,8 @@ function OpenCommandPaletteDialog(props: {
           ? changeAppearanceItem.groups
           : (currentView?.groups ?? rootGroups);
 
+  const isLinkedThreadSearch =
+    linkedThreadSearch?.linkedThreads !== undefined && deferredQuery === linkedThreadSearch.query;
   const filteredGroups = filterCommandPaletteGroups({
     activeGroups,
     query: deferredQuery,
@@ -2458,7 +2530,7 @@ function OpenCommandPaletteDialog(props: {
     projectSearchItems: projectSearchItems,
     settingsSearchItems,
     threadSearchItems:
-      linkedThreadSearch?.linkedThreads && deferredQuery === linkedThreadSearch.query
+      isLinkedThreadSearch && linkedThreadSearch?.linkedThreads
         ? buildLinkedThreadActionItems({
             ...linkedThreadSearch.linkedThreads,
             query: linkedThreadSearch.query,
@@ -2471,6 +2543,8 @@ function OpenCommandPaletteDialog(props: {
             },
           })
         : allThreadItems,
+    threadMessageItems: isLinkedThreadSearch ? [] : threadMessageItems,
+    now: searchNow,
   });
 
   const handleAddProjectForEnvironment = useCallback(
@@ -3194,6 +3268,15 @@ function OpenCommandPaletteDialog(props: {
   }
 
   function handleKeyDown(event: KeyboardEvent<HTMLInputElement>): void {
+    if (
+      event.key === "Enter" &&
+      isImeCompositionKey(event.nativeEvent.isComposing, event.keyCode)
+    ) {
+      // Confirming an IME candidate must not submit a path or select a row.
+      (event as typeof event & { preventBaseUIHandler?: () => void }).preventBaseUIHandler?.();
+      return;
+    }
+
     const command = resolveShortcutCommand(event, keybindings, {
       platform: navigator.platform,
       context: { modelPickerOpen: false },
@@ -3231,8 +3314,7 @@ function OpenCommandPaletteDialog(props: {
       event.key === "Enter" &&
       highlightedItemValue === null &&
       // Enter that confirms an IME composition is part of typing the name.
-      !event.nativeEvent.isComposing &&
-      event.keyCode !== 229
+      !isImeCompositionKey(event.nativeEvent.isComposing, event.keyCode)
     ) {
       event.preventDefault();
       void submitNewProject();
@@ -3268,7 +3350,7 @@ function OpenCommandPaletteDialog(props: {
       event.key === "ArrowDown" &&
       highlightClearedRef.current &&
       firstItemValue &&
-      !event.nativeEvent.isComposing
+      !isImeCompositionKey(event.nativeEvent.isComposing, event.keyCode)
     ) {
       (event as typeof event & { preventBaseUIHandler?: () => void }).preventBaseUIHandler?.();
       event.preventDefault();
@@ -3283,7 +3365,10 @@ function OpenCommandPaletteDialog(props: {
 
     // Base UI clicks the highlighted row on Enter, which does nothing once the
     // virtualized list has unmounted it, so run the tracked highlight directly.
-    if (event.key === "Enter" && !event.nativeEvent.isComposing && event.keyCode !== 229) {
+    if (
+      event.key === "Enter" &&
+      !isImeCompositionKey(event.nativeEvent.isComposing, event.keyCode)
+    ) {
       const highlightedItem = findHighlightedCommandPaletteItem(
         displayedGroups,
         highlightedItemValue ?? firstItemValue ?? null,

@@ -89,6 +89,8 @@ const layerManagement = Layer.unwrap(
         projections.getThreadSnapshotWindow(id, options).pipe(Effect.orDie),
       getThreadShell: (id) => projections.getThreadShell(id).pipe(Effect.orDie),
       getShellSnapshot: (options) => projections.getShellSnapshot(options).pipe(Effect.orDie),
+      countThreads: () => projections.countThreads().pipe(Effect.orDie),
+      listActiveShellIndex: () => projections.listActiveShellIndex().pipe(Effect.orDie),
       streamStoredEventsFrom: (input) =>
         sink.stream({ ...input, bounded: true }).pipe(Stream.orDie),
     });

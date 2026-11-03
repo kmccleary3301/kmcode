@@ -72,6 +72,15 @@ update can roll back to the previous version. If the update still fails:
 2. Check that you updated the server's machine, not only the device you are using.
 3. For a command-line server, stop it and relaunch the exact version shown in the notice.
 
+## npm registries and proxies
+
+When KM Code checks npm release or provider versions on a server, it runs
+`npm view` there. npm uses that machine's configured registry, authentication,
+and proxy. If the configured lookup fails, a provider's latest version stays
+unknown and a release lookup reports an error. KM Code does not retry against
+public npm. If npm is absent, npm-package checks use the public registry.
+Homebrew-managed providers use Homebrew's version information.
+
 ## Update providers
 
 **Settings → Providers** shows provider updates for the selected environment.

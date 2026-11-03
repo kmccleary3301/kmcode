@@ -1,6 +1,11 @@
-import { ProviderInstanceId, RunId } from "@t3tools/contracts";
+import * as DateTime from "effect/DateTime";
+import { ProviderDriverKind, ProviderInstanceId, RunId } from "@t3tools/contracts";
 import { describe, expect, it } from "vite-plus/test";
-import { resolveHandoffEndpoints, type HandoffTimelineRun } from "./handoff.ts";
+import {
+  resolveHandoffEndpoints,
+  resolvePendingHandoff,
+  type HandoffTimelineRun,
+} from "./handoff.ts";
 
 const from = ProviderInstanceId.make("codex_personal");
 const to = ProviderInstanceId.make("claudeAgent");
@@ -61,5 +66,63 @@ describe("handoff endpoints shared by web and mobile", () => {
     expect(
       resolveHandoffEndpoints(item, [run("target", 2, from, "wrong-model")]).to.model,
     ).toBeUndefined();
+  });
+});
+const projection: NonNullable<Parameters<typeof resolvePendingHandoff>[0]> = {
+  runs: [
+    {
+      status: "completed",
+      startedAt: DateTime.makeUnsafe("2026-10-11T00:00:00Z"),
+      modelSelection: { instanceId: from, model: "source" },
+    },
+  ],
+};
+
+describe("pending context handoff", () => {
+  it("appears on selection, updates the destination, and disappears on returning", () => {
+    expect(resolvePendingHandoff(projection, { instanceId: to, model: "first" }, [])).toEqual({
+      from: [{ instanceId: from, model: "source" }],
+      to: { instanceId: to, model: "first" },
+    });
+    expect(
+      resolvePendingHandoff(projection, { instanceId: to, model: "second" }, [])?.to.model,
+    ).toBe("second");
+    expect(resolvePendingHandoff(projection, { instanceId: from, model: "source" }, [])).toBeNull();
+    expect(resolvePendingHandoff(projection, { instanceId: from, model: "other" }, [])).toBeNull();
+  });
+
+  it("previews a same-provider model change only when it needs a fresh native thread", () => {
+    const providers: NonNullable<Parameters<typeof resolvePendingHandoff>[2]> = [
+      {
+        instanceId: from,
+        driver: ProviderDriverKind.make("codex"),
+        requiresNewThreadForModelChange: true,
+      },
+    ];
+    expect(
+      resolvePendingHandoff(projection, { instanceId: from, model: "other" }, providers)?.to.model,
+    ).toBe("other");
+    expect(
+      resolvePendingHandoff(projection, { instanceId: from, model: "source" }, providers),
+    ).toBeNull();
+  });
+
+  it("resumes accounts in a shared continuation group without showing a handoff", () => {
+    const sharedTarget = ProviderInstanceId.make("codex_work");
+    const providers: NonNullable<Parameters<typeof resolvePendingHandoff>[2]> = [
+      {
+        instanceId: from,
+        driver: ProviderDriverKind.make("codex"),
+        continuation: { groupKey: "shared" },
+      },
+      {
+        instanceId: sharedTarget,
+        driver: ProviderDriverKind.make("codex"),
+        continuation: { groupKey: "shared" },
+      },
+    ];
+    expect(
+      resolvePendingHandoff(projection, { instanceId: sharedTarget, model: "target" }, providers),
+    ).toBeNull();
   });
 });

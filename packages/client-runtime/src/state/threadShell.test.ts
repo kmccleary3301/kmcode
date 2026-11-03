@@ -1,6 +1,7 @@
 import {
   EnvironmentId,
   ProjectId,
+  RuntimeRequestId,
   ThreadId,
   type OrchestrationV2ShellSnapshot,
 } from "@t3tools/contracts";
@@ -100,6 +101,39 @@ describe("v2 thread shell lists", () => {
     expect(registry.get(threads.navigationThreadShellsAtom)).toBe(before);
     expect(registry.get(threads.threadShellsAtom)).toHaveLength(3);
     dispose();
+    registry.dispose();
+  });
+
+  it("keeps subagent questions on their child thread shell", () => {
+    const { registry, threads, snapshotAtom } = makeHarness();
+    const root = v2ThreadShell;
+    const child = {
+      ...root,
+      id: ThreadId.make("child"),
+      pendingRuntimeRequest: {
+        id: RuntimeRequestId.make("subagent-question"),
+        kind: "user_input" as const,
+        createdAt: root.createdAt,
+      },
+      lineage: {
+        ...root.lineage,
+        parentThreadId: root.id,
+        relationshipToParent: "subagent" as const,
+      },
+    };
+    registry.set(snapshotAtom(environmentId), {
+      ...v2ShellSnapshot,
+      threads: [root, child],
+    });
+
+    expect(
+      registry.get(threads.threadShellAtom({ environmentId, threadId: root.id }))
+        ?.hasPendingUserInput,
+    ).toBe(false);
+    expect(
+      registry.get(threads.threadShellAtom({ environmentId, threadId: child.id }))
+        ?.hasPendingUserInput,
+    ).toBe(true);
     registry.dispose();
   });
 

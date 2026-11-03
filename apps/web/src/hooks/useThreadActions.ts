@@ -254,6 +254,14 @@ export function useAcknowledgeThreadWoke() {
   );
 }
 
+// These Undos restore list placement, which archiving or deleting a thread ends.
+const LIST_PLACEMENT_UNDO_KINDS = ["settle", "snooze", "pin"] as const;
+const ARCHIVE_OR_DELETE_UNDO_KINDS = ["settle", "snooze", "pin", "archive"] as const;
+
+function expireThreadUndos(target: ScopedThreadRef, kinds: readonly string[]) {
+  for (const kind of kinds) ThreadUndo.invalidate(kind, scopedThreadKey(target));
+}
+
 function threadOperationFailure(target: ScopedThreadRef) {
   return readEnvironmentScope(target.environmentId, AuthOrchestrationOperateScope)
     ? null
@@ -388,6 +396,7 @@ export function useThreadActions() {
         );
       }
 
+      const requestingRouteHref = router.state.location.href;
       const currentRouteThreadRef = getCurrentRouteThreadRef();
       const shouldNavigateToDraft =
         currentRouteThreadRef?.threadId === threadRef.threadId &&
@@ -402,6 +411,8 @@ export function useThreadActions() {
         return archiveResult;
       }
       const wokeAt = threadWokeAt(thread, { now: new Date().toISOString() });
+
+      expireThreadUndos(threadRef, LIST_PLACEMENT_UNDO_KINDS);
       if (wokeAt !== null) {
         markThreadVisited(scopedThreadKey(threadRef), wokeAt);
       }
@@ -415,7 +426,7 @@ export function useThreadActions() {
         failureTitle: "Failed to undo archive",
       });
 
-      if (shouldNavigateToDraft) {
+      if (shouldNavigateToDraft && router.state.location.href === requestingRouteHref) {
         const navigationResult = await settlePromise(() =>
           handleNewThreadRef.current(scopeProjectRef(thread.environmentId, thread.projectId)),
         );
@@ -448,6 +459,7 @@ export function useThreadActions() {
           input: { threadId: target.threadId },
         });
         if (result._tag === "Success") {
+          expireThreadUndos(target, ARCHIVE_OR_DELETE_UNDO_KINDS);
           refreshArchivedThreadsForEnvironment(target.environmentId);
         }
         return result;
@@ -547,6 +559,7 @@ export function useThreadActions() {
       if (deleteResult._tag === "Failure") {
         return deleteResult;
       }
+      expireThreadUndos(threadRef, ARCHIVE_OR_DELETE_UNDO_KINDS);
       refreshArchivedThreadsForEnvironment(threadRef.environmentId);
       releaseComposerDraftUploads(threadRef);
       clearComposerDraftForThread(threadRef);

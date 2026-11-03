@@ -7,6 +7,7 @@ import {
   type AuthEnvironmentScope,
 } from "@t3tools/contracts";
 import { encodeOAuthScope } from "@t3tools/shared/oauthScope";
+import * as Redacted from "effect/Redacted";
 import * as Effect from "effect/Effect";
 import { environmentEndpointUrl } from "../environment/endpoint.ts";
 import {
@@ -218,7 +219,7 @@ export const resolveRemoteWebSocketConnectionUrl = Effect.fn(
   if (url.pathname === "" || url.pathname === "/") {
     url.pathname = "/ws";
   }
-  url.searchParams.set("wsTicket", issued.ticket);
+  url.searchParams.set("wsTicket", Redacted.value(issued.ticket));
   appendClientConnectionParams(url, input.clientMetadata, input.connectionMethod);
   return url.toString();
 });
@@ -244,7 +245,7 @@ export const resolveRemoteDpopWebSocketConnectionUrl = Effect.fn(
   if (url.pathname === "" || url.pathname === "/") {
     url.pathname = "/ws";
   }
-  url.searchParams.set("wsTicket", issued.ticket);
+  url.searchParams.set("wsTicket", Redacted.value(issued.ticket));
   appendClientConnectionParams(url, input.clientMetadata, input.connectionMethod);
   return url.toString();
 });

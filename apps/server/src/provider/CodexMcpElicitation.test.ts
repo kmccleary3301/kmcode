@@ -58,6 +58,46 @@ describe("Codex MCP elicitation approvals", () => {
     });
   });
 
+  it("recognizes one-time approval choices without accepting unrelated labels", () => {
+    for (const choice of [
+      "allow_once",
+      "Allow",
+      "accept_once",
+      "Approve once",
+      "allow_this_time",
+      "allow_once_only",
+    ]) {
+      NodeAssert.deepStrictEqual(
+        toMcpElicitationResponse(
+          {
+            mode: "form",
+            requestedSchema: {
+              type: "object",
+              properties: { decision: { type: "string", enum: ["disallow", choice, "always"] } },
+              required: ["decision"],
+            },
+          },
+          "accept",
+        ),
+        { action: "accept", content: { decision: choice } },
+      );
+    }
+    NodeAssert.deepStrictEqual(
+      toMcpElicitationResponse(
+        {
+          mode: "form",
+          requestedSchema: {
+            type: "object",
+            properties: { decision: { type: "string", enum: ["disallow"] } },
+            required: ["decision"],
+          },
+        },
+        "accept",
+      ),
+      { action: "decline" },
+    );
+  });
+
   it("returns session-scoped approval in the MCP response", () => {
     NodeAssert.deepStrictEqual(toMcpElicitationResponse(request, "acceptForSession"), {
       action: "accept",

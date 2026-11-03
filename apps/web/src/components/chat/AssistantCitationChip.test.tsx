@@ -18,16 +18,12 @@ vi.mock("@tanstack/react-router", () => ({
   useNavigate: () => vi.fn(),
   Link: ({ children }: { children: ReactNode }) => <a>{children}</a>,
 }));
-// Keep the real chip/editor lifecycle while replacing DOM positioning and floating layers.
-vi.mock("../ui/tooltip", () => ({
-  Tooltip: ({ children }: { children: ReactNode }) => <>{children}</>,
-  TooltipTrigger: ({ render }: { render: ReactNode }) => render,
-  TooltipPopup: ({ children }: { children: ReactNode }) => <>{children}</>,
-}));
 vi.mock("../ui/popover", () => ({
   Popover: ({ children }: { children: ReactNode }) => <>{children}</>,
   PopoverTrigger: ({ children }: { children: ReactNode }) => <button>{children}</button>,
   PopoverPopup: ({ children }: { children: ReactNode }) => <>{children}</>,
+  PopoverClose: ({ children }: { children: ReactNode }) => <button>{children}</button>,
+  PopoverTitle: ({ children }: { children: ReactNode }) => <h2>{children}</h2>,
 }));
 vi.mock("../ui/button", () => ({
   Button: (props: React.ComponentProps<"button">) => <button {...props} />,
@@ -62,6 +58,7 @@ function mount(onSave = vi.fn(() => true)) {
     return (
       <AssistantCitationChip
         citation={citation}
+        composer
         commentEditor={{ open, sourceAnchor, onOpenChange: setOpen, onSave }}
       />
     );
@@ -99,6 +96,17 @@ beforeEach(() => {
 afterEach(() => {
   act(() => renderer?.unmount());
   vi.unstubAllGlobals();
+});
+
+it("shows the quoted text and comment in its details popover", () => {
+  act(() => {
+    renderer = create(
+      <AssistantCitationChip citation={{ ...citation, comment: "Review this part" }} />,
+    );
+  });
+
+  expect(renderer.root.findByType("blockquote").children.join("")).toBe("hello");
+  expect(renderer.root.findByType("p").children.join("")).toBe("Review this part");
 });
 
 describe("citation comment source disappearance", () => {

@@ -452,8 +452,7 @@ function normalizeOmpSubagentRecord(payload: unknown): Record<string, unknown> {
   const completionPercent = recordNumber(progress, "completionPercent");
   const retryState = recordField(progress, "retryState");
   const retryFailure = recordField(progress, "retryFailure");
-  const retryAttempt =
-    recordNumber(retryState, "attempt") ?? recordNumber(retryFailure, "attempt");
+  const retryAttempt = recordNumber(retryState, "attempt") ?? recordNumber(retryFailure, "attempt");
   const retryDelayMs = parseRecordDurationMs(retryState, "delayMs");
 
   const retry =
@@ -488,9 +487,7 @@ function normalizeOmpSubagentRecord(payload: unknown): Record<string, unknown> {
       ? {
           currentTool,
           ...(metrics === undefined ? { metrics: undefined } : { metrics }),
-          ...(completionPercent !== undefined &&
-          completionPercent >= 0 &&
-          completionPercent <= 100
+          ...(completionPercent !== undefined && completionPercent >= 0 && completionPercent <= 100
             ? { completionPercent }
             : {}),
           retry,
@@ -513,10 +510,7 @@ interface PiStreamItemState {
 
 type PiSubagentTurnItem = Extract<OrchestrationV2TurnItem, { readonly type: "subagent" }>;
 type PiSubagentMetrics = NonNullable<PiSubagentTurnItem["metrics"]>;
-type PiSystemNoticeTurnItem = Extract<
-  OrchestrationV2TurnItem,
-  { readonly type: "system_notice" }
->;
+type PiSystemNoticeTurnItem = Extract<OrchestrationV2TurnItem, { readonly type: "system_notice" }>;
 type PiJobCompletion = NonNullable<PiSystemNoticeTurnItem["jobCompletion"]>;
 
 function nativeMetricInteger(record: unknown, field: string): number | undefined {
@@ -975,10 +969,7 @@ export function makePiAdapterV2(
           });
         });
 
-      const syncOmpGoal = (
-        state: PiThreadState,
-        goal: OrchestrationV2ProviderGoal | null,
-      ) =>
+      const syncOmpGoal = (state: PiThreadState, goal: OrchestrationV2ProviderGoal | null) =>
         Effect.gen(function* () {
           if (driver !== "omp" || providerGoalsEqual(state.providerThread.goal ?? null, goal)) {
             return;
@@ -999,10 +990,7 @@ export function makePiAdapterV2(
         return updateProviderThread(state, { pendingBackgroundTasks: [...others, ...jobs] });
       };
 
-      const setOmpBackgroundWait = (
-        state: PiThreadState,
-        turn: ActivePiTurn,
-      ) =>
+      const setOmpBackgroundWait = (state: PiThreadState, turn: ActivePiTurn) =>
         Effect.gen(function* () {
           if (turn.waitingOnBackgroundJob) return;
           turn.waitingOnBackgroundJob = true;
@@ -1022,10 +1010,7 @@ export function makePiAdapterV2(
           );
         });
 
-      const clearOmpBackgroundWait = (
-        state: PiThreadState,
-        turn: ActivePiTurn,
-      ) =>
+      const clearOmpBackgroundWait = (state: PiThreadState, turn: ActivePiTurn) =>
         Effect.gen(function* () {
           if (!turn.waitingOnBackgroundJob) return;
           turn.waitingOnBackgroundJob = false;
@@ -1216,6 +1201,7 @@ export function makePiAdapterV2(
         nativeItemId: string,
         startedAt: DateTime.Utc | null,
         updatedAt: DateTime.Utc,
+        parentNativeItemId?: string,
       ) => ({
         id: idAllocator.derive.turnItemFromProviderItem({
           driver,
@@ -1230,7 +1216,13 @@ export function makePiAdapterV2(
         providerThreadId: turn.turnInput.providerThread.id,
         providerTurnId: turn.providerTurn.id,
         nativeItemRef: providerRef(nativeItemId),
-        parentItemId: null,
+        parentItemId:
+          parentNativeItemId === undefined
+            ? null
+            : idAllocator.derive.turnItemFromProviderItem({
+                driver,
+                nativeItemId: parentNativeItemId,
+              }),
         ordinal: itemOrdinal(turn, nativeItemId),
         startedAt,
         updatedAt,
@@ -1243,6 +1235,7 @@ export function makePiAdapterV2(
         status: OrchestrationV2ExecutionNode["status"],
         startedAt: DateTime.Utc | null,
         completedAt: DateTime.Utc | null,
+        parentNativeItemId?: string,
       ) =>
         emit({
           type: "node.updated",
@@ -1254,7 +1247,13 @@ export function makePiAdapterV2(
             }),
             threadId: turn.turnInput.threadId,
             runId: turn.turnInput.runId,
-            parentNodeId: turn.turnInput.rootNodeId,
+            parentNodeId:
+              parentNativeItemId === undefined
+                ? turn.turnInput.rootNodeId
+                : idAllocator.derive.nodeFromProviderItem({
+                    driver,
+                    nativeItemId: parentNativeItemId,
+                  }),
             rootNodeId: turn.turnInput.rootNodeId,
             kind,
             status,
@@ -1488,6 +1487,8 @@ export function makePiAdapterV2(
           turn.toolNames.get(toolCallId) ??
           turn.toolPreviews[toolCallId]?.toolName ??
           "tool";
+        // Pi tags every phase of calls made through ctx.executeTool.
+        const parentToolCallId = recordString(event, "parentToolCallId");
         turn.toolNames.set(toolCallId, toolName);
         if (phase === "preview" || phase === "start") {
           turn.toolArgs.set(toolCallId, event["args"]);
@@ -1556,7 +1557,7 @@ export function makePiAdapterV2(
             : startedAt === null
               ? "pending"
               : "running";
-        const base = baseItemFields(turn, toolCallId, startedAt, emittedAt);
+        const base = baseItemFields(turn, toolCallId, startedAt, emittedAt, parentToolCallId);
         yield* emitItemNode(
           turn,
           toolCallId,
@@ -1564,6 +1565,7 @@ export function makePiAdapterV2(
           status,
           startedAt,
           terminal ? emittedAt : null,
+          parentToolCallId,
         );
         yield* emit({
           type: "turn_item.updated",
@@ -1634,8 +1636,7 @@ export function makePiAdapterV2(
         const rawId = recordString(record, "id");
         const rawJobId = explicitJobId ?? rawId;
         const runId = recordString(record, "runId");
-        const displayLabel =
-          recordString(record, "displayLabel") ?? recordString(record, "label");
+        const displayLabel = recordString(record, "displayLabel") ?? recordString(record, "label");
         const label = displayLabel ?? recordString(record, "agent");
         let activationId: string | undefined;
         if (explicitJobId !== undefined) {
@@ -1778,10 +1779,7 @@ export function makePiAdapterV2(
                   ...(currentToolArgs === undefined
                     ? {}
                     : {
-                        argsPreview: currentToolArgs.slice(
-                          0,
-                          OMP_SUBAGENT_ARGS_PREVIEW_MAX_LENGTH,
-                        ),
+                        argsPreview: currentToolArgs.slice(0, OMP_SUBAGENT_ARGS_PREVIEW_MAX_LENGTH),
                       }),
                   ...(currentToolElapsedMs === undefined
                     ? {}
@@ -1795,9 +1793,7 @@ export function makePiAdapterV2(
         const retry =
           retryRecord === null
             ? null
-            : retryAttempt === undefined ||
-                !Number.isInteger(retryAttempt) ||
-                retryAttempt < 0
+            : retryAttempt === undefined || !Number.isInteger(retryAttempt) || retryAttempt < 0
               ? undefined
               : {
                   attempt: retryAttempt,
@@ -1829,8 +1825,7 @@ export function makePiAdapterV2(
             "durationMs",
             "duration",
           );
-        const reportedDuration =
-          durationMs === undefined ? undefined : Duration.millis(durationMs);
+        const reportedDuration = durationMs === undefined ? undefined : Duration.millis(durationMs);
 
         let isNewActivation = false;
         if (activationId !== undefined) {
@@ -1853,9 +1848,7 @@ export function makePiAdapterV2(
           yield* clearTurnSubagentPreview(turn, nativeTaskId, existingItem);
         }
         const metricRecord =
-          recordField(record, "metrics") ??
-          recordField(record, "progress") ??
-          record;
+          recordField(record, "metrics") ?? recordField(record, "progress") ?? record;
         const reportedMetrics = nativeSubagentMetrics(
           metricRecord,
           isNativeTerminal ? record : undefined,
@@ -1874,20 +1867,14 @@ export function makePiAdapterV2(
               ? undefined
               : existingItem?.currentTool;
         const hasReportedPercent =
-          completionPercent !== undefined &&
-          completionPercent >= 0 &&
-          completionPercent <= 100;
+          completionPercent !== undefined && completionPercent >= 0 && completionPercent <= 100;
         const resolvedCompletionPercent = hasReportedPercent
           ? completionPercent
           : isNewActivation
             ? undefined
             : existingItem?.completionPercent;
         const resolvedRetry =
-          retry !== undefined
-            ? retry
-            : isNewActivation
-              ? undefined
-              : existingItem?.retry;
+          retry !== undefined ? retry : isNewActivation ? undefined : existingItem?.retry;
         const nativeTaskPresentation = {
           ...(nativeAgentId === undefined ? {} : { nativeAgentId }),
           ...(resolvedAgentType === undefined ? {} : { agentType: resolvedAgentType }),
@@ -1908,7 +1895,6 @@ export function makePiAdapterV2(
               ? null
               : (existingItem?.parentItemId ?? null);
 
-
         if (activationId !== undefined) {
           if (activation.terminalActivationIds.has(activationId)) {
             if (activation.currentActivationId !== activationId) {
@@ -1928,12 +1914,9 @@ export function makePiAdapterV2(
               nativeStartedAt !== undefined ||
               nativeCompletedAt !== undefined ||
               reportedDuration !== undefined;
-            if (
-              existingItem !== undefined &&
-              (hasReportedTiming || metricsChanged)
-            ) {
+            if (existingItem !== undefined && (hasReportedTiming || metricsChanged)) {
               const startedAt = hasReportedTiming
-                ? nativeStartedAt ??
+                ? (nativeStartedAt ??
                   (nativeCompletedAt !== undefined && reportedDuration !== undefined
                     ? DateTime.subtractDuration(nativeCompletedAt, reportedDuration)
                     : (existingItem.startedAt ??
@@ -1942,13 +1925,13 @@ export function makePiAdapterV2(
                         : DateTime.subtractDuration(
                             existingItem.completedAt ?? emittedAt,
                             reportedDuration,
-                          ))))
+                          )))))
                 : existingItem.startedAt;
               const completedAt = hasReportedTiming
-                ? nativeCompletedAt ??
+                ? (nativeCompletedAt ??
                   (reportedDuration !== undefined && startedAt !== null
                     ? DateTime.addDuration(startedAt, reportedDuration)
-                    : existingItem.completedAt ?? emittedAt)
+                    : (existingItem.completedAt ?? emittedAt)))
                 : existingItem.completedAt;
               const currentDurationMs =
                 existingItem.completedAt !== null && existingItem.startedAt !== null
@@ -2129,7 +2112,6 @@ export function makePiAdapterV2(
             : (recordString(record, "description") ?? recordString(record, "label"))) ??
           "";
 
-
         const outputText =
           recordString(record, "resultText") ??
           recordString(record, "output") ??
@@ -2152,7 +2134,6 @@ export function makePiAdapterV2(
                 : (existingItem?.result ?? null)
             : null;
 
-
         const subagentId =
           existingItem?.subagentId ??
           idAllocator.derive.nodeFromProviderItem({ driver, nativeItemId: nativeTaskId });
@@ -2162,7 +2143,6 @@ export function makePiAdapterV2(
             ? nativeTaskId.slice(0, nativeTaskId.lastIndexOf(":subagent:"))
             : toolCallId,
         });
-
 
         const turnItem: PiSubagentTurnItem = {
           ...baseItemFields(turn, nativeTaskId, startedAt, emittedAt),
@@ -2318,8 +2298,8 @@ export function makePiAdapterV2(
             result,
             emittedAt,
             Array.isArray(jobs)
-              ? recordNumber(result, "index") ?? recordNumber(result, "step")
-              : recordNumber(result, "index") ?? recordNumber(result, "step") ?? index,
+              ? (recordNumber(result, "index") ?? recordNumber(result, "step"))
+              : (recordNumber(result, "index") ?? recordNumber(result, "step") ?? index),
             taskCompleted,
           );
           pruneFinishedTurnIfIdle(threadState, owningTurn);
@@ -2464,15 +2444,10 @@ export function makePiAdapterV2(
       ) {
         if (driver !== "omp") return;
         const now = yield* Clock.currentTimeMillis;
-        const rateLimited =
-          subagentRateLimitedUntil !== null && now < subagentRateLimitedUntil;
+        const rateLimited = subagentRateLimitedUntil !== null && now < subagentRateLimitedUntil;
         if (subagentRateLimitedUntil !== null && !rateLimited) subagentRateLimitedUntil = null;
         const nextLevel = currentSubagentViewer && !rateLimited ? "events" : "progress";
-        const reason = rateLimited
-          ? "rate-limited"
-          : currentSubagentViewer
-            ? "viewing"
-            : "idle";
+        const reason = rateLimited ? "rate-limited" : currentSubagentViewer ? "viewing" : "idle";
         const levelChanged = desiredSubagentSubscriptionLevel !== nextLevel;
         const reasonChanged = currentSubagentModeReason !== reason;
         if (levelChanged) {
@@ -2527,8 +2502,6 @@ export function makePiAdapterV2(
             yield* waitForSubagentRateLimit(generation);
           }),
         );
-
-
 
       /** Shows a tool call while the model is still writing its arguments. */
       const emitToolPreview = (turn: ActivePiTurn, toolCallId: string) =>
@@ -2602,6 +2575,58 @@ export function makePiAdapterV2(
             discard: true,
           });
         });
+
+      const emitSystemNotice = Effect.fnUntraced(function* (
+        turn: ActivePiTurn,
+        nativeItemId: string,
+        message: string,
+      ) {
+        const emittedAt = yield* DateTime.now;
+        yield* emitItemNode(turn, nativeItemId, "system", "completed", emittedAt, emittedAt);
+        yield* emit({
+          type: "turn_item.updated",
+          driver,
+          turnItem: {
+            ...baseItemFields(turn, nativeItemId, emittedAt, emittedAt),
+            status: "completed",
+            completedAt: emittedAt,
+            title: null,
+            type: "system_notice",
+            message,
+          },
+        });
+      });
+
+      // Abort leaves queued steers and follow-ups for Pi's next prompt, and
+      // Pi may start them as soon as abort lands, so clear them first.
+      const clearNativeQueue = Effect.fnUntraced(function* (turn: ActivePiTurn) {
+        const cleared = yield* request({ type: "clear_queue" }, 2_000).pipe(
+          Effect.map((data) =>
+            ["steering", "followUp"].flatMap((key) => {
+              const texts = recordField(data, key);
+              return Array.isArray(texts)
+                ? texts.filter((text): text is string => typeof text === "string")
+                : [];
+            }),
+          ),
+          Effect.orElseSucceed((): ReadonlyArray<string> => []),
+        );
+        if (cleared.length === 0) return;
+        yield* sessionEventPermit.withPermits(1)(
+          threadState?.activeTurn === turn
+            ? emitSystemNotice(
+                turn,
+                `queue-cleared:${turn.providerTurn.id}`,
+                [
+                  `Stop cleared ${cleared.length} queued ${cleared.length === 1 ? "message" : "messages"} Pi had not read:`,
+                  ...cleared.filter((text) => text.length > 0),
+                ]
+                  .join("\n\n")
+                  .slice(0, 2_000),
+              )
+            : Effect.void,
+        );
+      });
 
       const handleExtensionUiRequest = Effect.fnUntraced(function* (event: PiRpcRecord) {
         const method = recordString(event, "method");
@@ -3057,10 +3082,7 @@ export function makePiAdapterV2(
 
           const providerTurnId = turn.providerTurn.id;
           const settleProbeGeneration = turn.settleProbeGeneration;
-          const backoffIndex = Math.min(
-            turn.settleReprobeAttempt,
-            SETTLE_PROBE_BACKOFF.length - 1,
-          );
+          const backoffIndex = Math.min(turn.settleReprobeAttempt, SETTLE_PROBE_BACKOFF.length - 1);
           const delay = SETTLE_PROBE_BACKOFF[backoffIndex]!;
           turn.settleReprobeAttempt += 1;
           const fiber = yield* Effect.sleep(delay).pipe(
@@ -3085,7 +3107,6 @@ export function makePiAdapterV2(
           );
           turn.settleReprobeFiber = fiber;
         });
-
 
       const turnOwnsTool = (turn: ActivePiTurn, toolCallId: string): boolean => {
         if (toolCallId.length === 0) return false;
@@ -3405,12 +3426,8 @@ export function makePiAdapterV2(
         const resultGoal = providerGoalFromOmpCommandResult(result.data);
         if (resultGoal !== undefined) yield* syncOmpGoal(state, resultGoal);
         if (command.type === "get") {
-          const goal =
-            resultGoal === undefined ? (state.providerThread.goal ?? null) : resultGoal;
-          yield* emitOmpGoalReply(
-            turn,
-            goal === null ? "No goal is set." : describeOmpGoal(goal),
-          );
+          const goal = resultGoal === undefined ? (state.providerThread.goal ?? null) : resultGoal;
+          yield* emitOmpGoalReply(turn, goal === null ? "No goal is set." : describeOmpGoal(goal));
           yield* finalizeTurn(state);
           return;
         }
@@ -3537,8 +3554,7 @@ export function makePiAdapterV2(
                 parseRecordDateTime(message, "timestamp") ??
                 parseRecordDateTime(event, "timestamp");
               const noticeTimestamp = nativeTimestamp ?? emittedAt;
-              const nativeMessageId =
-                recordString(message, "id") ?? recordString(event, "id");
+              const nativeMessageId = recordString(message, "id") ?? recordString(event, "id");
               const noticeIdentity =
                 nativeMessageId !== undefined && nativeMessageId.length > 0
                   ? `id:${nativeMessageId}`
@@ -3627,8 +3643,7 @@ export function makePiAdapterV2(
                   const durationMs = parseRecordDurationMs(job, "durationMs");
                   const durationText =
                     durationMs === undefined ? "" : ` (${(durationMs / 1_000).toFixed(1)}s)`;
-                  const noticeMessage =
-                    `Background job completed [${jobType ?? "job"}] ${jobId}${durationText}`;
+                  const noticeMessage = `Background job completed [${jobType ?? "job"}] ${jobId}${durationText}`;
                   const activeJobOwnerMatches =
                     owningTurn !== null &&
                     state.activeTurn === owningTurn &&
@@ -3682,10 +3697,15 @@ export function makePiAdapterV2(
                       : "completed";
                 const output = (PI_TASK_RESULT_OUTPUT_PATTERN.exec(body)?.[1] ?? "").trim();
                 const result = output.length > 0 ? output.slice(0, 10_000) : null;
-                const duration = /\bduration="(?:(\d+(?:\.\d+)?)h)?(?:(\d+(?:\.\d+)?)m)?(?:(\d+(?:\.\d+)?)(ms|s))?"/.exec(block);
+                const duration =
+                  /\bduration="(?:(\d+(?:\.\d+)?)h)?(?:(\d+(?:\.\d+)?)m)?(?:(\d+(?:\.\d+)?)(ms|s))?"/.exec(
+                    block,
+                  );
                 const durationMs =
                   duration === null ||
-                  (duration[1] === undefined && duration[2] === undefined && duration[3] === undefined)
+                  (duration[1] === undefined &&
+                    duration[2] === undefined &&
+                    duration[3] === undefined)
                     ? undefined
                     : Number(duration[1] ?? 0) * 3_600_000 +
                       Number(duration[2] ?? 0) * 60_000 +
@@ -3799,8 +3819,7 @@ export function makePiAdapterV2(
           case "tool_execution_start": {
             const toolCallId = recordString(event, "toolCallId");
             if (toolCallId === undefined) return;
-            const carrierTurn =
-              findOwningTurn(state, { parentToolCallId: toolCallId }) ?? turn;
+            const carrierTurn = findOwningTurn(state, { parentToolCallId: toolCallId }) ?? turn;
             if (carrierTurn !== null) {
               carrierTurn.sawAgentActivity = true;
               yield* invalidateSettleProbe(carrierTurn);
@@ -4168,10 +4187,7 @@ export function makePiAdapterV2(
             }
             const isNativeSettled = recordField(data, "isSettled");
             const contradictoryBusy =
-              isStreaming ||
-              isCompacting ||
-              hasPendingAsyncWork ||
-              pendingMessageCount > 0;
+              isStreaming || isCompacting || hasPendingAsyncWork || pendingMessageCount > 0;
             const settled =
               driver === "omp" && typeof isNativeSettled === "boolean"
                 ? isNativeSettled && !contradictoryBusy
@@ -4310,8 +4326,7 @@ export function makePiAdapterV2(
                 recordString(event, "message") ??
                 recordString(recordField(event, "details"), "body") ??
                 contentText(recordField(event, "content"));
-              const timestamp =
-                parseRecordDateTime(event, "timestamp") ?? (yield* DateTime.now);
+              const timestamp = parseRecordDateTime(event, "timestamp") ?? (yield* DateTime.now);
               const nativeLevelValue = recordString(event, "level");
               yield* emitNativeSystemNotice(state, nativeMessage, timestamp, {
                 ...(nativeLevelValue === "info" ||
@@ -5018,6 +5033,7 @@ export function makePiAdapterV2(
               // so Stop covers user /compact as well as detached recovery compact.
               stopRequested = true;
               if (interruptInput.requestRuntimeRestart === true && !turn.settleWhenIdle) {
+                yield* clearNativeQueue(turn);
                 yield* request({ type: "abort" }, 2_000).pipe(Effect.ignore);
               }
               // Terminating fails every later request, so read the stopped
@@ -5034,6 +5050,7 @@ export function makePiAdapterV2(
               );
               return;
             }
+            yield* clearNativeQueue(turn);
             yield* request({ type: "abort" }).pipe(
               Effect.tapError(() => Effect.sync(() => (turn.interrupted = false))),
             );
@@ -5548,9 +5565,7 @@ function estimateJsonStringByteLength(value: string): number {
       total += 1;
     } else if (code <= 0x1f) {
       total +=
-        code === 0x08 || code === 0x09 || code === 0x0a || code === 0x0c || code === 0x0d
-          ? 1
-          : 5;
+        code === 0x08 || code === 0x09 || code === 0x0a || code === 0x0c || code === 0x0d ? 1 : 5;
     } else if (code >= 0xd800 && code <= 0xdbff) {
       const next = value.charCodeAt(index + 1);
       if (next >= 0xdc00 && next <= 0xdfff) {

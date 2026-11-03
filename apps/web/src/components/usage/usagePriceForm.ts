@@ -30,7 +30,7 @@ export function parseUsagePriceForm(
   if (model.length === 0) return null;
   const rates: Partial<Record<(typeof USAGE_PRICE_FIELDS)[number]["key"], number>> = {};
   for (const field of USAGE_PRICE_FIELDS) {
-    const raw = form[field.key].trim();
+    const raw = form[field.key].trim().replace(",", ".");
     if (raw === "") {
       if (field.optional) continue;
       return null;

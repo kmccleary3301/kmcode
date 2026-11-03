@@ -29,6 +29,11 @@ describe("injectHtmlRenderBootstrap", () => {
     expect(injected).toContain('name="viewport"');
   });
 
+  it("leaves an 8px root gutter for focus and selection rings", () => {
+    const injected = injectHtmlRenderBootstrap("<main>content</main>");
+    expect(injected).toContain("html{box-sizing:border-box;padding:8px;");
+  });
+
   it("wraps fragments without a head and keeps existing meta tags", () => {
     const fragment =
       '<meta charset="utf-8"><meta name="viewport" content="width=device-width"><p>hi</p>';

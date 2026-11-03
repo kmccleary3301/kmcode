@@ -1,8 +1,12 @@
 // @effect-diagnostics nodeBuiltinImport:off - Stands in for an Electron debugger.
-import { describe, expect, it } from "@effect/vitest";
-import { DesktopBrowserEvent } from "@t3tools/contracts";
+import { describe, expect, it, vi } from "@effect/vitest";
+import {
+  DesktopBrowserEvent,
+  type DesktopBrowserEvent as DesktopBrowserEventType,
+} from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
+import * as Queue from "effect/Queue";
 import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
 import * as NodeEvents from "node:events";
@@ -118,5 +122,51 @@ describe("DesktopBrowserHost", () => {
       expect(host.placeDownload(debuggee.tab.webContents, item)).toBe(true);
       expect(paths).toEqual(["/srv/downloads/guid-1"]);
     }),
+  );
+  it.effect("detaches only the tab whose CDP event is too large to relay", () =>
+    Effect.gen(function* () {
+      const host = yield* DesktopBrowserHost.make;
+      const tabs = [makeDebuggee(), makeDebuggee()];
+      const firstTabSend = vi.spyOn(tabs[0]!.tab.debugger, "sendCommand");
+      const keys = [key, { threadId: "thread-2", tabId: "tab-2" }];
+      const events = yield* Queue.unbounded<DesktopBrowserEventType>();
+      yield* host.events.pipe(
+        Stream.runForEach((line) =>
+          Queue.offer(events, decodeEvent(new TextDecoder().decode(line))).pipe(Effect.asVoid),
+        ),
+        Effect.forkScoped,
+      );
+      yield* Effect.yieldNow;
+      for (const [index, tabKey] of keys.entries()) {
+        host.attach(tabKey, tabs[index]!.tab);
+        expect(yield* Queue.take(events)).toEqual({ type: "attached", ...tabKey });
+        yield* host.handleCommandLine(
+          encodeJson({
+            type: "cdp",
+            ...tabKey,
+            message: encodeJson({ id: 1, method: "Target.setAutoAttach", params: {} }),
+          }),
+        );
+        yield* Queue.takeN(events, 2);
+      }
+
+      tabs[0]!.emit("Runtime.consoleAPICalled", {
+        args: Array(2048).fill("x".repeat(40 * 1024)),
+      });
+      tabs[1]!.emit("Page.loadEventFired", { timestamp: 1 });
+      const [detached, next] = yield* Queue.takeN(events, 2);
+
+      expect(detached).toEqual({ type: "detached", ...key });
+      expect(next).toMatchObject({ type: "cdp", ...keys[1] });
+      expect(firstTabSend).toHaveBeenCalledWith("Target.setAutoAttach", {
+        autoAttach: false,
+        waitForDebuggerOnStart: false,
+        flatten: true,
+      });
+      if (next?.type !== "cdp") throw new Error("expected a CDP event");
+      expect(JSON.parse(next.message)).toMatchObject({
+        method: "Page.loadEventFired",
+      });
+    }).pipe(Effect.scoped),
   );
 });

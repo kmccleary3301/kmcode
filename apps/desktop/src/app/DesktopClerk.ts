@@ -9,6 +9,7 @@ import * as Schema from "effect/Schema";
 import * as Scope from "effect/Scope";
 
 import { codexAuthDeliveryUrl, readCodexAuthHandoff } from "@t3tools/shared/codexAuthHandoff";
+import { readPairingAppLink } from "@t3tools/shared/remote";
 import { receiveCodexAuthCallback, CodexAuthCallbackError } from "./CodexAuthCallback.ts";
 import * as ElectronShell from "../electron/ElectronShell.ts";
 import { providerAuthReturnUrl } from "@t3tools/shared/providerAuthReturnUrl";
@@ -17,8 +18,10 @@ import { clerkFrontendApiHostnameFromPublishableKey } from "@t3tools/shared/rela
 import * as ElectronApp from "../electron/ElectronApp.ts";
 import * as ElectronProtocol from "../electron/ElectronProtocol.ts";
 import * as ElectronWindow from "../electron/ElectronWindow.ts";
+import * as IpcChannels from "../ipc/channels.ts";
 import * as DesktopUserData from "./DesktopUserData.ts";
 import * as DesktopEnvironment from "./DesktopEnvironment.ts";
+import { openClerkTokenStorage } from "./ClerkTokenStore.ts";
 
 declare const __T3CODE_BUILD_CLERK_PUBLISHABLE_KEY__: string | undefined;
 
@@ -81,10 +84,15 @@ export const desktopClerkFrontendApiHostname = resolveDesktopClerkFrontendApiHos
 export function createDesktopClerkBridge(
   stateDir: string,
   isDevelopment: boolean,
-  productProfile?: ProductProfile,
+  productProfile: ProductProfile | undefined,
+  userDataPath: string,
 ) {
   return createClerkBridge({
-    storage: storage({ path: stateDir }),
+    storage: openClerkTokenStorage(
+      stateDir,
+      (directory) => storage({ path: directory }),
+      userDataPath,
+    ),
     passkeys: true,
     renderer: {
       scheme: ElectronProtocol.getDesktopScheme(isDevelopment, productProfile),
@@ -111,6 +119,7 @@ export const make = Effect.gen(function* () {
           environment.stateDir,
           environment.isDevelopment,
           environment.productProfile,
+          userDataPath,
         ),
       catch: (cause) =>
         new DesktopClerkBridgeInitializationError({
@@ -130,6 +139,17 @@ export const make = Effect.gen(function* () {
           }),
       }).pipe(Effect.orDie),
   );
+
+  const pendingOpenUrls: string[] = [];
+  const pendingPairingUrls: string[] = [];
+  let handleOpenUrl = (url: string) => {
+    pendingOpenUrls.push(url);
+    return true;
+  };
+  // macOS can deliver an open-url event before configure runs.
+  yield* electronApp.on("open-url", (event: { preventDefault: () => void }, url: string) => {
+    if (handleOpenUrl(url)) event.preventDefault();
+  });
 
   return DesktopClerk.of({
     configure: Effect.gen(function* () {
@@ -195,15 +215,71 @@ export const make = Effect.gen(function* () {
         );
         return true;
       };
+      const desktopUrl = new URL(
+        ElectronProtocol.getDesktopUrl(environment.isDevelopment, environment.productProfile),
+      );
+      const isApplicationRenderer = (value: string): boolean => {
+        try {
+          const url = new URL(value);
+          return url.protocol === desktopUrl.protocol && url.host === desktopUrl.host;
+        } catch {
+          return false;
+        }
+      };
+      const flushPairingUrls = (window: Electron.BrowserWindow) => {
+        if (!isApplicationRenderer(window.webContents.getURL())) return false;
+        for (const pairingUrl of pendingPairingUrls.splice(0)) {
+          window.webContents.send(IpcChannels.DESKTOP_PAIRING_APP_LINK_CHANNEL, pairingUrl);
+        }
+        return true;
+      };
+      const openPairingLink = (value: string | undefined) => {
+        const pairingUrl = value ? readPairingAppLink(value) : null;
+        if (pairingUrl === null) return false;
+        void runPromise(
+          Effect.gen(function* () {
+            const window = yield* electronWindow.currentMainOrFirst;
+            if (Option.isSome(window) && flushPairingUrls(window.value)) {
+              window.value.webContents.send(
+                IpcChannels.DESKTOP_PAIRING_APP_LINK_CHANNEL,
+                pairingUrl,
+              );
+              return;
+            }
+            pendingPairingUrls.push(pairingUrl);
+          }).pipe(
+            Effect.catchCause((cause) =>
+              Effect.logWarning("Could not deliver remote pairing link to the renderer.", cause),
+            ),
+          ),
+        );
+        return true;
+      };
+      yield* electronApp.on(
+        "browser-window-created",
+        (_event: unknown, window: Electron.BrowserWindow) => {
+          const didFinishLoad = () => {
+            if (!flushPairingUrls(window)) return;
+            window.webContents.removeListener("did-finish-load", didFinishLoad);
+          };
+          window.webContents.on("did-finish-load", didFinishLoad);
+          didFinishLoad();
+        },
+      );
+      handleOpenUrl = (url) =>
+        startProviderAuthHandoff(url) || resumeProviderAuth(url) || openPairingLink(url);
+      for (const url of pendingOpenUrls.splice(0)) handleOpenUrl(url);
       const args = yield* HostProcessArguments;
-      args.some((value) => startProviderAuthHandoff(value));
-      yield* electronApp.on("open-url", (event: { preventDefault: () => void }, url: string) => {
-        if (startProviderAuthHandoff(url) || resumeProviderAuth(url)) event.preventDefault();
-      });
-      // DesktopLifecycle reveals the main window on "second-instance"; this
-      // listener only routes provider auth callbacks carried in argv.
+      args.some(
+        (value) =>
+          startProviderAuthHandoff(value) || resumeProviderAuth(value) || openPairingLink(value),
+      );
+      // DesktopLifecycle reveals the main window on "second-instance"; this handler routes links.
       yield* electronApp.on("second-instance", (_event: unknown, argv: readonly string[]) => {
-        argv?.some((value) => startProviderAuthHandoff(value) || resumeProviderAuth(value));
+        argv?.some(
+          (value) =>
+            startProviderAuthHandoff(value) || resumeProviderAuth(value) || openPairingLink(value),
+        );
       });
     }).pipe(Effect.withSpan("desktop.clerk.configure")),
   });

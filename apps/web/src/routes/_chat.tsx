@@ -82,6 +82,13 @@ function ChatRouteGlobalShortcuts() {
         },
       });
 
+      if (
+        event.target instanceof Element &&
+        event.target.closest('[role="alertdialog"]') !== null
+      ) {
+        return;
+      }
+
       if (isCommandPaletteOpen()) {
         return;
       }
@@ -115,7 +122,7 @@ function ChatRouteGlobalShortcuts() {
 
       if (command === "chat.newWithoutProject") {
         const environmentId = scratchEnvironmentId(
-          activeThread?.environmentId ?? activeDraftThread?.environmentId ?? primaryEnvironmentId,
+          activeThread?.environmentId ?? activeDraftThread?.environmentId ?? null,
         );
         if (environmentId === null) return;
         event.preventDefault();

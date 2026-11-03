@@ -18,6 +18,7 @@ import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as LayerMap from "effect/LayerMap";
 import * as Schema from "effect/Schema";
+import * as Path from "effect/Path";
 
 import type {
   ProjectEntry,
@@ -143,8 +144,8 @@ export class WorkspaceSearchIndex extends Context.Service<
   }
 >()("t3/workspace/WorkspaceSearchIndex") {}
 
-function toPosixPath(input: string): string {
-  return input.replaceAll("\\", "/");
+function toPosixPath(input: string, separator: string): string {
+  return input.replaceAll(separator, "/");
 }
 
 function trimDirectorySeparator(input: string): string {
@@ -156,8 +157,8 @@ function parentPathOf(input: string): string | undefined {
   return separatorIndex === -1 ? undefined : input.slice(0, separatorIndex);
 }
 
-function toProjectEntry(item: MixedItem): ProjectEntry | null {
-  const normalizedPath = trimDirectorySeparator(toPosixPath(item.item.relativePath));
+function toProjectEntry(item: MixedItem, separator: string): ProjectEntry | null {
+  const normalizedPath = trimDirectorySeparator(toPosixPath(item.item.relativePath, separator));
   if (!normalizedPath) {
     return null;
   }
@@ -168,23 +169,24 @@ function toProjectEntry(item: MixedItem): ProjectEntry | null {
   };
 }
 
-function toFileEntry(item: FileItem): ProjectEntry | null {
-  const normalizedPath = trimDirectorySeparator(toPosixPath(item.relativePath));
+function toFileEntry(item: FileItem, separator: string): ProjectEntry | null {
+  const normalizedPath = trimDirectorySeparator(toPosixPath(item.relativePath, separator));
   return normalizedPath ? { path: normalizedPath, kind: "file" } : null;
 }
 
-function toDirectoryEntry(item: DirItem): ProjectEntry | null {
-  const normalizedPath = trimDirectorySeparator(toPosixPath(item.relativePath));
+function toDirectoryEntry(item: DirItem, separator: string): ProjectEntry | null {
+  const normalizedPath = trimDirectorySeparator(toPosixPath(item.relativePath, separator));
   return normalizedPath ? { path: normalizedPath, kind: "directory" } : null;
 }
 
 function mapFileSearchResult(
   result: SearchResult,
   limit: number,
+  separator: string,
   imageOnly = false,
 ): ProjectSearchEntriesResult {
   const entries = result.items.flatMap((item) => {
-    const entry = toFileEntry(item);
+    const entry = toFileEntry(item, separator);
     return entry && (!imageOnly || isWorkspaceImagePreviewPath(entry.path)) ? [entry] : [];
   });
   return {
@@ -196,9 +198,10 @@ function mapFileSearchResult(
 function mapDirectorySearchResult(
   result: DirSearchResult,
   limit: number,
+  separator: string,
 ): ProjectSearchEntriesResult {
   const entries = result.items.flatMap((item) => {
-    const entry = toDirectoryEntry(item);
+    const entry = toDirectoryEntry(item, separator);
     return entry ? [entry] : [];
   });
   const rootDirectoryCount = result.items.some((item) => item.relativePath.length === 0) ? 1 : 0;
@@ -211,10 +214,11 @@ function mapDirectorySearchResult(
 function mapMixedSearchResult(
   result: MixedSearchResult,
   limit: number,
+  separator: string,
 ): { readonly entries: ProjectEntry[]; readonly truncated: boolean } {
   const entries: ProjectEntry[] = [];
   for (const item of result.items) {
-    const entry = toProjectEntry(item);
+    const entry = toProjectEntry(item, separator);
     if (entry) {
       entries.push(entry);
     }
@@ -375,6 +379,7 @@ export const make = Effect.fn("WorkspaceSearchIndex.make")(function* (
   cwd: string,
   variant: WorkspaceSearchIndexVariant = "paths",
 ) {
+  const path = yield* Path.Path;
   const finder = yield* Effect.acquireRelease(createFinder(cwd, variant), (finder) =>
     Effect.try({
       try: () => finder.destroy(),
@@ -468,7 +473,7 @@ export const make = Effect.fn("WorkspaceSearchIndex.make")(function* (
       const result = yield* runSearch("", WORKSPACE_INDEX_PAGE_SIZE, "mixedSearch", () =>
         finder.mixedSearch("", { pageSize: WORKSPACE_INDEX_PAGE_SIZE }),
       );
-      const mapped = mapMixedSearchResult(result, WORKSPACE_INDEX_MAX_ENTRIES);
+      const mapped = mapMixedSearchResult(result, WORKSPACE_INDEX_MAX_ENTRIES, path.sep);
       const sortedEntries = withDirectoryAncestors(mapped.entries).toSorted((left, right) =>
         left.path.localeCompare(right.path),
       );
@@ -490,20 +495,20 @@ export const make = Effect.fn("WorkspaceSearchIndex.make")(function* (
       const result = yield* runSearch(query, pageSize, "fileSearch", () =>
         finder.fileSearch(query, { pageSize }),
       );
-      const mapped = mapFileSearchResult(result, limit, imageOnly);
+      const mapped = mapFileSearchResult(result, limit, path.sep, imageOnly);
       return { ...mapped, truncated: incompleteBeforeQuery || mapped.truncated };
     }
     if (kind === "directory") {
       const result = yield* runSearch(query, pageSize, "directorySearch", () =>
         finder.directorySearch(query, { pageSize }),
       );
-      const mapped = mapDirectorySearchResult(result, limit);
+      const mapped = mapDirectorySearchResult(result, limit, path.sep);
       return { ...mapped, truncated: incompleteBeforeQuery || mapped.truncated };
     }
     const result = yield* runSearch(query, pageSize, "mixedSearch", () =>
       finder.mixedSearch(query, { pageSize }),
     );
-    const mapped = mapMixedSearchResult(result, limit);
+    const mapped = mapMixedSearchResult(result, limit, path.sep);
     return { ...mapped, truncated: incompleteBeforeQuery || mapped.truncated };
   });
 
@@ -541,7 +546,7 @@ export const make = Effect.fn("WorkspaceSearchIndex.make")(function* (
         );
         if (matchRanges.length === 0) continue;
         matches.push({
-          path: toPosixPath(match.relativePath),
+          path: toPosixPath(match.relativePath, path.sep),
           lineNumber: match.lineNumber,
           lineContent: match.lineContent,
           matchRanges,

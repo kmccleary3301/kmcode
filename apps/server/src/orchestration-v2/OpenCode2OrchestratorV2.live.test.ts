@@ -48,6 +48,7 @@ import * as CheckpointStore from "../checkpointing/CheckpointStore.ts";
 import * as BackgroundPolicy from "../background/BackgroundPolicy.ts";
 import * as HostPowerMonitor from "../background/HostPowerMonitor.ts";
 import * as ServerConfig from "../config.ts";
+import * as PortScanner from "../preview/PortScanner.ts";
 import * as SqlitePersistence from "../persistence/Sqlite.ts";
 import * as AntigravityInstallation from "../provider/AntigravityInstallation.ts";
 import * as CodexInstallation from "../provider/CodexInstallation.ts";
@@ -177,6 +178,7 @@ const layerProviderInstanceRegistry = ProviderInstanceRegistryHydration.layer.pi
         Layer.provide(layerPlatformTest),
       ),
       NodeServices.layer,
+      PortScanner.layerTest,
       FetchHttpClient.layer,
       OpenCodeRuntime.layer.pipe(
         Layer.provide(layerSpawnedServers),

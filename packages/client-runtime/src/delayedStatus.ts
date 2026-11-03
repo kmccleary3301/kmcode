@@ -13,7 +13,7 @@ export interface ShownStatus<A> {
 
 export interface DelayedStatus<A> {
   /** Reports the real status for `key`. A new key drops the shown status at once. */
-  readonly update: (key: string, value: A | null) => void;
+  readonly update: (key: string, value: A | null, showDelayMs?: number) => void;
   /** Cancels pending timers. A later `update` starts again from the real status. */
   readonly dispose: () => void;
 }
@@ -55,7 +55,7 @@ export function createDelayedStatus<A>(
   };
 
   return {
-    update: (nextKey, value) => {
+    update: (nextKey, value, showDelayMs = STATUS_SHOW_DELAY_MS) => {
       if (nextKey !== key) {
         key = nextKey;
         clearTimer();
@@ -70,7 +70,7 @@ export function createDelayedStatus<A>(
           timer = setTimeout(() => {
             timer = undefined;
             if (latest !== null) show(latest);
-          }, STATUS_SHOW_DELAY_MS);
+          }, showDelayMs);
         }
         return;
       }

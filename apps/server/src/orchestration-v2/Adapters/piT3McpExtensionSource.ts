@@ -210,6 +210,24 @@ function createMcpClient(endpoint: string, token: string) {
 }
 
 export default async function t3McpExtension(pi: ExtensionAPI) {
+  // RPC has no trust prompt, so Pi skips an untrusted folder's protected resources. Session
+  // replacement reruns this factory without project_trust, and KM Code drops notices outside a
+  // turn, so check each session's first turn. An explicit --no-approve is deliberate and stays quiet.
+  let projectTrustChecked = false;
+  pi.on("before_agent_start", (_event, ctx) => {
+    if (projectTrustChecked) return;
+    projectTrustChecked = true;
+    if (
+      ctx.isProjectTrusted() ||
+      process.argv.some((arg) => arg === "--no-approve" || arg === "-na")
+    ) {
+      return;
+    }
+    ctx.ui.notify(
+      \`Pi did not load project settings, extensions, skills, prompts, MCP servers or system prompt files for \${ctx.cwd} because the folder is not trusted. To load them, run the configured Pi binary there with the same PI_CODING_AGENT_DIR (if set), trust the folder or its parent with /trust, then start a new thread in that same worktree. To trust every project, add --approve to Pi's launch arguments in KM Code settings; to keep them off without this notice, add --no-approve.\`,
+      "warning",
+    );
+  });
   // Workaround for an upstream Pi context-budgeting bug: pi-ai reuses the
   // previous response's usage even when a fork's instructions/tools differ,
   // then reserves almost all remaining context for output. OpenRouter can

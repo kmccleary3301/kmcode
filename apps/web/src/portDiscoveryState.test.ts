@@ -1,7 +1,25 @@
-import { CONFIGURED_LOCAL_SERVER_URLS_MAX_ITEMS, PREVIEW_URL_MAX_LENGTH } from "@t3tools/contracts";
+import {
+  CONFIGURED_LOCAL_SERVER_URLS_MAX_ITEMS,
+  PREVIEW_URL_MAX_LENGTH,
+  type DiscoveredLocalServer,
+  ThreadId,
+} from "@t3tools/contracts";
 import { describe, expect, it } from "vite-plus/test";
 
-import { boundConfiguredLocalServerUrls } from "./portDiscoveryState";
+import {
+  boundConfiguredLocalServerUrls,
+  isDiscoveredLocalServerOwnedByThread,
+} from "./portDiscoveryState";
+
+const threadId = ThreadId.make("thread-1");
+const discoveredServer = {
+  host: "localhost",
+  port: 5173,
+  url: "http://localhost:5173",
+  processName: "node",
+  pid: 42,
+  terminal: null,
+} satisfies DiscoveredLocalServer;
 
 describe("boundConfiguredLocalServerUrls", () => {
   it("keeps subscription payloads within the discovery RPC bounds", () => {
@@ -31,5 +49,35 @@ describe("boundConfiguredLocalServerUrls", () => {
       "http://localhost:3000/docs#section-0",
       "http://localhost:4000/app",
     ]);
+  });
+});
+
+describe("discovered server ownership", () => {
+  it("matches terminal owners", () => {
+    expect(
+      isDiscoveredLocalServerOwnedByThread(
+        {
+          ...discoveredServer,
+          terminal: { threadId, terminalId: "terminal-1" },
+        },
+        threadId,
+      ),
+    ).toBe(true);
+  });
+
+  it("matches agent owners", () => {
+    expect(
+      isDiscoveredLocalServerOwnedByThread({ ...discoveredServer, agent: { threadId } }, threadId),
+    ).toBe(true);
+  });
+
+  it("rejects servers owned by another thread or no thread", () => {
+    expect(
+      isDiscoveredLocalServerOwnedByThread(
+        { ...discoveredServer, agent: { threadId: ThreadId.make("thread-2") } },
+        threadId,
+      ),
+    ).toBe(false);
+    expect(isDiscoveredLocalServerOwnedByThread(discoveredServer, threadId)).toBe(false);
   });
 });

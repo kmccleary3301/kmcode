@@ -98,6 +98,11 @@ export function parseCliArgs(
   for (let i = 0; i < tokens.length; i++) {
     const token = tokens[i]!;
 
+    if (token === "--") {
+      for (i += 1; i < tokens.length; i += 1) positionals.push(tokens[i]!);
+      break;
+    }
+
     if (token.startsWith("--")) {
       const rest = token.slice(2);
       if (!rest) continue;

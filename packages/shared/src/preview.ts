@@ -72,6 +72,20 @@ export function normalizePreviewUrl(rawUrl: string): string {
   if (trimmed.length === 0) {
     throw new PreviewUrlNormalizationError({ inputLength: rawUrl.length, reason: "empty" });
   }
+  const declaredProtocol = previewUrlProtocol(trimmed);
+  const hasBarePort = /^[^:/?#]+:\d+(?:[/?#]|$)/u.test(trimmed);
+  if (
+    declaredProtocol !== undefined &&
+    declaredProtocol !== "http:" &&
+    declaredProtocol !== "https:" &&
+    !hasBarePort
+  ) {
+    throw new PreviewUrlNormalizationError({
+      inputLength: rawUrl.length,
+      reason: "unsupported-protocol",
+      protocol: declaredProtocol,
+    });
+  }
   const useHttp = LOOPBACK_PREFIX_PATTERN.test(trimmed);
   const candidate = trimmed.includes("://")
     ? trimmed
@@ -95,4 +109,17 @@ export function normalizePreviewUrl(rawUrl: string): string {
     });
   }
   return parsed.href;
+}
+
+/** Removes URL userinfo before a preview address reaches chrome or history. */
+export function previewUrlWithoutCredentials(rawUrl: string): string {
+  let url: URL;
+  try {
+    url = new URL(rawUrl);
+  } catch {
+    return "";
+  }
+  url.username = "";
+  url.password = "";
+  return url.href;
 }

@@ -189,6 +189,9 @@ export function makeAcpRegistryAdapterV2(options: AcpRegistryAdapterV2Options) {
   const isDevin = registryAgentId === "devin";
   const flavor: AcpAdapterV2Flavor = {
     driver: ACP_REGISTRY_PROVIDER,
+    ...(options.settings.customModels === undefined
+      ? {}
+      : { customModels: options.settings.customModels }),
     capabilities: AcpProviderCapabilitiesV2,
     promptFailure: (cause) => acpRegistryPromptFailure(registryAgentId, cause),
     // Per-agent exceptions (Mistral Vibe, Devin): see the note above

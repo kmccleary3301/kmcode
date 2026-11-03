@@ -288,32 +288,46 @@ export function readTerminalOutputUpdate(
   output: TerminalOutputState,
   cursor: TerminalOutputCursor,
 ): TerminalOutputUpdate {
-  const nextCursor = {
-    generation: output.generation,
-    resetVersion: output.resetVersion,
-    offset: output.nextOffset,
-  };
   const firstChunk = output.chunks[0];
   if (
     cursor.generation !== output.generation ||
     cursor.resetVersion !== output.resetVersion ||
     cursor.offset < (firstChunk?.startOffset ?? output.nextOffset)
   ) {
-    return { type: "reset", data: terminalOutputText(output), cursor: nextCursor };
+    return {
+      type: "reset",
+      data: terminalOutputText(output),
+      cursor: {
+        generation: output.generation,
+        resetVersion: output.resetVersion,
+        offset: output.nextOffset,
+      },
+    };
   }
 
-  const appended = output.chunks.filter(
-    (chunk) => chunk.startOffset + chunk.data.length > cursor.offset,
-  );
-  if (appended.length === 0) {
-    return { type: "none", cursor: nextCursor };
+  // Compaction and appends preserve offset order, so unread chunks form a suffix.
+  let firstUnread = output.chunks.length;
+  while (
+    firstUnread > 0 &&
+    output.chunks[firstUnread - 1]!.startOffset + output.chunks[firstUnread - 1]!.data.length >
+      cursor.offset
+  ) {
+    firstUnread -= 1;
   }
+  if (firstUnread === output.chunks.length) {
+    return { type: "none", cursor };
+  }
+  const appended = output.chunks.slice(firstUnread);
   return {
     type: "append",
     data: appended
       .map((chunk) => chunk.data.slice(Math.max(0, cursor.offset - chunk.startOffset)))
       .join(""),
-    cursor: nextCursor,
+    cursor: {
+      generation: output.generation,
+      resetVersion: output.resetVersion,
+      offset: output.nextOffset,
+    },
   };
 }
 

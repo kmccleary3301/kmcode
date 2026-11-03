@@ -22,11 +22,12 @@ import { ProjectMutation } from "./project.ts";
 
 const decodeClientSettings = Schema.decodeUnknownSync(ClientSettingsSchema);
 const decodeClientSettingsPatch = Schema.decodeUnknownSync(ClientSettingsPatch);
+const decodeClaudeSettings = Schema.decodeUnknownSync(ClaudeSettings);
 const encodeClientSettings = Schema.encodeSync(ClientSettingsSchema);
 const decodeServerSettings = Schema.decodeUnknownSync(ServerSettings);
 const decodeServerSettingsPatch = Schema.decodeUnknownSync(ServerSettingsPatch);
 const encodeServerSettings = Schema.encodeSync(ServerSettings);
-const decodeClaudeSettings = Schema.decodeUnknownSync(ClaudeSettings);
+const encodeServerSettingsPatch = Schema.encodeSync(ServerSettingsPatch);
 
 describe("project mutation authorization scopes", () => {
   it("requires settings-write when scripts are changed", () => {
@@ -86,6 +87,41 @@ describe("ServerSettings response streaming", () => {
       expect(() => decodeServerSettings(input)).toThrow();
       expect(() => decodeServerSettingsPatch(input)).toThrow();
     }
+  });
+});
+
+describe("thread title instructions settings", () => {
+  it("defaults to empty and round-trips environment and project values", () => {
+    const input = {
+      threadTitleInstructions: "Keep titles concise.",
+      projectSettingsOverrides: {
+        project: { threadTitleInstructions: "Put the project name first." },
+      },
+    };
+
+    expect(decodeServerSettings({}).threadTitleInstructions).toBe("");
+    expect(encodeServerSettings(decodeServerSettings(input))).toMatchObject(input);
+    expect(decodeServerSettingsPatch(input)).toEqual(input);
+  });
+});
+
+describe("ServerSettings project overrides across versions", () => {
+  it("round-trips a newer server's override when an older client edits the entry", () => {
+    const projectId = ProjectId.make("project-a");
+    const entry = decodeServerSettings({
+      projectSettingsOverrides: {
+        [projectId]: { defaultAutoPull: true, addedByNewerServer: { mode: "kept" } },
+      },
+    }).projectSettingsOverrides[projectId];
+
+    const sent = encodeServerSettingsPatch({
+      projectSettingsOverrides: { [projectId]: { ...entry, defaultAutoPull: false } },
+    });
+
+    expect(decodeServerSettingsPatch(sent).projectSettingsOverrides?.[projectId]).toEqual({
+      defaultAutoPull: false,
+      addedByNewerServer: { mode: "kept" },
+    });
   });
 });
 
@@ -418,11 +454,14 @@ describe("ClientSettings transcript style", () => {
     expect(decodeClientSettings({}).transcriptStyle).toBe("minimal");
   });
 
-  it.each(["km", "terminal", "minimal", "minimal-plus"])("round-trips the %s style", (transcriptStyle) => {
-    const settings = decodeClientSettings({ transcriptStyle });
-    expect(encodeClientSettings(settings).transcriptStyle).toBe(transcriptStyle);
-    expect(decodeClientSettingsPatch({ transcriptStyle }).transcriptStyle).toBe(transcriptStyle);
-  });
+  it.each(["km", "terminal", "minimal", "minimal-plus"])(
+    "round-trips the %s style",
+    (transcriptStyle) => {
+      const settings = decodeClientSettings({ transcriptStyle });
+      expect(encodeClientSettings(settings).transcriptStyle).toBe(transcriptStyle);
+      expect(decodeClientSettingsPatch({ transcriptStyle }).transcriptStyle).toBe(transcriptStyle);
+    },
+  );
 
   it("rejects unsupported styles", () => {
     expect(() => decodeClientSettings({ transcriptStyle: "cards" })).toThrow();

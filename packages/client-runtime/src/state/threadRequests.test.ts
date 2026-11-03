@@ -3,6 +3,7 @@ import {
   ProviderSessionId,
   RuntimeRequestId,
   TurnItemId,
+  type OrchestrationV2RuntimeRequest,
   type OrchestrationV2ThreadProjection,
 } from "@t3tools/contracts";
 import { describe, expect, it, vi } from "vite-plus/test";
@@ -13,6 +14,8 @@ import {
   createQuestionHistoryProjector,
   declinePendingApprovals,
   derivePendingThreadRequests,
+  fullAccessOverrideExplanation,
+  sendApprovalFeedback,
   type ApprovalResponse,
   type ApprovalResponder,
   type ThreadPendingApproval,
@@ -121,6 +124,81 @@ const projection: OrchestrationV2ThreadProjection = {
     },
   ],
 };
+
+describe("approval feedback", () => {
+  const approvalTurnItem: OrchestrationV2ThreadProjection["turnItems"][number] = {
+    ...projection.turnItems[0]!,
+    providerThreadId: null,
+    id: TurnItemId.make("approval-item"),
+    type: "approval_request",
+    requestId,
+    requestKind: "command",
+    prompt: "Run pwd?",
+    reason: "This command matched an ask rule.",
+    fullAccessOverride: "ask_rule",
+  };
+  const feedbackRequest = {
+    ...projection.runtimeRequests[0]!,
+    kind: "command",
+    responseCapability: {
+      type: "live",
+      providerSessionId: ProviderSessionId.make("claude-session"),
+      supportsFeedback: true,
+    },
+  } satisfies OrchestrationV2RuntimeRequest;
+  const unrelatedRequest = {
+    ...feedbackRequest,
+    id: secondApproval.requestId,
+    responseCapability: {
+      type: "live",
+      providerSessionId: ProviderSessionId.make("other-session"),
+    },
+  } satisfies OrchestrationV2RuntimeRequest;
+
+  it("routes trimmed feedback only to the displayed request", async () => {
+    const pending = derivePendingThreadRequests({
+      runtimeRequests: [feedbackRequest, unrelatedRequest],
+      turnItems: [approvalTurnItem],
+    });
+    expect(pending.approvals[0]).toMatchObject({
+      requestId,
+      reason: "This command matched an ask rule.",
+      fullAccessOverride: "ask_rule",
+      supportsFeedback: true,
+    });
+    expect(pending.approvals[1]?.supportsFeedback).toBeUndefined();
+
+    const respond = vi.fn<ApprovalResponder>(async () => AsyncResult.success(undefined));
+    expect(await sendApprovalFeedback(pending.approvals[0]!, "  Safer please.  ", respond)).toBe(
+      true,
+    );
+    expect(respond.mock.calls).toEqual([[requestId, "decline", "Safer please."]]);
+  });
+
+  it("keeps feedback unsent when unsupported, stale, empty, or rejected", async () => {
+    const respond = vi.fn<ApprovalResponder>(async () => AsyncResult.failure(Cause.fail("failed")));
+    expect(await sendApprovalFeedback(approval, "Safer please.", respond)).toBe(false);
+    expect(
+      await sendApprovalFeedback(
+        { ...approval, supportsFeedback: true, responseCapability: "not_resumable" },
+        "Safer please.",
+        respond,
+      ),
+    ).toBe(false);
+    expect(await sendApprovalFeedback({ ...approval, supportsFeedback: true }, "  ", respond)).toBe(
+      false,
+    );
+    expect(respond).not.toHaveBeenCalled();
+    expect(
+      await sendApprovalFeedback({ ...approval, supportsFeedback: true }, "Safer please.", respond),
+    ).toBe(false);
+  });
+
+  it("explains both reasons a full-access request can still need approval", () => {
+    expect(fullAccessOverrideExplanation("ask_rule")).toContain("ask rule");
+    expect(fullAccessOverrideExplanation("provider_check")).toContain("safety checks");
+  });
+});
 
 describe("pending v2 questions", () => {
   it("keeps message responses available after the originating runtime exits", () => {

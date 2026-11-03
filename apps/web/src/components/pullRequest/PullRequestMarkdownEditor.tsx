@@ -26,6 +26,7 @@ export function PullRequestMarkdownEditor({
   cwd,
   environmentId,
   threadRef = null,
+  lineBreaks = false,
   placeholder,
   label,
   saving,
@@ -39,6 +40,7 @@ export function PullRequestMarkdownEditor({
   readonly environmentId: EnvironmentId;
   /** Thread the editor sits beside, so links in its preview follow the link target setting. */
   readonly threadRef?: ScopedThreadRef | null;
+  readonly lineBreaks?: boolean;
   readonly placeholder?: string | undefined;
   readonly label: string;
   readonly saving: boolean;
@@ -112,6 +114,7 @@ export function PullRequestMarkdownEditor({
               cwd={cwd}
               environmentId={environmentId}
               threadRef={threadRef}
+              lineBreaks={lineBreaks}
             />
           )}
         </div>

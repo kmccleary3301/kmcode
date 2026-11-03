@@ -139,6 +139,43 @@ it.effect.each(TEMPLATE_DIRECTORIES)("recognizes the $0 directory", (relativeDir
     }),
   ),
 );
+it.effect.each([
+  ".github/pull_request_template.txt",
+  "PULL_REQUEST_TEMPLATE.TXT",
+  "docs/PuLl_ReQuEsT_TeMpLaTe.Md",
+  ".github/PULL_REQUEST_TEMPLATE/template.TxT",
+])("reads committed text and mixed-case template $0 from a subdirectory", (relativePath) =>
+  runWithTempDirectory((cwd) =>
+    Effect.gen(function* () {
+      const path = yield* Path.Path;
+      yield* runGit(cwd, ["config", "grep.patternType", "fixed"]);
+      yield* runGit(cwd, ["config", "color.grep", "always"]);
+      yield* writeTemplate(cwd, relativePath, "committed template");
+      yield* writeTemplate(cwd, "nested/README.md", "project");
+      for (let index = 0; index < 600; index += 1) {
+        yield* writeTemplate(cwd, `docs/${index}-${"a".repeat(180)}.md`, "guide");
+      }
+      yield* commitTemplates(cwd);
+      yield* writeTemplate(cwd, relativePath, "uncommitted template");
+
+      assert.strictEqual(
+        Option.getOrUndefined(yield* detectTemplate(path.join(cwd, "nested"))),
+        "committed template",
+      );
+    }),
+  ),
+);
+
+it.effect("does not guess between Markdown and text directory templates", () =>
+  runWithTempDirectory((cwd) =>
+    Effect.gen(function* () {
+      yield* writeTemplate(cwd, ".github/PULL_REQUEST_TEMPLATE/a.md", "markdown");
+      yield* writeTemplate(cwd, ".github/PULL_REQUEST_TEMPLATE/b.TXT", "text");
+      yield* commitTemplates(cwd);
+      assert.isTrue(Option.isNone(yield* detectTemplate(cwd)));
+    }),
+  ),
+);
 
 it.effect.skipIf(!symlinksSupported)(
   "skips unusable directory entries and uses the one valid template",

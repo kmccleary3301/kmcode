@@ -13,22 +13,31 @@ export interface FileBreadcrumbChild extends ProjectEntry {
   label: string;
 }
 
+/** The home path starts with `~/`; a project directory named `~` does not. */
+export function isHostHomePath(path: string): boolean {
+  return path.startsWith("~/");
+}
+
 /**
- * Crumbs for a workspace-relative path start at the project. An absolute host
- * path is outside the workspace, so its crumbs start at the filesystem root.
+ * Crumbs for workspace-relative paths start at the project. Absolute host and
+ * home-relative paths start at their filesystem root.
  */
 export function fileBreadcrumbs(projectName: string, relativePath: string): FileBreadcrumb[] {
-  const hostPath = isAbsolutePath(relativePath);
+  const hostPath = isAbsolutePath(relativePath) || isHostHomePath(relativePath);
   const separator = isWindowsAbsolutePath(relativePath) ? "\\" : "/";
   const parts = relativePath.split(/[\\/]/).filter(Boolean);
-  const root = relativePath.startsWith("\\\\") ? "\\\\" : hostPath && separator === "/" ? "/" : "";
+  const root = relativePath.startsWith("\\\\") ? "\\\\" : relativePath.startsWith("/") ? "/" : "";
   return [
     ...(hostPath ? [] : [{ label: projectName, path: "", kind: "project" as const }]),
-    ...parts.map((part, index) => ({
-      label: part,
-      path: root + parts.slice(0, index + 1).join(separator),
-      kind: index === parts.length - 1 ? ("file" as const) : ("directory" as const),
-    })),
+    ...parts.map((part, index) => {
+      const path = root + parts.slice(0, index + 1).join(separator);
+      const breadcrumbPath = hostPath && path === "~" ? "~/" : path;
+      return {
+        label: part,
+        path: breadcrumbPath,
+        kind: index === parts.length - 1 ? ("file" as const) : ("directory" as const),
+      };
+    }),
   ];
 }
 
@@ -56,7 +65,8 @@ export function fileBreadcrumbChildren(
 }
 
 export function fileBreadcrumbParent(directoryPath: string): string | null {
-  if (!directoryPath) return null;
+  if (!directoryPath || directoryPath === "~/") return null;
   const separatorIndex = directoryPath.lastIndexOf("/");
+  if (directoryPath.startsWith("~/") && separatorIndex === 1) return "~/";
   return separatorIndex === -1 ? "" : directoryPath.slice(0, separatorIndex);
 }

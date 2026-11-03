@@ -1,6 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 
-import { serializeRenderedMarkdownFragment } from "./markdown-clipboard";
+import {
+  serializeRenderedMarkdownFragment,
+  serializeTableElementToMarkdown,
+} from "./markdown-clipboard";
 import { EnvironmentId, MessageId, ThreadId } from "@t3tools/contracts";
 import {
   collectAssistantCitations,
@@ -9,15 +12,21 @@ import {
 
 const TEXT_NODE = 3;
 const ELEMENT_NODE = 1;
+class FakeNode {
+  static readonly TEXT_NODE = TEXT_NODE;
+  static readonly ELEMENT_NODE = ELEMENT_NODE;
+}
 
-class FakeText {
+class FakeText extends FakeNode {
   readonly nodeType = TEXT_NODE;
   readonly childNodes: ReadonlyArray<never> = [];
 
-  constructor(readonly textContent: string) {}
+  constructor(readonly textContent: string) {
+    super();
+  }
 }
 
-class FakeElement {
+class FakeElement extends FakeNode {
   readonly nodeType = ELEMENT_NODE;
   checked = false;
   readonly childNodes: Array<FakeElement | FakeText> = [];
@@ -29,7 +38,9 @@ class FakeElement {
     readonly tagName: string,
     private readonly classNames: ReadonlyArray<string> = [],
     private readonly attributes: Readonly<Record<string, string>> = {},
-  ) {}
+  ) {
+    super();
+  }
 
   get localName(): string {
     return this.tagName.toLowerCase();
@@ -95,6 +106,21 @@ class FakeElement {
       return null;
     };
     return search(this);
+  }
+  /** Supports the `:scope > a > b` child paths the table serializer queries. */
+  querySelectorAll(selector: string): FakeElement[] {
+    return selector.split(", ").flatMap((part) =>
+      part
+        .replace(/^:scope > /, "")
+        .split(" > ")
+        .reduce<FakeElement[]>(
+          (level, tag) =>
+            level.flatMap((element) =>
+              element.children.filter((child) => child.tagName === tag.toUpperCase()),
+            ),
+          [this],
+        ),
+    );
   }
 }
 
@@ -341,5 +367,63 @@ describe("serializeRenderedMarkdownFragment", () => {
     expect(serializeRenderedMarkdownFragment(asNode(container))).toBe(
       "Hello World (Document template)",
     );
+  });
+});
+
+function renderedFormula(tex: string): FakeElement {
+  return new FakeElement("SPAN", [], {
+    "data-markdown-math": "inline",
+    "data-markdown-copy": `\\(${tex}\\)`,
+  }).append(new FakeText(tex));
+}
+
+function renderedTable(...rows: Array<Array<FakeElement | FakeText>>): FakeElement {
+  const row = (tag: string, cells: Array<FakeElement | FakeText>) =>
+    new FakeElement("TR").append(...cells.map((cell) => new FakeElement(tag).append(cell)));
+  const [head = [], ...body] = rows;
+  return new FakeElement("TABLE").append(
+    new FakeElement("THEAD").append(row("TH", head)),
+    new FakeElement("TBODY").append(...body.map((cells) => row("TD", cells))),
+  );
+}
+
+describe("copying rendered Markdown tables", () => {
+  beforeEach(() => {
+    vi.stubGlobal("Node", FakeNode);
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("keeps formula pipes as authored while escaping prose pipes", () => {
+    const table = renderedTable(
+      [new FakeText("Formula"), new FakeText("Note")],
+      [renderedFormula("|x|"), new FakeText("a | b")],
+      [renderedFormula("\\|x\\|"), new FakeElement("CODE").append(new FakeText("\\(c|d\\)"))],
+      [
+        new FakeElement("A", [], { href: "https://example.com/?q=a|b" }).append(
+          new FakeText("norm "),
+          renderedFormula("|y|"),
+        ),
+        new FakeText("e"),
+      ],
+      [
+        new FakeElement("UL").append(
+          new FakeElement("LI").append(renderedFormula("|z|"), new FakeText(" a | b")),
+        ),
+        new FakeElement("BLOCKQUOTE").append(new FakeElement("P").append(new FakeText("c | d"))),
+      ],
+    );
+    const markdown = serializeTableElementToMarkdown(table as unknown as Element);
+
+    expect(markdown).toContain(String.raw`\(|x|\)`);
+    expect(markdown).toContain(String.raw`\(\|x\|\)`);
+    expect(markdown).toContain(String.raw`a \| b`);
+    expect(markdown).toContain(String.raw`c\|d`);
+    expect(markdown).toContain(String.raw`norm \(|y|\)`);
+    expect(markdown).toContain(String.raw`- \(|z|\) a \| b`);
+    expect(markdown).toContain(String.raw`> c \| d`);
+    expect(markdown).toContain(String.raw`https://example.com/?q=a\|b`);
   });
 });

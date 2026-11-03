@@ -319,10 +319,10 @@ export function threadRuntimeHasInterruptibleRun(
  * end is not active unless an interruptible run now owns the runtime.
  */
 export function threadRuntimeHasActiveWork(
-  runtime: Pick<
-    ThreadRuntimeSummary,
-    "status" | "activeRunId" | "activityRunWorkCompletedAt"
-  > | null | undefined,
+  runtime:
+    | Pick<ThreadRuntimeSummary, "status" | "activeRunId" | "activityRunWorkCompletedAt">
+    | null
+    | undefined,
   latestRun?: Pick<ThreadRunSummary, "status"> | null,
 ): boolean {
   if (
@@ -347,6 +347,50 @@ export function threadRuntimeHasActiveWork(
 }
 
 type BackgroundWorkKind = OrchestrationV2PendingBackgroundTask["kind"];
+
+export interface RunStopPresentation {
+  readonly state: "stopping" | "unresponsive";
+  readonly runId: OrchestrationV2ThreadProjection["runs"][number]["id"];
+  readonly requestedAt: string;
+  readonly background: boolean;
+}
+
+export function presentRunStop(
+  projection: Pick<OrchestrationV2ThreadProjection, "runs" | "turnItems">,
+): RunStopPresentation | null {
+  let active: OrchestrationV2ThreadProjection["runs"][number] | null = null;
+  let latest: OrchestrationV2ThreadProjection["runs"][number] | null = null;
+  for (const candidate of projection.runs) {
+    if (candidate.status !== "queued" && candidate.ordinal > (latest?.ordinal ?? -1))
+      latest = candidate;
+    if (
+      INTERRUPTIBLE_RUN_STATUSES.has(candidate.status) &&
+      candidate.ordinal > (active?.ordinal ?? -1)
+    )
+      active = candidate;
+  }
+  const run = active ?? latest;
+  if (run === null) return null;
+  let request:
+    | Extract<
+        OrchestrationV2ThreadProjection["turnItems"][number],
+        { type: "run_interrupt_request" }
+      >
+    | undefined;
+  for (const item of projection.turnItems) {
+    if (item.runId !== run.id) continue;
+    if (item.type === "run_interrupt_result") return null;
+    if (item.type === "run_interrupt_request") request = item;
+  }
+  if (request === undefined || (active === null && request.unresponsiveAt === undefined))
+    return null;
+  return {
+    state: request.unresponsiveAt === undefined ? "stopping" : "unresponsive",
+    runId: run.id,
+    requestedAt: DateTime.formatIso(request.startedAt ?? request.updatedAt),
+    background: active === null,
+  };
+}
 
 // `order` groups work the way a reader thinks about it: agents first, loose tasks last.
 const BACKGROUND_WORK_KINDS: Record<
@@ -466,7 +510,8 @@ const PROVIDER_GOAL_TITLES: Record<OrchestrationV2ProviderGoal["status"], string
 
 function formatGoalTokens(tokens: number): string {
   if (tokens < 1_000) return `${tokens}`;
-  if (tokens < 1_000_000) return `${Math.round(tokens / 1_000)}k`;
+  const thousands = Math.round(tokens / 1_000);
+  if (thousands < 1_000) return `${thousands}k`;
   return `${(tokens / 1_000_000).toFixed(1).replace(/\.0$/, "")}m`;
 }
 

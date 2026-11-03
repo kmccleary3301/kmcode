@@ -9,12 +9,15 @@ import * as NodeChildProcess from "node:child_process";
 import * as NodeUtil from "node:util";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as Effect from "effect/Effect";
+import * as Exit from "effect/Exit";
 import * as FileSystem from "effect/FileSystem";
 import * as Path from "effect/Path";
+import { HttpClient, HttpClientResponse } from "effect/http";
 import { ensureAgentDeviceShim } from "./AgentDeviceShim.ts";
 import {
   agentDeviceConfigPath,
   agentDeviceSession,
+  releaseAgentDeviceSession,
   writeAgentDeviceConfig,
 } from "./AgentDeviceTarget.ts";
 
@@ -96,5 +99,78 @@ if (process.env.AGENT_DEVICE_DAEMON_BASE_URL) process.exit(2);`,
       Effect.provideService(HostProcessExecutablePath, "/packaged/t3"),
       Effect.provide(NodeServices.layer),
     ),
+  );
+});
+
+describe("agent session release", () => {
+  it.effect("sends close RPC and accepts an already-released session", () =>
+    Effect.gen(function* () {
+      const calls: Array<{
+        readonly method: string;
+        readonly url: string;
+        readonly authorization: string | undefined;
+        readonly body: string;
+      }> = [];
+      let outcome: "ok" | "missing" | "failure" = "ok";
+      const http = HttpClient.make((request) =>
+        Effect.sync(() => {
+          if (request.body._tag !== "Uint8Array") throw new Error("Missing close body");
+          calls.push({
+            method: request.method,
+            url: request.url,
+            authorization: request.headers.authorization,
+            body: new TextDecoder().decode(request.body.body),
+          });
+          return HttpClientResponse.fromWeb(
+            request,
+            outcome === "missing"
+              ? Response.json(
+                  {
+                    error: {
+                      code: -32000,
+                      message: "No active session",
+                      data: { code: "SESSION_NOT_FOUND" },
+                    },
+                  },
+                  { status: 404 },
+                )
+              : outcome === "failure"
+                ? new Response("Offline", { status: 503 })
+                : Response.json({ result: { ok: true } }),
+          );
+        }),
+      );
+      const release = releaseAgentDeviceSession(http, {
+        baseUrl: "http://agent.test",
+        token: "test",
+        entryPath: "/agent",
+      });
+
+      yield* release("t3-session");
+      outcome = "missing";
+      yield* release("t3-session");
+      outcome = "failure";
+      const failed = yield* Effect.exit(release("t3-session"));
+
+      expect(Exit.isFailure(failed)).toBe(true);
+      expect(calls).toEqual(
+        Array.from({ length: 3 }, () => ({
+          method: "POST",
+          url: "http://agent.test/rpc",
+          authorization: "Bearer test",
+          body: JSON.stringify({
+            jsonrpc: "2.0",
+            id: "t3-session",
+            method: "agent_device.command",
+            params: {
+              command: "close",
+              session: "t3-session",
+              positionals: [],
+              flags: {},
+            },
+          }),
+        })),
+      );
+    }),
   );
 });

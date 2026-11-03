@@ -129,19 +129,6 @@ jobs:
           git sparse-checkout set --no-cone '/*' '!/.repos/'
           git -c checkout.workers=0 checkout --detach FETCH_HEAD
 
-      # Windows installs straight from the registry. There, linking the packages
-      # takes the time, not downloading them, so a ~700 MB package cache did not
-      # pay for its own restore. Across recent nightlies, restore plus install
-      # took 183-233s on arm64 and 116-172s on x64, while a plain install took
-      # 142-210s and 84-160s. The arm64 entries also filled 4 GB of the
-      # repository's 10 GB Actions cache.
-      - name: Setup Vite+
-        uses: voidzero-dev/setup-vp@250f29ce396baf5e8f24498e17c0dfdebabc26eb # v1
-        with:
-          node-version-file: package.json
-          cache: ${{ inputs.platform != 'win' }}
-          run-install: false
-
       # pnpm checks the lockfile and policy before reusing this result. A missing
       # artifact leaves the cache empty, so installation runs the checks again.
       - name: Download dependency verification
@@ -151,10 +138,38 @@ jobs:
           name: release-dependency-verification
           path: ${{ runner.temp }}/pnpm-metadata
 
-      - name: Install desktop dependencies
+      # Windows package-store restores were slower than installs and filled
+      # several gigabytes of the Actions cache, so leave that cache disabled.
+      - name: Setup dependencies
+        uses: ./.github/actions/setup-ci-deps
+        with:
+          install-args: --filter=@t3tools/desktop... --filter=t3... --filter=@t3tools/scripts...
+          cache-pnpm-store: ${{ inputs.platform != 'win' }}
         env:
           pnpm_config_cache_dir: ${{ runner.temp }}/pnpm-metadata
-        run: vp install --filter=@t3tools/desktop... --filter=t3... --filter=@t3tools/scripts...
+
+      # The CLI archive and staged app install without a lockfile, so they
+      # ask the registry about every package and fetch platform packages the
+      # workspace store lacks. They share this registry metadata and store. A
+      # new week starts cold, which bounds how stale cached ranges can get.
+      - name: Resolve staged install cache
+        id: stage_pnpm
+        shell: bash
+        run: |
+          echo "dir=$RUNNER_TEMP/desktop-stage-pnpm" >> "$GITHUB_OUTPUT"
+          echo "prefix=desktop-stage-pnpm-v2-${{ inputs.platform }}-${{ inputs.arch }}-$(date -u +%G-%V)-" >> "$GITHUB_OUTPUT"
+
+      - name: Restore staged install cache
+        id: stage_pnpm_cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          path: ${{ steps.stage_pnpm.outputs.dir }}
+          key: ${{ steps.stage_pnpm.outputs.prefix }}${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: ${{ steps.stage_pnpm.outputs.prefix }}
+
+      - name: Mark staged install cache
+        shell: bash
+        run: mkdir -p "${{ steps.stage_pnpm.outputs.dir }}" && touch "$RUNNER_TEMP/desktop-stage-pnpm.marker"
 
       - name: Cache resource monitor
         id: resource_monitor_cache
@@ -373,7 +388,10 @@ jobs:
       - name: Build desktop artifact
         shell: bash
         env:
-          pnpm_config_cache_dir: ${{ runner.temp }}/pnpm-metadata
+          # pnpm only goes to the registry for packages or versions the cache lacks.
+          pnpm_config_cache_dir: ${{ steps.stage_pnpm.outputs.dir }}/cache
+          pnpm_config_store_dir: ${{ steps.stage_pnpm.outputs.dir }}/store
+          pnpm_config_prefer_offline: "true"
           T3CODE_DESKTOP_REUSE_RESOURCE_MONITOR: ${{ steps.resource_monitor_cache.outputs.cache-hit == 'true' }}
           T3CODE_DESKTOP_REUSE_LINUX_CAPTURE_HELPERS: ${{ steps.capture_helper_cache.outputs.cache-hit == 'true' }}
           CSC_LINK: ${{ secrets.CSC_LINK }}
@@ -514,10 +532,73 @@ jobs:
           mkdir -p "$target_dir"
           cp "native/resource-monitor/target/${{ inputs.rust_target }}/release/${binary_name}" "$target_dir/$binary_name"
 
+      - name: Resolve target Node.js for the CLI executable
+        id: target_node
+        if: inputs.cli_archive && inputs.platform == 'win'
+        shell: bash
+        run: echo "version=$(node -p 'require("./package.json").engines.node')" >> "$GITHUB_OUTPUT"
+
+      # The download only changes with engines.node, so a cached copy keeps
+      # releases off nodejs.org, which stalls on the runners some days.
+      - name: Restore target Node.js for the CLI executable
+        id: target_node_cache
+        if: inputs.cli_archive && inputs.platform == 'win'
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          path: ${{ runner.temp }}/node-download
+          key: node-download-v${{ steps.target_node.outputs.version }}-win-${{ inputs.arch }}
+
+      - name: Download target Node.js for the CLI executable
+        if: inputs.cli_archive && inputs.platform == 'win' && steps.target_node_cache.outputs.cache-hit != 'true'
+        shell: bash
+        env:
+          VERSION: ${{ steps.target_node.outputs.version }}
+        run: |
+          set -euo pipefail
+          name="node-v$VERSION-win-${{ inputs.arch }}"
+          dir="$RUNNER_TEMP/node-download"
+          mkdir -p "$dir"
+          fetch=(curl -fsSL --retry 5 --retry-all-errors --connect-timeout 10 --speed-limit 102400 --speed-time 30)
+          "${fetch[@]}" -o "$dir/$name.zip" "https://nodejs.org/dist/v$VERSION/$name.zip"
+          "${fetch[@]}" -o "$dir/SHASUMS256.txt" "https://nodejs.org/dist/v$VERSION/SHASUMS256.txt"
+          (cd "$dir" && grep " $name.zip\$" SHASUMS256.txt | sha256sum -c -)
+
+      # Saved right away so a later failure in this job still keeps the download.
+      - name: Save target Node.js for the CLI executable
+        if: inputs.cli_archive && inputs.platform == 'win' && steps.target_node_cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          path: ${{ runner.temp }}/node-download
+          key: ${{ steps.target_node_cache.outputs.cache-primary-key }}
+
+      - name: Install target Node.js for the CLI executable
+        if: inputs.cli_archive && inputs.platform == 'win'
+        shell: bash
+        env:
+          VERSION: ${{ steps.target_node.outputs.version }}
+        run: |
+          set -euo pipefail
+          name="node-v$VERSION-win-${{ inputs.arch }}"
+          dir="$RUNNER_TEMP/node-download"
+          dest="${XDG_CACHE_HOME:-$HOME/.cache}/tsdown/node/v$VERSION/win-${{ inputs.arch }}"
+          mkdir -p "$dest"
+          (cd "$dir" && grep " $name.zip\$" SHASUMS256.txt | sha256sum -c -)
+          unzip -p "$dir/$name.zip" "$name/node.exe" > "$dest/node.exe"
+
+      # The Linux archive ships libatomic.so.1 and points t3's RUNPATH at it.
+      - name: Install patchelf
+        if: inputs.cli_archive && inputs.platform == 'linux'
+        shell: bash
+        run: command -v patchelf || { sudo apt-get update && sudo apt-get install -y patchelf; }
+
       - name: Build CLI archive
         if: inputs.cli_archive
         shell: bash
         env:
+          # pnpm only goes to the registry for packages or versions the cache lacks.
+          pnpm_config_cache_dir: ${{ steps.stage_pnpm.outputs.dir }}/cache
+          pnpm_config_store_dir: ${{ steps.stage_pnpm.outputs.dir }}/store
+          pnpm_config_prefer_offline: "true"
           APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
           APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
           APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
@@ -540,6 +621,23 @@ jobs:
             --version "${{ inputs.version }}" \
             --resource-monitor-dir "$RUNNER_TEMP/cli-resource-monitor" \
             --output-dir release-cli
+
+      # Warm installs only touch the store index, so new content means a fetch.
+      - name: Check staged install cache for new content
+        id: stage_pnpm_changed
+        shell: bash
+        run: |
+          dir="${{ steps.stage_pnpm.outputs.dir }}"
+          new=$(find "$dir/cache/v12" "$dir/store/v11/files" -type f -newer "$RUNNER_TEMP/desktop-stage-pnpm.marker" 2>/dev/null | wc -l | tr -d ' ')
+          echo "Staged installs added $new cached files."
+          echo "changed=$([[ "$new" -gt 0 ]] && echo true || echo false)" >> "$GITHUB_OUTPUT"
+
+      - name: Save staged install cache
+        if: steps.stage_pnpm_changed.outputs.changed == 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          path: ${{ steps.stage_pnpm.outputs.dir }}
+          key: ${{ steps.stage_pnpm_cache.outputs.cache-primary-key }}
 
       - name: Smoke-test CLI archive
         if: inputs.cli_archive

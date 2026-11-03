@@ -4,6 +4,7 @@ import {
   ProviderInstanceId,
   type ServerProvider,
 } from "@t3tools/contracts";
+import * as DateTime from "effect/DateTime";
 import { describe, expect, it } from "vite-plus/test";
 
 import {
@@ -13,6 +14,7 @@ import {
   getProviderSkillsForSlashMenu,
   hasCompleteProviderWorkspaceSnapshot,
   hasCurrentProviderWorkspaceSnapshot,
+  hasProviderWorkspaceSnapshotRefreshProgressed,
   resolveProviderSkillsForCwd,
   resolveProviderSlashCommandsForCwd,
   resolveProviderSkillSourceKind,
@@ -293,5 +295,79 @@ describe("workspace provider snapshots", () => {
     expect(hasCurrentProviderWorkspaceSnapshot(provider, "/workspace/project-b", scannedAt)).toBe(
       false,
     );
+  });
+
+  it("retries an already expired catalog when discovery returns the unchanged snapshot", () => {
+    const scannedAt = Date.parse("2026-01-01T00:00:00.000Z");
+    const stale = {
+      ...provider,
+      workspaceSnapshots: provider.workspaceSnapshots.map((snapshot) => ({
+        ...snapshot,
+        checkedAt: DateTime.formatIso(DateTime.makeUnsafe(scannedAt)),
+      })),
+    } satisfies ServerProvider;
+    expect(
+      hasProviderWorkspaceSnapshotRefreshProgressed(
+        stale,
+        stale,
+        "/workspace/project-a",
+        scannedAt + PROVIDER_WORKSPACE_SNAPSHOT_TTL_MS,
+      ),
+    ).toBe(false);
+  });
+
+  it("retries an unchanged catalog that expires during discovery", () => {
+    const scannedAt = Date.parse("2026-01-01T00:00:00.000Z");
+    const stale = {
+      ...provider,
+      workspaceSnapshots: provider.workspaceSnapshots.map((snapshot) => ({
+        ...snapshot,
+        checkedAt: DateTime.formatIso(DateTime.makeUnsafe(scannedAt)),
+      })),
+    } satisfies ServerProvider;
+    const cwd = "/workspace/project-a";
+    expect(
+      hasCurrentProviderWorkspaceSnapshot(
+        stale,
+        cwd,
+        scannedAt + PROVIDER_WORKSPACE_SNAPSHOT_TTL_MS - 1,
+      ),
+    ).toBe(true);
+    expect(
+      hasProviderWorkspaceSnapshotRefreshProgressed(
+        stale,
+        stale,
+        cwd,
+        scannedAt + PROVIDER_WORKSPACE_SNAPSHOT_TTL_MS,
+      ),
+    ).toBe(false);
+  });
+
+  it("accepts a newer server scan timestamp when the client clock is ahead", () => {
+    const scannedAt = Date.parse("2026-01-01T00:00:00.000Z");
+    const previous = {
+      ...provider,
+      workspaceSnapshots: provider.workspaceSnapshots.map((snapshot) => ({
+        ...snapshot,
+        checkedAt: DateTime.formatIso(DateTime.makeUnsafe(scannedAt)),
+      })),
+    } satisfies ServerProvider;
+    const refreshed = {
+      ...previous,
+      workspaceSnapshots: previous.workspaceSnapshots.map((snapshot) => ({
+        ...snapshot,
+        checkedAt: DateTime.formatIso(DateTime.makeUnsafe(scannedAt + 1_000)),
+      })),
+    } satisfies ServerProvider;
+    const now = scannedAt + PROVIDER_WORKSPACE_SNAPSHOT_TTL_MS * 10;
+    expect(hasCurrentProviderWorkspaceSnapshot(refreshed, "/workspace/project-a", now)).toBe(false);
+    expect(
+      hasProviderWorkspaceSnapshotRefreshProgressed(
+        previous,
+        refreshed,
+        "/workspace/project-a",
+        now,
+      ),
+    ).toBe(true);
   });
 });

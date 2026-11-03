@@ -77,6 +77,7 @@ const browserArchive = makeZip([
 
 const makeHarness = Effect.fn("test.makePreviewBrowser")(function* (
   options: {
+    readonly version?: string;
     readonly archive?: Buffer;
     readonly sha256?: string;
     readonly body?: Stream.Stream<Uint8Array>;
@@ -97,7 +98,7 @@ const makeHarness = Effect.fn("test.makePreviewBrowser")(function* (
     release: options.unsupported
       ? null
       : {
-          version: "1.2.3",
+          version: options.version ?? "1.2.3",
           platform: "fixture",
           url: "https://storage.googleapis.com/chrome-headless-shell-fixture.zip",
           bytes: archive.byteLength,
@@ -125,10 +126,11 @@ const makeHarness = Effect.fn("test.makePreviewBrowser")(function* (
 });
 
 it.layer(NodeServices.layer)("PreviewBrowser", (it) => {
-  it.effect("installs a verified download with its file modes and then reuses it", () =>
+  it.effect.each(["0.8.0", "1.2.3"])("retains another version when installing %s", (current) =>
     Effect.gen(function* () {
-      const { browser, fs, path, installRoot, requests } = yield* makeHarness();
-      yield* fs.makeDirectory(path.join(installRoot, "1.0.0"), { recursive: true });
+      const { browser, fs, path, installRoot, requests } = yield* makeHarness({ version: current });
+      yield* fs.makeDirectory(path.join(installRoot, "0.9.0"), { recursive: true });
+      yield* fs.makeDirectory(path.join(installRoot, "0.10.0"));
       // Another server's install in progress, and one abandoned two hours ago.
       const active = path.join(installRoot, ".install-other");
       const abandoned = path.join(installRoot, ".install-abandoned");
@@ -140,7 +142,7 @@ it.layer(NodeServices.layer)("PreviewBrowser", (it) => {
 
       const executable = yield* browser.executable;
 
-      const version = path.join(installRoot, "1.2.3");
+      const version = path.join(installRoot, current);
       expect(executable).toBe(path.join(version, executableName));
       expect(yield* fs.readFileString(path.join(version, "locales", "en-US.pak"))).toBe("strings");
       if (hostPlatform !== "win32") {
@@ -150,11 +152,10 @@ it.layer(NodeServices.layer)("PreviewBrowser", (it) => {
         expect(yield* mode("libEGL.so")).toBe(0o755);
         expect(yield* mode(path.join("locales", "en-US.pak"))).toBe(0o644);
       }
-      // The old build and stale staging directories are gone; a fresh one stays.
-      expect((yield* fs.readDirectory(installRoot)).toSorted()).toEqual([
-        ".install-other",
-        "1.2.3",
-      ]);
+      // The newest other version and a fresh staging directory stay; older builds and stale staging directories go.
+      expect((yield* fs.readDirectory(installRoot)).toSorted()).toEqual(
+        [".install-other", "0.10.0", current].toSorted(),
+      );
       expect(yield* browser.executable).toBe(executable);
       expect(yield* browser.installed).toEqual(Option.some(executable));
       expect(requests).toHaveLength(1);

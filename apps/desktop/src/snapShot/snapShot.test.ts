@@ -1,5 +1,6 @@
 import { it as effectIt } from "@effect/vitest";
 import { HostProcessPlatform } from "@t3tools/shared/hostProcess";
+import { parseKeybindingShortcut } from "@t3tools/shared/keybindings";
 import * as Effect from "effect/Effect";
 import { describe, expect, it, vi } from "vite-plus/test";
 
@@ -646,6 +647,17 @@ describe("toElectronAccelerator", () => {
         modKey: false,
       }),
     ).toBe("Control+Alt+Up");
+  });
+  it.each([
+    ["mod+shift+arrowup", "CommandOrControl+Shift+Up"],
+    ["mod+shift+arrowdown", "CommandOrControl+Shift+Down"],
+    ["ctrl+alt+arrowleft", "Control+Alt+Left"],
+    ["ctrl+alt+arrowright", "Control+Alt+Right"],
+    ["mod+shift+esc", "CommandOrControl+Shift+Esc"],
+    ["mod+shift+space", "CommandOrControl+Shift+Space"],
+    ["mod+shift+2", "CommandOrControl+Shift+2"],
+  ])("maps a recorded %s to an Electron accelerator", (recorded, accelerator) => {
+    expect(toElectronAccelerator(parseKeybindingShortcut(recorded)!)).toBe(accelerator);
   });
 });
 

@@ -94,13 +94,30 @@ function updateCached<A, E>(
   registry.update(atom, AsyncResult.map(update));
 }
 
-function createPullRequestRefreshAtomFamily<R, E>(
+type PullRequestRefreshAtomFamily = (target: {
+  readonly environmentId: EnvironmentId;
+  readonly input: Readonly<Record<string, never>>;
+}) => Atom.Atom<AsyncResult.AsyncResult<number, unknown>>;
+
+function makePullRequestRefreshAtomFamily<R, E>(
   runtime: Atom.AtomRuntime<EnvironmentRegistry | R, E>,
-) {
+): PullRequestRefreshAtomFamily {
   return createEnvironmentRpcSubscriptionAtomFamily(runtime, {
     label: "environment-data:pull-requests:turn-refreshes",
     tag: WS_METHODS.pullRequestsSubscribeRefreshes,
   });
+}
+
+const refreshFamiliesByRuntime = new WeakMap<object, PullRequestRefreshAtomFamily>();
+
+function createPullRequestRefreshAtomFamily<R, E>(
+  runtime: Atom.AtomRuntime<EnvironmentRegistry | R, E>,
+): PullRequestRefreshAtomFamily {
+  const existing = refreshFamiliesByRuntime.get(runtime);
+  if (existing) return existing;
+  const refreshes = makePullRequestRefreshAtomFamily(runtime);
+  refreshFamiliesByRuntime.set(runtime, refreshes);
+  return refreshes;
 }
 
 /** Refresh only the live fields a linked thread renders. */

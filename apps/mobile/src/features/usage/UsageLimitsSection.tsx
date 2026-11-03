@@ -21,6 +21,8 @@ import { type ReactNode, useEffect, useEffectEvent, useRef, useState } from "rea
 import { refreshUsageLimits } from "@t3tools/client-runtime/state/usage";
 import { Alert, Linking, Pressable, View } from "react-native";
 
+import { normalizeProviderAccentColor } from "@t3tools/client-runtime/state/provider-instance-display";
+
 import { AppText as Text } from "../../components/AppText";
 import { ProviderIcon } from "../../components/ProviderIcon";
 import { environmentPresentations } from "../../state/presentation";
@@ -132,6 +134,7 @@ export function AccountLimits(props: {
   readonly limits: ServerProvider["usageLimits"];
   readonly now: number;
   readonly first: boolean;
+  readonly accentColor?: string | undefined;
   /** Tighter padding for the composer card. */
   readonly dense?: boolean;
   /** Sits at the end of the heading row, such as a close control. */
@@ -139,7 +142,8 @@ export function AccountLimits(props: {
   readonly footer?: ReactNode;
 }) {
   const { limits, now, dense = false } = props;
-  const color = useBarColor(props.driver);
+  const providerColor = useBarColor(props.driver);
+  const color = normalizeProviderAccentColor(props.accentColor) ?? providerColor;
   if (!limits) return null;
   const notice = limitsNotice(limits);
   const externalUsage = limits.externalUsage;

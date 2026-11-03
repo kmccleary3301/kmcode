@@ -1167,6 +1167,61 @@ it.effect("keeps concurrent diff file reads on different hosts separate", () =>
   ),
 );
 
+it.effect("shares one refresh stream between independently created pull request readers", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const revision = yield* SubscriptionRef.make(0);
+      const refreshStarted = Latch.makeUnsafe();
+      let subscriptions = 0;
+      let title = "Original title";
+      const client = {
+        [WS_METHODS.pullRequestsSubscribeRefreshes]: () =>
+          Stream.unwrap(
+            Effect.sync(() => {
+              subscriptions++;
+              refreshStarted.openUnsafe();
+              return SubscriptionRef.changes(revision);
+            }),
+          ),
+        [WS_METHODS.pullRequestsSummary]: () => Effect.sync(() => ({ title, state: "open" })),
+        [WS_METHODS.pullRequestsDetail]: () => Effect.sync(() => ({ title, state: "open" })),
+      } as unknown as WsRpcProtocolClient;
+      const { runtime, atoms, registry } = yield* makeTestRuntime(client);
+      const target = {
+        environmentId: TARGET.environmentId,
+        input: { projectId: ProjectId.make("project-1"), repository: "acme/web", number: 1 },
+      };
+      const summary = createLinkedPullRequestSummaryAtomFamily(runtime)(target);
+      const detail = atoms.detail(target);
+      for (const atom of [summary, detail]) {
+        const unmount = registry.mount(atom);
+        yield* Effect.addFinalizer(() => Effect.sync(unmount));
+        expect((yield* AtomRegistry.getResult(registry, atom)).title).toBe(title);
+      }
+      const refreshes = atoms.refreshes({ environmentId: target.environmentId, input: {} });
+      const unmountRefreshes = registry.mount(refreshes);
+      yield* Effect.addFinalizer(() => Effect.sync(unmountRefreshes));
+      yield* refreshStarted.await;
+      expect(subscriptions).toBe(1);
+
+      const changed = [summary, detail].map((atom) => {
+        const ready = Latch.makeUnsafe();
+        const stop = registry.subscribe(atom, (result) => {
+          if (AsyncResult.isSuccess(result) && result.value.title === "Updated title") {
+            ready.openUnsafe();
+          }
+        });
+        return { ready, stop };
+      });
+      yield* Effect.addFinalizer(() => Effect.sync(() => changed.forEach(({ stop }) => stop())));
+      title = "Updated title";
+      yield* SubscriptionRef.update(revision, (value) => value + 1);
+      for (const { ready } of changed) yield* ready.await;
+      expect(subscriptions).toBe(1);
+    }),
+  ),
+);
+
 it.effect("queues merge preparation with actions without restarting it on refresh", () =>
   Effect.scoped(
     Effect.gen(function* () {

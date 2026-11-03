@@ -13,6 +13,7 @@ import {
   shouldIncludeModelPickerOption,
   shouldOfferModelPickerSetup,
 } from "./ModelPickerContent";
+import { isImeCompositionKey } from "../CommandPalette.logic";
 
 function entry(status: ServerProvider["status"], driver = "opencode") {
   return deriveProviderInstanceEntries([
@@ -283,5 +284,14 @@ describe("adjacentModelPickerProvider", () => {
         direction: -1,
       }),
     ).toBe(claude.instanceId);
+  });
+});
+
+describe("IME composition key classification", () => {
+  it.each([
+    { isComposing: true, keyCode: 13 },
+    { isComposing: false, keyCode: 229 },
+  ])("recognizes composition: %j", ({ isComposing, keyCode }) => {
+    expect(isImeCompositionKey(isComposing, keyCode)).toBe(true);
   });
 });

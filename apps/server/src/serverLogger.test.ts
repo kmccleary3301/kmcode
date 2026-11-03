@@ -191,6 +191,24 @@ describe("ServerLoggerLive", () => {
     }),
   );
 
+  it.effect("exports logged request failures without their connection tickets", () =>
+    Effect.gen(function* () {
+      const { requests } = yield* logInSpanThrough(
+        { otlpLogsUrl: "https://collector.example.com/v1/logs" },
+        Effect.logError(
+          Cause.die(
+            new Error("RequestParseError (GET /ws?wsTicket=ticket-secret&dpop=proof-secret)"),
+          ),
+        ),
+      );
+
+      const body = requests.map((request) => request.body).join("\n");
+      assert.include(body, "wsTicket=<redacted>&dpop=<redacted>");
+      assert.notInclude(body, "ticket-secret");
+      assert.notInclude(body, "proof-secret");
+    }),
+  );
+
   it.effect("stays off the network when no logs endpoint is configured", () =>
     Effect.gen(function* () {
       const requests = yield* logThrough({});

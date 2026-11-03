@@ -8,6 +8,11 @@ import * as OtlpLogger from "effect/observability/OtlpLogger";
 
 import * as ServerConfig from "./config.ts";
 
+const redactingCredentials = <Output>(logger: Logger.Logger<unknown, Output>) =>
+  Logger.make<unknown, Output>((options) =>
+    logger.log({ ...options, cause: SharedObservability.redactCauseCredentials(options.cause) }),
+  );
+
 export const layer = Effect.gen(function* () {
   const config = yield* ServerConfig.ServerConfig;
   const layerMinimumLogLevel = Layer.succeed(References.MinimumLogLevel, config.logLevel);
@@ -37,8 +42,11 @@ export const layer = Effect.gen(function* () {
   // https://opentelemetry.io/blog/2026/deprecating-span-events/
   const layerLogger = Logger.layer(
     otlpLogger === undefined
-      ? [Logger.consolePretty(), Logger.tracerLogger]
-      : [Logger.consolePretty(), otlpLogger],
+      ? [redactingCredentials(Logger.consolePretty()), Logger.tracerLogger]
+      : [
+          redactingCredentials(Logger.consolePretty()),
+          otlpLogger?.pipe(Effect.map(redactingCredentials)),
+        ],
     { mergeWithExisting: false },
   ).pipe(
     Layer.provide(OtlpExporter.layerFlusher),

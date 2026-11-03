@@ -55,6 +55,9 @@ export const ProviderApprovalDecision = Schema.Literals([
   "cancel",
 ]);
 export type ProviderApprovalDecision = typeof ProviderApprovalDecision.Type;
+// Why a request can require approval even when the thread runs with full access.
+export const ProviderApprovalFullAccessOverride = Schema.Literals(["ask_rule", "provider_check"]);
+export type ProviderApprovalFullAccessOverride = typeof ProviderApprovalFullAccessOverride.Type;
 
 export const ProviderApprovalOption = Schema.Struct({
   decision: ProviderApprovalDecision,

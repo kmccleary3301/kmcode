@@ -9,6 +9,7 @@ import {
   PRIMARY_LOCAL_ENVIRONMENT_ID,
 } from "@t3tools/contracts";
 import type {
+  DiscoveredLocalServer,
   ForwardedPort,
   ListeningPort,
   PortForwardHost,
@@ -35,6 +36,8 @@ import { stackedThreadToast, toastManager } from "~/components/ui/toast";
 import { cn } from "~/lib/utils";
 import { useRightPanelStore } from "~/rightPanelStore";
 import { openPreviewSession } from "../preview/openPreviewSession";
+import { useThreadDiscoveredPorts } from "../../portDiscoveryState";
+import { useServerConfigs } from "../../state/entities";
 import { useClientSettings } from "../../hooks/useSettings";
 import {
   autoForwardErrorsAtom,
@@ -76,6 +79,7 @@ interface PortRow {
   readonly remoteHost: PortForwardHost;
   readonly forward: ForwardedPort | null;
   readonly process: ListeningPort | null;
+  readonly discoveredServer: DiscoveredLocalServer | null;
   readonly error: string | null;
 }
 
@@ -90,6 +94,10 @@ export function formatLoopbackUrl(host: PortForwardHost, port: number): string {
   return `http://${host === "::1" ? "[::1]" : host}:${port}`;
 }
 
+function portForwardHostForDiscoveredServer(host: string): PortForwardHost {
+  return host === "127.0.0.1" || host === "::1" ? host : "localhost";
+}
+
 export function PortsView({ threadRef }: PortsViewProps) {
   const environmentId = threadRef.environmentId;
   const desktop = isPortForwardingAvailable();
@@ -99,6 +107,16 @@ export function PortsView({ threadRef }: PortsViewProps) {
   const canOperatePreview = useEnvironmentScope(environmentId, AuthPreviewOperateScope);
   const previewAvailable = usePreviewAvailable(environmentId);
   const openPreview = useAtomCommand(previewEnvironment.open, {
+    reportFailure: false,
+  });
+  const supportsLocalServerStop =
+    useServerConfigs().get(environmentId)?.environment.capabilities.localServerStop === true;
+  const canStopLocalServer = connected && permitted && supportsLocalServerStop;
+  const threadDiscoveredPorts = useThreadDiscoveredPorts({
+    environmentId,
+    threadId: threadRef.threadId,
+  });
+  const stopLocalServerCommand = useAtomCommand(previewEnvironment.stopLocalServer, {
     reportFailure: false,
   });
   const forwards = useAtomValue(forwardedPortsAtom);
@@ -185,6 +203,54 @@ export function PortsView({ threadRef }: PortsViewProps) {
       }
     };
   }, [connected, desktop, environmentId]);
+  function canStopDiscoveredServer(
+    server: DiscoveredLocalServer | null,
+  ): server is DiscoveredLocalServer & { readonly pid: number } {
+    return (
+      server !== null &&
+      server.pid !== null &&
+      canStopLocalServer &&
+      server.agent?.threadId === threadRef.threadId
+    );
+  }
+
+  function stopDiscoveredServerButton(row: PortRow) {
+    const server = row.discoveredServer;
+    if (!canStopDiscoveredServer(server)) return null;
+    return (
+      <Button
+        size="icon-xs"
+        variant="ghost-destructive"
+        className="pointer-coarse:size-11"
+        disabled={busy}
+        aria-label={`Stop server on port ${server.port}`}
+        title="Stop server"
+        onClick={() => void stopDiscoveredServer(server)}
+      >
+        <Square />
+      </Button>
+    );
+  }
+
+  async function stopDiscoveredServer(server: DiscoveredLocalServer | null) {
+    if (!canStopDiscoveredServer(server)) return;
+    setError(null);
+    setBusy(true);
+    try {
+      const result = await stopLocalServerCommand({
+        environmentId,
+        input: { pid: server.pid, port: server.port },
+      });
+      if (result._tag === "Failure" && !isAtomCommandInterrupted(result)) {
+        const failure = squashAtomCommandFailure(result);
+        setError(failure instanceof Error ? failure.message : "Could not stop the server.");
+      }
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : "Could not stop the server.");
+    } finally {
+      setBusy(false);
+    }
+  }
   const rows = useMemo(() => {
     const ports: Record<string, PortRow> = {};
     for (const forward of forwards) {
@@ -196,6 +262,7 @@ export function PortsView({ threadRef }: PortsViewProps) {
         remoteHost: forward.remoteHost,
         forward,
         process: null,
+        discoveredServer: null,
         error: forward.status === "error" ? forward.error : null,
       };
     }
@@ -209,16 +276,48 @@ export function PortsView({ threadRef }: PortsViewProps) {
         remoteHost: process.host,
         forward: ports[key]?.forward ?? null,
         process,
+        discoveredServer: null,
         error: rowError,
       };
     }
+    for (const server of threadDiscoveredPorts) {
+      const remoteHost = portForwardHostForDiscoveredServer(server.host);
+      const key = portKey(environmentId, remoteHost, server.port);
+      const existing =
+        ports[key] ??
+        ports[portKey(environmentId, "localhost", server.port)] ??
+        ports[portKey(environmentId, "127.0.0.1", server.port)] ??
+        ports[portKey(environmentId, "::1", server.port)];
+      const rowKey = existing?.key ?? key;
+      ports[rowKey] = {
+        key: rowKey,
+        remotePort: server.port,
+        remoteHost: existing?.remoteHost ?? remoteHost,
+        forward: existing?.forward ?? null,
+        process: existing?.process ?? null,
+        discoveredServer: server,
+        error: existing?.error ?? null,
+      };
+    }
     return Object.values(ports)
-      .filter((row) => row.forward !== null || !removedPortNumbers.has(row.remotePort))
+      .filter(
+        (row) =>
+          row.forward !== null ||
+          row.discoveredServer !== null ||
+          !removedPortNumbers.has(row.remotePort),
+      )
       .toSorted(
         (left, right) =>
           left.remotePort - right.remotePort || left.remoteHost.localeCompare(right.remoteHost),
       );
-  }, [autoForwardErrors, discovery.ports, environmentId, forwards, removedPortNumbers]);
+  }, [
+    autoForwardErrors,
+    discovery.ports,
+    environmentId,
+    forwards,
+    removedPortNumbers,
+    threadDiscoveredPorts,
+  ]);
 
   async function forward(port: number, host: PortForwardHost, requestedLocalPort: number) {
     setError(null);
@@ -434,8 +533,7 @@ export function PortsView({ threadRef }: PortsViewProps) {
               variant="ghost"
               className="pointer-coarse:min-h-11"
               aria-label={
-                `${showRemoved ? "Hide" : "Show"} removed ports ` +
-                `(${removedPortEntries.length})`
+                `${showRemoved ? "Hide" : "Show"} removed ports ` + `(${removedPortEntries.length})`
               }
               onClick={() => setShowRemoved((visible) => !visible)}
             >
@@ -649,19 +747,28 @@ export function PortsView({ threadRef }: PortsViewProps) {
                         )}
                       >
                         <span className={cn(!desktop && "max-w-28 truncate sm:max-w-none")}>
-                          {row.process?.processName ?? "—"}
+                          {row.discoveredServer?.processName ?? row.process?.processName ?? "—"}
                         </span>
-                        {row.process?.pid != null && (
+                        {(row.discoveredServer?.pid ?? row.process?.pid) != null && (
                           <span
                             className={cn(
                               "ml-1 text-muted-foreground",
                               !desktop && "ml-0 text-3xs",
                             )}
                           >
-                            {row.process.pid}
+                            {row.discoveredServer?.pid ?? row.process?.pid}
                           </span>
                         )}
                       </div>
+                      {row.discoveredServer?.agent?.threadId === threadRef.threadId ? (
+                        <span className="text-3xs text-muted-foreground sm:text-xs">
+                          Agent-owned
+                        </span>
+                      ) : row.discoveredServer?.terminal?.threadId === threadRef.threadId ? (
+                        <span className="text-3xs text-muted-foreground sm:text-xs">
+                          Terminal-owned
+                        </span>
+                      ) : null}
                       {!desktop && row.error && (
                         <span className="text-destructive sm:hidden">{row.error}</span>
                       )}
@@ -708,6 +815,7 @@ export function PortsView({ threadRef }: PortsViewProps) {
                   <td className="px-3 py-2">
                     {desktop ? (
                       <div className="flex items-center gap-1">
+                        {stopDiscoveredServerButton(row)}
                         {row.forward && (
                           <Button
                             size="icon-xs"
@@ -773,6 +881,7 @@ export function PortsView({ threadRef }: PortsViewProps) {
                       </div>
                     ) : (
                       <div className="flex items-center gap-1">
+                        {stopDiscoveredServerButton(row)}
                         <Button
                           size="xs"
                           variant="outline"

@@ -1,11 +1,13 @@
 import * as ServerSecretStore from "../auth/ServerSecretStore.ts";
 import * as CodexInstallation from "./CodexInstallation.ts";
+import * as AntigravityInstallation from "./AntigravityInstallation.ts";
 import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { describe, it, assert, expect } from "@effect/vitest";
 import * as DateTime from "effect/DateTime";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
+import * as FileSystem from "effect/FileSystem";
 import * as Path from "effect/Path";
 import * as Exit from "effect/Exit";
 import * as Fiber from "effect/Fiber";
@@ -40,8 +42,8 @@ import { applyServerSettingsPatch } from "@t3tools/shared/serverSettings";
 
 import { checkCodexProviderStatus, type CodexAppServerProviderSnapshot } from "./CodexProvider.ts";
 import { checkClaudeProviderStatus } from "./ClaudeProvider.ts";
+import type { ClaudeModelCatalog } from "./ClaudeModelCatalog.ts";
 import * as BackgroundPolicy from "../background/BackgroundPolicy.ts";
-import * as AntigravityInstallation from "./AntigravityInstallation.ts";
 import * as ModelManifest from "./ModelManifest.ts";
 import { applyProviderCompatibility } from "./providerCompatibility.ts";
 import * as ResetCreditCoordinator from "./resetCreditCoordinator.ts";
@@ -51,6 +53,7 @@ import * as ProviderEventLoggers from "./ProviderEventLoggers.ts";
 import * as ProviderInstanceRegistryHydration from "./ProviderInstanceRegistryHydration.ts";
 import * as ServerConfig from "../config.ts";
 import * as ServerSettingsModule from "../serverSettings.ts";
+import * as PortScanner from "../preview/PortScanner.ts";
 import {
   readProviderStatusCache,
   resolveProviderStatusCachePath,
@@ -453,6 +456,91 @@ it.layer(
           },
         ]);
       }),
+    );
+
+    it.effect.each([
+      {
+        stdout: "codex-cli 0.1.4161006",
+        code: 0,
+        expectedVersion: "0.1.4161006",
+      },
+      {
+        stdout: "codex-cli v0.159.0-beta.1",
+        code: 0,
+        expectedVersion: "0.159.0-beta.1",
+      },
+      { stdout: "codex-cli 0.1.4161006", code: 1, expectedVersion: null },
+      { stdout: "unrecognized output", code: 0, expectedVersion: null },
+    ] as const)(
+      "uses the Codex CLI version when the app-server probe fails ($stdout)",
+      ({ stdout, code, expectedVersion }) =>
+        Effect.gen(function* () {
+          const spawner = recordingMockSpawnerLayer(() => ({
+            stdout,
+            stderr: "",
+            code,
+          }));
+          const status = yield* checkCodexProviderStatus(
+            decodeCodexSettings({
+              binaryPath: process.execPath,
+              homePath: "/tmp/codex-home",
+            }),
+            () => Effect.fail(new CodexErrors.CodexAppServerProcessExitedError({ code: 1 })),
+            { ...process.env, KM_CODEX_VERSION_TEST: "preserved" },
+          ).pipe(Effect.provide(spawner.layer));
+
+          assert.strictEqual(status.status, "error");
+          assert.strictEqual(status.installed, true);
+          assert.strictEqual(status.version, expectedVersion);
+          assert.match(status.message ?? "", /^Codex app-server provider probe failed:/);
+          assert.deepStrictEqual(spawner.commands[0]?.args, ["--version"]);
+          assert.strictEqual(spawner.commands[0]?.env?.CODEX_HOME, "/tmp/codex-home");
+          assert.strictEqual(spawner.commands[0]?.env?.KM_CODEX_VERSION_TEST, "preserved");
+        }),
+    );
+
+    it.effect("skips the version fallback when the app-server cannot spawn", () =>
+      Effect.gen(function* () {
+        const spawner = recordingMockSpawnerLayer(() => ({
+          stdout: "",
+          stderr: "",
+          code: 0,
+        }));
+        const status = yield* checkCodexProviderStatus(defaultCodexSettings, () =>
+          Effect.fail(
+            new CodexErrors.CodexAppServerSpawnError({
+              command: "codex app-server",
+              cause: new Error("not found"),
+            }),
+          ),
+        ).pipe(Effect.provide(spawner.layer));
+
+        assert.strictEqual(status.installed, false);
+        assert.strictEqual(status.version, null);
+        assert.deepStrictEqual(spawner.commands, []);
+      }),
+    );
+
+    it.effect.each([
+      { usagePlanType: "free", expected: "ChatGPT Free Subscription" },
+      { usagePlanType: null, expected: "ChatGPT Pro 20x Subscription" },
+      { usagePlanType: "unknown", expected: "ChatGPT Subscription" },
+    ] as const)(
+      "maps Codex usage plan metadata to labels ($usagePlanType)",
+      ({ usagePlanType, expected }) =>
+        Effect.gen(function* () {
+          const status = yield* checkCodexProviderStatus(defaultCodexSettings, () =>
+            Effect.succeed(
+              makeCodexProbeSnapshot({
+                rateLimits: {
+                  snapshot: { planType: usagePlanType },
+                  resetCredits: null,
+                },
+              }),
+            ),
+          );
+          assert.strictEqual(status.auth.label, expected);
+        }),
     );
 
     it.effect("passes configured launch args to the Codex provider probe", () =>
@@ -2699,6 +2787,7 @@ it.layer(
         yield* Effect.addFinalizer(() => Scope.close(scope, Exit.void));
         const layerProviderRegistry = ProviderRegistry.layer.pipe(
           Layer.provideMerge(ProviderInstanceRegistryHydration.layer),
+          Layer.provide(PortScanner.layerTest),
           Layer.provideMerge(AntigravityInstallation.AntigravityInstallation.layer),
           Layer.provideMerge(
             Layer.succeed(ServerSettingsModule.ServerSettingsService, serverSettings),
@@ -2803,6 +2892,7 @@ it.layer(
         yield* Effect.addFinalizer(() => Scope.close(scope, Exit.void));
         const layerProviderRegistry = ProviderRegistry.layer.pipe(
           Layer.provideMerge(ProviderInstanceRegistryHydration.layer),
+          Layer.provide(PortScanner.layerTest),
           Layer.provideMerge(AntigravityInstallation.AntigravityInstallation.layer),
           Layer.provideMerge(
             Layer.succeed(ServerSettingsModule.ServerSettingsService, serverSettings),
@@ -2923,6 +3013,7 @@ it.layer(
         yield* Effect.addFinalizer(() => Scope.close(scope, Exit.void));
         const layerProviderRegistry = ProviderRegistry.layer.pipe(
           Layer.provideMerge(ProviderInstanceRegistryHydration.layer),
+          Layer.provide(PortScanner.layerTest),
           Layer.provideMerge(AntigravityInstallation.AntigravityInstallation.layer),
           Layer.provideMerge(
             Layer.succeed(ServerSettingsModule.ServerSettingsService, serverSettings),
@@ -2989,6 +3080,7 @@ it.layer(
           yield* Effect.addFinalizer(() => Scope.close(scope, Exit.void));
           const layerProviderRegistry = ProviderRegistry.layer.pipe(
             Layer.provideMerge(ProviderInstanceRegistryHydration.layer),
+            Layer.provide(PortScanner.layerTest),
             Layer.provideMerge(AntigravityInstallation.AntigravityInstallation.layer),
             Layer.provideMerge(
               Layer.succeed(ServerSettingsModule.ServerSettingsService, serverSettings),
@@ -3111,6 +3203,100 @@ it.layer(
       ),
     );
 
+    it.effect.each([
+      {
+        settings: { env: { ANTHROPIC_BASE_URL: "https://hub.example.test:8317" } },
+        baseUrl: "https://api.anthropic.com",
+        type: "customEndpoint",
+        label: "Custom API endpoint",
+      },
+      {
+        settings: { env: { ANTHROPIC_BASE_URL: "https://api.anthropic.com" } },
+        baseUrl: "https://proxy.example",
+        type: "apiKey",
+        label: "Claude API Key",
+      },
+      {
+        settings: {},
+        baseUrl: "https://proxy.example",
+        type: "customEndpoint",
+        label: "Custom API endpoint",
+      },
+    ])(
+      "uses Claude's settings endpoint before the process endpoint: $type / $baseUrl",
+      ({ settings, baseUrl, type, label }) =>
+        Effect.gen(function* () {
+          const fileSystem = yield* FileSystem.FileSystem;
+          const path = yield* Path.Path;
+          const configDir = yield* fileSystem.makeTempDirectoryScoped({
+            prefix: "t3-claude-settings-",
+          });
+          yield* fileSystem.writeFileString(
+            path.join(configDir, "settings.json"),
+            JSON.stringify(settings),
+          );
+          const status = yield* checkClaudeProviderStatus(
+            { ...defaultClaudeSettings, homePath: configDir },
+            claudeCapabilities({
+              tokenSource: "ANTHROPIC_AUTH_TOKEN",
+              apiProvider: "firstParty",
+            }),
+            { ANTHROPIC_BASE_URL: baseUrl },
+          );
+          assert.strictEqual(status.status, "ready");
+          assert.strictEqual(status.auth.type, type);
+          assert.strictEqual(status.auth.label, label);
+        }).pipe(
+          Effect.provide(
+            layerMockSpawner((args) => {
+              const joined = args.join(" ");
+              if (joined === "--version") return { stdout: "1.0.0\n", stderr: "", code: 0 };
+              throw new Error(`Unexpected args: ${joined}`);
+            }),
+          ),
+        ),
+    );
+
+    it.effect("keeps Claude model upgrade guidance when capabilities are unavailable", () => {
+      const modelCatalog = {
+        models: [
+          {
+            model: {
+              slug: "claude-next",
+              name: "Next",
+              isCustom: false,
+              capabilities: null,
+            },
+            runtime: {},
+            compatibility: { minVersion: "1.1.0" },
+          },
+        ],
+      } satisfies ClaudeModelCatalog;
+      return Effect.gen(function* () {
+        const status = yield* checkClaudeProviderStatus(
+          defaultClaudeSettings,
+          noClaudeCapabilities,
+          undefined,
+          undefined,
+          modelCatalog,
+        );
+        assert.strictEqual(status.status, "warning");
+        assert.include(status.message ?? "", "Claude Code v1.0.0 is too old for Next.");
+        assert.include(
+          status.message ?? "",
+          "Could not verify Claude authentication status from initialization result.",
+        );
+      }).pipe(
+        Effect.provide(
+          layerMockSpawner((args) => {
+            const joined = args.join(" ");
+            if (joined === "--version") return { stdout: "1.0.0\n", stderr: "", code: 0 };
+            throw new Error(`Unexpected args: ${joined}`);
+          }),
+        ),
+      );
+    });
+
     it.effect("returns ready and labels Bedrock-backed Claude as authenticated", () =>
       Effect.gen(function* () {
         // Bedrock authenticates via external AWS credentials, so the SDK init
@@ -3145,6 +3331,18 @@ it.layer(
         assert.strictEqual(status.auth.status, "authenticated");
         assert.strictEqual(status.auth.type, "maxplan");
         assert.strictEqual(status.auth.label, "Claude Max Subscription");
+        for (const [subscriptionType, expectedLabel] of [
+          ["claudemax5xsubscription", "Claude Max Subscription"],
+          ["claudemax20xsubscription", "Claude Ultra Subscription"],
+          ["max5", "Claude Max Subscription"],
+          ["max20", "Claude Ultra Subscription"],
+        ] as const) {
+          const planStatus = yield* checkClaudeProviderStatus(
+            defaultClaudeSettings,
+            claudeCapabilities({ subscriptionType }),
+          );
+          assert.strictEqual(planStatus.auth.label, expectedLabel);
+        }
       }).pipe(
         Effect.provide(
           layerMockSpawner((args) => {
@@ -3459,8 +3657,8 @@ it.layer(
         assert.strictEqual(status.status, "warning");
         assert.strictEqual(status.installed, true);
         assert.strictEqual(status.auth.status, "unknown");
-        assert.strictEqual(
-          status.message,
+        assert.include(
+          status.message ?? "",
           "Could not verify Claude authentication status from initialization result.",
         );
       }).pipe(

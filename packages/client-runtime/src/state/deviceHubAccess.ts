@@ -12,6 +12,7 @@
  * Callers fetch a fresh one each time they (re)connect a stream.
  */
 import * as Effect from "effect/Effect";
+import * as Redacted from "effect/Redacted";
 import type { HttpClient } from "effect/http";
 
 import * as RemoteEnvironmentAuthorization from "../authorization/service.ts";
@@ -53,7 +54,7 @@ export const resolveDeviceHubAccess = Effect.fn("clientRuntime.state.resolveDevi
     return {
       httpBase,
       wsBase,
-      query: { wsTicket: ticket.ticket },
+      query: { wsTicket: Redacted.value(ticket.ticket) },
       credentials: false,
     };
   },

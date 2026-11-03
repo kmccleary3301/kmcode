@@ -58,6 +58,10 @@ in the receiving app. Connection settings are under **Settings → Connections**
 on web and desktop and **Settings → Environments** on mobile. A loopback address
 such as `127.0.0.1` reaches only the device opening the link.
 
+On a computer with the desktop app, you can open the printed `t3code://pair`
+app link instead. The desktop app asks you to confirm the server address, then
+adds it.
+
 Pairing authorizes that device for future connections. Use a fresh one-time link
 for each new device; you do not need the original token to reconnect. Links
 created in Settings can only be copied from the client that created them while
@@ -207,8 +211,10 @@ an error rather than an empty list.
 
 Open a thread's terminal drawer and select **Ports**. The web app refreshes the
 listener list while this panel is open, including when you connect directly to a
-remote server through Tailscale HTTPS. Start a development server in the terminal
-and its port appears automatically.
+remote server through Tailscale HTTPS. Development servers started in a terminal
+or by a thread agent appear automatically; agent-owned servers are labeled with
+their thread. With terminal-operation permission on supported hosts, **Stop**
+ends an agent-owned server when its process group can be isolated safely.
 On narrow screens, the port number stays visible while you scroll to the actions.
 Available actions have separate touch-sized targets so you can identify the port
 before changing it.
@@ -312,8 +318,22 @@ desktop app installed, it names the full path of the app's own `t3` instead. It 
 any missing libraries with apt. It is safe to run again. Without `sudo`, it
 only reports what it would change.
 
-The browser always runs in Chrome's sandbox. Where you cannot change the host,
-set `T3CODE_SERVER_BROWSER_SANDBOX=0` for the environment to run without it.
+The browser runs in Chrome's sandbox by default. Chrome cannot start that sandbox
+as root. If your KM Code server runs as root, run it as a nonroot user to keep
+sandboxing enabled. `t3 browser setup` does not fix this root restriction.
+
+If you need to run as root, or cannot enable the sandbox on your host, set
+`T3CODE_SERVER_BROWSER_SANDBOX=0` in the **KM Code server's environment** and restart
+the server. This disables Chrome's sandbox. For a manual launch:
+
+```sh
+T3CODE_SERVER_BROWSER_SANDBOX=0 t3 serve
+```
+
+For a systemd service, add `Environment=T3CODE_SERVER_BROWSER_SANDBOX=0` under
+`[Service]` in its configuration, run `sudo systemctl daemon-reload`, then restart
+your KM Code service. Setting the variable in an agent's terminal does not change the
+environment of an already running KM Code server.
 
 ## Connect an outside agent
 

@@ -142,6 +142,12 @@ export const ProviderAdapterV2Event = Schema.Union([
   }),
 
   Schema.Struct({
+    type: Schema.Literal("background_work.updated"),
+    driver: ProviderDriverKind,
+    providerTurnId: ProviderTurnId,
+    pending: Schema.Boolean,
+  }),
+  Schema.Struct({
     type: Schema.Literal("turn.terminal"),
     driver: ProviderDriverKind,
     providerThreadId: ProviderThreadId,
@@ -331,6 +337,20 @@ export class ProviderAdapterInterruptError extends Schema.TaggedError<ProviderAd
     return `Failed to interrupt ${this.driver} provider turn ${this.providerTurnId}.`;
   }
 }
+/** The provider did not confirm a stop in time; its processes may still be running. */
+export class ProviderAdapterInterruptTimeoutError extends Schema.TaggedError<ProviderAdapterInterruptTimeoutError>()(
+  "ProviderAdapterInterruptTimeoutError",
+  {
+    driver: ProviderDriverKind,
+    providerThreadId: ProviderThreadId,
+    providerTurnId: ProviderTurnId,
+    timeoutMs: Schema.Number,
+  },
+) {
+  override get message(): string {
+    return `The ${this.driver} provider did not confirm stopping turn ${this.providerTurnId} within ${this.timeoutMs} ms.`;
+  }
+}
 
 export class ProviderAdapterRuntimeRequestResponseError extends Schema.TaggedError<ProviderAdapterRuntimeRequestResponseError>()(
   "ProviderAdapterRuntimeRequestResponseError",
@@ -385,6 +405,7 @@ export const ProviderAdapterV2Error = Schema.Union([
   ProviderAdapterSteerRunUnsupportedError,
   ProviderAdapterSteerRunError,
   ProviderAdapterInterruptError,
+  ProviderAdapterInterruptTimeoutError,
   ProviderAdapterRuntimeRequestResponseError,
   ProviderAdapterEventStreamError,
   ProviderAdapterProtocolError,
@@ -427,10 +448,7 @@ export interface ProviderAdapterV2TurnInput {
   readonly modelSelection: ModelSelection;
   readonly runtimePolicy: ProviderAdapterV2RuntimePolicy;
   /** Whether a native turn's original orchestration attempt is still active. */
-  readonly isRunAttemptActive?: (
-    runId: RunId,
-    attemptId: RunAttemptId,
-  ) => Effect.Effect<boolean>;
+  readonly isRunAttemptActive?: (runId: RunId, attemptId: RunAttemptId) => Effect.Effect<boolean>;
   /**
    * What the thread's MCP Apps want the agent to know (`ui/update-model-context`),
    * latest per app, keyed stably per app. Adapters that host apps deliver it as
@@ -457,6 +475,7 @@ export interface ProviderAdapterV2InterruptInput {
 export interface ProviderAdapterV2RuntimeRequestResponseInput {
   readonly requestId: RuntimeRequestId;
   readonly decision?: ProviderApprovalDecision;
+  readonly feedback?: string;
   readonly answers?: ProviderUserInputAnswers;
   readonly response?: unknown;
 }

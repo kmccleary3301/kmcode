@@ -1,5 +1,5 @@
 import { describe, expect, it } from "@effect/vitest";
-import { HostProcessPlatform } from "@t3tools/shared/hostProcess";
+import { HostProcessPlatform, HostProcessUserId } from "@t3tools/shared/hostProcess";
 import * as Effect from "effect/Effect";
 import * as Sink from "effect/Sink";
 import * as Stream from "effect/Stream";
@@ -47,7 +47,12 @@ const lddReporting = (stdout: string) => {
   return { spawner, commands };
 };
 
-const diagnose = (input: { platform: NodeJS.Platform; output: string; ldd: string }) => {
+const diagnose = (input: {
+  platform: NodeJS.Platform;
+  output: string;
+  ldd: string;
+  uid?: number;
+}) => {
   const { spawner, commands } = lddReporting(input.ldd);
   return PreviewBrowserHost.diagnoseLaunchFailure({
     executable: "/home/me/.t3/tools/chrome-headless-shell/linux64/154/chrome-headless-shell",
@@ -56,11 +61,32 @@ const diagnose = (input: { platform: NodeJS.Platform; output: string; ldd: strin
   }).pipe(
     Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
     Effect.provideService(HostProcessPlatform, input.platform),
+    Effect.provideService(HostProcessUserId, input.uid),
     Effect.map((error) => ({ error, commands })),
   );
 };
 
 describe("diagnoseLaunchFailure", () => {
+  it.effect("explains how to restart a root server without Chrome's sandbox", () =>
+    Effect.gen(function* () {
+      const { error, commands } = yield* diagnose({
+        platform: "linux",
+        uid: 0,
+        output: PreviewBrowserHost.NO_SANDBOX_SIGNATURE,
+        ldd: "",
+      });
+      expect(error).toBeInstanceOf(PreviewBrowserHost.PreviewBrowserRootError);
+      expect(error?.message).toContain("KM Code server is running as root");
+      expect(error?.message).toContain("KM Code server's environment and restart the server");
+      expect(error?.message).toContain("T3CODE_SERVER_BROWSER_SANDBOX=0");
+      expect(error?.message).toContain("this disables Chrome's sandbox");
+      expect(error?.message).toContain("T3CODE_SERVER_BROWSER_SANDBOX=0 t3 serve");
+      expect(error?.message).toContain("Environment=T3CODE_SERVER_BROWSER_SANDBOX=0");
+      expect(error?.message).toContain("`t3 browser setup` cannot fix root sandboxing");
+      expect(commands).toEqual([]);
+    }),
+  );
+
   it.effect("turns Chrome's sandbox abort into the AppArmor steps", () =>
     Effect.gen(function* () {
       const { error, commands } = yield* diagnose({

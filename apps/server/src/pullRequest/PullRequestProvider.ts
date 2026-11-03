@@ -61,6 +61,7 @@ export class PullRequestProviderError extends Schema.TaggedError<PullRequestProv
     ]),
     detail: Schema.String,
     retryAt: Schema.optional(Schema.Number),
+    accessHint: Schema.optional(Schema.String),
     cause: Schema.optional(Schema.Defect()),
   },
 ) {
@@ -81,6 +82,7 @@ export interface ProviderChangeRequestWatchFingerprint {
 export interface PullRequestProviderFailure {
   readonly reason: PullRequestProviderError["reason"];
   readonly retryAt?: number | undefined;
+  readonly accessHint?: string | undefined;
 }
 
 /** A change request as the provider sees it, before the service attaches project context. */
@@ -345,6 +347,8 @@ export interface PullRequestProviderApi {
   >;
   readonly kind: SourceControlProviderKind;
   readonly capabilities: PullRequestCapabilities;
+  /** False for a recognized provider host this API is not configured to serve. */
+  readonly servesHost?: (host: string) => boolean;
 
   /** The signed-in account, which is what involvement filtering compares against. */
   readonly getViewer: (input: {
@@ -428,6 +432,12 @@ export interface PullRequestProviderApi {
   readonly getChangeRequest: (
     input: ProviderRepositoryRef & { readonly number: number },
   ) => Effect.Effect<ProviderChangeRequestDetail, PullRequestProviderError>;
+
+  /** Drops a provider's own held reads when a refresh or finished turn invalidates service reads. */
+  readonly forgetChangeRequestReads?: (scope?: {
+    readonly repository: string;
+    readonly number?: number;
+  }) => Effect.Effect<void>;
 
   /** Hosts without a narrow read use their existing detail response for hover cards. */
   readonly getChangeRequestPreview?: (

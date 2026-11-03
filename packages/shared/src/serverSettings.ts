@@ -1,12 +1,13 @@
 import {
   isProviderDriverKind,
   isProviderAvailable,
+  resolveProjectProviderInstanceEnabled,
   resolveProviderInstanceEnabled,
   isProviderTextGenerationCapable,
   type ModelSelection,
   type ProjectId,
   type ProjectScopedServerSettingKey,
-  type ProjectSettingsOverrides,
+  ProjectSettingsOverrides,
   type ProviderDriverKind,
   type ServerProvider,
   ServerSettings,
@@ -84,10 +85,14 @@ export function isModelSelectionProviderEnabled(
 
 export function resolveSourceControlWriterModelSelection(
   settings: ServerSettings,
-  providers?: ReadonlyArray<ServerProvider>,
+  providers: ReadonlyArray<ServerProvider> | undefined,
+  projectId: ProjectId | null,
 ): ModelSelection {
   const selection = settings.sourceControlWriterModelSelection;
-  if (!selection || !isModelSelectionProviderEnabled(settings, selection)) {
+  if (
+    !selection ||
+    !resolveProjectProviderInstanceEnabled(settings, projectId, selection.instanceId)
+  ) {
     return settings.textGenerationModelSelection;
   }
   if (providers === undefined) {
@@ -175,6 +180,37 @@ function mergeSettingsEntries<Value>(
     } else {
       next.set(id, config);
     }
+  }
+  return Object.fromEntries(next);
+}
+
+const knownProjectOverrideKeys = new Set(Object.keys(ProjectSettingsOverrides.fields));
+
+function mergeProjectSettingsOverridesPatch(
+  current: Readonly<Record<string, ProjectSettingsOverrides>>,
+  patch: Readonly<Record<string, ProjectSettingsOverrides | null>>,
+): Record<string, ProjectSettingsOverrides> {
+  const next = new Map(Object.entries(current));
+  for (const [projectId, entry] of Object.entries(patch)) {
+    if (entry === null) {
+      next.delete(projectId);
+      continue;
+    }
+    const storedProviderInstances = current[projectId]?.providerInstances;
+    next.set(projectId, {
+      // Preserve downgraded storage, but only accept keys this build can validate from the patch.
+      ...Object.fromEntries(
+        Object.entries<unknown>(current[projectId] ?? {}).filter(
+          ([key]) => !knownProjectOverrideKeys.has(key),
+        ),
+      ),
+      ...Object.fromEntries(
+        Object.entries<unknown>(entry).filter(([key]) => knownProjectOverrideKeys.has(key)),
+      ),
+      ...(Object.hasOwn(entry, "providerInstances") || storedProviderInstances === undefined
+        ? {}
+        : { providerInstances: storedProviderInstances }),
+    });
   }
   return Object.fromEntries(next);
 }
@@ -386,7 +422,10 @@ export function applyServerSettingsPatch(
       ? {
           projectSettingsOverrides: Object.fromEntries(
             Object.entries(
-              mergeSettingsEntries(current.projectSettingsOverrides, projectSettingsOverridesPatch),
+              mergeProjectSettingsOverridesPatch(
+                current.projectSettingsOverrides,
+                projectSettingsOverridesPatch,
+              ),
             ).filter(([, entry]) => Object.keys(entry).length > 0),
           ),
         }

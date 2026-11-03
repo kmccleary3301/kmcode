@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vite-plus/test";
 import { MessageId } from "@t3tools/contracts";
+import { ATTACHMENT_ONLY_BOOTSTRAP_PROMPT } from "@t3tools/shared/composerContextReferences";
 import type { MessagesTimelineRow } from "./MessagesTimeline.logic";
 import { deriveTimelineMinimapItems, resolveTimelineMinimapPreview } from "./timelineMinimapItems";
 import type { ChatMessage } from "../../types";
@@ -48,6 +49,17 @@ describe("timeline minimap previews", () => {
     expect(resolveTimelineMinimapPreview(items[1]!)?.assistantText).toBe("Second answer");
     expect(items[0]?.assistantText).toBe(" Done\t now ");
   });
+
+  it.each(["", "Ultrathink:\n"])(
+    "omits attachment-only bootstrap text from the minimap preview (%j)",
+    (prefix) => {
+      const items = deriveTimelineMinimapItems(
+        rows([["user", prefix + ATTACHMENT_ONLY_BOOTSTRAP_PROMPT]]),
+      );
+      expect(items[0]?.userText).toBe("");
+      expect(resolveTimelineMinimapPreview(items[0]!)?.userText).toBeNull();
+    },
+  );
 
   it("handles an unanswered prompt, empty responses, and a closed preview", () => {
     const items = deriveTimelineMinimapItems(

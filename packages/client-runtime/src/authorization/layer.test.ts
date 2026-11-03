@@ -2,6 +2,7 @@ import {
   AuthAdministrativeScopes,
   AuthStandardClientScopes,
   EnvironmentId,
+  ORCHESTRATION_PROTOCOL_VERSION,
 } from "@t3tools/contracts";
 import {
   RelayEnvironmentConnectScope,
@@ -24,6 +25,11 @@ import * as RpcHttp from "../rpc/http.ts";
 import * as ClientCapabilities from "../platform/capabilities.ts";
 import * as RemoteEnvironmentAuthorization from "./service.ts";
 import * as TokenStore from "./tokenStore.ts";
+import { BearerConnectionCredential, BearerConnectionProfile } from "../connection/catalog.ts";
+import * as ConnectionCredentialStore from "../connection/credentialStore.ts";
+import { BearerConnectionTarget } from "../connection/model.ts";
+import * as ConnectionProfileStore from "../connection/profileStore.ts";
+import * as ConnectionResolver from "../connection/resolver.ts";
 
 const ENVIRONMENT_ID = EnvironmentId.make("environment-1");
 const ENDPOINT = {
@@ -195,7 +201,7 @@ const makeHarness = Effect.fn("TestRemoteAuthorization.makeHarness")(function* (
     resetTokenCache: Effect.void,
   });
   const layer = RemoteEnvironmentAuthorization.layer.pipe(
-    Layer.provide(
+    Layer.provideMerge(
       Layer.mergeAll(
         RpcHttp.layerRemoteHttpClient(fetch.fetchFn),
         Layer.succeed(ManagedRelay.ManagedRelayDpopSigner, signer),
@@ -221,6 +227,60 @@ const makeHarness = Effect.fn("TestRemoteAuthorization.makeHarness")(function* (
       ),
     ),
   );
+  const prepareDirectBearer = (times: number) => {
+    const target = new BearerConnectionTarget({
+      environmentId: ENVIRONMENT_ID,
+      label: DESCRIPTOR.label,
+      connectionId: "direct-1",
+    });
+    const entry = {
+      target,
+      profile: Option.some(
+        new BearerConnectionProfile({
+          connectionId: target.connectionId,
+          environmentId: ENVIRONMENT_ID,
+          label: target.label,
+          httpBaseUrl: ENDPOINT.httpBaseUrl,
+          wsBaseUrl: ENDPOINT.wsBaseUrl,
+        }),
+      ),
+      enabled: true,
+    };
+    const unused = () => Effect.die("unused");
+    const resolverLayer = ConnectionResolver.layer.pipe(
+      Layer.provide(
+        Layer.mergeAll(
+          layer,
+          Layer.succeed(ConnectionProfileStore.ConnectionProfileStore, {
+            get: unused,
+            put: unused,
+            remove: unused,
+          }),
+          Layer.succeed(ConnectionCredentialStore.ConnectionCredentialStore, {
+            get: () =>
+              Effect.succeedSome(new BearerConnectionCredential({ token: "bearer-token" })),
+            put: unused,
+            remove: unused,
+          }),
+          Layer.succeed(ClientCapabilities.PrimaryEnvironmentAuth, {
+            bearerToken: Effect.succeedNone,
+          }),
+          Layer.succeed(ClientCapabilities.SshEnvironmentGateway, {
+            provision: unused,
+            prepare: unused,
+            disconnect: unused,
+          }),
+        ),
+      ),
+    );
+    return Effect.gen(function* () {
+      const resolver = yield* ConnectionResolver.ConnectionResolver;
+      return yield* Effect.forEach(Array.from({ length: times }), () =>
+        resolver.prepare(entry).pipe(Effect.result),
+      );
+    }).pipe(Effect.provide(resolverLayer));
+  };
+
   return {
     layer,
     tokens,
@@ -231,16 +291,75 @@ const makeHarness = Effect.fn("TestRemoteAuthorization.makeHarness")(function* (
     session,
     thumbprint,
     tokenReads,
+    prepareDirectBearer,
   };
 });
 
 describe("RemoteEnvironmentAuthorization", () => {
-  it.effect("reuses a validated bearer descriptor while issuing fresh websocket tickets", () =>
+  it.effect("prepares a cold direct bearer connection with one descriptor request", () =>
+    Effect.gen(function* () {
+      const harness = yield* makeHarness({
+        responses: [
+          Response.json({
+            ...DESCRIPTOR,
+            orchestrationProtocolVersion: ORCHESTRATION_PROTOCOL_VERSION,
+          }),
+          websocketTicket("cold-ticket"),
+        ],
+      });
+
+      const [prepared] = yield* harness.prepareDirectBearer(1);
+
+      expect(prepared).toMatchObject({
+        _tag: "Success",
+        success: { socketUrl: expect.stringContaining("wsTicket=cold-ticket") },
+      });
+      expect(harness.fetch.calls.map(([url]) => new URL(String(url)).pathname)).toEqual([
+        "/.well-known/t3/environment",
+        "/api/auth/websocket-ticket",
+      ]);
+    }),
+  );
+
+  it.effect("blocks a warm direct bearer prepare when the environment changes identity", () =>
+    Effect.gen(function* () {
+      const harness = yield* makeHarness({
+        responses: [
+          Response.json({
+            ...DESCRIPTOR,
+            orchestrationProtocolVersion: ORCHESTRATION_PROTOCOL_VERSION,
+          }),
+          websocketTicket("first-ticket"),
+          Response.json({
+            ...DESCRIPTOR,
+            environmentId: "another-environment",
+            orchestrationProtocolVersion: ORCHESTRATION_PROTOCOL_VERSION,
+          }),
+        ],
+      });
+
+      const [first, second] = yield* harness.prepareDirectBearer(2);
+
+      expect(first?._tag).toBe("Success");
+      expect(second).toMatchObject({
+        _tag: "Failure",
+        failure: { _tag: "ConnectionBlockedError", reason: "configuration" },
+      });
+      expect(
+        harness.fetch.calls.filter(([url]) => String(url).endsWith("/api/auth/websocket-ticket")),
+      ).toHaveLength(1);
+    }),
+  );
+});
+
+describe("RemoteEnvironmentAuthorization", () => {
+  it.effect("validates a fresh bearer descriptor while issuing fresh websocket tickets", () =>
     Effect.gen(function* () {
       const harness = yield* makeHarness({
         responses: [
           Response.json(DESCRIPTOR),
           websocketTicket("first-ticket"),
+          Response.json(DESCRIPTOR),
           websocketTicket("second-ticket"),
         ],
       });
@@ -262,14 +381,14 @@ describe("RemoteEnvironmentAuthorization", () => {
       expect(second.socketUrl).toContain("wsTicket=second-ticket");
       expect(
         harness.fetch.calls.filter(([url]) => String(url).endsWith("/.well-known/t3/environment")),
-      ).toHaveLength(1);
+      ).toHaveLength(2);
       expect(
         harness.fetch.calls.filter(([url]) => String(url).endsWith("/api/auth/websocket-ticket")),
       ).toHaveLength(2);
     }),
   );
 
-  it.effect("revalidates a bearer descriptor after the cache expires", () =>
+  it.effect("revalidates a bearer descriptor before each authorization", () =>
     Effect.gen(function* () {
       const reassignedEnvironmentId = EnvironmentId.make("environment-2");
       const harness = yield* makeHarness({
@@ -295,9 +414,8 @@ describe("RemoteEnvironmentAuthorization", () => {
           });
 
         yield* authorize();
-        yield* TestClock.adjust("10 seconds");
         return yield* authorize().pipe(Effect.flip);
-      }).pipe(Effect.provide(Layer.merge(harness.layer, TestClock.layer())));
+      }).pipe(Effect.provide(harness.layer));
 
       expect(failure).toEqual(
         expect.objectContaining({
@@ -569,6 +687,59 @@ describe("RemoteEnvironmentAuthorization", () => {
           });
         }
       }),
+  );
+
+  it.effect("renews a live socket's token in the minute before each expiry", () =>
+    Effect.gen(function* () {
+      const puts = yield* Queue.unbounded<void>();
+      const relayBlips = yield* Ref.make(1);
+      const harness = yield* makeHarness({
+        beforeBootstrap: Ref.getAndUpdate(relayBlips, (count) => count - 1).pipe(
+          Effect.flatMap((count) =>
+            count > 0
+              ? Effect.fail(
+                  new ManagedRelay.ManagedRelayRequestTimeoutError({
+                    activity: "Relay environment connection",
+                    timeoutMs: 30_000,
+                    traceId: null,
+                  }),
+                )
+              : Effect.void,
+          ),
+        ),
+        initialToken: persistedToken({ expiresAtEpochMs: 3_600_000 }),
+        responses: [
+          Response.json(DESCRIPTOR),
+          accessToken("renewed-1"),
+          Response.json(DESCRIPTOR),
+          accessToken("renewed-2"),
+        ],
+        beforePut: Queue.offer(puts, undefined).pipe(Effect.asVoid),
+      });
+
+      yield* Effect.gen(function* () {
+        const remote = yield* RemoteEnvironmentAuthorization.RemoteEnvironmentAuthorization;
+        yield* remote
+          .renewDpopBeforeExpiry({
+            expectedEnvironmentId: ENVIRONMENT_ID,
+            expiresAtEpochMs: 3_600_000,
+          })
+          .pipe(Effect.forkScoped);
+        yield* TestClock.adjust(3_540_000 - 1);
+        expect(yield* Ref.get(harness.bootstrapCalls)).toBe(0);
+        // The first try hits a relay blip, and the retry 5 s later succeeds.
+        yield* TestClock.adjust(1);
+        expect(yield* Ref.get(harness.bootstrapCalls)).toBe(1);
+        yield* TestClock.adjust(5_000);
+        yield* Queue.take(puts);
+        // Renewed at 0:59:05, so the next renewal is at 1:58:05.
+        yield* TestClock.adjust(7_085_000 - 3_545_000 - 1);
+        expect(yield* Ref.get(harness.bootstrapCalls)).toBe(2);
+        yield* TestClock.adjust(1);
+        yield* Queue.take(puts);
+        expect(yield* Ref.get(harness.bootstrapCalls)).toBe(3);
+      }).pipe(Effect.scoped, Effect.provide(Layer.merge(harness.layer, TestClock.layer())));
+    }),
   );
 
   it.effect("evicts an auth-invalid cached token and obtains a fresh bootstrap", () =>

@@ -48,6 +48,7 @@ import {
   sortInboxThreadsByReturn,
   resolveSidebarDropTarget,
   planSidebarThreadDrop,
+  resolveSidebarReorderableThreadKeys,
   sortPinnedThreadsForSidebar,
   sortProjectsForSidebar,
   sortScopedProjectsForSidebar,
@@ -61,6 +62,7 @@ import {
   resolveSidebarDropVerb,
 } from "./Sidebar.logic";
 import { threadSearchMatchKey } from "@t3tools/client-runtime/state/thread-search";
+import { scopeThreadRef, scopedThreadKey } from "@t3tools/client-runtime/environment";
 import { sortSettledThreads } from "@t3tools/client-runtime/state/thread-sort";
 import { EnvironmentId, ProjectId, ProviderInstanceId, RunId, ThreadId } from "@t3tools/contracts";
 
@@ -100,6 +102,76 @@ describe("resolveSidebarRowAccessibility", () => {
   ])("leads with the title without folding row actions into its name: %j", (input) => {
     const { expected, ...state } = input;
     expect(resolveSidebarRowAccessibility(state)).toEqual(expected);
+  });
+});
+
+describe("resolveSidebarReorderableThreadKeys", () => {
+  const connectedEnvironmentId = EnvironmentId.make("connected");
+  const cachedEnvironmentId = EnvironmentId.make("cached-offline");
+  const activeOnlyEnvironmentId = EnvironmentId.make("active-only");
+  const missingEnvironmentId = EnvironmentId.make("missing-config");
+  const thread = (environmentId: EnvironmentId, id: string) => ({
+    environmentId,
+    id: ThreadId.make(id),
+  });
+  const online = thread(connectedEnvironmentId, "online");
+  const cachedOffline = thread(cachedEnvironmentId, "offline");
+  const activeOnly = thread(activeOnlyEnvironmentId, "active-only");
+  const missingConfig = thread(missingEnvironmentId, "missing");
+  const config = (capabilities: {
+    readonly threadPinning?: boolean;
+    readonly threadPinReorder?: boolean;
+    readonly threadActiveReorder?: boolean;
+  }) => ({ environment: { capabilities } });
+  const serverConfigs = new Map([
+    [
+      connectedEnvironmentId,
+      config({ threadPinning: true, threadPinReorder: true, threadActiveReorder: true }),
+    ],
+    [
+      cachedEnvironmentId,
+      config({ threadPinning: true, threadPinReorder: true, threadActiveReorder: true }),
+    ],
+    [activeOnlyEnvironmentId, config({ threadActiveReorder: true })],
+  ]);
+  const keyOf = (entry: typeof online) =>
+    scopedThreadKey(scopeThreadRef(entry.environmentId, entry.id));
+
+  it("gates cached configuration on connectivity and capabilities", () => {
+    const result = resolveSidebarReorderableThreadKeys({
+      threads: [online, cachedOffline, activeOnly, missingConfig],
+      serverConfigs,
+      connectedEnvironmentIds: [
+        connectedEnvironmentId,
+        activeOnlyEnvironmentId,
+        missingEnvironmentId,
+      ],
+    });
+
+    expect([...result.draggableThreadKeys]).toEqual([keyOf(online)]);
+    expect([...result.activeReorderableThreadKeys]).toEqual([keyOf(online), keyOf(activeOnly)]);
+    expect(serverConfigs.has(cachedEnvironmentId)).toBe(true);
+  });
+
+  it("restores cached rows when their environment reconnects", () => {
+    const result = resolveSidebarReorderableThreadKeys({
+      threads: [online, cachedOffline, activeOnly, missingConfig],
+      serverConfigs,
+      connectedEnvironmentIds: [
+        connectedEnvironmentId,
+        cachedEnvironmentId,
+        activeOnlyEnvironmentId,
+        missingEnvironmentId,
+      ],
+    });
+
+    expect([...result.draggableThreadKeys]).toEqual([keyOf(online), keyOf(cachedOffline)]);
+    expect([...result.activeReorderableThreadKeys]).toEqual([
+      keyOf(online),
+      keyOf(cachedOffline),
+      keyOf(activeOnly),
+    ]);
+    expect(result.draggableThreadKeys.has(keyOf(missingConfig))).toBe(false);
   });
 });
 
@@ -2315,6 +2387,57 @@ describe("Working shelf (beta)", () => {
         activeReorderableKeys: new Set(["a2"]),
       });
       expect(above.kind === "move-active" && above.assignments[0]!.orderKey < "m").toBe(true);
+    });
+
+    it.each(["active", "pinned"] as const)(
+      "rejects moving writable rows across a frozen keyless boundary in %s",
+      (section) => {
+        const keysById = new Map([
+          ["offline", null],
+          ["a1", null],
+          ["a2", null],
+        ]);
+        const order = ["a2", "offline", "a1"];
+
+        const plan = planSidebarThreadDrop({
+          activeKey: "a2",
+          activeSection: section,
+          target: { section, pinnedOrder: order, activeOrder: order },
+          pinnedOrder: ["a1", "a2"],
+          pinnedKeysById: keysById,
+          reorderableKeys: new Set(["a1", "a2"]),
+          activeOrder: ["a1", "a2"],
+          activeKeysById: keysById,
+          activeReorderableKeys: new Set(["a1", "a2"]),
+        });
+
+        expect(plan).toEqual({ kind: "none" });
+      },
+    );
+
+    it("allows realizable pinned assignments before a frozen keyless row", () => {
+      const plan = planSidebarThreadDrop({
+        activeKey: "p2",
+        activeSection: "pinned",
+        target: {
+          section: "pinned",
+          pinnedOrder: ["p2", "p1", "offline"],
+          activeOrder: [],
+        },
+        pinnedOrder: ["p1", "p2", "offline"],
+        pinnedKeysById: new Map([
+          ["offline", null],
+          ["p1", null],
+          ["p2", null],
+        ]),
+        reorderableKeys: new Set(["p1", "p2"]),
+        activeOrder: [],
+        activeKeysById: new Map(),
+      });
+
+      expect(plan.kind).toBe("reorder-pinned");
+      if (plan.kind !== "reorder-pinned") return;
+      expect(plan.assignments.map(({ id }) => id)).toEqual(["p2", "p1"]);
     });
 
     it("only changes lifecycle when the inbox is time-ordered", () => {

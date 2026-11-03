@@ -124,15 +124,12 @@ describe("third-party license generation", () => {
     });
   });
 
-  it("renders generated notices from the ignored SPDX cache", async () => {
+  it("renders generated notices from committed SPDX templates", async () => {
     const fixture = await createFixture();
-    await writeJson(
-      NodePath.join(fixture.root, ".generated/third-party-licenses/spdx/v3.28.0/MIT.json"),
-      {
-        licenseId: "MIT",
-        licenseText: "MIT License\n\nCopyright (c) <year> <copyright holders>\n\nPermission text",
-      },
-    );
+    await writeJson(NodePath.join(fixture.root, "third-party-licenses/spdx/v3.28.0/MIT.json"), {
+      licenseId: "MIT",
+      licenseText: "MIT License\n\nCopyright (c) <year> <copyright holders>\n\nPermission text",
+    });
     await writeJson(fixture.configFile, {
       customNotices: [
         {
@@ -161,7 +158,7 @@ describe("third-party license generation", () => {
     );
   });
 
-  it("omits generated rows without a cache during optional development", async () => {
+  it("omits generated rows without a local template during optional development", async () => {
     const fixture = await createFixture();
     await writeJson(fixture.configFile, {
       customNotices: [
@@ -330,10 +327,7 @@ describe("third-party license generation", () => {
     await NodeFSP.rm(NodePath.join(fixture.dependencyRoot, "LICENSE"));
     for (const licenseId of ["Apache-2.0", "BSD-3-Clause"]) {
       await writeJson(
-        NodePath.join(
-          fixture.root,
-          `.generated/third-party-licenses/spdx/v3.28.0/${licenseId}.json`,
-        ),
+        NodePath.join(fixture.root, `third-party-licenses/spdx/v3.28.0/${licenseId}.json`),
         { licenseId, licenseText: `${licenseId} terms` },
       );
     }

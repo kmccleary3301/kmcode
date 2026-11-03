@@ -7,6 +7,7 @@ import {
   ProjectId,
   ProviderInstanceId,
   RunId,
+  RuntimeRequestId,
   ThreadId,
   TurnItemId,
   type OrchestrationV2AppThread,
@@ -261,6 +262,7 @@ it.effect.each(["sqlite", "memory"] as const)(
         yield* sql`UPDATE orchestration_v2_projection_messages SET payload_json = json_object('text', ${"x".repeat(512_000)}, 'attachments', json_array(json_object('id', 'attachment:old'))) WHERE message_id = 'obsolete-history'`;
         assert.deepEqual(yield* store.getThreadAttachmentIds(threadId), ["attachment:old"]);
       }
+
       const page = yield* store.getTimelinePage(threadId, { view: "activity", limit: 1 });
       assert.deepEqual(
         page.items.map((row) => row.item),
@@ -358,6 +360,63 @@ it.effect.each(["sqlite", "memory"] as const)(
       assert.instanceOf(
         yield* store.getTurnStartContext(ThreadId.make("missing"), runId).pipe(Effect.flip),
         ProjectionStore.ProjectionStoreThreadNotFoundError,
+      );
+      const answerFile = {
+        type: "file" as const,
+        id: "answer-document",
+        name: "notes.pdf",
+        mimeType: "application/pdf",
+        sizeBytes: 12,
+      };
+      const answerImage = {
+        type: "image" as const,
+        id: "answer-image",
+        name: "photo.png",
+        mimeType: "image/png",
+        sizeBytes: 8,
+      };
+      yield* store.apply({
+        id: EventId.make("attachment:message-event"),
+        type: "message.updated",
+        threadId,
+        runId,
+        occurredAt: now,
+        payload: {
+          ...message,
+          id: MessageId.make("message:attachment"),
+          attachments: [{ ...answerFile, id: "message-file" }],
+        },
+      });
+      yield* store.apply({
+        id: EventId.make("attachment:question-event"),
+        type: "turn-item.updated",
+        threadId,
+        runId: oldRunId,
+        occurredAt: now,
+        payload: {
+          ...item,
+          id: TurnItemId.make("attachment:question"),
+          type: "user_input_request" as const,
+          requestId: RuntimeRequestId.make("attachment:request"),
+          questions: [],
+          questionAnswer: {
+            requestId: "attachment:request",
+            answers: { document: ["See document"], image: ["See image"] },
+            attachmentsByQuestionId: {
+              document: [answerFile],
+              image: [answerImage],
+            },
+          },
+        },
+      });
+      assert.deepEqual(
+        (yield* store.getThreadAttachmentIds(threadId)).toSorted(),
+        [
+          ...(storage === "sqlite" ? ["attachment:old"] : []),
+          "answer-document",
+          "answer-image",
+          "message-file",
+        ].toSorted(),
       );
     }).pipe(
       Effect.provide(

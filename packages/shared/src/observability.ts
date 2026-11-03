@@ -368,6 +368,29 @@ function spanToTraceRecord(span: SerializableSpan): EffectTraceRecord {
   };
 }
 
+// WebSocket tickets and their DPoP proofs ride in URL queries and stay valid after the request.
+const URL_CREDENTIAL_PARAMS = /(^|[?&"\s])(wsTicket|dpop)=[^&#"\\\s]*/g;
+
+const redactUrlCredentials = (text: string) =>
+  text.replace(URL_CREDENTIAL_PARAMS, "$1$2=<redacted>");
+
+// Effect's HTTP errors, including failed upgrades, put the request URL in their message.
+export function redactCauseCredentials(cause: Cause.Cause<unknown>): Cause.Cause<unknown> {
+  if (cause.reasons.length === 0 || Cause.hasInterruptsOnly(cause)) {
+    return cause;
+  }
+  const pretty = Cause.pretty(cause);
+  const redacted = redactUrlCredentials(pretty);
+  return redacted === pretty ? cause : Cause.die(new Error(redacted));
+}
+
+function redactExitCredentials(exit: Exit.Exit<unknown, unknown>): Exit.Exit<unknown, unknown> {
+  if (ExitRuntime.isSuccess(exit)) {
+    return exit;
+  }
+  const cause = redactCauseCredentials(exit.cause);
+  return cause === exit.cause ? exit : ExitRuntime.failCause(cause);
+}
 export const makeTraceSink = Effect.fn("makeTraceSink")(function* (options: TraceSinkOptions) {
   const sink = new RotatingFileSink({
     filePath: options.filePath,
@@ -518,7 +541,7 @@ export const makeTraceSink = Effect.fn("makeTraceSink")(function* (options: Trac
     filePath: options.filePath,
     push(record) {
       try {
-        const line = `${JSON.stringify(record)}\n`;
+        const line = `${redactUrlCredentials(JSON.stringify(record))}\n`;
         const bytes = textEncoder.encode(line).byteLength;
         if (bytes > options.maxBytes || bytes > MAX_TRACE_BUFFERED_BYTES) {
           pendingDropCount += 1;
@@ -526,7 +549,8 @@ export const makeTraceSink = Effect.fn("makeTraceSink")(function* (options: Trac
         }
         if (
           buffer.length > 0 &&
-          (buffer.length >= MAX_TRACE_BUFFERED_RECORDS || bufferBytes + bytes > MAX_TRACE_BUFFERED_BYTES)
+          (buffer.length >= MAX_TRACE_BUFFERED_RECORDS ||
+            bufferBytes + bytes > MAX_TRACE_BUFFERED_BYTES)
         ) {
           flushUnsafe();
         }
@@ -601,7 +625,7 @@ class LocalFileSpan implements Tracer.Span {
       endTime,
       exit: traceExit,
     };
-    this.delegate.end(endTime, traceExit);
+    this.delegate.end(endTime, redactExitCredentials(traceExit));
 
     if (this.sampled) {
       this.push(spanToTraceRecord(this));
@@ -609,12 +633,20 @@ class LocalFileSpan implements Tracer.Span {
   }
 
   attribute(key: string, value: unknown): void {
-    this.attributes.set(key, value);
-    this.delegate.attribute(key, value);
+    const recorded =
+      (key === "url.full" || key === "url.query") && typeof value === "string"
+        ? redactUrlCredentials(value)
+        : value;
+    this.attributes.set(key, recorded);
+    this.delegate.attribute(key, recorded);
   }
 
   event(name: string, startTime: bigint, attributes?: Record<string, unknown>): void {
-    const nextAttributes = attributes ?? {};
+    const cause = attributes?.["effect.cause"];
+    const nextAttributes =
+      typeof cause === "string"
+        ? { ...attributes, "effect.cause": redactUrlCredentials(cause) }
+        : (attributes ?? {});
     this.events.push([name, startTime, nextAttributes]);
     this.delegate.event(name, startTime, nextAttributes);
   }

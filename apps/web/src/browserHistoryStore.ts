@@ -4,7 +4,7 @@ import { create } from "zustand";
 import { createJSONStorage, persist } from "zustand/middleware";
 import { useShallow } from "zustand/react/shallow";
 
-import { normalizePreviewUrl } from "@t3tools/shared/preview";
+import { normalizePreviewUrl, previewUrlWithoutCredentials } from "@t3tools/shared/preview";
 import { readPreparedConnection } from "~/state/session";
 
 import { isLocalLoopbackHost, normalizeHostname } from "./browser/browserTargetResolver";
@@ -25,14 +25,13 @@ export function isValidHistoryTimestamp(value: unknown): value is number {
 }
 
 export function normalizeHistoryUrl(raw: string): string | null {
-  let parsed: URL;
+  let normalized: string;
   try {
-    parsed = new URL(normalizePreviewUrl(raw));
+    normalized = previewUrlWithoutCredentials(normalizePreviewUrl(raw));
   } catch {
     return null;
   }
-  parsed.username = parsed.password = "";
-  return parsed.href.length > BROWSER_HISTORY_MAX_URL_LENGTH ? null : parsed.href;
+  return normalized.length > BROWSER_HISTORY_MAX_URL_LENGTH ? null : normalized;
 }
 
 function titleLookupKey(normalized: string, environmentHostname?: string | null): string {

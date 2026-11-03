@@ -134,6 +134,10 @@ export function renderBootServiceUnit(plan: BootServicePlan): string {
     "OOMPolicy=continue",
     "Restart=always",
     "RestartSec=5",
+    // Preserve server resources when its user slice is under pressure.
+    "CPUWeight=1000",
+    "IOWeight=1000",
+    "MemoryLow=1536M",
     `StandardOutput=append:${escapeSystemdSpecifiers(plan.logPath)}`,
     `StandardError=append:${escapeSystemdSpecifiers(plan.logPath)}`,
     "",

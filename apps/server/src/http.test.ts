@@ -14,6 +14,8 @@ import * as Path from "effect/Path";
 import * as Queue from "effect/Queue";
 import * as Tracer from "effect/Tracer";
 import { HttpClient, HttpClientRequest, HttpRouter, HttpServerResponse } from "effect/http";
+import { ASSET_ROUTE_PREFIX } from "./assets/AssetAccess.ts";
+import { ATTACHMENT_UPLOAD_ROUTE_PREFIX } from "./assets/AttachmentUpload.ts";
 import { openMediaFile } from "./assets/MediaFile.ts";
 
 import { ORCHESTRATION_PROTOCOL_HEADER } from "@t3tools/contracts";
@@ -39,6 +41,12 @@ describe("untraced requests", () => {
           const router = yield* HttpRouter.HttpRouter;
           yield* router.add("POST", "/api/observability/v1/traces", HttpServerResponse.empty());
           yield* router.add("GET", "/api/environment", HttpServerResponse.empty());
+          yield* router.add("GET", `${ASSET_ROUTE_PREFIX}/signed`, HttpServerResponse.empty());
+          yield* router.add(
+            "POST",
+            `${ATTACHMENT_UPLOAD_ROUTE_PREFIX}/signed`,
+            HttpServerResponse.empty(),
+          );
         }),
       );
       const services = yield* Layer.build(
@@ -50,6 +58,8 @@ describe("untraced requests", () => {
 
       yield* client.post("/api/observability/v1/traces");
       yield* client.post("/api/observability/v1/traces?x=1");
+      yield* client.get(`${ASSET_ROUTE_PREFIX}/signed/token?sig=secret`);
+      yield* client.post(`${ATTACHMENT_UPLOAD_ROUTE_PREFIX}/signed/token?sig=secret`);
       expect(spanNames).toEqual([]);
 
       yield* client.get("/api/environment");
@@ -311,7 +321,7 @@ it.layer(
   );
 });
 
-describe("video asset byte ranges", () => {
+describe("asset byte ranges", () => {
   it.effect("uses current descriptor metadata after an in-place truncate or extension", () =>
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;
@@ -550,9 +560,22 @@ describe("video asset byte ranges", () => {
       const image = HttpServerResponse.toWeb(
         yield* assetFileResponse({ path: file, mimeType: "image/png" }, "bytes=0-1"),
       );
-      expect(image.status).toBe(200);
-      expect(image.headers.has("accept-ranges")).toBe(false);
-      expect(yield* Effect.promise(() => image.text())).toBe("0123456789");
+      expect(image.status).toBe(206);
+      expect(image.headers.get("accept-ranges")).toBe("bytes");
+      expect(yield* Effect.promise(() => image.text())).toBe("01");
+      for (const mimeType of ["text/plain", "text/csv", "application/octet-stream"]) {
+        for (const [range, expected, status] of [
+          ["bytes=2-5", "2345", 206],
+          ["bytes=-3", "789", 206],
+          ["bytes=10-", "", 416],
+        ] as const) {
+          const result = HttpServerResponse.toWeb(
+            yield* assetFileResponse({ path: file, mimeType }, range),
+          );
+          expect(result.status).toBe(status);
+          expect(yield* Effect.promise(() => result.text())).toBe(expected);
+        }
+      }
     }).pipe(Effect.provide(layerFileResponse)),
   );
 

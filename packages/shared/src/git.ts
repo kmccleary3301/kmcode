@@ -236,17 +236,16 @@ export function parseOriginUrlFromGitConfig(configText: string): string | null {
   // A trailing backslash continues the value on the next line.
   const joined = configText.replace(/\\\r?\n[ \t]*/g, "");
   for (const rawLine of joined.split(/\r?\n/)) {
-    const line = rawLine.trim();
+    let line = rawLine.trim();
     if (line.length === 0 || line.startsWith("#") || line.startsWith(";")) continue;
-    // Both `[remote "origin"]` and the legacy `[remote.origin]` form, with an
-    // optional trailing comment. Git keeps quoted subsections case-sensitive
-    // but folds the dotted form to lowercase.
-    const header = /^\[\s*remote(?:\s+"([^"]+)"|\.([^\]\s]+))\s*\](?:\s*[#;].*)?$/i.exec(line);
+    // Git allows one setting on the remote section header line. Quoted subsections remain
+    // case-sensitive, while legacy dotted names are folded to lowercase.
+    const header = /^\[\s*remote(?:\s+"([^"]+)"|\.([^\]\s]+))\s*\](.*)$/i.exec(line);
     if (header) {
       section = header[1] ?? header[2]?.toLowerCase() ?? null;
-      continue;
-    }
-    if (line.startsWith("[")) {
+      line = header[3]?.trim() ?? "";
+      if (line.length === 0 || line.startsWith("#") || line.startsWith(";")) continue;
+    } else if (line.startsWith("[")) {
       section = null;
       continue;
     }

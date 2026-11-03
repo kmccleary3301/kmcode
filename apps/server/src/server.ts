@@ -262,7 +262,9 @@ const layerHttpServer = Layer.unwrap(
 
 const layerPlatformServices = NodeServices.layer;
 
-const layerPersistence = Layer.empty.pipe(Layer.provideMerge(SqlitePersistence.layerConfigExclusive));
+const layerPersistence = Layer.empty.pipe(
+  Layer.provideMerge(SqlitePersistence.layerConfigExclusive),
+);
 
 const layerVcsDriverRegistry = VcsDriverRegistry.layer.pipe(Layer.provide(VcsProjectConfig.layer));
 
@@ -582,6 +584,7 @@ const layerRuntimeCoreDependenciesBase = Layer.mergeAll(
   // through this layer. Built-in drivers come from `BUILT_IN_DRIVERS`;
   // `providerInstances` hydration merges `settings.providers.<kind>`
   // with explicit `providerInstances` entries on boot.
+  Layer.provideMerge(layerPortScanner),
   Layer.provideMerge(ProviderInstanceRegistryHydration.layer),
   Layer.provideMerge(
     Layer.mergeAll(

@@ -36,7 +36,7 @@ import {
 } from "./providerSnapshot.ts";
 import { resolveClaudeSdkExecutablePath } from "./Drivers/ClaudeExecutable.ts";
 import { makeClaudeEnvironment } from "./Drivers/ClaudeHome.ts";
-import { discoverClaudeSkills } from "./Drivers/ClaudeSkills.ts";
+import { discoverClaudeSkills, readClaudeSettingsBaseUrl } from "./Drivers/ClaudeSkills.ts";
 import type { ProviderWorkspaceSnapshot } from "./ProviderDriver.ts";
 import { makeUnavailableUsageLimits } from "./providerUsageLimits.ts";
 import {
@@ -76,11 +76,10 @@ function claudeSubscriptionLabel(subscriptionType: string | undefined): string |
 
   switch (normalized) {
     case "claudemaxsubscription":
-      return "Max";
     case "claudemax5xsubscription":
-      return "Max 5x";
+      return "Max";
     case "claudemax20xsubscription":
-      return "Max 20x";
+      return "Ultra";
     case "claudeenterprisesubscription":
       return "Enterprise";
     case "claudeteamsubscription":
@@ -91,11 +90,10 @@ function claudeSubscriptionLabel(subscriptionType: string | undefined): string |
       return "Free";
     case "max":
     case "maxplan":
-      return "Max";
     case "max5":
-      return "Max 5x";
+      return "Max";
     case "max20":
-      return "Max 20x";
+      return "Ultra";
     case "enterprise":
       return "Enterprise";
     case "team":
@@ -590,6 +588,7 @@ export const checkClaudeProviderStatus = Effect.fn("checkClaudeProviderStatus")(
   const dedupedSlashCommands = dedupeSlashCommands(slashCommands);
 
   if (!capabilities) {
+    const authWarning = "Could not verify Claude authentication status from initialization result.";
     return buildServerProvider({
       presentation: CLAUDE_PRESENTATION,
       enabled: claudeSettings.enabled,
@@ -602,16 +601,27 @@ export const checkClaudeProviderStatus = Effect.fn("checkClaudeProviderStatus")(
         version: parsedVersion,
         status: "warning",
         auth: { status: "unknown" },
-        message: "Could not verify Claude authentication status from initialization result.",
+        message: versionUpgradeMessage ? `${versionUpgradeMessage} ${authWarning}` : authWarning,
       },
     });
   }
 
+  const baseUrl =
+    (yield* readClaudeSettingsBaseUrl(claudeSettings, cwd, resolvedEnvironment)) ??
+    resolvedEnvironment.ANTHROPIC_BASE_URL;
+  const endpoint = URL.parse(baseUrl?.trim() ?? "");
+  const customApiEndpoint =
+    endpoint !== null &&
+    (endpoint.protocol === "http:" || endpoint.protocol === "https:") &&
+    endpoint.hostname !== "api.anthropic.com" &&
+    endpoint.hostname !== "api.claude.ai";
   const authMetadata =
+    apiProviderAuthMetadata(capabilities.apiProvider) ??
+    (customApiEndpoint ? { type: "customEndpoint", label: "Custom API endpoint" } : undefined) ??
     claudeAuthMetadata({
       subscriptionType: capabilities.subscriptionType,
       authMethod: capabilities.tokenSource,
-    }) ?? apiProviderAuthMetadata(capabilities.apiProvider);
+    });
   const usageLimits = !capabilities.usage
     ? makeUnavailableUsageLimits({ checkedAt, reason: "probeFailed" })
     : scopedLimitNames

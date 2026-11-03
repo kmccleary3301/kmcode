@@ -210,6 +210,30 @@ describe("buildThreadTitlePrompt", () => {
     );
   });
 
+  it("adds custom instructions to both new and regenerated titles", () => {
+    const instructions = "Put the project name first.";
+    const initial = buildThreadTitlePrompt({
+      message: "Fix the login redirect.",
+      policy: {
+        kind: "custom",
+        inferRepositoryConventions: false,
+        threadTitleInstructions: instructions,
+      },
+    });
+    const regenerated = buildThreadTitlePrompt({
+      message: "USER:\nFix the login redirect.\n\nASSISTANT:\nThe callback is stale.",
+      previousTitle: "Fix login",
+      policy: {
+        kind: "custom",
+        inferRepositoryConventions: false,
+        threadTitleInstructions: instructions,
+      },
+    });
+
+    expect(initial.prompt).toContain(`Additional instructions:\n${instructions}`);
+    expect(regenerated.prompt).toContain(`Additional instructions:\n${instructions}`);
+  });
+
   it("includes attachment metadata when attachments are provided", () => {
     const result = buildThreadTitlePrompt({
       message: "Name this thread from the screenshot",

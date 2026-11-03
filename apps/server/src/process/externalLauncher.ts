@@ -19,7 +19,7 @@ import {
   type LaunchEditorInput,
 } from "@t3tools/contracts";
 import { resolveEditorCommand } from "@t3tools/shared/editor";
-import { HostProcessPlatform } from "@t3tools/shared/hostProcess";
+import { HostProcessEnvironment, HostProcessPlatform } from "@t3tools/shared/hostProcess";
 import {
   isCommandAvailable,
   resolveSpawnCommand,
@@ -37,6 +37,7 @@ import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Path from "effect/Path";
 import * as Ref from "effect/Ref";
+import * as Schema from "effect/Schema";
 import * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
 import * as ChildProcess from "effect/process/ChildProcess";
@@ -679,6 +680,54 @@ const resolveFileManagerRevealLaunch = Effect.fn("resolveFileManagerRevealLaunch
   return { editor: "file-manager", target, command, args: [path.dirname(target)] };
 });
 
+const GRAPHICAL_SESSION_ENV_KEYS: ReadonlySet<string> = new Set([
+  "DISPLAY",
+  "WAYLAND_DISPLAY",
+  "XAUTHORITY",
+]);
+
+const decodeManagerEnvironment = Schema.decodeUnknownEffect(
+  Schema.fromJsonString(Schema.Struct({ data: Schema.Array(Schema.String) })),
+);
+
+// Boot services miss the desktop environment imported later into the systemd user manager.
+// `busctl` returns the raw values, including spaces in XAUTHORITY.
+const readGraphicalSessionEnv = Effect.fn("externalLauncher.readGraphicalSessionEnv")(
+  function* (hostEnv: NodeJS.ProcessEnv) {
+    if ((yield* HostProcessPlatform) !== "linux" || hasGraphicalLinuxSession(hostEnv)) {
+      return {};
+    }
+    const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
+    const output = yield* spawner.string(
+      ChildProcess.make(
+        "busctl",
+        [
+          "--user",
+          "--json=short",
+          "get-property",
+          "org.freedesktop.systemd1",
+          "/org/freedesktop/systemd1",
+          "org.freedesktop.systemd1.Manager",
+          "Environment",
+        ],
+        { stdin: "ignore", stderr: "ignore" },
+      ),
+    );
+    const { data } = yield* decodeManagerEnvironment(output);
+    return Object.fromEntries(
+      data.flatMap((line) => {
+        const separator = line.indexOf("=");
+        const key = line.slice(0, separator);
+        return separator > 0 && GRAPHICAL_SESSION_ENV_KEYS.has(key)
+          ? [[key, line.slice(separator + 1)]]
+          : [];
+      }),
+    );
+  },
+  Effect.timeout("2 seconds"),
+  Effect.orElseSucceed((): NodeJS.ProcessEnv => ({})),
+);
+
 const launchAndUnref = Effect.fn("externalLauncher.launchAndUnref")(function* (
   launch: ProcessLaunch,
   onError: (cause: unknown) => ExternalLauncherError,
@@ -718,6 +767,9 @@ const launchEditorProcess = Effect.fn("externalLauncher.launchEditorProcess")(fu
   ChildProcessSpawner.ChildProcessSpawner | FileSystem.FileSystem | Path.Path
 > {
   const env = yield* readCommandLookupEnv;
+  const hostEnv = { ...(yield* HostProcessEnvironment) };
+  delete hostEnv.ELECTRON_RUN_AS_NODE;
+  const spawnEnv = { ...hostEnv, ...(yield* readGraphicalSessionEnv(hostEnv)) };
   if (!(yield* isCommandAvailable(launch.command, { env }))) {
     return yield* new ExternalLauncherCommandNotFoundError({
       editor: launch.editor,
@@ -736,6 +788,8 @@ const launchEditorProcess = Effect.fn("externalLauncher.launchEditorProcess")(fu
         stdin: "ignore",
         stdout: "ignore",
         stderr: "ignore",
+        env: spawnEnv,
+        extendEnv: false,
       },
     },
     (cause) =>

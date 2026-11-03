@@ -721,7 +721,7 @@ describe("AcpRegistrySupport", () => {
     },
   );
 
-  it.effect("installs a tar archive containing a root directory entry", () => {
+  it.effect("installs tar archives with a root entry and large listings", () => {
     const downloadUrl = "https://registry.test/agent.tar.gz";
     const agent = makeAgent({
       binary: { "linux-x86_64": { archive: downloadUrl, cmd: "./agent" } },
@@ -732,6 +732,15 @@ describe("AcpRegistrySupport", () => {
       const source = `${cacheDir}/source`;
       yield* fileSystem.makeDirectory(source);
       yield* fileSystem.writeFileString(`${source}/agent`, "#!/bin/sh\necho managed\n");
+      yield* Effect.forEach(
+        Array.from({ length: 5_000 }, (_, index) => index),
+        (index) =>
+          fileSystem.writeFileString(
+            `${source}/entry-${String(index).padStart(4, "0")}-${"x".repeat(230)}`,
+            "",
+          ),
+        { concurrency: 16 },
+      );
       const archivePath = `${cacheDir}/agent.tar.gz`;
       const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
       const tar = yield* spawner.spawn(
@@ -840,7 +849,7 @@ describe("AcpRegistrySupport", () => {
     );
   });
 
-  it.effect("refreshes explicit searches and coalesces concurrent refreshes", () => {
+  it.effect("searches reuse an index fetched in the last five minutes", () => {
     const agent = makeAgent({ npx: { package: "@example/acp@1.2.3" } });
     let requests = 0;
     return Effect.gen(function* () {
@@ -859,6 +868,11 @@ describe("AcpRegistrySupport", () => {
       );
       expect(requests).toBe(1);
 
+      yield* TestClock.adjust("4 minutes");
+      yield* resolver.search({ query: "other" });
+      expect(requests).toBe(1);
+
+      yield* TestClock.adjust("1 minute");
       yield* resolver.search({ query: "example" });
       expect(requests).toBe(2);
     }).pipe(
@@ -868,6 +882,94 @@ describe("AcpRegistrySupport", () => {
           requests += 1;
           return Effect.yieldNow.pipe(
             Effect.as(HttpClientResponse.fromWeb(request, new Response(makeRegistry(agent)))),
+          );
+        }),
+      ),
+    );
+  });
+
+  it.effect("searches retry the network after falling back to the cached index", () => {
+    const agent = makeAgent({ npx: { package: "@example/acp@1.2.3" } });
+    let requests = 0;
+    return Effect.gen(function* () {
+      const fileSystem = yield* FileSystem.FileSystem;
+      const cacheDir = yield* fileSystem.makeTempDirectoryScoped({
+        prefix: "t3-acp-registry-retry-",
+      });
+      yield* fileSystem.makeDirectory(`${cacheDir}/acp-registry`, { recursive: true });
+      yield* fileSystem.writeFileString(
+        `${cacheDir}/acp-registry/registry.json`,
+        makeRegistry(agent),
+      );
+      const resolver = yield* AcpRegistrySupport.makeAcpRegistryCatalog({
+        cacheDir,
+        toolsDir: `${cacheDir}/tools`,
+        registryUrl,
+      });
+      const offline = yield* resolver.search({ query: "example" });
+      expect(offline.agents.map((result) => result.id)).toEqual([agent.id]);
+      expect(requests).toBe(1);
+
+      yield* resolver.search({ query: "example" });
+      expect(requests).toBe(2);
+      yield* resolver.search({ query: "example" });
+      expect(requests).toBe(2);
+    }).pipe(
+      Effect.scoped,
+      Effect.provide(
+        layerResolver((request) => {
+          requests += 1;
+          return Effect.succeed(
+            HttpClientResponse.fromWeb(
+              request,
+              requests === 1
+                ? new Response("unavailable", { status: 503 })
+                : new Response(makeRegistry(agent)),
+            ),
+          );
+        }),
+      ),
+    );
+  });
+
+  it.effect("searches retry the network after a refresh falls back within the reuse window", () => {
+    const agent = makeAgent({ npx: { package: "@example/acp@1.2.3" } });
+    let requests = 0;
+    let online = true;
+    return Effect.gen(function* () {
+      const fileSystem = yield* FileSystem.FileSystem;
+      const cacheDir = yield* fileSystem.makeTempDirectoryScoped({
+        prefix: "t3-acp-registry-refresh-fallback-",
+      });
+      const resolver = yield* AcpRegistrySupport.makeAcpRegistryCatalog({
+        cacheDir,
+        toolsDir: `${cacheDir}/tools`,
+        registryUrl,
+      });
+      yield* resolver.search({ query: "example" });
+      expect(requests).toBe(1);
+
+      // Prepare always refreshes; an unknown agent stops it right after the refresh.
+      online = false;
+      const missing = yield* resolver.prepare({ agentId: "missing-agent" }).pipe(Effect.flip);
+      expect(missing.reason).toBe("agent_not_found");
+      expect(requests).toBe(2);
+
+      online = true;
+      yield* resolver.search({ query: "example" });
+      expect(requests).toBe(3);
+    }).pipe(
+      Effect.scoped,
+      Effect.provide(
+        layerResolver((request) => {
+          requests += 1;
+          return Effect.succeed(
+            HttpClientResponse.fromWeb(
+              request,
+              online
+                ? new Response(makeRegistry(agent))
+                : new Response("unavailable", { status: 503 }),
+            ),
           );
         }),
       ),
@@ -1524,6 +1626,93 @@ describe("AcpRegistrySupport", () => {
                 ),
               ),
             );
+          }),
+        ),
+      );
+    });
+  });
+
+  it.effect("resolves one agent while another agent's archive download is waiting", () => {
+    const fastUrl = "https://registry.test/fast-agent.tar.gz";
+    const slowUrl = "https://registry.test/slow-agent.tar.gz";
+    const fastAgent = {
+      ...makeAgent({ binary: { "linux-x86_64": { archive: fastUrl, cmd: "./agent" } } }),
+      id: "fast-agent",
+    };
+    const slowAgent = {
+      ...makeAgent({ binary: { "linux-x86_64": { archive: slowUrl, cmd: "./agent" } } }),
+      id: "slow-agent",
+    };
+    const registry = JSON.stringify({ version: "1.0.0", agents: [fastAgent, slowAgent] });
+    return Effect.gen(function* () {
+      const downloadStarted = yield* Deferred.make<void>();
+      const releaseDownload = yield* Deferred.make<void>();
+      const archiveReady = yield* Deferred.make<Uint8Array>();
+      return yield* Effect.gen(function* () {
+        const fileSystem = yield* FileSystem.FileSystem;
+        const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
+        const cacheDir = yield* fileSystem.makeTempDirectoryScoped({
+          prefix: "t3-acp-registry-independent-install-",
+        });
+        const source = `${cacheDir}/source`;
+        yield* fileSystem.makeDirectory(source);
+        yield* fileSystem.writeFileString(`${source}/agent`, "#!/bin/sh\necho agent\n");
+        const archivePath = `${cacheDir}/agent.tar.gz`;
+        const tar = yield* spawner.spawn(
+          ChildProcess.make("tar", ["-czf", archivePath, "-C", source, "."]),
+        );
+        expect(yield* tar.exitCode).toBe(0);
+        const archive = yield* fileSystem.readFile(archivePath);
+        yield* Deferred.succeed(archiveReady, archive);
+        const resolver = yield* AcpRegistrySupport.makeAcpRegistryCatalog({
+          cacheDir,
+          toolsDir: `${cacheDir}/tools`,
+          registryUrl,
+        });
+
+        yield* resolver.prepare({ agentId: fastAgent.id });
+        const slowFiber = yield* resolver
+          .resolve(settings({ agentId: slowAgent.id }), "/workspace", {})
+          .pipe(Effect.forkChild({ startImmediately: true }));
+        yield* Deferred.await(downloadStarted);
+        const fastFiber = yield* resolver
+          .resolve(settings({ agentId: fastAgent.id }), "/workspace", {})
+          .pipe(Effect.forkChild({ startImmediately: true }));
+        const fastResult = yield* Fiber.join(fastFiber).pipe(
+          Effect.timeout("2 seconds"),
+          Effect.ensuring(Deferred.succeed(releaseDownload, undefined)),
+        );
+        expect(fastResult.spawn.command).toBe(
+          yield* fileSystem.realPath(`${cacheDir}/tools/${fastAgent.id}/1.2.3/linux-x86_64/agent`),
+        );
+        const slowResult = yield* Fiber.join(slowFiber);
+        expect(slowResult.spawn.command).toBe(
+          yield* fileSystem.realPath(`${cacheDir}/tools/${slowAgent.id}/1.2.3/linux-x86_64/agent`),
+        );
+      }).pipe(
+        Effect.scoped,
+        Effect.provide(
+          layerResolver((request) => {
+            if (request.url === registryUrl) {
+              return Effect.succeed(HttpClientResponse.fromWeb(request, new Response(registry)));
+            }
+            if (request.url === fastUrl) {
+              return Deferred.await(archiveReady).pipe(
+                Effect.map((archive) =>
+                  HttpClientResponse.fromWeb(request, new Response(archive.buffer as ArrayBuffer)),
+                ),
+              );
+            }
+            if (request.url === slowUrl) {
+              return Deferred.succeed(downloadStarted, undefined).pipe(
+                Effect.andThen(Deferred.await(releaseDownload)),
+                Effect.andThen(Deferred.await(archiveReady)),
+                Effect.map((archive) =>
+                  HttpClientResponse.fromWeb(request, new Response(archive.buffer as ArrayBuffer)),
+                ),
+              );
+            }
+            return Effect.die(new Error(`unexpected ACP Registry request: ${request.url}`));
           }),
         ),
       );

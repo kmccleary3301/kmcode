@@ -180,58 +180,55 @@ export default function FileBrowserPanel({
       : { x: anchorRect.left, y: anchorRect.bottom };
     const fileTarget = { environmentId, filePath: relativePath, workspaceRoot: cwd };
     const fileMenuItems = fileContextMenu.buildItems(fileTarget);
-    try {
-      const clicked = await api.contextMenu.show(
-        [
-          ...fileMenuItems,
-          { id: "copy-mention", label: "Copy mention" },
-          { id: "add-to-chat", label: "Add to chat" },
-        ],
-        position,
-      );
-      if (clicked === null) return;
-      // "Open with" submenu selections report the child id ("editor:<id>"),
-      // which is not present in the top-level item list.
-      const isFileMenuAction =
-        fileMenuItems.some((entry) => entry.id === clicked) || clicked.startsWith("editor:");
-      if (isFileMenuAction) {
-        await fileContextMenu.activate(clicked as FileContextMenuAction, fileTarget);
+    context.close({ restoreFocus: !pointerIsFresh });
+    const clicked = await api.contextMenu.show(
+      [
+        ...fileMenuItems,
+        { id: "copy-mention", label: "Copy mention" },
+        { id: "add-to-chat", label: "Add to chat" },
+      ],
+      position,
+    );
+    if (clicked === null) return;
+    // "Open with" submenu selections report the child id ("editor:<id>"),
+    // which is not present in the top-level item list.
+    const isFileMenuAction =
+      fileMenuItems.some((entry) => entry.id === clicked) || clicked.startsWith("editor:");
+    if (isFileMenuAction) {
+      await fileContextMenu.activate(clicked as FileContextMenuAction, fileTarget);
+      return;
+    }
+    if (clicked === "copy-mention") {
+      try {
+        await writeTextToClipboard(mention);
+        toastManager.add({ type: "success", title: "Mention copied", description: relativePath });
+      } catch (error) {
+        toastManager.add({
+          type: "error",
+          title: "Failed to copy mention",
+          description: error instanceof Error ? error.message : "An error occurred.",
+        });
+      }
+      return;
+    }
+    if (clicked === "add-to-chat") {
+      const composer = composerRef?.current;
+      if (!composer) {
+        toastManager.add({
+          type: "error",
+          title: "Unable to add to chat",
+          description: "Open a chat for this project and try again.",
+        });
         return;
       }
-      if (clicked === "copy-mention") {
-        try {
-          await writeTextToClipboard(mention);
-          toastManager.add({ type: "success", title: "Mention copied", description: relativePath });
-        } catch (error) {
-          toastManager.add({
-            type: "error",
-            title: "Failed to copy mention",
-            description: error instanceof Error ? error.message : "An error occurred.",
-          });
-        }
-        return;
+      const inserted = composer.insertTextAtEnd(`${mention} `, { ensureLeadingBoundary: true });
+      if (!inserted) {
+        toastManager.add({
+          type: "error",
+          title: "Unable to add to chat",
+          description: "The chat isn't ready to accept input right now.",
+        });
       }
-      if (clicked === "add-to-chat") {
-        const composer = composerRef?.current;
-        if (!composer) {
-          toastManager.add({
-            type: "error",
-            title: "Unable to add to chat",
-            description: "Open a chat for this project and try again.",
-          });
-          return;
-        }
-        const inserted = composer.insertTextAtEnd(`${mention} `, { ensureLeadingBoundary: true });
-        if (!inserted) {
-          toastManager.add({
-            type: "error",
-            title: "Unable to add to chat",
-            description: "The chat isn't ready to accept input right now.",
-          });
-        }
-      }
-    } finally {
-      context.close();
     }
   };
   const showEntryContextMenuRef = useRef(showEntryContextMenu);

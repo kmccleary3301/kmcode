@@ -132,6 +132,30 @@ it.layer(NodeServices.layer)("server settings", (it) => {
       assert.deepEqual(persisted.projectSettingsOverrides, settings.projectSettingsOverrides);
     }).pipe(Effect.provide(layerServerSettings())),
   );
+  it.effect("keeps a newer server's project override when a setting is edited", () =>
+    Effect.gen(function* () {
+      const config = yield* ServerConfig.ServerConfig;
+      const fs = yield* FileSystem.FileSystem;
+      const service = yield* ServerSettingsModule.ServerSettingsService;
+      const projectId = ProjectId.make("project-a");
+      yield* fs.writeFileString(
+        config.settingsPath,
+        `{ "projectSettingsOverrides": { "project-a": { "defaultAutoPull": true, "addedByNewerServer": 3 } } }`,
+      );
+      const loaded = yield* service.getSettings;
+
+      yield* service.updateSettings({
+        projectSettingsOverrides: {
+          [projectId]: { ...loaded.projectSettingsOverrides[projectId], defaultAutoPull: false },
+        },
+      });
+
+      const persisted = JSON.parse(yield* fs.readFileString(config.settingsPath));
+      assert.deepEqual(persisted.projectSettingsOverrides, {
+        [projectId]: { defaultAutoPull: false, addedByNewerServer: 3 },
+      });
+    }).pipe(Effect.provide(layerServerSettings())),
+  );
 
   it.effect("saves through a symlinked settings file without replacing the link", () =>
     Effect.gen(function* () {
@@ -833,7 +857,7 @@ it.layer(NodeServices.layer)("server settings", (it) => {
 
         assert.deepEqual(next.sourceControlWriterModelSelection, sourceControlWriterModelSelection);
         assert.deepEqual(
-          ServerSettingsModule.resolveSourceControlWriterModelSelection(next),
+          ServerSettingsModule.resolveSourceControlWriterModelSelection(next, undefined, null),
           next.textGenerationModelSelection,
         );
         assert.deepEqual(
@@ -857,7 +881,7 @@ it.layer(NodeServices.layer)("server settings", (it) => {
           },
         });
         assert.deepEqual(
-          ServerSettingsModule.resolveSourceControlWriterModelSelection(restored),
+          ServerSettingsModule.resolveSourceControlWriterModelSelection(restored, undefined, null),
           sourceControlWriterModelSelection,
         );
       }).pipe(Effect.provide(layerServerSettings())),
@@ -1616,6 +1640,54 @@ it.layer(NodeServices.layer)("server settings", (it) => {
     }).pipe(Effect.provide(layerServerSettings())),
   );
 
+  it.effect("reads settings secrets once per settings change", () => {
+    let reads = 0;
+    const layerSecret = Layer.effect(
+      ServerSecretStore.ServerSecretStore,
+      Effect.map(ServerSecretStore.ServerSecretStore, (store) => ({
+        ...store,
+        get: (name: string) =>
+          Effect.suspend(() => {
+            reads++;
+            return store.get(name);
+          }),
+      })),
+    ).pipe(Layer.provide(ServerSecretStore.layer));
+    const layerSettings = ServerSettingsModule.layer.pipe(
+      Layer.provide(layerSecret),
+      Layer.provideMerge(Layer.fresh(SqlitePersistence.layerMemory)),
+      Layer.provideMerge(
+        Layer.fresh(
+          ServerConfig.layerTest(process.cwd(), { prefix: "t3code-settings-secret-cache-test-" }),
+        ),
+      ),
+    );
+    return Effect.gen(function* () {
+      const instanceId = ProviderInstanceId.make("codex_cached");
+      const service = yield* ServerSettingsModule.ServerSettingsService;
+      const save = (value: string) =>
+        service.updateSettings({
+          providerInstances: {
+            [instanceId]: {
+              driver: ProviderDriverKind.make("codex"),
+              environment: [{ name: "API_TOKEN", value, sensitive: true }],
+              config: {},
+            },
+          },
+        });
+      const token = service.getSettings.pipe(
+        Effect.map((settings) => settings.providerInstances[instanceId]?.environment?.[0]?.value),
+      );
+      yield* save("sk-first");
+      reads = 0;
+      assert.equal(yield* token, "sk-first");
+      assert.equal(yield* token, "sk-first");
+      assert.equal(reads, 0);
+      yield* save("sk-second");
+      assert.equal(yield* token, "sk-second");
+    }).pipe(Effect.provide(layerSettings));
+  });
+
   it.effect(
     "keeps Bitbucket tokens in the secret store and tells clients only that one is set",
     () =>
@@ -1673,13 +1745,19 @@ it.layer(NodeServices.layer)("server settings", (it) => {
       const antigravityId = ProviderInstanceId.make("antigravity_secret");
       const saved = yield* serverSettings.updateSettings({
         providers: {
-          opencode: { serverUrl: "http://127.0.0.1:4096", serverPassword: "legacy-opencode-secret" },
+          opencode: {
+            serverUrl: "http://127.0.0.1:4096",
+            serverPassword: "legacy-opencode-secret",
+          },
           antigravity: { apiKey: "legacy-antigravity-secret" },
         },
         providerInstances: {
           [instanceId]: {
             driver: ProviderDriverKind.make("opencode"),
-            config: { serverUrl: "http://127.0.0.1:4096", serverPassword: "instance-opencode-secret" },
+            config: {
+              serverUrl: "http://127.0.0.1:4096",
+              serverPassword: "instance-opencode-secret",
+            },
           },
           [antigravityId]: {
             driver: ProviderDriverKind.make("antigravity"),

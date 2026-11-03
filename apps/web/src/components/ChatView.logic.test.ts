@@ -329,6 +329,24 @@ describe("deriveComposerSendState", () => {
     expect(state.hasSendableContent).toBe(true);
   });
 
+  it("keeps a queued edit with retained attachments sendable", () => {
+    expect(
+      deriveComposerSendState({
+        prompt: "",
+        imageCount: 0,
+        existingAttachmentCount: 1,
+        terminalContexts: [],
+      }).hasSendableContent,
+    ).toBe(true);
+    expect(
+      deriveComposerSendState({
+        prompt: "",
+        imageCount: 0,
+        terminalContexts: [],
+      }).hasSendableContent,
+    ).toBe(false);
+  });
+
   it("does NOT treat zero element contexts as sendable", () => {
     expect(
       deriveComposerSendState({
@@ -349,7 +367,7 @@ describe("buildExpiredTerminalContextToastCopy", () => {
     });
     expect(buildExpiredTerminalContextToastCopy(2, "omitted")).toEqual({
       title: "Expired terminal contexts omitted from message",
-      description: "Re-add it if you want that terminal output included.",
+      description: "Re-add them if you want those terminal outputs included.",
     });
   });
 });
@@ -1921,6 +1939,29 @@ describe("proactive completed diff guard", () => {
       ).toBe(action);
     },
   );
+
+  it("uses full checkpoint totals when the wire sends only a file prefix", () => {
+    const cappedByFileCount = {
+      status: "ready",
+      files: [{ path: "src/first.ts", kind: "modified", additions: 1, deletions: 0 }],
+      filesTotal: { count: 3, additions: 1, deletions: 0 },
+    } satisfies Pick<TurnDiffSummary, "status" | "files" | "filesTotal">;
+    const cappedByChangedLines = {
+      status: "ready",
+      files: [{ path: "src/first.ts", kind: "modified", additions: 1, deletions: 0 }],
+      filesTotal: { count: 1, additions: 50, deletions: 0 },
+    } satisfies Pick<TurnDiffSummary, "status" | "files" | "filesTotal">;
+
+    for (const checkpoint of [cappedByFileCount, cappedByChangedLines]) {
+      expect(
+        resolveProactiveTurnDiffAction({
+          checkpoint,
+          isGitRepo: true,
+          activeSurfaceKind: null,
+        }),
+      ).toBe("open");
+    }
+  });
 
   it("waits for definitive checkpoint and repository state", () => {
     const missingCheckpoint = {

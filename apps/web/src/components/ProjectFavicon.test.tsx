@@ -1,4 +1,11 @@
-import type { ComponentType, Dispatch, ReactElement, SetStateAction } from "react";
+import {
+  isValidElement,
+  type ComponentType,
+  type Dispatch,
+  type ReactElement,
+  type ReactNode,
+  type SetStateAction,
+} from "react";
 import { beforeEach, describe, expect, it, vi } from "vite-plus/test";
 import type { EnvironmentId } from "@t3tools/contracts";
 import { PROJECT_FAVICON_FALLBACK_MARKER } from "@t3tools/shared/projectFavicon";
@@ -76,10 +83,10 @@ function makeProject(
 }
 
 type ProjectFaviconImageProps = {
-  readonly cacheKey: string;
   readonly src: string;
   readonly className?: string | undefined;
   readonly fallbackIcon: ComponentType<{ className?: string }>;
+  readonly fallbackProjectName?: string | undefined;
 };
 
 type ImageElement = ReactElement<{
@@ -92,58 +99,132 @@ type ProjectFaviconImageElement = ReactElement<{
   readonly children: [ReactElement | null, ImageElement | null, ImageElement | null];
 }>;
 
-function resolveImageComponent(): {
-  readonly Component: (props: ProjectFaviconImageProps) => ProjectFaviconImageElement;
-  readonly props: ProjectFaviconImageProps;
-} {
-  hooks.beginRender();
-  const element = ProjectFavicon({
-    project: makeProject({ workspaceRoot: "/workspace-test", title: "workspace-test" }),
-  }) as ReactElement<ProjectFaviconImageProps>;
-  hooks.reset();
+type ProjectFaviconFallbackProps = {
+  readonly className?: string | undefined;
+  readonly icon: ComponentType<{ className?: string }>;
+  readonly emoji?: string | undefined;
+  readonly projectName?: string | undefined;
+};
 
-  return {
-    Component: element.type as (props: ProjectFaviconImageProps) => ProjectFaviconImageElement,
-    props: element.props,
-  };
+type ProjectMonogramProps = {
+  readonly text: string;
+  readonly color: string;
+  readonly className?: string | undefined;
+};
+
+function isFunctionComponent<Props>(
+  type: ReactElement<Props>["type"],
+): type is (props: Props) => ReactNode {
+  return typeof type === "function";
+}
+
+function renderFunctionComponent<Props>(element: ReactElement<Props>): ReactNode {
+  if (!isFunctionComponent(element.type)) {
+    throw new Error("Expected a function component element");
+  }
+  return element.type(element.props);
+}
+
+function isProjectFaviconFallbackElement(
+  element: ReactNode,
+): element is ReactElement<ProjectFaviconFallbackProps> {
+  return (
+    isValidElement(element) &&
+    typeof element.props === "object" &&
+    element.props !== null &&
+    "projectName" in element.props &&
+    typeof element.props.projectName === "string" &&
+    "icon" in element.props
+  );
+}
+
+function isProjectFaviconImageElement(
+  element: ReactNode,
+): element is ReactElement<ProjectFaviconImageProps> {
+  return (
+    isValidElement(element) &&
+    typeof element.props === "object" &&
+    element.props !== null &&
+    "src" in element.props &&
+    typeof element.props.src === "string" &&
+    "fallbackIcon" in element.props
+  );
+}
+
+function renderProjectFavicon(project: ProjectFaviconProject): ReactNode {
+  hooks.reset();
+  hooks.beginRender();
+  const element = ProjectFavicon({ project });
+  hooks.reset();
+  hooks.beginRender();
+  const rendered = renderFunctionComponent(element);
+  hooks.reset();
+  return rendered;
+}
+
+function resolveProjectMonogram(
+  project: ProjectFaviconProject,
+): ReactElement<ProjectMonogramProps> {
+  const fallback = renderProjectFavicon(project);
+  if (!isProjectFaviconFallbackElement(fallback)) {
+    throw new Error("Expected an automatic project favicon fallback");
+  }
+  hooks.beginRender();
+  const monogram = renderFunctionComponent(fallback);
+  hooks.reset();
+  if (!isValidElement<ProjectMonogramProps>(monogram)) {
+    throw new Error("Expected the project monogram element");
+  }
+  return monogram;
+}
+
+function resolveImageElement(): ReactElement<ProjectFaviconImageProps> {
+  const element = renderProjectFavicon(
+    makeProject({ workspaceRoot: "/workspace-test", title: "workspace-test" }),
+  );
+  if (!isProjectFaviconImageElement(element)) {
+    throw new Error("Expected the displayed favicon image component");
+  }
+  return element;
 }
 
 function renderImage(
-  Component: (props: ProjectFaviconImageProps) => ProjectFaviconImageElement,
-  props: ProjectFaviconImageProps,
+  element: ReactElement<ProjectFaviconImageProps>,
+  props: ProjectFaviconImageProps = element.props,
 ): ProjectFaviconImageElement {
   hooks.beginRender();
-  return Component(props);
+  const rendered = renderFunctionComponent({ ...element, props });
+  if (!isValidElement<ProjectFaviconImageElement["props"]>(rendered)) {
+    throw new Error("Expected the favicon image fragment");
+  }
+  return rendered;
 }
 
 describe("ProjectFavicon", () => {
   beforeEach(() => {
     hooks.reset();
     testState.faviconUrl = "https://environment.test/api/assets/token-a/v1-20-favicon.svg";
+    testState.lastTarget = null;
   });
 
   it("shows the project monogram when no favicon exists", () => {
     testState.faviconUrl = `https://environment.test/api/assets/token/${PROJECT_FAVICON_FALLBACK_MARKER}`;
 
-    const element = ProjectFavicon({
-      project: makeProject({ workspaceRoot: "/workspace/analytics-db", title: "analytics-db" }),
-    }) as ReactElement<{
-      readonly projectName?: string;
-    }>;
+    const monogram = resolveProjectMonogram(
+      makeProject({ workspaceRoot: "/workspace/analytics-db", title: "analytics-db" }),
+    );
 
-    expect(element.props.projectName).toBe("analytics-db");
+    expect(monogram.props.text).toBe("AD");
   });
 
   it("uses the same monogram fallback for every project category", () => {
     testState.faviconUrl = `https://environment.test/api/assets/token/${PROJECT_FAVICON_FALLBACK_MARKER}`;
 
-    const element = ProjectFavicon({
-      project: makeProject({ workspaceRoot: "/workspace/agent-runtime", title: "agent-runtime" }),
-    }) as ReactElement<{
-      readonly projectName?: string;
-    }>;
+    const monogram = resolveProjectMonogram(
+      makeProject({ workspaceRoot: "/workspace/agent-runtime", title: "agent-runtime" }),
+    );
 
-    expect(element.props.projectName).toBe("agent-runtime");
+    expect(monogram.props.text).toBe("AR");
   });
 
   it("renders a saved Lucide icon and color ahead of an uploaded favicon", () => {
@@ -180,35 +261,35 @@ describe("ProjectFavicon", () => {
   });
 
   it("falls back when the displayed favicon fails without discarding a valid older image early", () => {
-    const { Component, props } = resolveImageComponent();
-    const initialLoadingImage = renderImage(Component, props).props.children[2];
+    const image = resolveImageElement();
+    const initialLoadingImage = renderImage(image).props.children[2];
     initialLoadingImage?.props.onLoad?.();
 
     const refreshedProps = {
-      ...props,
+      ...image.props,
       src: "https://environment.test/api/assets/token-b/v1-20-favicon.svg",
     };
-    const refreshing = renderImage(Component, refreshedProps).props.children;
-    expect(refreshing[1]?.props.src).toBe(props.src);
+    const refreshing = renderImage(image, refreshedProps).props.children;
+    expect(refreshing[1]?.props.src).toBe(image.props.src);
     refreshing[2]?.props.onError?.();
 
-    const afterRefreshError = renderImage(Component, refreshedProps).props.children;
-    expect(afterRefreshError[1]?.props.src).toBe(props.src);
+    const afterRefreshError = renderImage(image, refreshedProps).props.children;
+    expect(afterRefreshError[1]?.props.src).toBe(image.props.src);
     afterRefreshError[1]?.props.onError?.();
 
-    const afterDisplayedError = renderImage(Component, refreshedProps).props.children;
+    const afterDisplayedError = renderImage(image, refreshedProps).props.children;
     expect(afterDisplayedError[0]).not.toBeNull();
     expect(afterDisplayedError[1]).toBeNull();
   });
 
   it("requests a saved favicon path when one is set", () => {
-    ProjectFavicon({
-      project: makeProject({
+    renderProjectFavicon(
+      makeProject({
         workspaceRoot: "/workspace-test",
         title: "workspace-test",
         faviconPath: "brand/icon.svg",
       }),
-    });
+    );
 
     expect(testState.lastTarget).toMatchObject({
       environmentId: "environment-test",

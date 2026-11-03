@@ -699,6 +699,21 @@ html[data-mobile-composer-route-transition="true"]::view-transition-old(t3-mobil
   ::highlight(t3-assistant-citation-comment) {
     background-color: color-mix(in oklab, var(--primary) 45%, transparent);
   }
+  ::highlight(t3-thread-find) {
+    color: var(--app-theme-search-match-foreground, var(--color-foreground));
+    background-color: var(
+      --app-theme-search-match-background,
+      oklch(0.826487 0.157967 78.604 / 0.3)
+    );
+  }
+  ::highlight(t3-thread-find-active) {
+    color: var(--app-theme-search-match-active-foreground, oklch(0.216164 0.028283 77.423));
+    background-color: var(
+      --app-theme-search-match-active-background,
+      oklch(0.774202 0.151946 74.331)
+    );
+  }
+
   :root {
     /* Keep the original T3 Code artwork palettes as the defaults. Built-in
        themes override them with their own pigments in the components layer. */
@@ -2410,8 +2425,13 @@ form[data-t3-surface="composer"] {
   color: var(--foreground);
 }
 
-/* Preflight already draws the 1px rule, as it does in chat; only the block
-   spacing needs to match. */
+/* Surface borders can blend into dark message bubbles; rules need a readable color. */
+:is(.chat-markdown, .composer-tiptap) hr {
+  @variant dark {
+    border-color: var(--contrast-muted-foreground);
+  }
+}
+
 .composer-tiptap hr {
   margin: 0.65rem 0;
 }
@@ -2557,14 +2577,13 @@ form[data-t3-surface="composer"] {
   }
 }
 
-/* Diagnostics-style tables: row separators only, uppercase headers, and a
-   scroll-fade container for horizontal overflow. The root chat-markdown
-   wrapping rules (overflow-wrap: anywhere) would let columns shrink to single
-   characters and defeat the overflow — restore word-boundary wrapping so the
-   min column width is the longest word. */
+/* Diagnostics-style tables: row separators only, and a scroll-fade container
+   for horizontal overflow. Cells wrap and the table fits its lane. The root
+   chat-markdown wrapping rules (overflow-wrap: anywhere) would let columns
+   shrink to single characters, so restore word-boundary wrapping: the min
+   column width is the longest word, and only wider content scrolls. */
 .chat-markdown table {
   width: 100%;
-  min-width: max-content;
   border-collapse: collapse;
   overflow-wrap: normal;
   word-break: normal;
@@ -2581,11 +2600,16 @@ form[data-t3-surface="composer"] {
   border-bottom: 1px solid color-mix(in srgb, var(--contrast-border) 60%, transparent);
   padding-block: 0.55rem;
   font-weight: 600;
-  white-space: nowrap;
 }
 
 .chat-markdown tbody td {
   border-bottom: 1px solid color-mix(in srgb, var(--contrast-border) 60%, transparent);
+}
+
+/* Keep long table content readable without allowing one cell to widen the lane. */
+.chat-markdown :is(th, td) {
+  max-width: 24rem;
+  overflow-wrap: break-word;
 }
 
 /* Collapsed (default): single-line cells truncate so arbitrary chat content
@@ -2593,16 +2617,9 @@ form[data-t3-surface="composer"] {
 .chat-markdown .chat-markdown-table-container[data-expanded="false"] th,
 .chat-markdown .chat-markdown-table-container[data-expanded="false"] td {
   overflow: hidden;
-  max-width: 24rem;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-
-.chat-markdown .chat-markdown-table-container[data-expanded="true"] td {
-  max-width: 24rem;
-  overflow-wrap: anywhere;
-}
-
 
 :root {
   --diff-addition: var(--success);

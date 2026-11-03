@@ -276,6 +276,25 @@ describe("resolveAutoSettlementAt", () => {
     ).toBeNull();
   });
 
+  it("uses a retired snooze wake as the latest activity", () => {
+    const thread = shell({
+      latestUserMessageAt: at(-4 * DAY_MS),
+      latestRunRequestedAt: at(-4 * DAY_MS),
+      latestRunStartedAt: at(-4 * DAY_MS),
+      latestRunCompletedAt: at(-3 * DAY_MS),
+      lastSnoozeWakeAt: at(-30 * 60 * 1_000),
+    });
+    expect(
+      ThreadSettlementService.resolveAutoSettlementAt({
+        thread,
+        pullRequest: null,
+        nowMs: NOW_MS,
+        autoSettleAfterDays: 2,
+        autoSettleOnMerge: true,
+      }),
+    ).toBeNull();
+  });
+
   it("settles on merge only after the user's last action and preserves the activity time", () => {
     const thread = shell({
       latestUserMessageAt: at(-2 * 60 * 60 * 1_000),
@@ -738,6 +757,28 @@ describe("ThreadSettlementServiceV2 worker", () => {
           yield* startHarness(service, fixture.activation, fixture.snapshotReads);
           const commands = yield* Ref.get(fixture.commands);
           expect(commands.map((command) => command.threadId)).toEqual([thread.id]);
+        }).pipe(Effect.provide(fixture.layer));
+      }),
+    ),
+  );
+
+  it.effect("stops settling the rest of a sweep once auto-settlement is turned off", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        yield* TestClock.setTime(Date.parse(NOW));
+        const threads = Array.from({ length: 9 }, (_, index) => makeThread(`idle-${index}`));
+        let disable: Effect.Effect<unknown> = Effect.void;
+        const fixture = yield* makeHarness({
+          snapshot: makeSnapshot(threads),
+          settings: { ...DEFAULT_SERVER_SETTINGS, sidebarAutoSettleAfterDays: 3 },
+          onDispatch: () => disable,
+        });
+        disable = fixture.updateSettings({ sidebarAutoSettleAfterDays: null });
+        yield* Effect.gen(function* () {
+          const service = yield* ThreadSettlementService.ThreadSettlementServiceV2;
+          yield* startHarness(service, fixture.activation, fixture.snapshotReads);
+          const settled = (yield* Ref.get(fixture.commands)).map((command) => command.threadId);
+          expect(settled).not.toContain(threads[8]!.id);
         }).pipe(Effect.provide(fixture.layer));
       }),
     ),

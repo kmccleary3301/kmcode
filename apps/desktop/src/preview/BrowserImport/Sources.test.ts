@@ -49,7 +49,7 @@ describe("Linux Chromium secret applications", () => {
         chrome: "chrome",
         edge: "msedge",
         brave: "brave",
-        vivaldi: "vivaldi",
+        vivaldi: "chrome",
         opera: "opera",
         helium: "chromium",
         firefox: undefined,

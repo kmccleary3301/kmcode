@@ -11,6 +11,8 @@ import * as DateTime from "effect/DateTime";
 import {
   cancelledRosterTaskWork,
   cancelledTurnItemWork,
+  continuationFailedBeforePrompt,
+  continuationStartRetryDelayMs,
   isRestartNoteContinuation,
   pendingRestartCancelledBackgroundWork,
   restartCancelledBackgroundWorkNote,
@@ -234,4 +236,31 @@ it("counts a prompted mid-turn or chained continuation as delivering the note", 
     }),
     [],
   );
+});
+
+it("retries failed continuation starts with bounded backoff", () => {
+  const cut = run(1, claudeThread, { status: "cancelled" });
+  const first = run(2, claudeThread, {
+    status: "failed",
+    restartContinuationOfRunId: cut.id,
+  });
+  const second = run(3, claudeThread, {
+    status: "failed",
+    restartContinuationOfRunId: first.id,
+  });
+  const third = run(4, claudeThread, {
+    status: "failed",
+    restartContinuationOfRunId: second.id,
+  });
+  const projection = {
+    runs: [cut, first, second, third],
+    providerTurns: [],
+    turnItems: [],
+  };
+
+  assert.isTrue(continuationFailedBeforePrompt(first, []));
+  assert.equal(continuationStartRetryDelayMs(first, projection), 60_000);
+  assert.equal(continuationStartRetryDelayMs(second, projection), 180_000);
+  assert.isUndefined(continuationStartRetryDelayMs(third, projection));
+  assert.isFalse(continuationFailedBeforePrompt(first, [{ runAttemptId: first.activeAttemptId! }]));
 });

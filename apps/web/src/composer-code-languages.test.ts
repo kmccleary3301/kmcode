@@ -2,6 +2,7 @@ import { describe, expect, it } from "vite-plus/test";
 
 import {
   CODE_BLOCK_LANGUAGES,
+  codeLanguageEntry,
   codeLanguageLabel,
   languageOfInfoString,
   withInfoStringLanguage,
@@ -55,5 +56,15 @@ describe("codeLanguageLabel", () => {
     const ids = CODE_BLOCK_LANGUAGES.map((language) => language.id);
     expect(ids[0]).toBe("");
     expect(new Set(ids).size).toBe(ids.length);
+  });
+});
+
+describe("plain-text fence aliases", () => {
+  it("recognizes plain-text tags without treating metadata as the language", () => {
+    const entries = ["Text", "TEXT", "plaintext", "plain", "txt", "none"].map((language) =>
+      codeLanguageEntry(languageOfInfoString(` ${language} title=notes.txt`)),
+    );
+
+    expect(entries).toEqual(Array.from({ length: 6 }, () => ({ id: "", label: "Plain text" })));
   });
 });

@@ -402,6 +402,12 @@ describe("project settings permissions", () => {
     await act(async () =>
       renderer!.root.findByProps({ "aria-label": "Remove checkout /work/primary" }).props.onClick(),
     );
+    expect(state.confirm).toHaveBeenCalledWith(
+      expect.stringContaining(
+        "Any archived threads are deleted from KM Code. Provider sessions are kept.",
+      ),
+      { variant: "destructive" },
+    );
     expect(state.delete).toHaveBeenCalledExactlyOnceWith({
       environmentId: primaryId,
       input: { projectId: state.projects[0]!.id, force: true },

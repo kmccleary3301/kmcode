@@ -1,3 +1,5 @@
+// @vitest-environment jsdom
+
 import { cloneElement, type ReactElement, type ReactNode } from "react";
 import { act, create, type ReactTestRenderer } from "react-test-renderer";
 import { afterEach, expect, it, vi } from "vite-plus/test";
@@ -16,6 +18,7 @@ vi.mock("../ui/scroll-area", () => ({ ScrollArea: "div" }));
 let renderer: ReactTestRenderer;
 afterEach(async () => {
   if (renderer) await act(() => renderer.unmount());
+  vi.restoreAllMocks();
   vi.unstubAllGlobals();
 });
 
@@ -46,7 +49,13 @@ it("only offers notice details when the description cannot fit", async () => {
   let position = "static";
   vi.stubGlobal("getComputedStyle", () => ({ position }));
   let availableWidth = 200;
-  const nested = { clientWidth: 100, scrollWidth: 80 };
+  const nested = {
+    clientWidth: 100,
+    scrollWidth: 80,
+    getBoundingClientRect() {
+      return new DOMRect(0, 0, this.clientWidth, 0);
+    },
+  };
   const text = {
     querySelectorAll: () => [nested],
     get clientWidth() {
@@ -56,7 +65,20 @@ it("only offers notice details when the description cannot fit", async () => {
       );
     },
     scrollWidth: 80,
+    getBoundingClientRect() {
+      return new DOMRect(0, 0, this.clientWidth, 0);
+    },
   };
+  let selectedWidth = 0;
+  const range = document.createRange();
+  vi.spyOn(range, "selectNodeContents").mockImplementation((node) => {
+    selectedWidth = Number(Reflect.get(node, "scrollWidth"));
+  });
+  Object.defineProperty(range, "getBoundingClientRect", {
+    configurable: true,
+    value: () => new DOMRect(0, 0, selectedWidth, 0),
+  });
+  vi.spyOn(document, "createRange").mockReturnValue(range);
   await act(() => {
     renderer = create(
       <ComposerBannerStack

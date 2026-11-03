@@ -3,7 +3,11 @@ import {
   EnvironmentId,
   ProjectId,
   ProviderInstanceId,
+  type ModelSelection,
   ThreadId,
+  type ServerProvider,
+  ProviderDriverKind,
+  type RuntimeMode,
   type OrchestrationV2ThreadShell,
   type Project as ProjectRecord,
 } from "@t3tools/contracts";
@@ -19,8 +23,11 @@ import * as Stream from "effect/Stream";
 import * as ThreadLaunch from "../../../orchestration-v2/ThreadLaunchService.ts";
 import * as ThreadManagement from "../../../orchestration-v2/ThreadManagementService.ts";
 import * as ServerConfig from "../../../config.ts";
+import * as ServerSettings from "../../../serverSettings.ts";
 import * as Project from "../../../project/ProjectService.ts";
 import * as ManagedProjectFolders from "../../../project/ManagedProjectFolders.ts";
+import * as ProjectCloneTracker from "../../../project/ProjectCloneTracker.ts";
+import * as ProviderRegistry from "../../../provider/ProviderRegistry.ts";
 import * as GitVcsDriver from "../../../vcs/GitVcsDriver.ts";
 import * as VcsProcess from "../../../vcs/VcsProcess.ts";
 import * as McpInvocationContext from "../../McpInvocationContext.ts";
@@ -48,6 +55,7 @@ it.effect("attributes a launched thread's first message to the calling thread", 
     let launchedSender: ThreadId | undefined;
     const layerDependencies = Layer.mergeAll(
       NodeCrypto.layer,
+      ServerSettings.layerTest(),
       Layer.succeed(McpInvocationContext.McpInvocationContext, {
         environmentId: EnvironmentId.make("environment"),
         requestNamespace: "session",
@@ -59,6 +67,9 @@ it.effect("attributes a launched thread's first message to the calling thread", 
         client: undefined,
         issuedAt: 0,
         capabilities: new Set(["orchestration" as const]),
+      }),
+      Layer.mock(ProviderRegistry.ProviderRegistry)({
+        getProviders: Effect.succeed([]),
       }),
       Layer.mock(ThreadManagement.ThreadManagementService)({
         getThreadShell: () => Effect.succeed(caller),
@@ -76,6 +87,7 @@ it.effect("attributes a launched thread's first message to the calling thread", 
           } as unknown as ThreadLaunch.ThreadLaunchResult);
         },
       }),
+      Layer.mock(ProjectCloneTracker.ProjectCloneTracker)({ discard: () => Effect.void }),
       Layer.mock(Project.ProjectService)({}),
       Layer.mock(ManagedProjectFolders.ManagedProjectFolders)({ namedProjectsRoot: "/projects" }),
       Layer.mock(GitVcsDriver.GitVcsDriver)({}),
@@ -123,6 +135,7 @@ it.effect("launches a scratch thread into the Scratch project", () =>
     const launched: Array<ThreadLaunch.ThreadLaunchInput> = [];
     const layerDependencies = Layer.mergeAll(
       NodeCrypto.layer,
+      ServerSettings.layerTest(),
       Layer.succeed(McpInvocationContext.McpInvocationContext, {
         environmentId: EnvironmentId.make("environment"),
         requestNamespace: "session",
@@ -134,6 +147,9 @@ it.effect("launches a scratch thread into the Scratch project", () =>
         client: undefined,
         issuedAt: 0,
         capabilities: new Set(["orchestration" as const]),
+      }),
+      Layer.mock(ProviderRegistry.ProviderRegistry)({
+        getProviders: Effect.succeed([]),
       }),
       Layer.mock(ThreadManagement.ThreadManagementService)({
         getThreadShell: () => Effect.succeed(caller),
@@ -156,6 +172,7 @@ it.effect("launches a scratch thread into the Scratch project", () =>
           } as unknown as ThreadLaunch.ThreadLaunchResult);
         },
       }),
+      Layer.mock(ProjectCloneTracker.ProjectCloneTracker)({ discard: () => Effect.void }),
       Layer.mock(Project.ProjectService)({}),
       Layer.mock(ManagedProjectFolders.ManagedProjectFolders)({
         namedProjectsRoot: "/projects",
@@ -225,6 +242,7 @@ it.effect("starts a project from just a title when workspaceRoot is omitted", ()
     };
     const layerDependencies = Layer.mergeAll(
       NodeCrypto.layer,
+      ServerSettings.layerTest(),
       Layer.succeed(McpInvocationContext.McpInvocationContext, {
         environmentId: EnvironmentId.make("environment"),
         requestNamespace: "session",
@@ -236,6 +254,9 @@ it.effect("starts a project from just a title when workspaceRoot is omitted", ()
         client: undefined,
         issuedAt: 0,
         capabilities: new Set(["orchestration" as const]),
+      }),
+      Layer.mock(ProviderRegistry.ProviderRegistry)({
+        getProviders: Effect.succeed([]),
       }),
       Layer.mock(ThreadManagement.ThreadManagementService)({
         getThreadShell: () => Effect.succeed(caller),
@@ -252,6 +273,7 @@ it.effect("starts a project from just a title when workspaceRoot is omitted", ()
             projectId === createdProjectId ? Option.some(createdProject) : Option.none(),
           ),
       }),
+      Layer.mock(ProjectCloneTracker.ProjectCloneTracker)({ discard: () => Effect.void }),
       Layer.mock(ManagedProjectFolders.ManagedProjectFolders)({
         namedProjectsRoot: "/projects",
         createNamedProject: (input) =>
@@ -306,18 +328,123 @@ it.effect("starts a project from just a title when workspaceRoot is omitted", ()
   }),
 );
 
+it.effect("discards a tracked clone when an MCP project delete succeeds", () =>
+  Effect.gen(function* () {
+    const projectId = ProjectId.make("project:clone");
+    const sourceThreadId = ThreadId.make("delete-source-thread");
+    const providerInstanceId = ProviderInstanceId.make("codex");
+    const caller = {
+      id: sourceThreadId,
+      projectId,
+      providerInstanceId,
+      modelSelection: { instanceId: providerInstanceId, model: "gpt-5" },
+      runtimeMode: "full-access",
+      interactionMode: "default",
+      activeRunId: "active-run",
+      archivedAt: null,
+      deletedAt: null,
+    } as OrchestrationV2ThreadShell;
+    const deletedProject: ProjectRecord = {
+      id: projectId,
+      title: "Clone",
+      workspaceRoot: "/projects/clone",
+      defaultModelSelection: null,
+      scripts: [],
+      createdAt: "2026-10-01T00:00:00.000Z",
+      updatedAt: "2026-10-01T00:00:00.000Z",
+      deletedAt: null,
+    };
+    const deletions: Array<Project.ProjectDeleteInput> = [];
+    const discarded: Array<ProjectId> = [];
+    const layerDependencies = Layer.mergeAll(
+      NodeCrypto.layer,
+      ServerSettings.layerTest(),
+      Layer.succeed(McpInvocationContext.McpInvocationContext, {
+        environmentId: EnvironmentId.make("environment"),
+        requestNamespace: "session",
+        thread: {
+          threadId: sourceThreadId,
+          providerSessionId: "session",
+          providerInstanceId,
+        },
+        client: undefined,
+        issuedAt: 0,
+        capabilities: new Set(["orchestration" as const]),
+      }),
+      Layer.mock(ProviderRegistry.ProviderRegistry)({
+        getProviders: Effect.succeed([]),
+      }),
+      Layer.mock(ThreadManagement.ThreadManagementService)({
+        getThreadShell: () => Effect.succeed(caller),
+      }),
+      Layer.mock(ThreadLaunch.ThreadLaunchService)({}),
+      Layer.mock(Project.ProjectService)({
+        delete: (input) =>
+          Effect.sync(() => {
+            deletions.push(input);
+            return deletedProject;
+          }),
+      }),
+      Layer.mock(ProjectCloneTracker.ProjectCloneTracker)({
+        discard: (id) =>
+          Effect.sync(() => {
+            discarded.push(id);
+          }),
+      }),
+      Layer.mock(ManagedProjectFolders.ManagedProjectFolders)({ namedProjectsRoot: "/projects" }),
+      Layer.mock(GitVcsDriver.GitVcsDriver)({}),
+      NodeServices.layer,
+      ServerConfig.layerTest(process.cwd(), { prefix: "t3-project-delete-" }).pipe(
+        Layer.provide(NodeServices.layer),
+      ),
+    );
+    const toolkit = yield* ProjectToolkit.pipe(
+      Effect.provide(
+        McpToolAccess.HandlersLayer.layer(ProjectHandlers.layer).pipe(
+          Layer.provide(layerDependencies),
+        ),
+      ),
+    );
+    const result = yield* toolkit
+      .handle("t3_project_delete", { projectId, force: true })
+      .pipe(Stream.unwrap, Stream.runCollect, Effect.provide(layerDependencies));
+
+    expect(result.at(-1)?.result).toEqual(deletedProject);
+    expect(deletions).toHaveLength(1);
+    expect(deletions[0]).toMatchObject({ projectId, force: true });
+    expect(discarded).toEqual([projectId]);
+  }),
+);
 const clientLaunchHarness = (input: {
-  readonly runtimeModeCeiling: "approval-required" | "auto-accept-edits" | "auto" | "full-access";
+  readonly runtimeModeCeiling: RuntimeMode;
+  readonly defaultRuntimeMode?: RuntimeMode;
+  readonly overrideModel?: ModelSelection;
   readonly launched: Array<ThreadLaunch.ThreadLaunchInput>;
   readonly workspaceRoot?: string;
   readonly requestNamespace?: string;
+  readonly webOrigin?: string;
+  readonly providers?: ReadonlyArray<ServerProvider>;
 }) => {
   const projectId = ProjectId.make("project:client-target");
-  const modelSelection = { instanceId: ProviderInstanceId.make("claude"), model: "claude-opus" };
+  const modelSelection = { instanceId: ProviderInstanceId.make("codex"), model: "gpt-5" };
   const launchedShells = new Map<string, OrchestrationV2ThreadShell>();
   const acceptedLaunches = new Map<string, ThreadLaunch.ThreadLaunchResult>();
   const layerDependencies = Layer.mergeAll(
     NodeCrypto.layer,
+    ServerSettings.layerTest({
+      ...(input.defaultRuntimeMode === undefined
+        ? {}
+        : { defaultRuntimeMode: input.defaultRuntimeMode }),
+      providers: { codex: { enabled: true } },
+      ...(input.overrideModel === undefined
+        ? {}
+        : {
+            projectSettingsFolded: true,
+            projectSettingsOverrides: {
+              [projectId]: { defaultModelSelection: input.overrideModel },
+            },
+          }),
+    }),
     Layer.succeed(McpInvocationContext.McpInvocationContext, {
       environmentId: EnvironmentId.make("environment"),
       requestNamespace: input.requestNamespace ?? "client:session-1",
@@ -326,9 +453,13 @@ const clientLaunchHarness = (input: {
         sessionId: "session-1",
         label: "Claude Code",
         access: input.runtimeModeCeiling,
+        ...(input.webOrigin === undefined ? {} : { webOrigin: input.webOrigin }),
       },
       issuedAt: 0,
       capabilities: new Set(["orchestration" as const]),
+    }),
+    Layer.mock(ProviderRegistry.ProviderRegistry)({
+      getProviders: Effect.succeed(input.providers ?? []),
     }),
     Layer.mock(ThreadManagement.ThreadManagementService)({
       getThreadShell: (threadId) => Effect.succeed(launchedShells.get(threadId) ?? null),
@@ -353,16 +484,13 @@ const clientLaunchHarness = (input: {
           },
           resumed: false,
         } as unknown as ThreadLaunch.ThreadLaunchResult;
-        launchedShells.set(
-          threadId,
-          {
-            id: threadId,
-            projectId: launch.projectId,
-            modelSelection: launch.modelSelection,
-            title: launch.title,
-            deletedAt: null,
-          } as OrchestrationV2ThreadShell,
-        );
+        launchedShells.set(threadId, {
+          id: threadId,
+          projectId: launch.projectId,
+          modelSelection: launch.modelSelection,
+          title: launch.title,
+          deletedAt: null,
+        } as OrchestrationV2ThreadShell);
         acceptedLaunches.set(launch.commandId, result);
         return Effect.succeed(result);
       },
@@ -374,11 +502,12 @@ const clientLaunchHarness = (input: {
             ? Option.some({
                 id,
                 workspaceRoot: input.workspaceRoot ?? "/projects/client-target",
-                defaultModelSelection: modelSelection,
+                defaultModelSelection: input.overrideModel === undefined ? modelSelection : null,
               } as unknown as ProjectRecord)
             : Option.none(),
         ),
     }),
+    Layer.mock(ProjectCloneTracker.ProjectCloneTracker)({ discard: () => Effect.void }),
     Layer.mock(ManagedProjectFolders.ManagedProjectFolders)({ namedProjectsRoot: "/projects" }),
     NodeServices.layer,
   ).pipe(
@@ -399,6 +528,7 @@ it.effect("uses a caller-scoped clientRequestId to replay a thread launch", () =
     const { projectId, dependencies } = clientLaunchHarness({
       runtimeModeCeiling: "auto-accept-edits",
       launched,
+      webOrigin: "https://box.example.ts.net",
     });
     const toolkit = yield* ProjectToolkit.pipe(
       Effect.provide(
@@ -417,6 +547,11 @@ it.effect("uses a caller-scoped clientRequestId to replay a thread launch", () =
     };
     const first = yield* handle(request);
     const replay = yield* handle(request);
+    expect(first.at(-1)?.result).toMatchObject({
+      link: `[Audit](https://box.example.ts.net/environment/${encodeURIComponent(
+        launched[0]?.threadId ?? "",
+      )})`,
+    });
     expect(launched).toHaveLength(1);
     expect(replay.at(-1)?.result).toEqual(first.at(-1)?.result);
     const otherCallerLaunches: Array<ThreadLaunch.ThreadLaunchInput> = [];
@@ -434,20 +569,17 @@ it.effect("uses a caller-scoped clientRequestId to replay a thread launch", () =
     );
     yield* otherToolkit
       .handle("t3_thread_launch", request)
-      .pipe(
-        Stream.unwrap,
-        Stream.runCollect,
-        Effect.provide(otherCaller.dependencies),
-      );
+      .pipe(Stream.unwrap, Stream.runCollect, Effect.provide(otherCaller.dependencies));
     expect(otherCallerLaunches[0]?.commandId).not.toBe(launched[0]?.commandId);
   }),
 );
 
-it.effect("a client launches at its ceiling with the project's default model", () =>
+it.effect("a client launches with the project default model and mode", () =>
   Effect.gen(function* () {
     const launched: Array<ThreadLaunch.ThreadLaunchInput> = [];
     const { projectId, modelSelection, dependencies } = clientLaunchHarness({
       runtimeModeCeiling: "auto-accept-edits",
+      defaultRuntimeMode: "approval-required",
       launched,
     });
     const toolkit = yield* ProjectToolkit.pipe(
@@ -462,7 +594,7 @@ it.effect("a client launches at its ceiling with the project's default model", (
 
     const result = yield* handle({ title: "Fix", projectId, message: "Fix the bug" });
     expect(result.at(-1)?.result).toMatchObject({ projectId, modelSelection });
-    expect(launched[0]?.runtimeMode).toBe("auto-accept-edits");
+    expect(launched[0]?.runtimeMode).toBe("approval-required");
     expect(launched[0]?.initialMessage?.senderThreadId).toBeUndefined();
 
     const escalated = yield* handle({ title: "Fix", projectId, runtimeMode: "full-access" });
@@ -472,6 +604,124 @@ it.effect("a client launches at its ceiling with the project's default model", (
     expect(untargeted.at(-1)?.result).toMatchObject({ code: "target_required" });
     expect(launched).toHaveLength(1);
   }),
+);
+
+it.effect("external launch defaults stay within the client's runtime ceiling", () =>
+  Effect.gen(function* () {
+    const launch = (input: {
+      readonly ceiling: RuntimeMode;
+      readonly defaultMode: RuntimeMode;
+      readonly requestedRuntimeMode?: RuntimeMode;
+      readonly overrideModel?: ModelSelection;
+    }) =>
+      Effect.gen(function* () {
+        const launched: Array<ThreadLaunch.ThreadLaunchInput> = [];
+        const { projectId, dependencies } = clientLaunchHarness({
+          runtimeModeCeiling: input.ceiling,
+          defaultRuntimeMode: input.defaultMode,
+          launched,
+          ...(input.overrideModel === undefined ? {} : { overrideModel: input.overrideModel }),
+        });
+        const toolkit = yield* ProjectToolkit.pipe(
+          Effect.provide(
+            McpToolAccess.HandlersLayer.layer(ProjectHandlers.layer).pipe(
+              Layer.provide(dependencies),
+            ),
+          ),
+        );
+        const result = yield* toolkit
+          .handle("t3_thread_launch", {
+            title: "Settings",
+            projectId,
+            ...(input.requestedRuntimeMode === undefined
+              ? {}
+              : { runtimeMode: input.requestedRuntimeMode }),
+          })
+          .pipe(Stream.unwrap, Stream.runCollect, Effect.provide(dependencies));
+        return { launched, result: result.at(-1)?.result };
+      });
+
+    const capped = yield* launch({
+      ceiling: "auto-accept-edits",
+      defaultMode: "full-access",
+    });
+    expect(capped.launched[0]?.runtimeMode).toBe("auto-accept-edits");
+
+    const requested = yield* launch({
+      ceiling: "full-access",
+      defaultMode: "approval-required",
+      requestedRuntimeMode: "auto",
+    });
+    expect(requested.launched[0]?.runtimeMode).toBe("auto");
+
+    const overrideModel = {
+      instanceId: ProviderInstanceId.make("codex"),
+      model: "gpt-settings",
+    };
+    const fromSettings = yield* launch({
+      ceiling: "full-access",
+      defaultMode: "approval-required",
+      overrideModel,
+    });
+    expect(fromSettings.launched[0]?.modelSelection).toEqual(overrideModel);
+  }),
+);
+
+it.effect(
+  "steps an inherited launch mode down to a provider mode and refuses unsupported modes",
+  () =>
+    Effect.gen(function* () {
+      const runLaunch = (
+        runtimeMode?: "approval-required" | "auto-accept-edits" | "auto" | "full-access",
+      ) =>
+        Effect.gen(function* () {
+          const launched: Array<ThreadLaunch.ThreadLaunchInput> = [];
+          const provider = {
+            instanceId: ProviderInstanceId.make("codex"),
+            driver: ProviderDriverKind.make("codex"),
+            enabled: true,
+            installed: true,
+            status: "ready",
+            version: null,
+            auth: { status: "authenticated" },
+            checkedAt: "2026-01-01T00:00:00Z",
+            models: [],
+            slashCommands: [],
+            skills: [],
+            supportedRuntimeModes: ["approval-required", "auto-accept-edits", "full-access"],
+          } satisfies ServerProvider;
+          const { projectId, dependencies } = clientLaunchHarness({
+            runtimeModeCeiling: "auto",
+            launched,
+            providers: [provider],
+          });
+          const toolkit = yield* ProjectToolkit.pipe(
+            Effect.provide(
+              McpToolAccess.HandlersLayer.layer(ProjectHandlers.layer).pipe(
+                Layer.provide(dependencies),
+              ),
+            ),
+          );
+          const result = yield* toolkit
+            .handle("t3_thread_launch", {
+              title: "Fix",
+              projectId,
+              ...(runtimeMode === undefined ? {} : { runtimeMode }),
+            })
+            .pipe(Stream.unwrap, Stream.runCollect, Effect.provide(dependencies));
+          return { launched, result: result.at(-1)?.result };
+        });
+
+      const inherited = yield* runLaunch();
+      expect(inherited.launched[0]?.runtimeMode).toBe("auto-accept-edits");
+
+      const unsupported = yield* runLaunch("auto");
+      expect(unsupported.result).toMatchObject({ code: "invalid_request" });
+      expect(unsupported.launched).toHaveLength(0);
+
+      const offered = yield* runLaunch("approval-required");
+      expect(offered.launched[0]?.runtimeMode).toBe("approval-required");
+    }),
 );
 
 it.effect("a launch binds only an existing checkout that is one of the project's worktrees", () =>

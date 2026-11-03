@@ -20,6 +20,7 @@ import {
   VcsProcessExitError,
   VcsProcessTimeoutError,
 } from "@t3tools/contracts";
+import { HostProcessPlatform } from "@t3tools/shared/hostProcess";
 import * as ServerConfig from "../config.ts";
 import * as CheckpointStore from "../checkpointing/CheckpointStore.ts";
 import * as ProcessRunner from "../processRunner.ts";
@@ -101,6 +102,24 @@ runVcsDriverContractSuite<GitVcsDriver.GitVcsDriver, GitContractError>({
   },
 });
 
+it.effect.skipIf(HostProcessPlatform.defaultValue() === "win32")(
+  "GitVcsDriver detects a repository whose path contains a newline",
+  () =>
+    Effect.gen(function* () {
+      const fileSystem = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const parent = yield* fileSystem.makeTempDirectoryScoped({ prefix: "t3-newline-repo-" });
+      const cwd = path.join(parent, "multi\nline");
+      yield* fileSystem.makeDirectory(cwd);
+      yield* runGit(cwd, ["init"]);
+      const driver = yield* GitVcsDriver.makeVcsDriverShape();
+
+      const repository = yield* driver.detectRepository(cwd);
+      assert.strictEqual(repository?.rootPath, yield* fileSystem.realPath(cwd));
+      assert.strictEqual(repository?.metadataPath, ".git");
+    }).pipe(Effect.scoped, Effect.provide(layerGitContract)),
+);
+
 const makeCheckpointFixture = Effect.fn("makeCheckpointFixture")(function* (
   driver: Effect.Success<ReturnType<typeof GitVcsDriver.makeVcsDriverShape>>,
   cwd: string,
@@ -121,6 +140,98 @@ const makeCheckpointFixture = Effect.fn("makeCheckpointFixture")(function* (
   yield* fileSystem.writeFileString(path.join(cwd, "file.txt"), "unstaged\n");
   return { git, checkpointRef };
 });
+
+const captureCheckpointRecordingCommands = Effect.fn("test.captureCheckpointRecordingCommands")(
+  function* (cwd: string, checkpointRef: CheckpointRef) {
+    const liveProcess = yield* VcsProcess.VcsProcess;
+    const commands: Array<ReadonlyArray<string>> = [];
+    const driver = yield* GitVcsDriver.makeVcsDriverShape().pipe(
+      Effect.provideService(VcsProcess.VcsProcess, {
+        run: (input) => {
+          let commandIndex = 0;
+          while (input.args[commandIndex] === "-C" || input.args[commandIndex] === "-c") {
+            commandIndex += 2;
+          }
+          commands.push(input.args.slice(commandIndex));
+          return liveProcess.run(input);
+        },
+      }),
+    );
+    yield* driver.checkpoints.captureCheckpoint({ cwd, checkpointRef });
+    return commands;
+  },
+);
+
+it.effect.each(["committed", "unborn"] as const)(
+  "reads checkpoint metadata with one rev-parse when HEAD is %s",
+  (head) =>
+    Effect.gen(function* () {
+      const fileSystem = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const driver = yield* GitVcsDriver.makeVcsDriverShape();
+      const cwd = yield* fileSystem.makeTempDirectoryScoped({ prefix: "t3-checkpoint-processes-" });
+      const checkpointRef = CheckpointRef.make("refs/t3/checkpoints/test");
+      if (head === "committed") {
+        yield* makeCheckpointFixture(driver, cwd);
+      } else {
+        yield* driver.execute({ operation: "checkpoint-test", cwd, args: ["init"] });
+        yield* fileSystem.writeFileString(path.join(cwd, "file.txt"), "unstaged\n");
+      }
+
+      const commands = yield* captureCheckpointRecordingCommands(cwd, checkpointRef);
+      assert.deepStrictEqual(
+        commands.filter((args) => args[0] === "rev-parse"),
+        [
+          [
+            "rev-parse",
+            "--path-format=absolute",
+            "--git-common-dir",
+            "--git-path",
+            "index",
+            "--verify",
+            "--quiet",
+            "HEAD",
+          ],
+        ],
+      );
+    }).pipe(Effect.scoped, Effect.provide(layerGitContract)),
+);
+
+it.effect.skipIf(HostProcessPlatform.defaultValue() === "win32")(
+  "falls back to separate checkpoint metadata reads for a newline repository path",
+  () =>
+    Effect.gen(function* () {
+      const fileSystem = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const driver = yield* GitVcsDriver.makeVcsDriverShape();
+      const cwd = yield* fileSystem.makeTempDirectoryScoped({
+        prefix: "t3-checkpoint-new\nline-",
+      });
+      const { checkpointRef } = yield* makeCheckpointFixture(driver, cwd);
+      const originalIndex = yield* fileSystem.readFile(path.join(cwd, ".git", "index"));
+
+      const commands = yield* captureCheckpointRecordingCommands(cwd, checkpointRef);
+
+      assert.deepStrictEqual(
+        commands.filter((args) => args[0] === "rev-parse"),
+        [
+          [
+            "rev-parse",
+            "--path-format=absolute",
+            "--git-common-dir",
+            "--git-path",
+            "index",
+            "--verify",
+            "--quiet",
+            "HEAD",
+          ],
+          ["rev-parse", "--git-common-dir"],
+          ["rev-parse", "--path-format=absolute", "--git-path", "index"],
+        ],
+      );
+      assert.deepEqual(yield* fileSystem.readFile(path.join(cwd, ".git", "index")), originalIndex);
+    }).pipe(Effect.scoped, Effect.provide(layerGitContract)),
+);
 
 it.effect("checkpoint capture skips untracked nested repositories without a commit", () =>
   Effect.gen(function* () {
@@ -718,9 +829,13 @@ it.effect("checkpoint capture keeps the legacy path when Git lacks add --sparse"
   }).pipe(Effect.scoped, Effect.provide(layerGitContract)),
 );
 
-it.effect.each(["normal", "flags", "sparse"] as const)(
-  "checkpoint index inspection handles entries beyond the output cap (index=%s)",
-  (indexMode) =>
+it.effect.each(
+  (["normal", "flags", "sparse"] as const).flatMap((indexMode) =>
+    [1, 3, 4096].map((chunkSize) => ({ indexMode, chunkSize })),
+  ),
+)(
+  "checkpoint index inspection handles entries beyond the output cap (index=$indexMode, chunk=$chunkSize)",
+  ({ indexMode, chunkSize }) =>
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;
       const path = yield* Path.Path;
@@ -756,8 +871,8 @@ it.effect.each(["normal", "flags", "sparse"] as const)(
                     ...input,
                     maxOutputBytes: 8,
                     onStdoutChunk: (chunk) => {
-                      for (let i = 0; i < chunk.length; i++)
-                        input.onStdoutChunk?.(chunk.subarray(i, i + 1));
+                      for (let i = 0; i < chunk.length; i += chunkSize)
+                        input.onStdoutChunk?.(chunk.subarray(i, i + chunkSize));
                     },
                   }
                 : input,

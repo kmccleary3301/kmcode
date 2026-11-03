@@ -37,6 +37,7 @@ for (const operation of [
           const provider = yield* make.pipe(
             Effect.provide(
               Layer.mock(BitbucketPullRequestApi.BitbucketPullRequestApi)({
+                servesHost: (host) => host === "bitbucket.org",
                 getPullRequest: () => Effect.succeed(pullRequest),
                 getDiffStat: () => Effect.succeed({ additions: 0, deletions: 0, changedFiles: 0 }),
                 getMergeability: () => Effect.succeed("unknown" as const),
@@ -100,6 +101,7 @@ it.effect("reads checks and PR state without diff, mergeability, or permission r
     const provider = yield* make.pipe(
       Effect.provide(
         Layer.mock(BitbucketPullRequestApi.BitbucketPullRequestApi)({
+          servesHost: (host) => host === "bitbucket.org",
           getPullRequest: () => Effect.succeed(pullRequest),
           listChecks: () =>
             limited
@@ -126,6 +128,21 @@ it.effect("reads checks and PR state without diff, mergeability, or permission r
       reason: "rate-limited",
       retryAt: 120_000,
     });
+  }),
+);
+
+it.effect("exposes the configured Bitbucket host support", () =>
+  Effect.gen(function* () {
+    const provider = yield* make.pipe(
+      Effect.provide(
+        Layer.mock(BitbucketPullRequestApi.BitbucketPullRequestApi)({
+          servesHost: (host) => host === "bitbucket.org",
+        }),
+      ),
+    );
+
+    expect(provider.servesHost?.("bitbucket.org")).toBe(true);
+    expect(provider.servesHost?.("bitbucket.example.com")).toBe(false);
   }),
 );
 

@@ -5,6 +5,7 @@ import type { ProviderDriverKind, ProviderReplayTranscript } from "@t3tools/cont
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
+import * as Stream from "effect/Stream";
 import * as Path from "effect/Path";
 import * as PlatformError from "effect/PlatformError";
 import type * as Scope from "effect/Scope";
@@ -15,6 +16,7 @@ import type { SqlError } from "effect/sql/SqlError";
 import * as CheckpointStore from "../../checkpointing/CheckpointStore.ts";
 import * as ServerConfig from "../../config.ts";
 import * as SqlitePersistence from "../../persistence/Sqlite.ts";
+import * as ProviderInstanceRegistry from "../../provider/ProviderInstanceRegistry.ts";
 import * as ServerSettings from "../../serverSettings.ts";
 import * as ThreadManagementService from "../ThreadManagementService.ts";
 import * as McpSessionRegistryTestkit from "../../mcp/McpSessionRegistry.testkit.ts";
@@ -268,6 +270,7 @@ export function layerWithRegistry<Error>(
     readonly recoverOnStartup?: boolean;
     readonly continueThreadsAfterServerUpdate?: boolean;
     readonly serverSettings?: Parameters<typeof ServerSettings.layerTest>[0];
+    readonly serverSettingsLayer?: Layer.Layer<ServerSettings.ServerSettingsService>;
   } = {},
 ): Layer.Layer<
   | Orchestrator.OrchestratorV2
@@ -295,13 +298,15 @@ export function layerWithRegistry<Error>(
   const layerContinuationRequests =
     options.runContinuationWorker === true ? ProviderContinuationRequests.layer : Layer.empty;
   const layerProvidedRegistry = registryLayer.pipe(Layer.provide(layerContinuationRequests));
-  const layerServerSettings = ServerSettings.layerTest({
-    ...options.serverSettings,
-    responseStreamingMode: "turn",
-    ...(options.continueThreadsAfterServerUpdate === undefined
-      ? {}
-      : { continueThreadsAfterServerUpdate: options.continueThreadsAfterServerUpdate }),
-  }).pipe(Layer.orDie);
+  const layerServerSettings =
+    options.serverSettingsLayer ??
+    ServerSettings.layerTest({
+      ...options.serverSettings,
+      responseStreamingMode: "turn",
+      ...(options.continueThreadsAfterServerUpdate === undefined
+        ? {}
+        : { continueThreadsAfterServerUpdate: options.continueThreadsAfterServerUpdate }),
+    }).pipe(Layer.orDie);
   const layerStores = Layer.mergeAll(
     EventStore.layer,
     ProjectionStore.layer,
@@ -316,6 +321,16 @@ export function layerWithRegistry<Error>(
   const layerCommandReceiptStoreProvided = CommandReceiptStore.layer.pipe(
     Layer.provide(layerDatabase),
   );
+  const layerEmptyProviderInstanceRegistry = Layer.succeed(
+    ProviderInstanceRegistry.ProviderInstanceRegistry,
+    ProviderInstanceRegistry.ProviderInstanceRegistry.of({
+      getInstance: () => Effect.succeed(undefined),
+      listInstances: Effect.succeed([]),
+      listUnavailable: Effect.succeed([]),
+      streamChanges: Stream.empty,
+      subscribeChanges: Effect.die("Replay tests do not subscribe to registry changes"),
+    }),
+  );
   const layerProviderEventIngestorProvided = ProviderEventIngestor.layer.pipe(
     Layer.provide(
       Layer.mergeAll(
@@ -323,6 +338,7 @@ export function layerWithRegistry<Error>(
         layerEventSinkProvided,
         IdAllocator.layer,
         ThreadCommandExecutor.layer,
+        layerEmptyProviderInstanceRegistry,
       ),
     ),
   );
@@ -443,6 +459,7 @@ export function layerWithRegistry<Error>(
         layerProviderSessionManagerProvided,
         layerProviderSwitchServiceProvided,
         layerRunExecutionServiceProvided,
+        layerServerSettings,
         ThreadForkService.layer,
       ),
     ),

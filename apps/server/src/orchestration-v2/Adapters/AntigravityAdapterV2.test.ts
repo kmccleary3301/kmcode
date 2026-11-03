@@ -32,19 +32,6 @@ import {
   makeAntigravityAdapterV2,
 } from "./AntigravityAdapterV2.ts";
 
-const flavor = makeAntigravityAcpAdapterFlavor({
-  instanceId: ProviderInstanceId.make("antigravity-test"),
-  crypto: undefined as never,
-  fileSystem: undefined as never,
-  path: undefined as never,
-  idAllocator: undefined as never,
-  serverConfig: undefined as never,
-  selfInvocation: undefined as never,
-  makeRuntime: () => Effect.die("not spawned in this test"),
-  withProcess: (_stop, task) => task,
-  defaultModel: Effect.succeed(undefined),
-});
-
 function permissionRequest(
   toolCallId: string,
   options: ReadonlyArray<EffectAcpSchema.PermissionOption>,
@@ -56,76 +43,6 @@ function permissionRequest(
   };
 }
 
-describe("AntigravityAdapterV2 flavor", () => {
-  it("keeps a successful subagent launch running until the parent turn becomes idle", () => {
-    const batch = flavor.extractSubagentUpdate?.({
-      toolCallId: "trajectory:4",
-      title: "Running start_subagent",
-      kind: "other",
-      status: "completed",
-      data: { rawOutput: "Started two agents." },
-    });
-    assert.equal(batch?.status, "running");
-    assert.equal(batch?.prompt, "Started two agents.");
-    assert.isNull(batch?.result);
-    assert.isTrue(flavor.subagentsIdleOnTurnCompletion);
-  });
-
-  it("maps runtime modes to the agent's native permission modes", () => {
-    const mode = (runtimeMode: "approval-required" | "auto-accept-edits" | "full-access") =>
-      flavor.sessionModeForPolicy?.(
-        ProviderAdapterV2RuntimePolicy.make({
-          runtimeMode,
-          interactionMode: "default",
-          cwd: "/workspace",
-        }),
-      );
-    assert.equal(mode("approval-required"), "default");
-    assert.equal(mode("auto-accept-edits"), "auto_edit");
-    assert.equal(mode("full-access"), "yolo");
-  });
-
-  it("exposes Antigravity's /compact command through the v2 compaction path", () => {
-    assert.isTrue(flavor.supportsCompaction);
-  });
-
-  it("routes interaction_* permission requests to the question card", () => {
-    const question = flavor.extractPermissionQuestion?.(
-      permissionRequest("interaction_1", [
-        { optionId: "main", name: "main", kind: "allow_once" },
-        { optionId: "dev", name: "dev", kind: "allow_once" },
-      ]),
-    );
-    assert.isDefined(question);
-    assert.deepEqual(
-      question?.question.options.map((option) => option.label),
-      ["main", "dev"],
-    );
-    assert.deepEqual(question?.respond({ interaction_1: "dev" }), {
-      outcome: { outcome: "selected", optionId: "dev" },
-    });
-    assert.isUndefined(question?.respond({ interaction_1: "nope" }));
-    assert.isUndefined(
-      flavor.extractPermissionQuestion?.(
-        permissionRequest("tool_1", [{ optionId: "allow", name: "Allow", kind: "allow_once" }]),
-      ),
-    );
-  });
-
-  it("advertises only the approval decisions the request can honor", () => {
-    const options = flavor.approvalOptions?.(
-      permissionRequest("tool_1", [
-        { optionId: "once", name: "Allow", kind: "allow_once" },
-        { optionId: "deny", name: "Deny", kind: "reject_once" },
-      ]),
-    );
-    assert.deepEqual(
-      options?.map((option) => option.decision),
-      ["accept", "decline", "cancel"],
-    );
-  });
-});
-
 const layerSession = Layer.mergeAll(
   NodeServices.layer,
   IdAllocator.layer,
@@ -133,6 +50,156 @@ const layerSession = Layer.mergeAll(
     Layer.provide(NodeServices.layer),
   ),
 );
+const makeTestFlavor = Effect.gen(function* () {
+  return makeAntigravityAcpAdapterFlavor({
+    instanceId: ProviderInstanceId.make("antigravity-test"),
+    crypto: yield* Crypto.Crypto,
+    fileSystem: yield* FileSystem.FileSystem,
+    path: yield* Path.Path,
+    idAllocator: yield* IdAllocator.IdAllocatorV2,
+    serverConfig: yield* ServerConfig.ServerConfig,
+    selfInvocation: yield* resolveSelfInvocation(),
+    makeRuntime: () => Effect.die("not spawned in this test"),
+    withProcess: (_stop, task) => task,
+    defaultModel: Effect.succeed(undefined),
+  });
+});
+
+describe("AntigravityAdapterV2 flavor", () => {
+  it.effect("keeps a successful subagent launch running until the parent turn becomes idle", () =>
+    Effect.gen(function* () {
+      const flavor = yield* makeTestFlavor;
+      const batch = flavor.extractSubagentUpdate?.({
+        toolCallId: "trajectory:4",
+        title: "Running start_subagent",
+        kind: "other",
+        status: "completed",
+        data: { rawOutput: "Started two agents." },
+      });
+      assert.equal(batch?.status, "running");
+      assert.equal(batch?.prompt, "Started two agents.");
+      assert.isNull(batch?.result);
+      assert.isTrue(flavor.subagentsIdleOnTurnCompletion);
+    }).pipe(Effect.provide(layerSession)),
+  );
+
+  it.effect("maps runtime modes to the agent's native permission modes", () =>
+    Effect.gen(function* () {
+      const flavor = yield* makeTestFlavor;
+      const mode = (runtimeMode: "approval-required" | "auto-accept-edits" | "full-access") =>
+        flavor.sessionModeForPolicy?.(
+          ProviderAdapterV2RuntimePolicy.make({
+            runtimeMode,
+            interactionMode: "default",
+            cwd: "/workspace",
+          }),
+        );
+      assert.equal(mode("approval-required"), "default");
+      assert.equal(mode("auto-accept-edits"), "auto_edit");
+      assert.equal(mode("full-access"), "yolo");
+    }).pipe(Effect.provide(layerSession)),
+  );
+
+  it.effect("does not expose unsupported manual compaction", () =>
+    Effect.gen(function* () {
+      const flavor = yield* makeTestFlavor;
+      assert.isFalse(flavor.supportsCompaction);
+    }).pipe(Effect.provide(layerSession)),
+  );
+
+  it.effect("routes interaction_* permission requests to the question card", () =>
+    Effect.gen(function* () {
+      const flavor = yield* makeTestFlavor;
+      const question = flavor.extractPermissionQuestion?.(
+        permissionRequest("interaction_1", [
+          { optionId: "main", name: "main", kind: "allow_once" },
+          { optionId: "dev", name: "dev", kind: "allow_once" },
+        ]),
+      );
+      assert.isDefined(question);
+      assert.deepEqual(
+        question?.question.options.map((option) => option.label),
+        ["main", "dev"],
+      );
+      assert.deepEqual(question?.respond({ interaction_1: "dev" }), {
+        outcome: { outcome: "selected", optionId: "dev" },
+      });
+      assert.isUndefined(question?.respond({ interaction_1: "nope" }));
+      assert.isUndefined(
+        flavor.extractPermissionQuestion?.(
+          permissionRequest("tool_1", [{ optionId: "allow", name: "Allow", kind: "allow_once" }]),
+        ),
+      );
+    }).pipe(Effect.provide(layerSession)),
+  );
+
+  it.effect("advertises only the approval decisions the request can honor", () =>
+    Effect.gen(function* () {
+      const flavor = yield* makeTestFlavor;
+      const options = flavor.approvalOptions?.(
+        permissionRequest("tool_1", [
+          { optionId: "once", name: "Allow", kind: "allow_once" },
+          { optionId: "deny", name: "Deny", kind: "reject_once" },
+        ]),
+      );
+      assert.deepEqual(
+        options?.map((option) => option.decision),
+        ["accept", "decline", "cancel"],
+      );
+    }).pipe(Effect.provide(layerSession)),
+  );
+});
+
+describe("AntigravityAdapterV2 compaction", () => {
+  it.effect("does not expose unsupported manual compaction on the provider session", () =>
+    Effect.gen(function* () {
+      const childProcessSpawner = yield* ChildProcessSpawner.ChildProcessSpawner;
+      const path = yield* Path.Path;
+      const crypto = yield* Crypto.Crypto;
+      const fileSystem = yield* FileSystem.FileSystem;
+      const idAllocator = yield* IdAllocator.IdAllocatorV2;
+      const serverConfig = yield* ServerConfig.ServerConfig;
+      const mockAgentPath = yield* path.fromFileUrl(
+        new URL("../../../scripts/acp-mock-agent.ts", import.meta.url),
+      );
+      const instanceId = ProviderInstanceId.make("antigravity-compaction-test");
+      const adapter = makeAntigravityAdapterV2({
+        instanceId,
+        crypto,
+        selfInvocation: yield* resolveSelfInvocation(),
+        fileSystem,
+        path,
+        idAllocator,
+        serverConfig,
+        makeRuntime: (input) =>
+          makeAntigravityAcpRuntime({
+            ...input,
+            childProcessSpawner,
+            spawn: {
+              command: process.execPath,
+              args: [mockAgentPath],
+              cwd: input.cwd,
+              env: { T3_ACP_ANTIGRAVITY: "1" },
+            },
+          }).pipe(Effect.provideService(Crypto.Crypto, crypto)),
+        withProcess: (_stop, task) => task,
+        // @effect-diagnostics-next-line effectSucceedWithVoid:off - This optional result requires undefined, not the wider void type.
+        defaultModel: Effect.succeed(undefined),
+      });
+      const session = yield* adapter.openSession({
+        threadId: ThreadId.make("thread-antigravity-compaction"),
+        providerSessionId: ProviderSessionId.make("provider-session-antigravity-compaction"),
+        modelSelection: { instanceId, model: "gemini-test-low" },
+        runtimePolicy: ProviderAdapterV2RuntimePolicy.make({
+          runtimeMode: "full-access",
+          interactionMode: "default",
+          cwd: process.cwd(),
+        }),
+      });
+      assert.isUndefined(session.compactThread);
+    }).pipe(Effect.provide(layerSession), Effect.scoped),
+  );
+});
 
 describe("AntigravityAdapterV2 client file system", () => {
   it.effect("confines agent file requests to the workspace under full access", () =>
@@ -227,6 +294,26 @@ describe("AntigravityAdapterV2 client file system", () => {
       );
       assert.equal(pasted.content, "pasted");
 
+      yield* fileSystem.writeFileString(insidePath, "\uFEFFfirst\né中🙂\nlast");
+      const sliced = yield* readTextFile(
+        { sessionId: "mock-session-1", path: insidePath, line: 2, limit: 1 },
+        context("fs/read_text_file"),
+      );
+      assert.equal(sliced.content, "é中🙂");
+      yield* fileSystem.writeFileString(insidePath, "inside");
+      for (const [name, bytes] of [
+        ["image.png", new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])],
+        ["data.bin", new Uint8Array([0x61, 0, 0x62])],
+      ] as const) {
+        const binaryPath = path.join(workspace, name);
+        yield* fileSystem.writeFile(binaryPath, bytes);
+        const binaryRead = yield* readTextFile(
+          { sessionId: "mock-session-1", path: binaryPath },
+          context("fs/read_text_file"),
+        ).pipe(Effect.flip);
+        assert.propertyVal(binaryRead, "code", -32602, `${name} is refused as binary`);
+      }
+
       const outsideRead = yield* readTextFile(
         { sessionId: "mock-session-1", path: outsideFile },
         context("fs/read_text_file"),
@@ -276,6 +363,20 @@ describe("AntigravityAdapterV2 client file system", () => {
       ).pipe(Effect.exit);
       assert.isTrue(Exit.isFailure(linkedDirWrite), "a write under an escaping directory link");
       assert.isFalse(yield* fileSystem.exists(path.join(outside, "new.txt")));
+      const nestedLinkedDirWrite = yield* writeTextFile(
+        {
+          sessionId: "mock-session-1",
+          path: path.join(workspace, "linked-dir", "a", "b", "file.txt"),
+          content: "planted",
+        },
+        context("fs/write_text_file"),
+      ).pipe(Effect.exit);
+      assert.isTrue(
+        Exit.isFailure(nestedLinkedDirWrite),
+        "a write to missing directories under an escaping directory link",
+      );
+      assert.isFalse(yield* fileSystem.exists(path.join(outside, "a")));
+
       // A symlink that stays inside the workspace keeps working.
       const insideLink = path.join(workspace, "inside-link.ts");
       yield* fileSystem.symlink(insidePath, insideLink);

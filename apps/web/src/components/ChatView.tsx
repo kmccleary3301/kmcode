@@ -1,4 +1,4 @@
-import { ChatCanvas } from "./chat/ChatCanvas";
+import { ThreadFind, ThreadFindCanvas, type ThreadFindControls } from "./chat/ThreadFindProvider";
 import { usageLimitRecoveryBannerItem } from "./chat/UsageLimitRecoveryBanner";
 import {
   resolveBackgroundDraftWorkspaceOptions,
@@ -82,6 +82,7 @@ import {
   ProviderInteractionMode,
   ProviderDriverKind,
   resolveEnvironmentMachineKind,
+  resolveProjectProviderInstanceEnabled,
   RuntimeMode,
   TerminalOpenInput,
   type WorktreeSetupSnapshot,
@@ -105,8 +106,10 @@ import {
   deriveLatestThreadRun,
   deriveThreadRuntime,
   presentPendingBackgroundWork,
+  presentRunStop,
   presentProviderGoal,
 } from "@t3tools/client-runtime/state/thread-execution";
+import { resolvePendingHandoff } from "@t3tools/client-runtime/handoff";
 import { threadSupportsProviderHandoff } from "@t3tools/client-runtime/state/thread-workflows";
 import {
   codexFeedbackMessage,
@@ -115,15 +118,13 @@ import {
   submitCodexFeedback,
   type CodexFeedbackSubmission,
 } from "@t3tools/client-runtime/state/threads";
-import {
-  selectSubagentLiveContent,
-  useThreadLiveOverlay,
-} from "../hooks/useSubagentLiveContent";
+import { selectSubagentLiveContent, useThreadLiveOverlay } from "../hooks/useSubagentLiveContent";
 import type { OrchestrationV2SubagentLiveContent } from "@t3tools/contracts";
 import { resolveThreadLastVisitedAt } from "./Sidebar.logic";
 import {
   declinePendingApprovals,
   derivePendingThreadRequests,
+  sendApprovalFeedback,
 } from "@t3tools/client-runtime/state/thread-requests";
 import {
   parseScopedThreadKey,
@@ -277,7 +278,7 @@ import { previewRuntimeTabId } from "../browser/previewRuntimeTabId";
 import { addBrowserSurface } from "./preview/addBrowserSurface";
 import { closePreviewSession } from "./preview/closePreviewSession";
 import { ThreadPreviewMiniPlayer } from "./preview/ThreadPreviewMiniPlayer";
-import { usePreviewSession } from "./preview/usePreviewSession";
+import { useDesktopHostedPreviewSessions, usePreviewSession } from "./preview/usePreviewSession";
 import { subscribePreviewAction } from "./preview/previewActionBus";
 import { getConfiguredPreviewUrls } from "./preview/previewEmptyStateLogic";
 
@@ -319,6 +320,7 @@ import {
   WifiOffIcon,
 } from "lucide-react";
 import { cn, randomUUID } from "~/lib/utils";
+import { surfaceShortcutKey } from "~/lib/surfaceShortcutKey";
 import { COLLAPSED_SIDEBAR_TITLEBAR_INSET_CLASS } from "~/workspaceTitlebar";
 import { stackedThreadToast, toastManager } from "./ui/toast";
 import {
@@ -422,6 +424,7 @@ import {
 } from "../state/server";
 import { terminalEnvironment } from "../state/terminal";
 import { threadEnvironment } from "../state/threads";
+import { orchestrationEnvironment } from "../state/orchestration";
 import { workspacePreparationRetryRunIds } from "@t3tools/client-runtime/state/turn-item-presentation";
 import { resolveProviderSkillsForCwd } from "@t3tools/client-runtime/providerSkills";
 import { vcsEnvironment } from "../state/vcs";
@@ -507,6 +510,7 @@ import type { ComposerBannerStackItem } from "./chat/ComposerBannerStack";
 import type { ComposerBackgroundWorkStatus, ComposerGoalStatus } from "./chat/ComposerStatusBumps";
 import { readNativeTodoPlan } from "./chat/todoPlan";
 import { ThreadStatusLine } from "./chat/ThreadStatusLine";
+import { HandoffRow } from "./chat/V2LifecycleRow";
 import { formatRelativeTimeLabel, formatRelativeTimeUntilLabel } from "../timestampFormat";
 import { ComposerSurface } from "./chat/ComposerSurface";
 import { resolveThreadSyncPhase } from "../threadSync";
@@ -626,8 +630,10 @@ import {
 import { useAssetUrls } from "../assets/assetUrls";
 import {
   ATTACHMENT_ONLY_BOOTSTRAP_PROMPT,
-  recallableComposerPrompt,
-} from "./chat/composerPromptHistory";
+  restoreAttachmentOnlyBootstrapPrompt,
+  stripAttachmentOnlyBootstrapPrompt,
+} from "@t3tools/shared/composerContextReferences";
+import { recallableComposerPrompt } from "./chat/composerPromptHistory";
 
 const EMPTY_PROVIDERS: ServerProvider[] = [];
 const EMPTY_PROVIDER_MODELS: ServerProvider["models"] = [];
@@ -764,6 +770,7 @@ const TYPE_TO_FOCUS_FLOATING_LAYER_SELECTOR = [
   '[data-slot="combobox-popup"]:is([data-open],[data-ending-style])',
   '[data-slot="autocomplete-popup"]:is([data-open],[data-ending-style])',
 ].join(",");
+const SURFACE_LAUNCHER_KEYS_ATTRIBUTE = "data-surface-launcher-keys";
 
 type EnvironmentUnavailableState = {
   readonly environmentId: EnvironmentId;
@@ -797,11 +804,21 @@ function shouldRedirectInputToComposer(event: Event): boolean {
   return true;
 }
 
+function isSurfaceLauncherKey(event: KeyboardEvent): boolean {
+  const launcherKeys = document
+    .querySelector(`[${SURFACE_LAUNCHER_KEYS_ATTRIBUTE}]`)
+    ?.getAttribute(SURFACE_LAUNCHER_KEYS_ATTRIBUTE)
+    ?.toLowerCase();
+  const key = surfaceShortcutKey(event);
+  return key !== null && (launcherKeys?.includes(key) ?? false);
+}
+
 function shouldTypeToFocusComposer(event: KeyboardEvent): boolean {
   if (event.isComposing) return false;
   if (event.metaKey || event.ctrlKey || event.altKey) return false;
   if (event.key.length !== 1) return false;
   if (!shouldRedirectInputToComposer(event)) return false;
+  if (isSurfaceLauncherKey(event)) return false;
 
   return true;
 }
@@ -1284,19 +1301,19 @@ const PersistentThreadTerminalDrawer = memo(function PersistentThreadTerminalDra
   );
 
   const closeTerminal = useCallback(
-    (terminalId: string) => {
-      if (!hasTerminalWriteAccess()) return;
+    (terminalId: string, target = threadRef) => {
+      if (!readEnvironmentScope(target.environmentId, AuthTerminalOperateScope)) return;
       const fallbackExitWrite = () =>
         writeTerminal({
-          environmentId: threadRef.environmentId,
-          input: { threadId, terminalId, data: "exit\n" },
+          environmentId: target.environmentId,
+          input: { threadId: target.threadId, terminalId, data: "exit\n" },
         });
 
       void (async () => {
         const closeResult = await closeTerminalMutation({
-          environmentId: threadRef.environmentId,
+          environmentId: target.environmentId,
           input: {
-            threadId,
+            threadId: target.threadId,
             terminalId,
             deleteHistory: true,
           },
@@ -1304,24 +1321,21 @@ const PersistentThreadTerminalDrawer = memo(function PersistentThreadTerminalDra
         if (
           closeResult._tag === "Failure" &&
           !isAtomCommandInterrupted(closeResult) &&
-          hasTerminalWriteAccess()
+          readEnvironmentScope(target.environmentId, AuthTerminalOperateScope)
         ) {
           await fallbackExitWrite();
         }
       })();
 
-      storeCloseTerminal(threadRef, terminalId);
-      bumpFocusRequestId();
+      storeCloseTerminal(target, terminalId);
+      if (
+        target.environmentId === threadRef.environmentId &&
+        target.threadId === threadRef.threadId
+      ) {
+        bumpFocusRequestId();
+      }
     },
-    [
-      bumpFocusRequestId,
-      storeCloseTerminal,
-      threadId,
-      threadRef,
-      closeTerminalMutation,
-      hasTerminalWriteAccess,
-      writeTerminal,
-    ],
+    [bumpFocusRequestId, storeCloseTerminal, threadRef, closeTerminalMutation, writeTerminal],
   );
 
   const handleAddTerminalContext = useCallback(
@@ -1395,7 +1409,7 @@ interface PersistentThreadTerminalPanelProps {
   onSplitTerminalVertical: () => void;
   onNewTerminal: () => void;
   onActiveTerminalChange: (terminalId: string) => void;
-  onCloseTerminal: (terminalId: string) => void;
+  onCloseTerminal: (terminalId: string, threadRef?: ScopedThreadRef) => void;
   splitShortcutLabel?: string | undefined;
   splitVerticalShortcutLabel?: string | undefined;
   newShortcutLabel?: string | undefined;
@@ -1661,6 +1675,9 @@ export default function ChatView(props: ChatViewProps) {
   const interruptThreadTurn = useOrchestrationCommand(threadEnvironment.interruptTurn, {
     reportFailure: false,
   });
+  const forceStopThread = useOrchestrationCommand(orchestrationEnvironment.v2.forceStopThread, {
+    reportFailure: false,
+  });
   const loadEarlierThreadHistory = useAtomCommand(threadEnvironment.loadEarlierHistory, {
     label: "load earlier thread history",
     reportFailure: false,
@@ -1794,10 +1811,13 @@ export default function ChatView(props: ChatViewProps) {
       hasMoreHistory: serverThreadHistory.hasMoreHistory,
       loading: serverThreadHistory.loading,
       error: serverThreadHistory.error,
-      onLoadEarlier: () => {
+      onLoadEarlier: (throughEntryId) => {
         void loadEarlierThreadHistory({
           environmentId: routeThreadDetailRef.environmentId,
-          input: { threadId: routeThreadDetailRef.threadId },
+          input: {
+            threadId: routeThreadDetailRef.threadId,
+            ...(throughEntryId === undefined ? {} : { throughEntryId }),
+          },
         });
       },
     };
@@ -1855,6 +1875,12 @@ export default function ChatView(props: ChatViewProps) {
   const composerActiveProvider = useComposerDraftStore(
     (store) => store.getComposerDraft(composerDraftTarget)?.activeProvider ?? null,
   );
+  const composerSelectedModelSelection = useComposerDraftStore((store) => {
+    const draft = store.getComposerDraft(composerDraftTarget);
+    return draft?.activeProvider
+      ? (draft.modelSelectionByProvider[draft.activeProvider] ?? null)
+      : null;
+  });
   const composerHasAttachments = useComposerDraftStore((store) => {
     const draft = store.getComposerDraft(composerDraftTarget);
     return (draft?.images.length ?? 0) > 0 || (draft?.files.length ?? 0) > 0;
@@ -3324,9 +3350,13 @@ export default function ChatView(props: ChatViewProps) {
   const providerInstanceEntries = useMemo(
     () =>
       sortProviderInstanceEntries(
-        applyProviderInstanceSettings(deriveProviderInstanceEntries(providerStatuses), settings),
+        applyProviderInstanceSettings(
+          deriveProviderInstanceEntries(providerStatuses),
+          settings,
+          activeProject?.id ?? null,
+        ),
       ),
-    [providerStatuses, settings],
+    [providerStatuses, settings, activeProject?.id],
   );
   const lockedInstanceId = lockedProvider
     ? (activeRuntime?.providerInstanceId ??
@@ -4467,7 +4497,13 @@ export default function ChatView(props: ChatViewProps) {
                     (activeProviderInstanceId === null ||
                       provider.instanceId === activeProviderInstanceId) &&
                     provider.driver === selectedProvider &&
-                    provider.enabled &&
+                    (environment.serverConfig?.settings
+                      ? resolveProjectProviderInstanceEnabled(
+                          environment.serverConfig.settings,
+                          candidate.projectId,
+                          provider.instanceId,
+                        )
+                      : provider.enabled) &&
                     provider.installed &&
                     provider.status !== "error" &&
                     provider.auth.status !== "unauthenticated" &&
@@ -4682,14 +4718,12 @@ export default function ChatView(props: ChatViewProps) {
     [draftId, routeThreadKey, routeThreadRef, serverThread],
   );
   const onRespondToApproval = useCallback(
-    async (requestId: RuntimeRequestId, decision: ProviderApprovalDecision) => {
+    async (requestId: RuntimeRequestId, decision: ProviderApprovalDecision, feedback?: string) => {
       if (!activeThreadId || !readEnvironmentScope(environmentId, AuthOrchestrationOperateScope))
         return;
-      if (
-        pendingApprovals.find((approval) => approval.requestId === requestId)
-          ?.responseCapability !== "live"
-      )
-        return;
+      const approval = pendingApprovals.find((candidate) => candidate.requestId === requestId);
+      if (!approval || approval.responseCapability !== "live") return;
+      if (feedback !== undefined && !approval.supportsFeedback) return;
 
       setRespondingRequestIds((existing) =>
         existing.includes(requestId) ? existing : [...existing, requestId],
@@ -4700,6 +4734,7 @@ export default function ChatView(props: ChatViewProps) {
           threadId: activeThreadId,
           requestId,
           decision,
+          ...(feedback === undefined ? {} : { feedback }),
         },
       });
       if (result._tag === "Failure" && !isAtomCommandInterrupted(result)) {
@@ -4720,6 +4755,78 @@ export default function ChatView(props: ChatViewProps) {
   }, [composerRef]);
   const canInterruptRunningThread =
     canOperateThread && deriveCanInterruptRunningThread(activeThread !== undefined, activeRuntime);
+  const runStopPresentation = useMemo(
+    () =>
+      serverProjection === null || activeThread === undefined
+        ? null
+        : presentRunStop(serverProjection),
+    [activeThread, serverProjection],
+  );
+  const forceStopEnabled =
+    canOperateThread &&
+    serverConfig?.environment.capabilities.threadForceStop === true &&
+    runStopPresentation?.state === "unresponsive";
+  const forceStopAvailable = forceStopEnabled && runStopPresentation?.background === false;
+  const [forceStoppingThreadKey, setForceStoppingThreadKey] = useState<string | null>(null);
+  const forceStopInFlightRef = useRef(new Set<string>());
+  const forceStopRequestKey =
+    activeThread === undefined ? null : `${activeThread.environmentId}:${activeThread.id}`;
+  const isForceStopping =
+    forceStopRequestKey !== null &&
+    (forceStoppingThreadKey === forceStopRequestKey ||
+      forceStopInFlightRef.current.has(forceStopRequestKey));
+  const onForceStop = useCallback(async () => {
+    if (
+      !activeThread ||
+      !forceStopEnabled ||
+      !runStopPresentation ||
+      runStopPresentation.state !== "unresponsive" ||
+      !readEnvironmentScope(activeThread.environmentId, AuthOrchestrationOperateScope)
+    )
+      return;
+    const requestKey = `${activeThread.environmentId}:${activeThread.id}`;
+    if (forceStopInFlightRef.current.has(requestKey)) return;
+    forceStopInFlightRef.current.add(requestKey);
+    setForceStoppingThreadKey(requestKey);
+    try {
+      const result = await forceStopThread({
+        environmentId: activeThread.environmentId,
+        input: { threadId: activeThread.id, runId: runStopPresentation.runId },
+      });
+      if (result._tag === "Success") {
+        if (result.value.outcome === "shared") {
+          const sharedThreadCount = result.value.sharedWithThreadIds.length;
+          toastManager.add({
+            type: "warning",
+            title: "Agent is shared with other threads",
+            description:
+              sharedThreadCount === 0
+                ? "It was left running to avoid interrupting another thread."
+                : `It was left running because it is shared with ${sharedThreadCount} other ${sharedThreadCount === 1 ? "thread" : "threads"}.`,
+          });
+        } else if (result.value.outcome === "releasing") {
+          toastManager.add({
+            type: "info",
+            title: "Force stop is still in progress",
+            description: "The agent is releasing its processes.",
+          });
+        }
+      } else if (!isAtomCommandInterrupted(result)) {
+        const error = squashAtomCommandFailure(result);
+        setThreadError(
+          activeThread.id,
+          error instanceof Error ? error.message : "Failed to force stop the thread.",
+        );
+      }
+    } finally {
+      forceStopInFlightRef.current.delete(requestKey);
+      setForceStoppingThreadKey((current) => (current === requestKey ? null : current));
+    }
+  }, [activeThread, forceStopEnabled, forceStopThread, runStopPresentation, setThreadError]);
+  const forceStopBump =
+    forceStopEnabled && runStopPresentation?.background === true
+      ? { stopping: isForceStopping, onForceStop }
+      : null;
   const onInterrupt = useCallback(async () => {
     if (
       !activeThread ||
@@ -4823,12 +4930,13 @@ export default function ChatView(props: ChatViewProps) {
       }
       const target = queuedEditDraftTargetFor(request.runId);
       clearComposerDraftContent(target);
-      setComposerDraftPrompt(target, request.text);
+      const text = stripAttachmentOnlyBootstrapPrompt(request.text);
+      setComposerDraftPrompt(target, text);
       setEditingQueuedRun({
         threadId: activeThread.id,
         runId: request.runId,
         messageId: request.messageId,
-        originalText: request.text,
+        originalText: text,
         existingAttachments: request.attachments,
         context: serverProjection?.messages.find((message) => message.id === request.messageId)
           ?.context,
@@ -5140,18 +5248,18 @@ export default function ChatView(props: ChatViewProps) {
     storeNewTerminal,
   ]);
   const closeTerminal = useCallback(
-    (terminalId: string) => {
-      if (!hasTerminalWriteAccess() || !activeThreadId || !activeThreadRef) return;
+    (terminalId: string, target = activeThreadRef) => {
+      if (!target || !readEnvironmentScope(target.environmentId, AuthTerminalOperateScope)) return;
       const fallbackExitWrite = () =>
         writeTerminal({
-          environmentId,
-          input: { threadId: activeThreadId, terminalId, data: "exit\n" },
+          environmentId: target.environmentId,
+          input: { threadId: target.threadId, terminalId, data: "exit\n" },
         });
       void (async () => {
         const closeResult = await closeTerminalMutation({
-          environmentId,
+          environmentId: target.environmentId,
           input: {
-            threadId: activeThreadId,
+            threadId: target.threadId,
             terminalId,
             deleteHistory: true,
           },
@@ -5159,23 +5267,20 @@ export default function ChatView(props: ChatViewProps) {
         if (
           closeResult._tag === "Failure" &&
           !isAtomCommandInterrupted(closeResult) &&
-          hasTerminalWriteAccess()
+          readEnvironmentScope(target.environmentId, AuthTerminalOperateScope)
         ) {
           await fallbackExitWrite();
         }
       })();
-      storeCloseTerminal(activeThreadRef, terminalId);
-      setTerminalFocusRequestId((value) => value + 1);
+      storeCloseTerminal(target, terminalId);
+      if (
+        activeThreadRef?.environmentId === target.environmentId &&
+        activeThreadRef.threadId === target.threadId
+      ) {
+        setTerminalFocusRequestId((value) => value + 1);
+      }
     },
-    [
-      activeThreadId,
-      activeThreadRef,
-      closeTerminalMutation,
-      hasTerminalWriteAccess,
-      environmentId,
-      storeCloseTerminal,
-      writeTerminal,
-    ],
+    [activeThreadRef, closeTerminalMutation, storeCloseTerminal, writeTerminal],
   );
   const runProjectScript = useCallback(
     async (
@@ -6212,54 +6317,51 @@ export default function ChatView(props: ChatViewProps) {
     [activeRightPanelSurface, activeThreadRef],
   );
   const closePanelTerminal = useCallback(
-    (terminalId: string) => {
-      if (
-        !hasTerminalWriteAccess() ||
-        !activeThreadRef ||
-        activeRightPanelSurface?.kind !== "terminal"
-      )
-        return;
+    (terminalId: string, target = activeThreadRef) => {
+      if (!target || !readEnvironmentScope(target.environmentId, AuthTerminalOperateScope)) return;
+      const store = useRightPanelStore.getState();
+      const surface = selectThreadRightPanelState(store.byThreadKey, target).surfaces.find(
+        (entry) => entry.kind === "terminal" && entry.terminalIds.includes(terminalId),
+      );
+      if (!surface) return;
       void closeTerminalMutation({
-        environmentId: activeThreadRef.environmentId,
-        input: { threadId: activeThreadRef.threadId, terminalId, deleteHistory: true },
+        environmentId: target.environmentId,
+        input: { threadId: target.threadId, terminalId, deleteHistory: true },
       });
-      storeCloseTerminal(activeThreadRef, terminalId);
-      useRightPanelStore
-        .getState()
-        .closeTerminal(activeThreadRef, activeRightPanelSurface.id, terminalId);
-      setTerminalFocusRequestId((value) => value + 1);
+      storeCloseTerminal(target, terminalId);
+      store.closeTerminal(target, surface.id, terminalId);
+      if (
+        activeThreadRef?.environmentId === target.environmentId &&
+        activeThreadRef.threadId === target.threadId
+      ) {
+        setTerminalFocusRequestId((value) => value + 1);
+      }
     },
-    [
-      hasTerminalWriteAccess,
-      activeRightPanelSurface,
-      activeThreadRef,
-      closeTerminalMutation,
-      storeCloseTerminal,
-    ],
+    [activeThreadRef, closeTerminalMutation, storeCloseTerminal],
   );
   const requestCloseTerminal = useCallback(
-    (terminalId: string) => {
-      if (!hasTerminalWriteAccess()) return;
+    (terminalId: string, target = activeThreadRef) => {
+      if (!target || !readEnvironmentScope(target.environmentId, AuthTerminalOperateScope)) return;
       const label = activeTerminalLabelsById.get(terminalId) ?? getTerminalLabel(terminalId);
       void confirmTerminalClose([label]).then((confirmed) => {
-        if (confirmed && readEnvironmentScope(environmentId, AuthTerminalOperateScope)) {
-          closeTerminal(terminalId);
+        if (confirmed && readEnvironmentScope(target.environmentId, AuthTerminalOperateScope)) {
+          closeTerminal(terminalId, target);
         }
       });
     },
-    [hasTerminalWriteAccess, activeTerminalLabelsById, closeTerminal, environmentId],
+    [activeTerminalLabelsById, activeThreadRef, closeTerminal],
   );
   const requestClosePanelTerminal = useCallback(
-    (terminalId: string) => {
-      if (!hasTerminalWriteAccess()) return;
+    (terminalId: string, target = activeThreadRef) => {
+      if (!target || !readEnvironmentScope(target.environmentId, AuthTerminalOperateScope)) return;
       const label = activeTerminalLabelsById.get(terminalId) ?? getTerminalLabel(terminalId);
       void confirmTerminalClose([label]).then((confirmed) => {
-        if (confirmed && readEnvironmentScope(environmentId, AuthTerminalOperateScope)) {
-          closePanelTerminal(terminalId);
+        if (confirmed && readEnvironmentScope(target.environmentId, AuthTerminalOperateScope)) {
+          closePanelTerminal(terminalId, target);
         }
       });
     },
-    [hasTerminalWriteAccess, activeTerminalLabelsById, closePanelTerminal, environmentId],
+    [activeTerminalLabelsById, activeThreadRef, closePanelTerminal],
   );
   const activateRightPanelSurface = useCallback(
     (surface: RightPanelSurface) => {
@@ -6296,8 +6398,7 @@ export default function ChatView(props: ChatViewProps) {
     );
   }, [canMaximizeRightPanel, routeThreadKey]);
   const cleanupRightPanelSurfaces = useCallback(
-    (surfaces: readonly RightPanelSurface[]) => {
-      if (!activeThreadRef) return;
+    (surfaces: readonly RightPanelSurface[], target: ScopedThreadRef) => {
       for (const surface of surfaces) {
         // Without preview access only the local surface goes away. The
         // server record is in-memory bookkeeping, not a live view, and stays
@@ -6307,25 +6408,24 @@ export default function ChatView(props: ChatViewProps) {
             closePreview,
             snapshot: activePreviewState.sessions[surface.resourceId] ?? null,
             tabId: surface.resourceId,
-            threadRef: activeThreadRef,
+            threadRef: target,
           });
         }
         if (
           surface.kind === "terminal" &&
-          readEnvironmentScope(activeThreadRef.environmentId, AuthTerminalOperateScope)
+          readEnvironmentScope(target.environmentId, AuthTerminalOperateScope)
         ) {
           for (const terminalId of surface.terminalIds) {
-            storeCloseTerminal(activeThreadRef, terminalId);
+            storeCloseTerminal(target, terminalId);
             void closeTerminalMutation({
-              environmentId: activeThreadRef.environmentId,
-              input: { threadId: activeThreadRef.threadId, terminalId, deleteHistory: true },
+              environmentId: target.environmentId,
+              input: { threadId: target.threadId, terminalId, deleteHistory: true },
             });
           }
         }
       }
     },
     [
-      activeThreadRef,
       activePreviewState.sessions,
       canOperatePreview,
       closePreview,
@@ -6354,46 +6454,42 @@ export default function ChatView(props: ChatViewProps) {
     },
     [activePreviewState.desktopByTabId],
   );
-  const syncActivePreviewSurface = useCallback(() => {
-    if (!activeThreadRef) return;
+  const syncActivePreviewSurface = useCallback((target: ScopedThreadRef) => {
     const nextActiveSurface = selectActiveRightPanelSurface(
       useRightPanelStore.getState().byThreadKey,
-      activeThreadRef,
+      target,
     );
     if (nextActiveSurface?.kind === "preview" && nextActiveSurface.resourceId) {
-      setActivePreviewTab(activeThreadRef, nextActiveSurface.resourceId);
+      setActivePreviewTab(target, nextActiveSurface.resourceId);
     }
-  }, [activeThreadRef]);
+  }, []);
   const finishRightPanelSurfaceClose = useCallback(
-    (surfaces: readonly RightPanelSurface[]) => {
-      if (!activeThreadRef) return;
+    (surfaces: readonly RightPanelSurface[], target: ScopedThreadRef) => {
       const store = useRightPanelStore.getState();
-      const activeId = selectThreadRightPanelState(
-        store.byThreadKey,
-        activeThreadRef,
-      ).activeSurfaceId;
+      const activeId = selectThreadRightPanelState(store.byThreadKey, target).activeSurfaceId;
       const ordered = surfaces.toSorted(
         (left, right) => Number(left.id === activeId) - Number(right.id === activeId),
       );
       for (const surface of ordered) {
-        cleanupRightPanelSurfaces([surface]);
-        store.closeSurface(activeThreadRef, surface.id);
+        cleanupRightPanelSurfaces([surface], target);
+        store.closeSurface(target, surface.id);
       }
-      syncActivePreviewSurface();
+      syncActivePreviewSurface(target);
     },
-    [activeThreadRef, cleanupRightPanelSurfaces, syncActivePreviewSurface],
+    [cleanupRightPanelSurfaces, syncActivePreviewSurface],
   );
   const closeRightPanelSurface = useCallback(
     (surface: RightPanelSurface) => {
-      if (!activeThreadRef) return;
-      const finishClose = () => finishRightPanelSurfaceClose([surface]);
+      const target = activeThreadRef;
+      if (!target) return;
+      const finishClose = () => finishRightPanelSurfaceClose([surface], target);
       if (surface.kind === "preview") {
         closeAfterAgentBrowserConfirmation([surface], finishClose);
         return;
       }
       if (
         surface.kind !== "terminal" ||
-        !readEnvironmentScope(activeThreadRef.environmentId, AuthTerminalOperateScope)
+        !readEnvironmentScope(target.environmentId, AuthTerminalOperateScope)
       ) {
         finishClose();
         return;
@@ -6407,9 +6503,7 @@ export default function ChatView(props: ChatViewProps) {
           (terminalId) => activeTerminalLabelsById.get(terminalId) ?? getTerminalLabel(terminalId),
         );
       void confirmTerminalClose([activeLabel, ...otherLabels]).then((confirmed) => {
-        if (confirmed) {
-          finishClose();
-        }
+        if (confirmed) finishClose();
       });
     },
     [
@@ -6421,9 +6515,10 @@ export default function ChatView(props: ChatViewProps) {
   );
   const closeOtherRightPanelSurfaces = useCallback(
     (surface: RightPanelSurface) => {
-      if (!activeThreadRef) return;
+      const target = activeThreadRef;
+      if (!target) return;
       const surfaces = rightPanelState.surfaces.filter((entry) => entry.id !== surface.id);
-      const finishClose = () => finishRightPanelSurfaceClose(surfaces);
+      const finishClose = () => finishRightPanelSurfaceClose(surfaces, target);
       closeAfterAgentBrowserConfirmation(surfaces, finishClose);
     },
     [
@@ -6435,11 +6530,12 @@ export default function ChatView(props: ChatViewProps) {
   );
   const closeRightPanelSurfacesToRight = useCallback(
     (surface: RightPanelSurface) => {
-      if (!activeThreadRef) return;
+      const target = activeThreadRef;
+      if (!target) return;
       const surfaceIndex = rightPanelState.surfaces.findIndex((entry) => entry.id === surface.id);
       if (surfaceIndex < 0) return;
       const surfaces = rightPanelState.surfaces.slice(surfaceIndex + 1);
-      const finishClose = () => finishRightPanelSurfaceClose(surfaces);
+      const finishClose = () => finishRightPanelSurfaceClose(surfaces, target);
       closeAfterAgentBrowserConfirmation(surfaces, finishClose);
     },
     [
@@ -6450,8 +6546,9 @@ export default function ChatView(props: ChatViewProps) {
     ],
   );
   const closeAllRightPanelSurfaces = useCallback(() => {
-    if (!activeThreadRef) return;
-    const finishClose = () => finishRightPanelSurfaceClose(rightPanelState.surfaces);
+    const target = activeThreadRef;
+    if (!target) return;
+    const finishClose = () => finishRightPanelSurfaceClose(rightPanelState.surfaces, target);
     closeAfterAgentBrowserConfirmation(rightPanelState.surfaces, finishClose);
   }, [
     activeThreadRef,
@@ -6459,6 +6556,13 @@ export default function ChatView(props: ChatViewProps) {
     finishRightPanelSurfaceClose,
     rightPanelState.surfaces,
   ]);
+  const moveRightPanelSurface = useCallback(
+    (surfaceId: string, toIndex: number) => {
+      if (activeThreadRef)
+        useRightPanelStore.getState().moveSurface(activeThreadRef, surfaceId, toIndex);
+    },
+    [activeThreadRef],
+  );
   const copyRightPanelFilePath = useCallback((relativePath: string) => {
     if (typeof window === "undefined" || !navigator.clipboard?.writeText) {
       toastManager.add(
@@ -7501,7 +7605,10 @@ export default function ChatView(props: ChatViewProps) {
       setUnsnoozingThreadKey((current) => (current === threadKey ? null : current));
     }
   }, [activeThreadRef, activeThreadShell, unsnoozeThreadMutation, updateThreadMetadata]);
-  const [isRestoringThreadBranch, setIsRestoringThreadBranch] = useState(false);
+  const [restoringBranchThreadKeys, setRestoringBranchThreadKeys] = useState<ReadonlySet<string>>(
+    () => new Set(),
+  );
+  const isRestoringThreadBranch = restoringBranchThreadKeys.has(routeThreadKey);
   const [branchRestoreConfirmOpen, setBranchRestoreConfirmOpen] = useState(false);
   // Once revealed for a given mismatch, the banner stays mounted until the
   // mismatch changes or resolves, so clearing the draft doesn't flicker it.
@@ -7544,7 +7651,15 @@ export default function ChatView(props: ChatViewProps) {
     ) {
       return;
     }
-    setIsRestoringThreadBranch(true);
+    const restoreThreadKey = routeThreadKey;
+    const finishRestore = () =>
+      setRestoringBranchThreadKeys((current) => {
+        if (!current.has(restoreThreadKey)) return current;
+        const next = new Set(current);
+        next.delete(restoreThreadKey);
+        return next;
+      });
+    setRestoringBranchThreadKeys((current) => new Set(current).add(restoreThreadKey));
     const checkoutResult = await switchGitRef({
       environmentId,
       input: {
@@ -7553,7 +7668,7 @@ export default function ChatView(props: ChatViewProps) {
       },
     });
     if (checkoutResult._tag === "Failure") {
-      setIsRestoringThreadBranch(false);
+      finishRestore();
       if (!isAtomCommandInterrupted(checkoutResult)) {
         toastManager.add(
           stackedThreadToast({
@@ -7567,7 +7682,7 @@ export default function ChatView(props: ChatViewProps) {
     }
 
     if (!readEnvironmentScope(environmentId, AuthSourceControlWriteScope)) {
-      setIsRestoringThreadBranch(false);
+      finishRestore();
       return;
     }
     const nextBranch = checkoutResult.value.refName ?? localCheckoutBranchMismatch.threadBranch;
@@ -7577,7 +7692,7 @@ export default function ChatView(props: ChatViewProps) {
         input: { threadId: activeThread.id, branch: nextBranch, worktreePath: null },
       });
       if (updateResult._tag === "Failure") {
-        setIsRestoringThreadBranch(false);
+        finishRestore();
         if (!isAtomCommandInterrupted(updateResult)) {
           toastManager.add(
             stackedThreadToast({
@@ -7592,8 +7707,12 @@ export default function ChatView(props: ChatViewProps) {
       }
     }
     gitStatusQuery.refresh();
-    setIsRestoringThreadBranch(false);
-    scheduleComposerFocus();
+    finishRestore();
+    if (currentRouteThreadKeyRef.current === routeThreadKey) {
+      window.requestAnimationFrame(() => {
+        if (currentRouteThreadKeyRef.current === routeThreadKey) focusComposer();
+      });
+    }
   }, [
     canWriteSourceControl,
     activeProjectCwd,
@@ -7602,7 +7721,8 @@ export default function ChatView(props: ChatViewProps) {
     gitStatusQuery,
     isRestoringThreadBranch,
     localCheckoutBranchMismatch,
-    scheduleComposerFocus,
+    focusComposer,
+    routeThreadKey,
     switchGitRef,
     updateThreadMetadata,
   ]);
@@ -7788,6 +7908,20 @@ export default function ChatView(props: ChatViewProps) {
       onStop: () => void handleStopBackgroundWork(),
     };
   }, [activeBackgroundTasks, canOperateThread, handleStopBackgroundWork, isStoppingBackgroundWork]);
+  const pendingHandoff = useMemo(
+    () =>
+      resolvePendingHandoff(
+        serverProjection,
+        composerSelectedModelSelection ?? activeThread?.modelSelection,
+        providerStatuses,
+      ),
+    [
+      activeThread?.modelSelection,
+      composerSelectedModelSelection,
+      providerStatuses,
+      serverProjection,
+    ],
+  );
   // Settled, snoozed, and woke are thread state, not composer actions: each
   // gets one quiet line after the last message instead of a banner. A woken
   // thread announces itself here, not just in the sidebar pill. Dismissing
@@ -8127,6 +8261,13 @@ export default function ChatView(props: ChatViewProps) {
     }),
     [composerRef, previewPanelOpen, terminalUiState.terminalOpen, routeKind, phase],
   );
+  const timelineSkills = activeProviderStatus
+    ? resolveProviderSkillsForCwd(activeProviderStatus, gitCwd)
+    : EMPTY_PROVIDER_SKILLS;
+  const threadFindControlsRef = useRef<ThreadFindControls | null>(null);
+  const [isThreadFindActive, setIsThreadFindActive] = useState(false);
+  const openThreadFind = useCallback(() => threadFindControlsRef.current?.open(), []);
+  const closeThreadFind = useCallback(() => threadFindControlsRef.current?.close(), []);
 
   useEffect(() => {
     const handler = (event: globalThis.KeyboardEvent) => {
@@ -8134,6 +8275,7 @@ export default function ChatView(props: ChatViewProps) {
         event.stopPropagation();
         return;
       }
+      if (isThreadFindActive && event.key === "Escape") return;
       if (isTerminalCloseConfirmPending() && preventTerminalCloseShortcut(event, keybindings)) {
         event.stopPropagation();
         return;
@@ -8146,6 +8288,16 @@ export default function ChatView(props: ChatViewProps) {
         return;
       }
       const shortcutContext = getShortcutContext(event.target);
+
+      if (
+        event.target instanceof Element &&
+        event.target.closest('[role="alertdialog"]') !== null
+      ) {
+        resolveChatShortcutCommand(event, keybindings, scriptKeybindings, {
+          context: shortcutContext,
+        });
+        return;
+      }
 
       if (
         !shortcutContext.terminalFocus &&
@@ -8163,6 +8315,12 @@ export default function ChatView(props: ChatViewProps) {
         context: shortcutContext,
       });
       if (!command) return;
+      if (command === "chat.find" && isServerThread && serverConfig?.threadFind === true) {
+        event.preventDefault();
+        event.stopPropagation();
+        openThreadFind();
+        return;
+      }
 
       if (command === "thread.copyReference") {
         event.preventDefault();
@@ -8329,6 +8487,15 @@ export default function ChatView(props: ChatViewProps) {
         return;
       }
 
+      if (command === "composer.increaseEffort" || command === "composer.decreaseEffort") {
+        event.preventDefault();
+        event.stopPropagation();
+        if (!event.repeat) {
+          composerRef.current?.stepReasoningEffort(command === "composer.increaseEffort" ? 1 : -1);
+        }
+        return;
+      }
+
       if (
         command === "composer.host" ||
         command === "composer.effort" ||
@@ -8407,8 +8574,28 @@ export default function ChatView(props: ChatViewProps) {
       event.stopPropagation();
       void runProjectScript(script);
     };
+    const dismissFind = (event: globalThis.KeyboardEvent) => {
+      if (
+        event.key !== "Escape" ||
+        !isThreadFindActive ||
+        event.defaultPrevented ||
+        event.isComposing ||
+        event.keyCode === 229 ||
+        isCommandPaletteOpen()
+      )
+        return;
+      const context = getShortcutContext(event.target);
+      if (context.terminalFocus || context.previewFocus || context.modelPickerOpen) return;
+      event.preventDefault();
+      closeThreadFind();
+      focusComposer();
+    };
     window.addEventListener("keydown", handler, true);
-    return () => window.removeEventListener("keydown", handler, true);
+    window.addEventListener("keydown", dismissFind);
+    return () => {
+      window.removeEventListener("keydown", handler, true);
+      window.removeEventListener("keydown", dismissFind);
+    };
   }, [
     activeProject,
     activeRightPanelSurface,
@@ -8435,6 +8622,11 @@ export default function ChatView(props: ChatViewProps) {
     scriptKeybindings,
     handleUnsettleActiveThread,
     isServerThread,
+    serverConfig?.threadFind,
+    openThreadFind,
+    closeThreadFind,
+    isThreadFindActive,
+    focusComposer,
     onInterrupt,
     onToggleDiff,
     pinThread,
@@ -8939,6 +9131,10 @@ export default function ChatView(props: ChatViewProps) {
       return;
     }
     const multipleModelSelections = sendCtx.multipleModelSelections;
+    const approvalFeedbackTarget = pendingApprovalsRef.current.find(
+      (approval) =>
+        approval.supportsFeedback && approval.requestId === sendCtx.shownPendingApprovalIds[0],
+    );
     if (
       multipleModelSelections !== null &&
       serverConfig?.environment.capabilities.requiredWorktreeBootstrap !== true
@@ -9084,7 +9280,7 @@ export default function ChatView(props: ChatViewProps) {
           input: {
             threadId: editingQueuedRun.threadId,
             runId: editingQueuedRun.runId,
-            text: editText.length === 0 ? ATTACHMENT_ONLY_BOOTSTRAP_PROMPT : editText,
+            text: restoreAttachmentOnlyBootstrapPrompt(editText, uploads.length > 0),
             edit: {
               messageId: editingQueuedRun.messageId,
               attachments: uploads,
@@ -9508,7 +9704,7 @@ export default function ChatView(props: ChatViewProps) {
             sendCtx.shownPendingApprovalIds.includes(approval.requestId),
           )
         : [];
-    if (approvalsToDecline.length > 0) {
+    if (approvalsToDecline.length > 0 || approvalFeedbackTarget !== undefined) {
       const attachmentIdsAtSend = composerAttachmentsSnapshot.map((attachment) => attachment.id);
       const annotationImageId = directAnnotation?.image?.id;
       const attachmentIdsBeforeAnnotation = attachmentIdsAtSend.filter(
@@ -9542,12 +9738,46 @@ export default function ChatView(props: ChatViewProps) {
       const approvalResponding = approvalsToDecline.some((approval) =>
         respondingRequestIdsRef.current.includes(approval.requestId),
       );
+      if (approvalFeedbackTarget !== undefined) {
+        if (composerAttachmentsSnapshot.length > 0 || outgoingMessageContext !== undefined) {
+          setThreadError(
+            threadIdForSend,
+            "Send approval feedback without attachments or added context.",
+          );
+          sendInFlightRef.current = false;
+          return;
+        }
+        if (
+          changedBeforeDecline ||
+          approvalResponding ||
+          currentRouteThreadKeyRef.current !== routeThreadKey
+        ) {
+          sendInFlightRef.current = false;
+          return;
+        }
+        const sent = await sendApprovalFeedback(
+          approvalFeedbackTarget,
+          messageTextForSend,
+          onRespondToApproval,
+        ).catch(() => false);
+        sendInFlightRef.current = false;
+        if (
+          sent &&
+          !draftChangedSinceSend() &&
+          currentRouteThreadKeyRef.current === routeThreadKey &&
+          useComposerDraftStore.getState().getComposerDraft(composerDraftTarget) ===
+            draftBeforeDecline
+        ) {
+          promptRef.current = "";
+          clearComposerDraftContent(composerDraftTarget);
+          composerRef.current?.resetCursorState();
+        }
+        return;
+      }
       const declined =
         !changedBeforeDecline &&
         !approvalResponding &&
-        (await declinePendingApprovals(approvalsToDecline, onRespondToApproval).catch(
-          () => false,
-        ));
+        (await declinePendingApprovals(approvalsToDecline, onRespondToApproval).catch(() => false));
       const draftChanged =
         changedBeforeDecline ||
         draftChangedSinceSend() ||
@@ -10311,7 +10541,6 @@ export default function ChatView(props: ChatViewProps) {
     }
   };
 
-
   const onRespondToUserInput = useCallback(
     async (requestId: RuntimeRequestId, answers: Record<string, unknown>) => {
       if (!activeThreadId || !readEnvironmentScope(environmentId, AuthOrchestrationOperateScope))
@@ -10520,6 +10749,7 @@ export default function ChatView(props: ChatViewProps) {
       }
       return;
     }
+    if (!activePendingProgress.canAdvance) return;
     setActivePendingUserInputQuestionIndex(activePendingProgress.questionIndex + 1);
   }, [
     activePendingProgress,
@@ -11500,7 +11730,17 @@ export default function ChatView(props: ChatViewProps) {
         {/* Main content area with optional plan sidebar */}
         <div className="relative flex min-h-0 min-w-0 flex-1">
           {/* Chat column */}
-          <ChatCanvas
+          <ThreadFindCanvas
+            findOptions={{
+              thread: activeThreadRef,
+              enabled:
+                isServerThread && serverConfig?.threadFind === true && !paintOnlyDisplayedTimeline,
+              progressive: serverConfig?.threadFindProgressive === true,
+              skills: timelineSkills,
+              content: serverProjection ?? undefined,
+            }}
+            controlsRef={threadFindControlsRef}
+            onOpenChange={setIsThreadFindActive}
             composerOverlayElement={isDraftHeroState ? null : composerOverlayElement}
             data-chat-workspace-drop-target="true"
             data-t3-surface="timeline"
@@ -11509,6 +11749,7 @@ export default function ChatView(props: ChatViewProps) {
             onDragLeave={workspaceFileDropHandlers.onDragLeave}
             onDrop={workspaceFileDropHandlers.onDrop}
           >
+            <ThreadFind onClose={focusComposer} />
             {isWorkspaceFileDragActive ? (
               <div
                 className="pointer-events-none absolute inset-2 z-40 flex items-center justify-center rounded-2xl border-2 border-dashed border-primary/60 bg-primary/[0.035]"
@@ -11569,6 +11810,14 @@ export default function ChatView(props: ChatViewProps) {
                   paintOnlyDisplayedTimeline ? null : activityRunWorkCompletedAt
                 }
                 isCompacting={!paintOnlyDisplayedTimeline && isCompacting}
+                {...(!paintOnlyDisplayedTimeline
+                  ? {
+                      pendingApprovals,
+                      respondingRequestIds,
+                      canOperateThread,
+                      onRespondToApproval,
+                    }
+                  : {})}
                 awaitingUser={
                   !paintOnlyDisplayedTimeline &&
                   (activePendingApproval !== null ||
@@ -11587,7 +11836,22 @@ export default function ChatView(props: ChatViewProps) {
                 {...(draftId ? { onWorktreeSetupWorkLocally } : {})}
                 {...(onOpenWorktreeSetupTerminal ? { onOpenWorktreeSetupTerminal } : {})}
                 isPreparingWorktree={!paintOnlyDisplayedTimeline && isPreparingWorktree}
-                footer={paintOnlyDisplayedTimeline ? null : threadStatusLine}
+                footer={
+                  paintOnlyDisplayedTimeline ? null : pendingHandoff === null ? (
+                    threadStatusLine
+                  ) : (
+                    <>
+                      <div className="chat-content-lane">
+                        <HandoffRow
+                          endpoints={pendingHandoff}
+                          providers={providerStatuses}
+                          pending
+                        />
+                      </div>
+                      {threadStatusLine}
+                    </>
+                  )
+                }
                 listRef={legendListRef}
                 timelineEntries={displayedTimeline.entries}
                 providerStatuses={
@@ -11640,11 +11904,7 @@ export default function ChatView(props: ChatViewProps) {
                     ? (heldPaintContext?.workspaceRoot ?? undefined)
                     : activeWorkspaceRoot
                 }
-                skills={
-                  activeProviderStatus
-                    ? resolveProviderSkillsForCwd(activeProviderStatus, gitCwd)
-                    : EMPTY_PROVIDER_SKILLS
-                }
+                skills={timelineSkills}
                 anchorMessageId={paintOnlyDisplayedTimeline ? null : timelineAnchorMessageId}
                 onAnchorReady={onTimelineAnchorReady}
                 onAnchorSizeChanged={onTimelineAnchorSizeChanged}
@@ -11663,7 +11923,7 @@ export default function ChatView(props: ChatViewProps) {
               />
 
               {/* scroll to end pill — shown when user has scrolled away from the live edge */}
-              {showScrollToBottom && (
+              {showScrollToBottom && !isThreadFindActive && (
                 <div
                   className="chat-scroll-to-bottom pointer-events-none absolute z-30 flex justify-center py-1.5"
                   style={{ bottom: scrollToEndClearance + 4 }}
@@ -11801,6 +12061,10 @@ export default function ChatView(props: ChatViewProps) {
                               }
                               phase={phase}
                               canInterrupt={canInterruptRunningThread}
+                              forceStopAvailable={forceStopAvailable}
+                              forceStopping={isForceStopping}
+                              forceStopBump={forceStopBump}
+                              onForceStop={onForceStop}
                               isConnecting={isConnecting}
                               isSendBusy={isSendBusy || isSavingQueuedEdit || isResuming}
                               canResume={resumableRunId !== null || hasHeldQueuedRuns}
@@ -11886,6 +12150,7 @@ export default function ChatView(props: ChatViewProps) {
                                 activeProjectDefaultModelSelection
                               }
                               activeThreadModelSelection={activeThread?.modelSelection}
+                              activeProjectId={activeProject?.id ?? null}
                               activeContextWindow={activeContextWindow}
                               activeTodoPlan={activeComposerTodoPlan}
                               goalBump={goalBump}
@@ -12094,7 +12359,7 @@ export default function ChatView(props: ChatViewProps) {
                 onPrepared={handlePreparedPullRequestThread}
               />
             ) : null}
-          </ChatCanvas>
+          </ThreadFindCanvas>
           {/* end chat column */}
         </div>
         {/* end horizontal flex container */}
@@ -12144,6 +12409,7 @@ export default function ChatView(props: ChatViewProps) {
           onCloseOtherSurfaces={closeOtherRightPanelSurfaces}
           onCloseSurfacesToRight={closeRightPanelSurfacesToRight}
           onCloseAllSurfaces={closeAllRightPanelSurfaces}
+          onMoveSurface={moveRightPanelSurface}
           onCopyFilePath={copyRightPanelFilePath}
           onAddBrowser={() => createBrowserSurface()}
           onAddBrowserInProfile={createBrowserSurface}
@@ -12207,6 +12473,7 @@ export default function ChatView(props: ChatViewProps) {
             onCloseOtherSurfaces={closeOtherRightPanelSurfaces}
             onCloseSurfacesToRight={closeRightPanelSurfacesToRight}
             onCloseAllSurfaces={closeAllRightPanelSurfaces}
+            onMoveSurface={moveRightPanelSurface}
             onCopyFilePath={copyRightPanelFilePath}
             onAddBrowser={() => createBrowserSurface()}
             onAddBrowserInProfile={createBrowserSurface}
@@ -12284,8 +12551,16 @@ export default function ChatView(props: ChatViewProps) {
   );
 }
 
-/** Keeps the thread's preview tabs synced while no browser panel is mounted. */
+/** Keeps existing thread tabs hydrated and environment events synced off-panel. */
 function PreviewSessionSync(props: { readonly threadRef: ScopedThreadRef }) {
+  useDesktopHostedPreviewSessions(props.threadRef.environmentId);
+  const previewState = useThreadPreviewState(props.threadRef);
+  return !previewState.listLoaded || Object.keys(previewState.sessions).length > 0 ? (
+    <ActiveThreadPreviewSessionSync threadRef={props.threadRef} />
+  ) : null;
+}
+
+function ActiveThreadPreviewSessionSync(props: { readonly threadRef: ScopedThreadRef }) {
   usePreviewSession(props.threadRef);
   return null;
 }

@@ -110,6 +110,8 @@ function layerExecutorFor(input: {
         closeInstance: () => Effect.void,
         release: () => record("release"),
         detach: () => record("detach"),
+        otherWorkingThreads: () => Effect.succeed([]),
+        releaseUnlessBusy: () => Effect.succeed(true),
       }),
     ),
     Layer.succeed(
@@ -196,7 +198,18 @@ it("does not retry pure interrupt races where the turn is already gone", () => {
   );
 });
 
-it.effect("settles a stopped run when its adapter has already lost the native turn", () =>
+it.effect.each([
+  {
+    name: "settles a stopped run when its adapter has already lost the native turn",
+    unresponsive: false,
+    dispatched: ["thread.background-work.settle"],
+  },
+  {
+    name: "leaves the run running and flags the Stop when the provider never confirms it",
+    unresponsive: true,
+    dispatched: ["thread.interrupt.unresponsive"],
+  },
+])("$name", ({ unresponsive, dispatched }) =>
   Effect.gen(function* () {
     const now = yield* DateTime.now;
     const events = yield* Ref.make<ReadonlyArray<string>>([]);
@@ -207,7 +220,8 @@ it.effect("settles a stopped run when its adapter has already lost the native tu
           threadId,
           operation: "interrupt",
           providerTurnId,
-          cause: "Provider turn is not active.",
+          ...(unresponsive ? { unresponsive } : {}),
+          cause: unresponsive ? "Timed out." : "Provider turn is not active.",
         }),
       threads: {
         dispatch: (command) =>
@@ -228,10 +242,9 @@ it.effect("settles a stopped run when its adapter has already lost the native tu
         },
       });
     }).pipe(Effect.provide(layer));
-    assert.deepEqual(yield* Ref.get(events), ["thread.background-work.settle"]);
+    assert.deepEqual(yield* Ref.get(events), dispatched);
   }),
 );
-
 it.effect("requeues a claim when a pre-execution worker check fails", () =>
   Effect.gen(function* () {
     const now = DateTime.formatIso(yield* DateTime.now);
@@ -860,18 +873,16 @@ it.effect("retries a delegated-task stop after the 30-second execution deadline"
       lastError: null,
     };
     const executionStarted = yield* Deferred.make<void>();
-    const retries = yield* Ref.make<ReadonlyArray<{ readonly error: string; readonly delayMs: number }>>(
-      [],
-    );
+    const retries = yield* Ref.make<
+      ReadonlyArray<{ readonly error: string; readonly delayMs: number }>
+    >([]);
     const layerOutbox = Layer.mock(EffectOutbox.EffectOutboxV2)({
       claimNext: () => Effect.succeed(Option.some(claimedEffect)),
       get: () => Effect.succeed(Option.some(claimedEffect)),
       awaitCancellation: () => Effect.never,
       clearCancellation: () => Effect.void,
       retry: ({ error, delayMs }) =>
-        Ref.update(retries, (existing) => [...existing, { error, delayMs }]).pipe(
-          Effect.as(true),
-        ),
+        Ref.update(retries, (existing) => [...existing, { error, delayMs }]).pipe(Effect.as(true)),
     });
     const layerExecutor = Layer.succeed(
       EffectWorker.OrchestrationEffectExecutorV2,

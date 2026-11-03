@@ -24,11 +24,12 @@ const GENERATED_FILE_NAMES = new Set([
 const GENERATED_DIRECTORIES = new Set([
   "__snapshots__",
   "__generated__",
+  "_generated",
   "dist",
   "build",
   "vendor",
 ]);
-const TEST_DIRECTORIES = new Set(["__tests__", "tests", "test"]);
+const TEST_DIRECTORIES = new Set(["__tests__", "tests", "test", "evals"]);
 const MODULE_EXTENSIONS = [".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs"];
 
 function diffFileTier(path: string): DiffFileTier {
@@ -45,7 +46,7 @@ function diffFileTier(path: string): DiffFileTier {
     return "generated";
   }
   if (
-    /\.(?:test|spec)\./.test(name) ||
+    /\.(?:test|spec|eval)\./.test(name) ||
     segments.slice(0, -1).some((segment) => TEST_DIRECTORIES.has(segment))
   ) {
     return "test";
@@ -139,7 +140,9 @@ function orderByImports(
 
 /** The implementation a test names: `foo.test.ts` and `__tests__/foo.ts` both point at `foo`. */
 function testedBaseName(path: string): string {
-  return (path.split("/").at(-1) ?? "").replace(/\.(?:test|spec)\..*$/, "").replace(/\.[^.]+$/, "");
+  return (path.split("/").at(-1) ?? "")
+    .replace(/\.(?:test|spec|eval)\..*$/, "")
+    .replace(/\.[^.]+$/, "");
 }
 
 /**

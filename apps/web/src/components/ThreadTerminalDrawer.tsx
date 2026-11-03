@@ -132,15 +132,27 @@ export function writeTerminalOutputUpdate(
   }
 }
 
+// Avoid formatting unbounded scrollback selections on every output update.
+const MAX_COMPARED_SELECTION_CELLS = 3_000;
+
 export function synchronizeTerminalOutput(
-  terminal: Pick<GhosttyTerminalSurface, "resetAndWrite" | "write" | "clearSelection">,
+  terminal: Pick<
+    GhosttyTerminalSurface,
+    "resetAndWrite" | "write" | "getSelection" | "getSelectionCellCount" | "clearSelection"
+  >,
   session: Pick<TerminalSessionState, "output" | "version">,
   cursor: TerminalOutputCursor,
 ): TerminalOutputCursor {
   if (session.version === 0) return cursor;
   const update = readTerminalOutputUpdate(session.output, cursor);
+  if (update.type === "none") return update.cursor;
+  const cells = terminal.getSelectionCellCount();
+  const compared = cells <= MAX_COMPARED_SELECTION_CELLS;
+  const selection = cells > 0 && compared ? terminal.getSelection() : "";
   writeTerminalOutputUpdate(terminal, update);
-  terminal.clearSelection();
+  if (!compared || (cells > 0 && terminal.getSelection() !== selection)) {
+    terminal.clearSelection();
+  }
   return update.cursor;
 }
 
@@ -609,6 +621,7 @@ export function TerminalViewport({
     error: terminalError,
     status: terminalStatus,
     version: terminalVersion,
+    grid: terminalSession.grid,
   });
   const latestSessionRef = useRef(previousSessionRef.current);
   latestSessionRef.current = {
@@ -616,6 +629,7 @@ export function TerminalViewport({
     error: terminalError,
     status: terminalStatus,
     version: terminalVersion,
+    grid: terminalSession.grid,
   };
 
   useEffect(() => {
@@ -704,6 +718,7 @@ export function TerminalViewport({
         void terminal.setFont(terminalFontOptions(currentFont.family, currentFont.size, mount));
       }
       const latestSession = latestSessionRef.current;
+      terminal.setSharedGrid(latestSession.grid);
       previousSessionRef.current = latestSession;
       const initialOutput = readTerminalOutputUpdate(
         latestSession.output,
@@ -781,8 +796,12 @@ export function TerminalViewport({
         };
       };
 
-      const addSelectionToChat = (selection: TerminalContextSelection) => {
-        handleAddTerminalContext(selection);
+      const addSelectionToChat = (clipboardText: string) => {
+        // Output keeps moving the selected rows while a menu is open, so take
+        // the line numbers now, and only if the same text is still selected.
+        const current = readSelectionAction();
+        if (current?.clipboardText !== clipboardText) return;
+        handleAddTerminalContext(current.selection);
         terminalRef.current?.clearSelection();
         terminalRef.current?.focus();
       };
@@ -862,7 +881,7 @@ export function TerminalViewport({
         switch (clicked) {
           case "add-to-chat":
             if (selectionAction && canAddSelectionToChat()) {
-              addSelectionToChat(selectionAction.selection);
+              addSelectionToChat(selectionAction.clipboardText);
             }
             return;
           case "copy":
@@ -904,7 +923,7 @@ export function TerminalViewport({
         }
         switch (clicked) {
           case "add-to-chat":
-            if (canAddSelectionToChat()) addSelectionToChat(nextAction.selection);
+            if (canAddSelectionToChat()) addSelectionToChat(nextAction.clipboardText);
             return;
           case "copy":
             await copySelection(nextAction.clipboardText, requestId);
@@ -1121,6 +1140,7 @@ export function TerminalViewport({
       error: terminalError,
       status: terminalStatus,
       version: terminalVersion,
+      grid: terminalSession.grid,
     };
     if (!terminal) {
       previousSessionRef.current = current;
@@ -1128,6 +1148,7 @@ export function TerminalViewport({
     }
 
     const previous = previousSessionRef.current;
+    terminal.setSharedGrid(current.grid);
     synchronizeTerminalStatus(terminal, current.status, current.version);
     if (current.version === previous.version && current.output === previous.output) {
       return;
@@ -1140,7 +1161,7 @@ export function TerminalViewport({
     }
 
     previousSessionRef.current = current;
-  }, [terminalOutput, terminalError, terminalStatus, terminalVersion]);
+  }, [terminalOutput, terminalError, terminalStatus, terminalVersion, terminalSession.grid]);
 
   useEffect(() => {
     if (!autoFocus || !canOperateTerminal || !visible) return;
@@ -1198,7 +1219,7 @@ interface ThreadTerminalDrawerProps {
   newShortcutLabel?: string | undefined;
   closeShortcutLabel?: string | undefined;
   onActiveTerminalChange: (terminalId: string) => void;
-  onCloseTerminal: (terminalId: string) => void;
+  onCloseTerminal: (terminalId: string, threadRef?: ScopedThreadRef) => void;
   onHeightChange: (height: number) => void;
   onAddTerminalContext: (selection: TerminalContextSelection) => void;
   keybindings: ResolvedKeybindingsConfig;
@@ -1496,7 +1517,7 @@ export default function ThreadTerminalDrawer({
       const label = terminalLabelById.get(terminalId) ?? getTerminalLabel(terminalId);
       void confirmTerminalClose([label]).then((confirmed) => {
         if (confirmed && readEnvironmentScope(threadRef.environmentId, AuthTerminalOperateScope)) {
-          onCloseTerminal(terminalId);
+          onCloseTerminal(terminalId, threadRef);
         }
       });
     },
@@ -1725,7 +1746,9 @@ export default function ThreadTerminalDrawer({
       <div
         className={cn(
           "flex min-h-0 w-full flex-1 flex-col",
-          !isPanel && drawerTab === "ports" && "invisible absolute pointer-events-none inset-0 -z-10",
+          !isPanel &&
+            drawerTab === "ports" &&
+            "invisible absolute pointer-events-none inset-0 -z-10",
         )}
         aria-hidden={!isPanel && drawerTab === "ports"}
       >
@@ -1798,7 +1821,7 @@ export default function ThreadTerminalDrawer({
                               {...(terminalLaunchLocation.runtimeEnv
                                 ? { runtimeEnv: terminalLaunchLocation.runtimeEnv }
                                 : {})}
-                              onSessionExited={() => onCloseTerminal(terminalId)}
+                              onSessionExited={() => onCloseTerminal(terminalId, threadRef)}
                               onAddTerminalContext={onAddTerminalContext}
                               focusRequestId={focusRequestId}
                               autoFocus={terminalId === resolvedActiveTerminalId}
@@ -1828,7 +1851,7 @@ export default function ThreadTerminalDrawer({
                       {...(activeTerminalLaunchLocation.runtimeEnv
                         ? { runtimeEnv: activeTerminalLaunchLocation.runtimeEnv }
                         : {})}
-                      onSessionExited={() => onCloseTerminal(resolvedActiveTerminalId)}
+                      onSessionExited={() => onCloseTerminal(resolvedActiveTerminalId, threadRef)}
                       onAddTerminalContext={onAddTerminalContext}
                       focusRequestId={focusRequestId}
                       autoFocus

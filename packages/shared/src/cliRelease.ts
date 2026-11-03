@@ -4,6 +4,8 @@
  * Releases. Every consumer derives the same file names from a version and a
  * platform key, so a rename here is a release-breaking change.
  */
+import * as Option from "effect/Option";
+import * as Schema from "effect/Schema";
 
 const CLI_RELEASE_REPOSITORY = "pingdotgg/t3code";
 export const CLI_RELEASE_CHECKSUMS_FILE = "SHA256SUMS";
@@ -121,4 +123,15 @@ export function newestCliReleaseVersion(
     if (cliReleaseChannelOf(version) === channel) return version;
   }
   return undefined;
+}
+
+const NpmReleaseMigrationManifest = Schema.Struct({
+  t3code: Schema.Struct({ databaseMigration: Schema.Int }),
+});
+const decodeNpmReleaseMigrationManifest = Schema.decodeUnknownOption(NpmReleaseMigrationManifest);
+
+/** Highest database migration a release's server knows, from its npm `t3` manifest. */
+export function npmReleaseDatabaseMigration(manifest: unknown): number | undefined {
+  return Option.getOrUndefined(decodeNpmReleaseMigrationManifest(manifest))?.t3code
+    .databaseMigration;
 }

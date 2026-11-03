@@ -2241,6 +2241,21 @@ export function ConnectionsSettings() {
   const highlightedSshHostRef = useRef<DesktopDiscoveredSshHost | undefined>(undefined);
   const [savedBackendError, setSavedBackendError] = useState<string | null>(null);
   const [isAddingSavedBackend, setIsAddingSavedBackend] = useState(false);
+  const savedBackendSessionRef = useRef(0);
+  const handleAddBackendDialogOpenChange = useCallback((open: boolean) => {
+    if (!open) {
+      savedBackendSessionRef.current += 1;
+      setSavedBackendMode("remote");
+      setSavedBackendHost("");
+      setSavedBackendPairingCode("");
+      setSavedBackendSshHost("");
+      setSavedBackendSshUsername("");
+      setSavedBackendSshPort("");
+    }
+    setAddBackendDialogOpen(open);
+    if (open) setRouteTarget(null);
+    else setSavedBackendError(null);
+  }, []);
   const [removingSavedEnvironmentId, setRemovingSavedEnvironmentId] =
     useState<EnvironmentId | null>(null);
   const [isUpdatingDesktopServerExposure, setIsUpdatingDesktopServerExposure] = useState(false);
@@ -2605,6 +2620,7 @@ export function ConnectionsSettings() {
   // Shared by manual SSH submission and discovered-host selection.
   const connectSavedBackendSshTarget = useCallback(
     async (target: DesktopSshEnvironmentTarget) => {
+      const session = savedBackendSessionRef.current;
       setIsAddingSavedBackend(true);
       setSavedBackendError(null);
       const result = await connectSshEnvironment({
@@ -2613,19 +2629,14 @@ export function ConnectionsSettings() {
         ...(routeTarget ? { expectedEnvironmentId: routeTarget.environmentId } : {}),
       });
       if (result._tag === "Failure") {
-        if (!isAtomCommandInterrupted(result)) {
+        if (session === savedBackendSessionRef.current && !isAtomCommandInterrupted(result)) {
           setSavedBackendError(formatDesktopSshConnectionError(squashAtomCommandFailure(result)));
         }
         setIsAddingSavedBackend(false);
         return;
       }
 
-      setSavedBackendHost("");
-      setSavedBackendPairingCode("");
-      setSavedBackendSshHost("");
-      setSavedBackendSshUsername("");
-      setSavedBackendSshPort("");
-      setAddBackendDialogOpen(false);
+      handleAddBackendDialogOpenChange(false);
       toastManager.add({
         type: "success",
         title: routeTarget ? "Route added" : "Environment connected",
@@ -2635,7 +2646,7 @@ export function ConnectionsSettings() {
       });
       setIsAddingSavedBackend(false);
     },
-    [connectSshEnvironment, routeTarget],
+    [connectSshEnvironment, handleAddBackendDialogOpenChange, routeTarget],
   );
 
   const handleAddSavedBackend = useCallback(async () => {
@@ -2699,12 +2710,7 @@ export function ConnectionsSettings() {
       return;
     }
 
-    setSavedBackendHost("");
-    setSavedBackendPairingCode("");
-    setSavedBackendSshHost("");
-    setSavedBackendSshUsername("");
-    setSavedBackendSshPort("");
-    setAddBackendDialogOpen(false);
+    handleAddBackendDialogOpenChange(false);
     toastManager.add(
       routeTarget
         ? {
@@ -2723,6 +2729,7 @@ export function ConnectionsSettings() {
     routeTarget,
     connectPairing,
     connectSavedBackendSshTarget,
+    handleAddBackendDialogOpenChange,
     savedBackendHost,
     savedBackendMode,
     savedBackendPairingCode,
@@ -2746,6 +2753,7 @@ export function ConnectionsSettings() {
   const handleSelectSshHostSuggestion = useCallback(
     async (target: DesktopDiscoveredSshHost) => {
       if (isAddingSavedBackend || !desktopBridge) return;
+      const session = savedBackendSessionRef.current;
 
       setIsAddingSavedBackend(true);
       setSavedBackendError(null);
@@ -2754,7 +2762,12 @@ export function ConnectionsSettings() {
       try {
         resolved = await desktopBridge.resolveSshHost(target.alias);
       } catch (error) {
-        setSavedBackendError(formatDesktopSshConnectionError(error));
+        if (session === savedBackendSessionRef.current)
+          setSavedBackendError(formatDesktopSshConnectionError(error));
+        setIsAddingSavedBackend(false);
+        return;
+      }
+      if (session !== savedBackendSessionRef.current) {
         setIsAddingSavedBackend(false);
         return;
       }
@@ -3037,7 +3050,7 @@ export function ConnectionsSettings() {
       }
       return;
     }
-    setAddBackendDialogOpen(false);
+    handleAddBackendDialogOpenChange(false);
     toastManager.add({
       type: "success",
       title: "Route added",
@@ -4114,17 +4127,7 @@ export function ConnectionsSettings() {
             {savedServerUpdateTargets.length > 0 ? (
               <ServerUpdatesAction targets={savedServerUpdateTargets} variant="ghost-muted" />
             ) : null}
-            <Dialog
-              open={addBackendDialogOpen}
-              onOpenChange={(open) => {
-                setAddBackendDialogOpen(open);
-                if (open) {
-                  setRouteTarget(null);
-                } else {
-                  setSavedBackendError(null);
-                }
-              }}
-            >
+            <Dialog open={addBackendDialogOpen} onOpenChange={handleAddBackendDialogOpenChange}>
               <Tooltip>
                 <TooltipTrigger
                   render={

@@ -374,6 +374,7 @@ export const GitCommandFailureReason = Schema.Literals([
   "branch_checked_out_in_worktree",
   "host_key_unverified",
   "not_a_repository",
+  "config_locked",
   "path_already_exists",
   "remote_unreachable",
   "tag_would_be_clobbered",

@@ -6,8 +6,10 @@ import {
   decodeRepositoryBlobsJson,
   decodeCommitsJson,
   decodeMergeRequestDetailJson,
+  decodeMergeRequestFileStatsJson,
   decodeMergeRequestDiffsJson,
   decodeMergeRequestListJson,
+  decodeMergeRequestStatsJson,
   decodeNotesJson,
   decodeOwnAwardIdJson,
   decodeViewerJson,
@@ -234,6 +236,14 @@ describe("decodeMergeRequestDetailJson", () => {
     );
 
     expect(detail.checks[0]?.status).toBe("neutral");
+  });
+
+  it.each(["scheduled", " SCHEDULED "])("keeps a delayed pipeline pending: %s", (status) => {
+    const detail = expectSuccess(
+      decodeMergeRequestDetailJson(detailJson({ head_pipeline: { status } })),
+    );
+
+    expect(detail.checks[0]?.status).toBe("pending");
   });
 });
 
@@ -509,6 +519,7 @@ describe("decodeMergeRequestDiffsJson", () => {
 
     expect(result.truncated).toBe(true);
     expect(result.patch).toContain("diff --git a/big.bin b/big.bin");
+    expect(result.omittedPaths).toEqual(["big.bin"]);
   });
 
   it("reports how many files GitLab returned, so the caller can page", () => {
@@ -799,5 +810,67 @@ describe("decodeRepositoryBlobsJson", () => {
   it("fails on output that is not the query's shape", () => {
     expect(Result.isSuccess(decodeRepositoryBlobsJson("not json"))).toBe(false);
     expect(Result.isSuccess(decodeRepositoryBlobsJson(JSON.stringify({ errors: [] })))).toBe(false);
+  });
+});
+
+describe("decodeMergeRequestStatsJson", () => {
+  it("keys available line counts by merge request number", () => {
+    const stats = expectSuccess(
+      decodeMergeRequestStatsJson(
+        JSON.stringify({
+          data: {
+            project: {
+              mergeRequests: {
+                nodes: [
+                  { iid: "7", diffStatsSummary: { additions: 12, deletions: 3 } },
+                  { iid: "8", diffStatsSummary: null },
+                  { iid: "bad", diffStatsSummary: { additions: 1, deletions: 1 } },
+                ],
+              },
+            },
+          },
+        }),
+      ),
+    );
+
+    expect([...stats]).toEqual([[7, { additions: 12, deletions: 3 }]]);
+  });
+
+  it("answers no counts when the token cannot see the project", () => {
+    expect(
+      expectSuccess(decodeMergeRequestStatsJson(JSON.stringify({ data: { project: null } }))),
+    ).toEqual(new Map());
+  });
+});
+
+describe("decodeMergeRequestFileStatsJson", () => {
+  const read = (fileCount: number) =>
+    expectSuccess(
+      decodeMergeRequestFileStatsJson(
+        JSON.stringify({
+          data: {
+            project: {
+              mergeRequest: {
+                diffStatsSummary: { fileCount },
+                diffStats: [{ path: "src/a.ts", additions: 2, deletions: 1 }],
+              },
+            },
+          },
+        }),
+      ),
+    );
+
+  it("decodes file line counts and whether the list was truncated", () => {
+    expect(read(1)).toEqual({
+      files: [{ path: "src/a.ts", additions: 2, deletions: 1 }],
+      truncated: false,
+    });
+    expect(read(2).truncated).toBe(true);
+  });
+
+  it("leaves counts empty when GitLab has no answer for the project", () => {
+    expect(
+      expectSuccess(decodeMergeRequestFileStatsJson(JSON.stringify({ data: { project: null } }))),
+    ).toEqual({ files: [], truncated: true });
   });
 });

@@ -15,6 +15,18 @@ import * as SqlitePersistence from "./Sqlite.ts";
 import * as ServerConfig from "../config.ts";
 import * as StateDirectoryLock from "./StateDirectoryLock.ts";
 
+const openDeletedTempFiles = () => {
+  const fileDescriptors = NodeFS.readdirSync("/proc/self/fd");
+  return fileDescriptors.flatMap((fd) => {
+    try {
+      const target = NodeFS.readlinkSync(`/proc/self/fd/${fd}`);
+      return target.includes("/etilqs_") && target.endsWith(" (deleted)") ? [target] : [];
+    } catch {
+      return [];
+    }
+  });
+};
+
 const lockHolderSource = `
 const { DatabaseSync } = require("node:sqlite");
 const db = new DatabaseSync(process.argv[1]);
@@ -68,15 +80,15 @@ const spawnStateDirectoryLockHolder = (lockPath: string) =>
         holder.once("error", reject);
         holder.once("exit", (code, signal) => {
           if (!acquired) {
-            reject(new Error(`State lock holder exited before acquiring the lock (${code ?? signal}).`));
+            reject(
+              new Error(`State lock holder exited before acquiring the lock (${code ?? signal}).`),
+            );
           }
         });
       }),
   );
 
-const releaseStateDirectoryLockHolder = (
-  holder: NodeChildProcess.ChildProcessWithoutNullStreams,
-) =>
+const releaseStateDirectoryLockHolder = (holder: NodeChildProcess.ChildProcessWithoutNullStreams) =>
   Effect.promise(
     () =>
       new Promise<void>((resolve, reject) => {
@@ -169,7 +181,6 @@ it.effect("lets CLI commands use the database while a server holds the state loc
   );
 });
 
-
 it.effect("waits out a concurrent writer instead of failing with SQLITE_BUSY", () => {
   const tempDir = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "t3-sqlite-busy-"));
   const dbPath = NodePath.join(tempDir, "state.sqlite");
@@ -212,6 +223,37 @@ it.effect("shrinks the WAL file back to the size limit after a large write", () 
     Effect.ensuring(Effect.sync(() => NodeFS.rmSync(tempDir, { recursive: true, force: true }))),
   );
 });
+
+it.effect.skipIf(NodeOS.platform() !== "linux")(
+  "keeps a write transaction's statement journal off the temp directory",
+  () => {
+    const tempDir = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "t3-sqlite-temp-"));
+    const persistence = SqlitePersistence.layerFromPath(
+      NodePath.join(tempDir, "state.sqlite"),
+    ).pipe(Layer.provide(NodeServices.layer));
+
+    return Effect.gen(function* () {
+      const sql = yield* SqlClient.SqlClient;
+      yield* sql`CREATE TABLE journal_probe(id INTEGER PRIMARY KEY, payload TEXT NOT NULL)`;
+      for (let id = 0; id < 64; id++) {
+        yield* sql`INSERT INTO journal_probe VALUES (${id}, ${"x".repeat(4096)})`;
+      }
+      const before = new Set(openDeletedTempFiles());
+      const opened = yield* sql.withTransaction(
+        Effect.gen(function* () {
+          // A multi-row update can fail halfway, so SQLite journals every page
+          // it changes, here well past the 64 KiB it holds in memory by default.
+          yield* sql`UPDATE journal_probe SET payload = payload || 'y'`;
+          return openDeletedTempFiles().filter((target) => !before.has(target));
+        }),
+      );
+      assert.deepEqual(opened, []);
+    }).pipe(
+      Effect.provide(persistence),
+      Effect.ensuring(Effect.sync(() => NodeFS.rmSync(tempDir, { recursive: true, force: true }))),
+    );
+  },
+);
 
 it.effect("clears stale planner statistics on database open", () => {
   const tempDir = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "t3-sqlite-stats-"));

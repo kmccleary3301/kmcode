@@ -166,7 +166,7 @@ const decodeJsonString = Schema.decodeEffect(Schema.fromJsonString(Schema.Unknow
 const parseLenientJsonGetter = SchemaGetter.transformEffect((input: string) => {
   // Strip single-line comments - alternation preserves quoted strings.
   let stripped = input.replace(
-    /("(?:[^"\\]|\\.)*")|\/\/[^\n]*/g,
+    /("(?:[^"\\]|\\.)*")|\/\/[^\r\n]*/g,
     (match, stringLiteral: string | undefined) => (stringLiteral ? match : ""),
   );
 

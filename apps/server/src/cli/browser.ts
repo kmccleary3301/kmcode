@@ -10,6 +10,8 @@
  * Both need root. Without it, the command prints what it would change and the
  * `sudo` line to run. It is safe to run again; it skips what is already done.
  */
+// @effect-diagnostics nodeBuiltinImport:off -- ChildProcess streams read from the reopened console descriptor.
+import * as NodeFS from "node:fs";
 import {
   HostProcessEnvironment,
   HostProcessPlatform,
@@ -20,15 +22,18 @@ import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Option from "effect/Option";
 import * as Path from "effect/Path";
+import * as PlatformError from "effect/PlatformError";
 import * as Schema from "effect/Schema";
 import { Command } from "effect/cli";
 import * as ChildProcess from "effect/process/ChildProcess";
 import * as ChildProcessSpawner from "effect/process/ChildProcessSpawner";
+import * as Stream from "effect/Stream";
 
 import * as PreviewBrowserHost from "../preview/PreviewBrowserHost.ts";
 import { resolveBaseDir } from "../os-jank.ts";
 import { baseDirFlag } from "./config.ts";
 import { resolveRootCliCommand } from "./invocation.ts";
+import { interactiveStdin } from "./consoleStdin.ts";
 
 export class BrowserSetupStepError extends Schema.TaggedError<BrowserSetupStepError>()(
   "BrowserSetupStepError",
@@ -46,9 +51,28 @@ const runStep = Effect.fn("browserSetup.runStep")(function* (
   args: ReadonlyArray<string>,
 ) {
   const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
+  const input = interactiveStdin();
+  const stdin =
+    typeof input === "number"
+      ? Stream.fromAsyncIterable(
+          NodeFS.createReadStream("", { fd: input, autoClose: false }),
+          (cause) =>
+            PlatformError.systemError({
+              _tag: "Unknown",
+              module: "node:fs",
+              method: "createReadStream",
+              pathOrDescriptor: input,
+              cause,
+            }),
+        )
+      : input;
   const exitCode = yield* spawner
     .exitCode(
-      ChildProcess.make(command, args, { stdin: "inherit", stdout: "inherit", stderr: "inherit" }),
+      ChildProcess.make(command, args, {
+        stdin,
+        stdout: "inherit",
+        stderr: "inherit",
+      }),
     )
     .pipe(Effect.mapError((cause) => new BrowserSetupStepError({ step, detail: String(cause) })));
   if (exitCode !== 0) {
@@ -114,10 +138,15 @@ const browserSetupCommand = Command.make("setup", { baseDir: baseDirFlag }).pipe
       }
       const fs = yield* FileSystem.FileSystem;
       const isRoot = (yield* HostProcessUserId) === 0;
-      const setupCommand = yield* resolveRootCliCommand(PreviewBrowserHost.SETUP_SUBCOMMAND);
+      const env = yield* HostProcessEnvironment;
+      const baseDirPath = yield* setupBaseDir(baseDir);
+      const setupCommand = yield* resolveRootCliCommand(
+        PreviewBrowserHost.SETUP_SUBCOMMAND,
+        Option.isSome(baseDir) || env.T3CODE_HOME !== undefined ? ["--base-dir", baseDirPath] : [],
+      );
 
       const needsProfile = yield* PreviewBrowserHost.sandboxBlocked;
-      const browser = yield* installedBrowser(yield* setupBaseDir(baseDir));
+      const browser = yield* installedBrowser(baseDirPath);
       const missing = Option.isSome(browser)
         ? yield* PreviewBrowserHost.missingLibraries(browser.value)
         : [];

@@ -2,6 +2,7 @@ import { expect, it } from "@effect/vitest";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import {
   DeviceHostUnavailableError,
+  DeviceOperationError,
   EnvironmentId,
   ProviderInstanceId,
   ThreadId,
@@ -142,6 +143,49 @@ it.effect("registers the device tools and returns the screenshot as image conten
     }),
   ).pipe(Effect.provide(layerTest)),
 );
+
+it.effect("preserves actionable advice for a rejected device screenshot", () => {
+  const layerScreenshotFailure = McpHttpServer.layerDeviceToolkit.pipe(
+    Layer.provideMerge(McpServer.McpServer.layer),
+    Layer.provideMerge(McpToolAccessTestkit.liveThreadsLayer),
+    Layer.provideMerge(
+      Layer.mock(DeviceService.DeviceService)({
+        sessionsForThread: () => Effect.succeed([]),
+        screenshot: () =>
+          Effect.fail(
+            new DeviceOperationError({
+              operation: "screenshot",
+              reason: "hub_rejected",
+              cause: new Error("private hub output"),
+            }),
+          ),
+      }),
+    ),
+    Layer.provide(
+      ServerConfig.layerTest(process.cwd(), { prefix: "t3-mcp-device-screenshot-test-" }),
+    ),
+    Layer.provide(NodeServices.layer),
+  );
+  return Effect.scoped(
+    Effect.gen(function* () {
+      const server = yield* McpServer.McpServer;
+      const result = yield* server
+        .callTool({ name: "device_screenshot", arguments: { deviceId: "UDID-1" } })
+        .pipe(
+          Effect.provideService(McpInvocationContext.McpInvocationContext, invocation(["device"])),
+          Effect.provideService(McpSchema.McpServerClient, client),
+        );
+      const message =
+        "Device screenshot failed: The device hub could not complete the request. Call device_list to check the device state, and device_open if it needs to be reopened.";
+      expect(result.isError).toBe(true);
+      expect(result.content).toEqual([{ type: "text", text: message }]);
+      expect(result.structuredContent).toMatchObject({
+        error: { message, operation: "screenshot" },
+      });
+      expect(JSON.stringify(result)).not.toContain("private hub output");
+    }),
+  ).pipe(Effect.provide(layerScreenshotFailure));
+});
 
 it.effect("rejects unavailable agent access before booting or opening a device", () => {
   const layerUnavailable = Layer.mock(DeviceService.DeviceService)({

@@ -271,6 +271,12 @@ function resolveBaseDir(baseDir: string | undefined): Effect.Effect<string, neve
     const path = yield* Path.Path;
     const configured = baseDir?.trim();
 
+    if (configured === "~") {
+      return NodeOS.homedir();
+    }
+    if (configured?.startsWith("~/") || configured?.startsWith("~\\")) {
+      return path.join(NodeOS.homedir(), configured.slice(2));
+    }
     if (configured) {
       return path.resolve(configured);
     }

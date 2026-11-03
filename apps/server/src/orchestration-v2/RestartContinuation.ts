@@ -2,6 +2,7 @@ import { runRanAfter } from "@t3tools/shared/orchestrationV2ThreadError";
 import { resolveProjectSettings } from "@t3tools/shared/projectSettings";
 import {
   CommandId,
+  isOrchestrationV2WorkActive,
   MessageId,
   type OrchestrationV2Run,
   type RunId,
@@ -15,6 +16,7 @@ import * as ServerSettings from "../serverSettings.ts";
 import { isNativeMaintenanceCommand } from "./Orchestrator.ts";
 import * as ThreadManagementService from "./ThreadManagementService.ts";
 import {
+  continuationFailedBeforePrompt,
   isRestartNoteSource,
   restartCancelledBackgroundWorkNote,
   restartContinuationNote,
@@ -115,7 +117,8 @@ export const continueRestartedRun = Effect.fn("RestartContinuation.continueResta
     // including waiting runs that reconciliation subsequently cancelled.
     if (
       !source ||
-      source.status !== "cancelled" ||
+      (source.status !== "cancelled" &&
+        !continuationFailedBeforePrompt(source, projection.providerTurns)) ||
       isRestartNoteSource(source, projection.providerTurns)
     )
       return;
@@ -158,6 +161,33 @@ export const continueRestartedRun = Effect.fn("RestartContinuation.continueResta
       )
     )
       return;
+
+    // A parent's Stop reaches its open delegated tasks through an effect a restart can cut short.
+    const { lineage, forkedFrom } = projection.thread;
+    const taskId =
+      source.delegatedTaskId ?? (forkedFrom?.type === "node" ? forkedFrom.nodeId : undefined);
+    if (
+      lineage.relationshipToParent === "subagent" &&
+      lineage.parentThreadId !== null &&
+      taskId !== undefined
+    ) {
+      const task = (yield* threads.getThreadRecords(lineage.parentThreadId, ["subagents"], {
+        subagentIds: [taskId],
+      })).subagents.find((candidate) => candidate.id === taskId);
+      // A settled task no longer owns later work in its thread.
+      const parentRunId =
+        task !== undefined && task.result === null && isOrchestrationV2WorkActive(task.status)
+          ? task.runId
+          : null;
+      if (
+        parentRunId !== null &&
+        (yield* threads.getThreadRecords(lineage.parentThreadId, ["turnItems"], {
+          turnItemTypes: ["run_interrupt_request"],
+          turnItemRunIds: [parentRunId],
+        })).turnItems.length > 0
+      )
+        return;
+    }
     const sourceMessage = sourceRecords.messages.find(
       (message) => message.id === source.userMessageId,
     );

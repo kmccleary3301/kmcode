@@ -152,8 +152,13 @@ function matchesCommandShortcut(
   return resolveShortcutCommand(event, keybindings, options) === command;
 }
 
+type ShortcutDispatchEvent = ShortcutEventLike & {
+  target?: EventTarget | null;
+  preventDefault?: () => void;
+};
+
 export function resolveShortcutCommand(
-  event: ShortcutEventLike,
+  event: ShortcutDispatchEvent,
   keybindings: ResolvedKeybindingsConfig,
   options?: ShortcutMatchOptions,
 ): KeybindingCommand | null {
@@ -165,6 +170,14 @@ export function resolveShortcutCommand(
     if (!binding) continue;
     if (!matchesWhenClause(binding.whenAst, context)) continue;
     if (!matchesKeybindingShortcut(event, binding.shortcut, platform)) continue;
+    if (
+      typeof Element !== "undefined" &&
+      event.target instanceof Element &&
+      event.target.closest('[role="alertdialog"]') !== null
+    ) {
+      event.preventDefault?.();
+      return null;
+    }
     return binding.command;
   }
   return null;
@@ -444,10 +457,6 @@ export function terminalNavigationShortcutData(
       return moveLine;
     }
     return null;
-  }
-
-  if (event.ctrlKey && !event.metaKey && !event.altKey) {
-    return moveWord;
   }
 
   if (event.altKey && !event.metaKey && !event.ctrlKey) {

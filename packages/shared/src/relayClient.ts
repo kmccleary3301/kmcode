@@ -1,3 +1,5 @@
+// @effect-diagnostics-next-line nodeBuiltinImport:off -- FileSystem.remove cannot remove an empty directory nonrecursively.
+import * as NodeFSP from "node:fs/promises";
 import * as Clock from "effect/Clock";
 import type {
   RelayClientInstallProgressEvent,
@@ -13,7 +15,7 @@ import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Path from "effect/Path";
-import * as PlatformError from "effect/PlatformError";
+import type * as PlatformError from "effect/PlatformError";
 import * as Semaphore from "effect/Semaphore";
 import { HttpClient, HttpClientRequest, HttpClientResponse } from "effect/http";
 import { ChildProcess, ChildProcessSpawner } from "effect/process";
@@ -106,7 +108,8 @@ const CLOUDFLARED_RELEASE_ASSETS: Readonly<
 
 const INSTALL_LOCK_RETRY_COUNT = 100;
 const INSTALL_LOCK_RETRY_DELAY = "100 millis";
-const INSTALL_LOCK_STALE_MS = 5 * 60 * 1_000;
+// Legacy locks have no owner; allow both ten-minute download stages and the install tail.
+const INSTALL_LOCK_LEGACY_STALE_MS = 30 * 60 * 1_000;
 
 const trimmedString = (name: string) =>
   Config.String(name).pipe(
@@ -152,8 +155,38 @@ function resolveReleaseAsset(
   return CLOUDFLARED_RELEASE_ASSETS[`${platform}-${arch}`] ?? null;
 }
 
-function isAlreadyExists(error: PlatformError.PlatformError): boolean {
-  return error.reason._tag === "AlreadyExists";
+function isLockContention(error: PlatformError.PlatformError, platform: NodeJS.Platform): boolean {
+  const cause = error.reason.cause;
+  const code =
+    typeof cause === "object" && cause !== null && "code" in cause ? cause.code : undefined;
+  return (
+    error.reason._tag === "AlreadyExists" ||
+    error.reason._tag === "BadResource" ||
+    code === "EEXIST" ||
+    code === "ENOTEMPTY" ||
+    (platform === "win32" && (code === "EPERM" || code === "EBUSY"))
+  );
+}
+
+function parseLockOwnerPid(owner: string): number | null {
+  const separator = owner.indexOf("-");
+  if (separator <= 0) return null;
+  const pid = Number(owner.slice(0, separator));
+  return Number.isSafeInteger(pid) && pid > 0 ? pid : null;
+}
+
+function processIsAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return !(
+      typeof error === "object" &&
+      error !== null &&
+      "code" in error &&
+      error.code === "ESRCH"
+    );
+  }
 }
 
 const wrapInstallFailure =
@@ -331,25 +364,75 @@ export const makeCloudflaredRelayClient = Effect.fn("cloudflared.make")(function
     return bytes;
   });
 
+  const removeEmptyLock = (lockPath: string) =>
+    Effect.tryPromise(() => NodeFSP.rmdir(lockPath)).pipe(Effect.ignore);
+
+  const releaseOwnedLock = Effect.fn("cloudflared.releaseOwnedLock")(function* (
+    lockPath: string,
+    owner: string,
+  ) {
+    yield* fileSystem.remove(path.join(lockPath, owner), { force: true }).pipe(Effect.ignore);
+    // A replacement contains a different owner entry, so rmdir cannot remove it.
+    yield* removeEmptyLock(lockPath);
+  });
+
   const acquireInstallLock = Effect.fn("cloudflared.acquireInstallLock")(function* (
     lockPath: string,
   ) {
-    for (let attempt = 0; attempt < INSTALL_LOCK_RETRY_COUNT; attempt += 1) {
-      const acquired = yield* fileSystem.writeFileString(lockPath, "", { flag: "wx" }).pipe(
-        Effect.as(true),
-        Effect.catchIf(isAlreadyExists, () => Effect.succeed(false)),
+    const ownerId = yield* crypto.randomUUIDv4;
+    const owner = `${process.pid}-${ownerId}`;
+    const acquired = yield* Effect.gen(function* () {
+      const candidate = yield* Effect.acquireRelease(
+        fileSystem.makeTempDirectory({
+          directory: path.dirname(lockPath),
+          prefix: ".lock-",
+        }),
+        (directory) =>
+          fileSystem.remove(directory, { recursive: true, force: true }).pipe(Effect.ignore),
       );
-      if (acquired) return;
+      yield* fileSystem.writeFileString(path.join(candidate, owner), "");
+      for (let attempt = 0; attempt < INSTALL_LOCK_RETRY_COUNT; attempt += 1) {
+        const acquired = yield* fileSystem.rename(candidate, lockPath).pipe(
+          Effect.as(true),
+          Effect.catchIf(
+            (error) => isLockContention(error, platform),
+            () => Effect.succeed(false),
+          ),
+        );
+        if (acquired) return true;
 
-      const now = yield* Clock.currentTimeMillis;
-      const lockInfo = yield* fileSystem.stat(lockPath).pipe(Effect.option);
-      const mtime = Option.flatMap(lockInfo, (info) => info.mtime);
-      if (Option.isSome(mtime) && now - mtime.value.getTime() > INSTALL_LOCK_STALE_MS) {
-        yield* fileSystem.remove(lockPath, { force: true });
-        continue;
+        const lockInfo = yield* fileSystem.stat(lockPath).pipe(Effect.option);
+        if (Option.isNone(lockInfo)) continue;
+        if (lockInfo.value.type === "Directory") {
+          const owners = yield* fileSystem
+            .readDirectory(lockPath)
+            .pipe(Effect.orElseSucceed(() => []));
+          let recovered = owners.length === 0;
+          for (const entry of owners) {
+            const pid = parseLockOwnerPid(entry);
+            if (pid !== null && !processIsAlive(pid)) {
+              yield* releaseOwnedLock(lockPath, entry);
+              recovered = true;
+            }
+          }
+          if (recovered) {
+            yield* removeEmptyLock(lockPath);
+            continue;
+          }
+        } else {
+          const now = yield* Clock.currentTimeMillis;
+          const mtime = lockInfo.value.mtime;
+          if (Option.isSome(mtime) && now - mtime.value.getTime() > INSTALL_LOCK_LEGACY_STALE_MS) {
+            // Nonrecursive removal also refuses a populated directory that replaced this file.
+            yield* fileSystem.remove(lockPath, { force: true }).pipe(Effect.ignore);
+            continue;
+          }
+        }
+        yield* Effect.sleep(INSTALL_LOCK_RETRY_DELAY);
       }
-      yield* Effect.sleep(INSTALL_LOCK_RETRY_DELAY);
-    }
+      return false;
+    }).pipe(Effect.scoped);
+    if (acquired) return owner;
     return yield* new RelayClientInstallError({
       reason: "install_locked",
       message: "Another relay client installation is still in progress.",
@@ -384,7 +467,7 @@ export const makeCloudflaredRelayClient = Effect.fn("cloudflared.make")(function
         wrapInstallFailure("write_failed", "Could not create the relay client tool directory."),
       );
     yield* report("waiting_for_lock");
-    yield* acquireInstallLock(lockPath).pipe(
+    const owner = yield* acquireInstallLock(lockPath).pipe(
       Effect.catchTags({
         PlatformError: (cause) =>
           Effect.fail(
@@ -449,7 +532,7 @@ export const makeCloudflaredRelayClient = Effect.fn("cloudflared.make")(function
       } satisfies AvailableRelayClient;
     }).pipe(
       Effect.scoped,
-      Effect.ensuring(fileSystem.remove(lockPath, { force: true }).pipe(Effect.ignore)),
+      Effect.ensuring(releaseOwnedLock(lockPath, owner)),
       Effect.catchIf(
         (cause) => !(cause instanceof RelayClientInstallError),
         (cause) =>

@@ -75,5 +75,8 @@ it("formats headless serve output with the connection string, token, pairing url
   expect(output).toContain("Connection string: http://192.168.1.42:3773");
   expect(output).toContain("Token: PAIRCODE");
   expect(output).toContain("Pairing URL: http://192.168.1.42:3773/pair#token=PAIRCODE");
+  expect(output).toContain(
+    "App link: t3code://pair?pairingUrl=http%3A%2F%2F192.168.1.42%3A3773%2Fpair%23token%3DPAIRCODE",
+  );
   assert.isTrue(output.includes("█") || output.includes("▀") || output.includes("▄"));
 });

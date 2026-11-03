@@ -178,7 +178,7 @@ const makeTestRelay = Effect.fnUntraced(function* (
   });
   const currentShell = yield* Ref.make<OrchestrationV2ThreadShell | null>(shell());
   const shellReads: ThreadId[] = [];
-  // Catch-up publishes read the whole shell once each.
+  // Catch-up reads the active-shell index and then the selected shells.
   const catchUp = { shellSnapshotReads: 0 };
   const threads = ThreadManagementService.ThreadManagementService.of({
     getThreadShell: (threadId) =>
@@ -190,12 +190,16 @@ const makeTestRelay = Effect.fnUntraced(function* (
         catchUp.shellSnapshotReads += 1;
         return { schemaVersion: 2, snapshotSequence: 1, threads: [], archivedThreads: [] };
       }),
+    countThreads: unused,
+    listActiveShellIndex: () => Effect.succeed([]),
     ensureLegacyTranscript: unused,
     assertProviderInstanceEnabled: unused,
     isProviderInstanceEnabledForProject: unused,
     hasReceipt: unused,
     dispatch: unused,
     getTimelinePage: () => Effect.die("Unused timeline read"),
+    searchThread: () => Effect.die("unused thread search"),
+    searchThreadStream: () => Stream.empty,
     getMessageCount: () => Effect.die("unused message count"),
     getTurnItem: () => Effect.die("unused turn item read"),
     getThreadRecords: () => Effect.die("unused record read"),
@@ -212,6 +216,7 @@ const makeTestRelay = Effect.fnUntraced(function* (
     settleAfterRun: unused,
     settleThread: unused,
     stopWorkflow: unused,
+    forceStopThread: unused,
     stopDelegatedTasks: unused,
     getThreadEventSequence: unused,
     recoverDelegatedTask: unused,

@@ -279,7 +279,7 @@ describe("decodeThreadsJson", () => {
     });
   });
 
-  it("reads a thread pinned to a file as a review comment", () => {
+  it("reads a thread pinned to a file as a review comment on its repository path", () => {
     const comments = expectSuccess(
       decodeThreadsJson(
         asJson({
@@ -294,7 +294,7 @@ describe("decodeThreadsJson", () => {
       ),
     );
 
-    expect(comments[0]).toMatchObject({ kind: "review-comment", path: "/src/app.ts" });
+    expect(comments[0]).toMatchObject({ kind: "review-comment", path: "src/app.ts" });
   });
 
   it("keeps the replies under a thread, which are as much of the conversation", () => {

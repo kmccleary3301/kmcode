@@ -3102,7 +3102,49 @@ it.layer(layerGitManagerTest)("GitManager", (it) => {
     }),
   );
 
-  it.effect("applies a V2-native thread's project settings to generated commit text", () =>
+  it.effect("uses an explicit project's provider settings for generated commit text", () =>
+    Effect.gen(function* () {
+      const repoDir = yield* makeTempDir("t3code-git-manager-");
+      yield* initRepo(repoDir);
+      NodeFS.writeFileSync(NodePath.join(repoDir, "README.md"), "hello\nproject\n");
+      const projectId = ProjectId.make("project:git-action-settings");
+      const projectModel: ModelSelection = {
+        instanceId: ProviderInstanceId.make("claudeAgent"),
+        model: "claude-project-writer",
+      };
+      let generatedModelSelection:
+        | TextGeneration.CommitMessageGenerationInput["modelSelection"]
+        | undefined;
+
+      const { manager } = yield* makeManager({
+        serverSettings: {
+          projectSettingsOverrides: {
+            [projectId]: {
+              textGenerationModelSelection: projectModel,
+              sourceControlWriterModelSelection: null,
+            },
+          },
+        },
+        textGeneration: {
+          generateCommitMessage: (input) => {
+            generatedModelSelection = input.modelSelection;
+            return Effect.succeed({ subject: "Use the project writer", body: "" });
+          },
+        },
+      });
+
+      yield* manager.runStackedAction({
+        actionId: "test-project-action-settings",
+        cwd: repoDir,
+        action: "commit",
+        projectId,
+      });
+
+      expect(generatedModelSelection).toEqual(projectModel);
+    }),
+  );
+
+  it.effect("prefers a V2-native thread's project settings over an explicit project", () =>
     Effect.gen(function* () {
       const repoDir = yield* makeTempDir("t3code-git-manager-");
       yield* initRepo(repoDir);
@@ -3191,6 +3233,7 @@ it.layer(layerGitManagerTest)("GitManager", (it) => {
         cwd: repoDir,
         action: "commit",
         threadId,
+        projectId: ProjectId.make("project:other"),
       });
 
       expect(generatedModelSelection).toEqual(projectModel);

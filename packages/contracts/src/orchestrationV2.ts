@@ -56,6 +56,7 @@ import {
 } from "./threadPullRequest.ts";
 import {
   ProviderApprovalDecision,
+  ProviderApprovalFullAccessOverride,
   ProviderApprovalOption,
   ProviderInteractionMode,
   ProviderRequestKind,
@@ -361,6 +362,22 @@ export const OrchestrationV2LimitRecoveryUpdate = Schema.Struct({
   ),
 );
 export type OrchestrationV2LimitRecoveryUpdate = typeof OrchestrationV2LimitRecoveryUpdate.Type;
+/**
+ * Decayed open history used to rank command-palette search results.
+ * Times are epoch milliseconds so the scorer can compare them directly.
+ */
+export const OrchestrationV2ThreadOpens = Schema.Struct({
+  openedAt: Schema.Finite,
+  score: Schema.Finite.check(Schema.isGreaterThanOrEqualTo(0)),
+  picks: Schema.Array(
+    Schema.Struct({ query: Schema.String.check(Schema.isMaxLength(32)), at: Schema.Finite }),
+  ).check(Schema.isMaxLength(3)),
+});
+export type OrchestrationV2ThreadOpens = typeof OrchestrationV2ThreadOpens.Type;
+
+const LenientThreadOpens = Schema.NullOr(OrchestrationV2ThreadOpens).pipe(
+  Schema.catchDecoding(() => Effect.succeedSome(null)),
+);
 
 export const OrchestrationV2AppThread = Schema.Struct({
   ...OrchestrationV2CreationFields,
@@ -405,6 +422,7 @@ export const OrchestrationV2AppThread = Schema.Struct({
   unsettledAt: Schema.optional(Schema.NullOr(Schema.DateTimeUtc)),
   snoozedUntil: Schema.optional(Schema.NullOr(Schema.DateTimeUtc)),
   snoozedAt: Schema.optional(Schema.NullOr(Schema.DateTimeUtc)),
+  lastSnoozeWakeAt: Schema.optional(Schema.NullOr(Schema.DateTimeUtc)),
   limitRecovery: Schema.optional(Schema.NullOr(OrchestrationV2LimitRecovery)),
   pinnedAt: Schema.optional(Schema.NullOr(Schema.DateTimeUtc)),
   autoSettleDisabledAt: Schema.optional(Schema.NullOr(Schema.DateTimeUtc)),
@@ -416,6 +434,7 @@ export const OrchestrationV2AppThread = Schema.Struct({
   lastVisitedAt: Schema.NullOr(Schema.DateTimeUtc).pipe(
     Schema.withDecodingDefault(Effect.succeed(null)),
   ),
+  opens: Schema.optional(LenientThreadOpens),
   /** In-flight title regeneration marker; cleared when a new title lands. */
   titleRegeneration: Schema.optional(
     Schema.NullOr(
@@ -1166,13 +1185,18 @@ export const OrchestrationV2RuntimeRequest = Schema.Struct({
   ]),
   status: Schema.Literals(["pending", "resolved", "expired", "cancelled"]),
   responseCapability: Schema.Union([
-    Schema.Struct({ type: Schema.Literal("live"), providerSessionId: ProviderSessionId }),
+    Schema.Struct({
+      type: Schema.Literal("live"),
+      providerSessionId: ProviderSessionId,
+      supportsFeedback: Schema.optional(Schema.Boolean),
+    }),
     Schema.Struct({ type: Schema.Literal("message") }),
     Schema.Struct({ type: Schema.Literal("not_resumable"), reason: Schema.String }),
   ]),
   createdAt: Schema.DateTimeUtc,
   resolvedAt: Schema.NullOr(Schema.DateTimeUtc),
   decision: Schema.optional(ProviderApprovalDecision),
+  feedback: Schema.optional(Schema.String),
   answers: Schema.optional(ProviderUserInputAnswers),
 });
 export type OrchestrationV2RuntimeRequest = typeof OrchestrationV2RuntimeRequest.Type;
@@ -1331,6 +1355,14 @@ export const OrchestrationV2CheckpointFileSummary = Schema.Struct({
 });
 export type OrchestrationV2CheckpointFileSummary = typeof OrchestrationV2CheckpointFileSummary.Type;
 
+/** Sent only when the wire carries a prefix of `files`; the totals cover the full list. */
+export const OrchestrationV2CheckpointFileTotals = Schema.Struct({
+  count: NonNegativeInt,
+  additions: NonNegativeInt,
+  deletions: NonNegativeInt,
+});
+export type OrchestrationV2CheckpointFileTotals = typeof OrchestrationV2CheckpointFileTotals.Type;
+
 export const OrchestrationV2Checkpoint = Schema.Struct({
   id: CheckpointId,
   threadId: ThreadId,
@@ -1343,6 +1375,7 @@ export const OrchestrationV2Checkpoint = Schema.Struct({
   ref: CheckpointRef,
   status: Schema.Literals(["ready", "missing", "error", "stale"]),
   files: Schema.Array(OrchestrationV2CheckpointFileSummary),
+  filesTotal: Schema.optionalKey(OrchestrationV2CheckpointFileTotals),
   capturedAt: Schema.DateTimeUtc,
 });
 export type OrchestrationV2Checkpoint = typeof OrchestrationV2Checkpoint.Type;
@@ -1696,6 +1729,8 @@ export const OrchestrationV2TurnItem = Schema.Union([
     appName: Schema.optional(Schema.String),
     /** Approval choices advertised by the provider (#8058). */
     options: Schema.optional(Schema.Array(ProviderApprovalOption)),
+    reason: Schema.optional(Schema.String),
+    fullAccessOverride: Schema.optional(ProviderApprovalFullAccessOverride),
   }),
   Schema.Struct({
     ...OrchestrationV2TurnItemBaseFields,
@@ -1703,11 +1738,14 @@ export const OrchestrationV2TurnItem = Schema.Union([
     checkpointId: CheckpointId,
     scopeId: CheckpointScopeId,
     files: Schema.Array(OrchestrationV2CheckpointFileSummary),
+    filesTotal: Schema.optionalKey(OrchestrationV2CheckpointFileTotals),
   }),
   Schema.Struct({
     ...OrchestrationV2TurnItemBaseFields,
     type: Schema.Literal("run_interrupt_request"),
     message: Schema.String,
+    /** Set when the provider did not confirm the stop in time; clients then offer Force stop. */
+    unresponsiveAt: Schema.optionalKey(Schema.DateTimeUtc),
   }),
   Schema.Struct({
     ...OrchestrationV2TurnItemBaseFields,
@@ -2140,6 +2178,7 @@ export const OrchestrationV2ThreadShell = Schema.Struct({
   unsettledAt: Schema.optional(Schema.NullOr(Schema.DateTimeUtc)),
   snoozedUntil: Schema.optional(Schema.NullOr(Schema.DateTimeUtc)),
   snoozedAt: Schema.optional(Schema.NullOr(Schema.DateTimeUtc)),
+  lastSnoozeWakeAt: Schema.optional(Schema.NullOr(Schema.DateTimeUtc)),
   limitRecovery: Schema.optional(Schema.NullOr(OrchestrationV2LimitRecovery)),
   /** Omitted by servers that predate thread pinning. */
   pinnedAt: Schema.optional(Schema.NullOr(Schema.DateTimeUtc)),
@@ -2153,6 +2192,7 @@ export const OrchestrationV2ThreadShell = Schema.Struct({
    * back to their local visited state when the field is absent.
    */
   lastVisitedAt: Schema.optional(Schema.NullOr(Schema.DateTimeUtc)),
+  opens: Schema.optional(LenientThreadOpens),
   /** In-flight title regeneration marker; null/absent when no request is pending. */
   titleRegeneration: Schema.optional(
     Schema.NullOr(
@@ -2237,6 +2277,7 @@ export const OrchestrationV2AppThreadJson = OrchestrationV2AppThread.mapFields((
   unsettledAt: Schema.optional(Schema.NullOr(Schema.DateTimeUtcFromString)),
   snoozedUntil: Schema.optional(Schema.NullOr(Schema.DateTimeUtcFromString)),
   snoozedAt: Schema.optional(Schema.NullOr(Schema.DateTimeUtcFromString)),
+  lastSnoozeWakeAt: Schema.optional(Schema.NullOr(Schema.DateTimeUtcFromString)),
   pinnedAt: Schema.optional(Schema.NullOr(Schema.DateTimeUtcFromString)),
   autoSettleDisabledAt: Schema.optional(Schema.NullOr(Schema.DateTimeUtcFromString)),
   lastVisitedAt: Schema.NullOr(Schema.DateTimeUtcFromString).pipe(
@@ -2487,6 +2528,8 @@ export const OrchestrationV2TurnItemJson = Schema.Union([
     appName: Schema.optional(Schema.String),
     /** Approval choices advertised by the provider (#8058). */
     options: Schema.optional(Schema.Array(ProviderApprovalOption)),
+    reason: Schema.optional(Schema.String),
+    fullAccessOverride: Schema.optional(ProviderApprovalFullAccessOverride),
   }),
   Schema.Struct({
     ...OrchestrationV2TurnItemJsonBaseFields,
@@ -2499,6 +2542,7 @@ export const OrchestrationV2TurnItemJson = Schema.Union([
     ...OrchestrationV2TurnItemJsonBaseFields,
     type: Schema.Literal("run_interrupt_request"),
     message: Schema.String,
+    unresponsiveAt: Schema.optionalKey(Schema.DateTimeUtcFromString),
   }),
   Schema.Struct({
     ...OrchestrationV2TurnItemJsonBaseFields,
@@ -2673,9 +2717,11 @@ export const OrchestrationV2ThreadShellJson = OrchestrationV2ThreadShell.mapFiel
   unsettledAt: Schema.optional(Schema.NullOr(Schema.DateTimeUtcFromString)),
   snoozedUntil: Schema.optional(Schema.NullOr(Schema.DateTimeUtcFromString)),
   snoozedAt: Schema.optional(Schema.NullOr(Schema.DateTimeUtcFromString)),
+  lastSnoozeWakeAt: Schema.optional(Schema.NullOr(Schema.DateTimeUtcFromString)),
   pinnedAt: Schema.optional(Schema.NullOr(Schema.DateTimeUtcFromString)),
   autoSettleDisabledAt: Schema.optional(Schema.NullOr(Schema.DateTimeUtcFromString)),
   lastVisitedAt: Schema.optional(Schema.NullOr(Schema.DateTimeUtcFromString)),
+  opens: Schema.optional(LenientThreadOpens),
   titleRegeneration: Schema.optional(
     Schema.NullOr(
       Schema.Struct({
@@ -2979,6 +3025,9 @@ export const OrchestrationV2Command = Schema.Union([
      * values, so replays and out-of-order deliveries cannot move it backwards.
      */
     visitedAt: IsoDateTime,
+    // Older servers ignore these fields and only move the read watermark.
+    opened: Schema.optional(Schema.Boolean),
+    searchQuery: Schema.optional(Schema.String.check(Schema.isMaxLength(200))),
   }),
   Schema.Struct({
     type: Schema.Literal("thread.mark-unread"),
@@ -3213,6 +3262,7 @@ export const OrchestrationV2Command = Schema.Union([
     decision: Schema.optional(ProviderApprovalDecision),
     answers: Schema.optional(ProviderUserInputAnswers),
     attachmentsByQuestionId: Schema.optional(UserInputAttachments),
+    feedback: Schema.optional(Schema.String),
   }),
   Schema.Struct({
     type: Schema.Literal("thread.user-input.dismiss"),
@@ -3351,6 +3401,16 @@ const OrchestrationV2InternalCommand = Schema.Union([
     threadId: ThreadId,
     providerThreadId: ProviderThreadId,
     providerTurnId: ProviderTurnId,
+    /** Replaces the Stop's own reason on the result, as Force stop does. */
+    reason: Schema.optional(Schema.String),
+  }),
+  /** The provider did not confirm a Stop of this turn in time. */
+  Schema.Struct({
+    type: Schema.Literal("thread.interrupt.unresponsive"),
+    commandId: CommandId,
+    threadId: ThreadId,
+    providerThreadId: ProviderThreadId,
+    providerTurnId: ProviderTurnId,
   }),
   /**
    * Stop for one thread, whatever it is doing: interrupts its running turn, holds its queue,
@@ -3390,9 +3450,12 @@ export const ORCHESTRATION_V2_WS_METHODS = {
   getTurnDiff: "orchestration.getTurnDiff",
   getFullThreadDiff: "orchestration.getFullThreadDiff",
   searchThreads: "orchestration.searchThreads",
+  searchThread: "orchestration.searchThread",
+  searchThreadStream: "orchestration.searchThreadStream",
   getArchivedShellSnapshot: "orchestration.getArchivedShellSnapshot",
   getThreadProjection: "orchestration.getThreadProjection",
   stopWorkflow: "orchestration.stopWorkflow",
+  forceStopThread: "orchestration.forceStopThread",
   getWorkflowScript: "orchestration.getWorkflowScript",
   getTurnItem: "orchestration.getTurnItem",
   launchThread: "orchestration.launchThread",
@@ -3711,12 +3774,41 @@ export class OrchestrationV2StopWorkflowError extends Schema.TaggedError<Orchest
   }
 }
 
+export const OrchestrationV2ForceStopThreadInput = Schema.Struct({
+  threadId: ThreadId,
+  /** The run the user saw ignore Stop; Force stop refuses once a newer run has started. */
+  runId: Schema.optionalKey(RunId),
+});
+export type OrchestrationV2ForceStopThreadInput = typeof OrchestrationV2ForceStopThreadInput.Type;
+
+export const OrchestrationV2ForceStopThreadResult = Schema.Struct({
+  outcome: Schema.Literals(["killed", "released", "releasing", "shared"]),
+  sharedWithThreadIds: Schema.Array(ThreadId),
+});
+export type OrchestrationV2ForceStopThreadResult = typeof OrchestrationV2ForceStopThreadResult.Type;
+
+export class OrchestrationV2ForceStopThreadError extends Schema.TaggedError<OrchestrationV2ForceStopThreadError>()(
+  "OrchestrationV2ForceStopThreadError",
+  {
+    threadId: ThreadId,
+    reason: Schema.optional(Schema.Literal("superseded")),
+    cause: Schema.optional(Schema.Defect()),
+  },
+) {
+  override get message(): string {
+    return this.reason === "superseded"
+      ? "A new turn started, so nothing was force stopped."
+      : "Failed to force stop the agent.";
+  }
+}
+
 export const OrchestrationV2RpcError = Schema.Union([
   OrchestrationV2DispatchCommandError,
   OrchestrationV2GetThreadProjectionError,
   OrchestrationV2GetShellSnapshotError,
   OrchestrationV2ThreadLaunchError,
   OrchestrationV2StopWorkflowError,
+  OrchestrationV2ForceStopThreadError,
 ]);
 export type OrchestrationV2RpcError = typeof OrchestrationV2RpcError.Type;
 
@@ -3796,7 +3888,64 @@ export class OrchestrationV2GetSubagentTranscriptError extends Schema.TaggedErro
   },
 ) {}
 
+export const OrchestrationV2SearchThreadInput = Schema.Struct({
+  threadId: ThreadId,
+  skills: Schema.optionalKey(
+    Schema.Array(
+      Schema.Struct({
+        name: Schema.String.check(Schema.isMaxLength(200)),
+        displayName: Schema.optional(Schema.String.check(Schema.isMaxLength(200))),
+      }),
+    ).check(Schema.isMaxLength(1_000)),
+  ),
+  query: TrimmedNonEmptyString.check(Schema.isMaxLength(200)),
+  index: Schema.optionalKey(NonNegativeInt),
+  offset: Schema.optionalKey(Schema.Int),
+  start: Schema.optionalKey(
+    Schema.Struct({ entryId: TrimmedNonEmptyString, occurrence: NonNegativeInt }),
+  ),
+});
+export type OrchestrationV2SearchThreadInput = typeof OrchestrationV2SearchThreadInput.Type;
+
+export const OrchestrationV2ThreadFindMatch = Schema.Struct({
+  entryId: TrimmedNonEmptyString,
+  runId: Schema.NullOr(RunId),
+  occurrence: NonNegativeInt,
+});
+
+export const OrchestrationV2SearchThreadResult = Schema.Struct({
+  complete: Schema.optionalKey(Schema.Boolean),
+  snapshotSequence: NonNegativeInt,
+  totalMatches: NonNegativeInt,
+  activeIndex: NonNegativeInt,
+  match: Schema.NullOr(OrchestrationV2ThreadFindMatch),
+  navigation: Schema.optionalKey(
+    Schema.Array(
+      Schema.Struct({
+        entryId: TrimmedNonEmptyString,
+        runId: Schema.NullOr(RunId),
+        startIndex: NonNegativeInt,
+        count: NonNegativeInt,
+      }),
+    ).check(Schema.isMaxLength(17)),
+  ),
+});
+export type OrchestrationV2SearchThreadResult = typeof OrchestrationV2SearchThreadResult.Type;
+
+export class OrchestrationV2SearchThreadError extends Schema.TaggedError<OrchestrationV2SearchThreadError>()(
+  "OrchestrationV2SearchThreadError",
+  { cause: Schema.Defect() },
+) {
+  override get message(): string {
+    return "Could not search this thread. Please retry.";
+  }
+}
+
 export const OrchestrationV2RpcSchemas = {
+  searchThread: {
+    input: OrchestrationV2SearchThreadInput,
+    output: OrchestrationV2SearchThreadResult,
+  },
   dispatchCommand: {
     input: OrchestrationV2Command,
     output: OrchestrationV2DispatchCommandResult,
@@ -3820,6 +3969,10 @@ export const OrchestrationV2RpcSchemas = {
   stopWorkflow: {
     input: OrchestrationV2StopWorkflowInput,
     output: Schema.Void,
+  },
+  forceStopThread: {
+    input: OrchestrationV2ForceStopThreadInput,
+    output: OrchestrationV2ForceStopThreadResult,
   },
   getWorkflowScript: {
     input: OrchestrationV2GetWorkflowScriptInput,

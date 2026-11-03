@@ -6,8 +6,14 @@ import * as NodeStream from "node:stream";
 import { describe, expect, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
+import { vi } from "vite-plus/test";
 
-import { AcpMcpBridgeError, callAcpMcpTool, runAcpMcpStdioBridge } from "./AcpMcpStdioBridge.ts";
+import {
+  AcpMcpBridgeError,
+  callAcpMcpTool,
+  runAcpMcpCliFastPath,
+  runAcpMcpStdioBridge,
+} from "./AcpMcpStdioBridge.ts";
 
 function makeHarness(responder: (request: Request) => Promise<Response> | Response) {
   const input = new NodeStream.PassThrough();
@@ -32,6 +38,50 @@ function makeHarness(responder: (request: Request) => Promise<Response> | Respon
 }
 
 describe("AcpMcpStdioBridge", () => {
+  it("prints structured results once in the terminal while retaining other content and errors", async () => {
+    const originalEnvironment = process.env;
+    using _environment = {
+      [Symbol.dispose]: () => {
+        process.env = originalEnvironment;
+      },
+    };
+    process.env = {
+      ...originalEnvironment,
+      T3_ACP_MCP_ENDPOINT: "http://127.0.0.1:1/mcp",
+      T3_ACP_MCP_AUTHORIZATION: "Bearer bridge-test",
+    };
+    const structuredContent = { taskId: "task-1", status: "failed" };
+    const explanation = { type: "text", text: "The command failed." };
+    const image = { type: "image", data: "image-data", mimeType: "image/png" };
+    const result = {
+      structuredContent,
+      content: [{ type: "text", text: JSON.stringify(structuredContent) }, explanation, image],
+      isError: true,
+    };
+    using fetch = vi.spyOn(globalThis, "fetch").mockImplementation(async (_url, init) => {
+      if (init?.method === "DELETE") return new Response(null, { status: 204 });
+      const message = JSON.parse(String(init?.body)) as { id?: string; method: string };
+      if (message.method === "notifications/initialized") {
+        return new Response(null, { status: 202 });
+      }
+      return Response.json(
+        {
+          jsonrpc: "2.0",
+          id: message.id,
+          result: message.method === "initialize" ? { protocolVersion: "2025-06-18" } : result,
+        },
+        { headers: { "mcp-session-id": "session-42" } },
+      );
+    });
+    using output = vi.spyOn(process.stdout, "write").mockReturnValue(true);
+
+    await runAcpMcpCliFastPath("acp-mcp-call", ["task_status", '{"taskId":"task-1"}']);
+
+    expect(output).toHaveBeenCalledExactlyOnceWith(
+      `${JSON.stringify({ ...result, content: [explanation, image] })}\n`,
+    );
+  });
+
   it.effect("preserves the original transport failure as the typed error cause", () =>
     Effect.gen(function* () {
       const source = new Error("fetch failed");
@@ -58,6 +108,10 @@ describe("AcpMcpStdioBridge", () => {
         arguments: {},
         fetchImplementation: async (_url, init) => {
           const headers = new Headers(init?.headers);
+          if (init?.method === "DELETE") {
+            requests.push({ body: null, headers });
+            return new Response(null, { status: 204 });
+          }
           const body: unknown = JSON.parse(String(init?.body ?? "{}"));
           requests.push({ body, headers });
           const request = body as { readonly id?: unknown; readonly method?: unknown };
@@ -81,7 +135,7 @@ describe("AcpMcpStdioBridge", () => {
       });
 
       expect(result).toEqual({ structuredContent: { providers: ["codex"] } });
-      expect(requests).toHaveLength(3);
+      expect(requests).toHaveLength(4);
       expect(requests[0]?.headers.get("authorization")).toBe("Bearer bridge-test");
       expect(requests[1]?.headers.get("mcp-session-id")).toBe("session-42");
       expect(requests[2]?.headers.get("mcp-protocol-version")).toBe("2025-06-18");
@@ -89,6 +143,7 @@ describe("AcpMcpStdioBridge", () => {
         method: "tools/call",
         params: { name: "orchestrator_capabilities", arguments: {} },
       });
+      expect(requests[3]?.headers.get("mcp-session-id")).toBe("session-42");
     }),
   );
 

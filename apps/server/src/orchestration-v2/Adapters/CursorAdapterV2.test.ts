@@ -34,11 +34,32 @@ import {
   makeCursorAdapterV2,
   nestedToolCallFromEnvelope,
 } from "./CursorAdapterV2.ts";
-import { isCursorCancellationError, loggedCursorAgentOptions } from "./CursorAgentSdk.ts";
+import {
+  CursorAgentSdkRunnerError,
+  isCursorCancellationError,
+  isCursorUsageLimitError,
+  loggedCursorAgentOptions,
+} from "./CursorAgentSdk.ts";
 
 const decodeCursorSettings = Schema.decodeEffect(CursorSettings);
 
 describe("CursorAdapterV2", () => {
+  it("classifies Cursor usage-limit responses", () => {
+    assert.isTrue(isCursorUsageLimitError({ code: "PRO_USER_USAGE_LIMIT" }));
+    assert.isTrue(isCursorUsageLimitError({ code: "resource_exhausted" }));
+    assert.isTrue(isCursorUsageLimitError({ name: "RateLimitError" }));
+    assert.isTrue(isCursorUsageLimitError({ status: 429 }));
+    assert.isTrue(
+      isCursorUsageLimitError(
+        new CursorAgentSdkRunnerError({
+          method: "run.wait",
+          cause: Object.assign(new Error("Too many requests"), { code: "resource_exhausted" }),
+        }),
+      ),
+    );
+    assert.isFalse(isCursorUsageLimitError({ code: "provider_unavailable" }));
+  });
+
   it.effect.each([
     { status: "finished", model: undefined, lateModel: undefined },
     { status: "cancelled", model: "claude-opus-4-6", lateModel: undefined },
@@ -480,6 +501,32 @@ describe("CursorAdapterV2", () => {
         {
           type: "tool-call-completed",
           modelCallId: "native-model-call",
+          callId: "grep-counts",
+          toolCall: {
+            type: "grep",
+            args: { pattern: "TODO", outputMode: "count" },
+            result: {
+              status: "success",
+              value: {
+                workspaceResults: {
+                  [workspace]: {
+                    type: "count",
+                    output: {
+                      counts: [
+                        { file: "src/a.ts", count: 1 },
+                        { file: "src/b.ts", count: 3 },
+                      ],
+                      total: 4,
+                    },
+                  },
+                },
+              },
+            },
+          },
+        },
+        {
+          type: "tool-call-completed",
+          modelCallId: "native-model-call",
           callId: "glob-failed",
           toolCall: {
             type: "glob",
@@ -735,6 +782,14 @@ describe("CursorAdapterV2", () => {
             pattern: "TODO",
             status: "failed",
             results: [{ fileName: "src", preview: "search failed" }],
+          },
+          {
+            pattern: "TODO",
+            status: "completed",
+            results: [
+              { fileName: "src/a.ts", preview: "1 match" },
+              { fileName: "src/b.ts", preview: "3 matches" },
+            ],
           },
           {
             pattern: "*.ts",

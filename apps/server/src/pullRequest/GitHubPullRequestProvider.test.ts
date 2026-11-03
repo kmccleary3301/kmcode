@@ -9,7 +9,12 @@ import { decodePullRequestDetailJson } from "./gitHubPullRequestJson.ts";
 import * as GitHubApi from "../sourceControl/GitHubApi.ts";
 import * as GitHubPullRequestApi from "./GitHubPullRequestApi.ts";
 import type { GitHubPullRequestCore } from "./gitHubPullRequestJson.ts";
-import { gitHubViewerPermissions, loginAvatarUrl, make } from "./GitHubPullRequestProvider.ts";
+import {
+  gitHubProviderFailure,
+  gitHubViewerPermissions,
+  loginAvatarUrl,
+  make,
+} from "./GitHubPullRequestProvider.ts";
 import type { GitHubReviewThreadComments } from "./gitHubPullRequestJson.ts";
 
 const coreFields = {
@@ -23,6 +28,38 @@ const coreFields = {
     mergeCapabilities: { merge: true, squash: true, rebase: true },
   },
 };
+
+it("maps refused GitHub credentials to repository access guidance", () => {
+  for (const [credential, accessHint] of [
+    [
+      "settings",
+      "Your saved GitHub token can't see it. Give it access, or change it in Settings → Source Control.",
+    ],
+    ["env", "The server's environment token can't see it. Give it access, or unset it."],
+    [
+      "gh",
+      "Your gh login can't see it. Give it access, or save a token in Settings → Source Control.",
+    ],
+  ] as const) {
+    expect(
+      gitHubProviderFailure(
+        new GitHubApi.GitHubApiNotFoundError({
+          host: "github.com",
+          operation: "listPullRequests",
+          credential,
+        }),
+      ),
+    ).toEqual({ reason: "not-found", accessHint });
+  }
+  expect(
+    gitHubProviderFailure(
+      new GitHubApi.GitHubApiNotFoundError({
+        host: "github.com",
+        operation: "listPullRequests",
+      }),
+    ),
+  ).toEqual({ reason: "not-found" });
+});
 
 it.effect("maps credential verification failures without relabeling operation failures", () =>
   Effect.gen(function* () {

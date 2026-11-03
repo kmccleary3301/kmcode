@@ -64,6 +64,7 @@ export function PullRequestMarkdown({
   environmentId,
   threadRef,
   className,
+  lineBreaks = false,
 }: {
   text: string;
   cwd: string;
@@ -71,6 +72,7 @@ export function PullRequestMarkdown({
   /** Thread the body is shown beside, so its links can open in that thread's in-app browser. */
   threadRef?: ScopedThreadRef | null;
   className?: string;
+  lineBreaks?: boolean;
 }) {
   const segments = splitPullRequestBody(text);
   const context = useContext(PullRequestMarkdownContext);
@@ -94,6 +96,7 @@ export function PullRequestMarkdown({
               threadRef={resolvedThreadRef}
               pullRequestPanelRef={resolvedThreadRef ?? PULL_REQUESTS_PANEL_REF}
               environmentId={environmentId}
+              lineBreaks={lineBreaks}
               pullRequestRepositoryUrl={repositoryUrl ?? undefined}
               githubMedia
             />

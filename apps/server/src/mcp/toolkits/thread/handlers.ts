@@ -10,6 +10,7 @@ import {
 import * as Effect from "effect/Effect";
 import { modelSelectionCommandType } from "@t3tools/shared/model";
 
+import * as McpInvocationContext from "../../McpInvocationContext.ts";
 import * as McpToolAccess from "../../McpToolAccess.ts";
 import {
   dispatchFailure,
@@ -78,6 +79,7 @@ const writesThread = <P extends { readonly threadId?: ThreadId | undefined }, A,
 export const layer = McpToolAccess.toLayer(ThreadToolkit, {
   run_scheduled_task_now: McpToolAccess.writesEnvironment((input) =>
     Effect.gen(function* () {
+      const scope = yield* McpInvocationContext.McpInvocationContext;
       const scheduler = yield* ScheduledTasks.ScheduledTaskService;
       const { tasks } = yield* scheduler.list().pipe(Effect.mapError(unavailable));
       if (!tasks.some((task) => task.id === input.taskId))
@@ -91,6 +93,9 @@ export const layer = McpToolAccess.toLayer(ThreadToolkit, {
       return {
         taskId: task.id,
         threadId: task.threadId,
+        ...(task.threadId === null
+          ? {}
+          : { link: McpInvocationContext.threadLinkFor(scope, task.threadId, task.title) }),
         lastRunStatus: task.lastRunStatus,
         runCount: task.runCount,
         nextRunAt: task.nextRunAt,
@@ -99,6 +104,7 @@ export const layer = McpToolAccess.toLayer(ThreadToolkit, {
   ),
   t3_thread_search: McpToolAccess.reads((input) =>
     Effect.gen(function* () {
+      const scope = yield* McpInvocationContext.McpInvocationContext;
       const { caller } = yield* readCaller();
       const { projectId: requested, ...query } = input;
       // Like the other project tools, an omitted project means the caller's own; a client
@@ -107,10 +113,12 @@ export const layer = McpToolAccess.toLayer(ThreadToolkit, {
       const threadSearch = yield* ThreadSearch.ThreadSearch;
       const result = yield* threadSearch.search(query).pipe(Effect.mapError(unavailable));
       return {
-        matches:
-          projectId === undefined
-            ? result.matches
-            : result.matches.filter((match) => match.projectId === projectId),
+        matches: result.matches
+          .filter((match) => projectId === undefined || match.projectId === projectId)
+          .map((match) => ({
+            ...match,
+            link: McpInvocationContext.threadLinkFor(scope, match.threadId, "Open thread"),
+          })),
       };
     }),
   ),

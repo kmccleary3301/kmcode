@@ -17,6 +17,16 @@ import { contextBridge, ipcRenderer, webFrame, webUtils } from "electron";
 
 import * as IpcChannels from "./ipc/channels.ts";
 import { mergeLegacyLocalStorage } from "./legacyLocalStorageMerge.ts";
+const pairingAppLinkListeners = new Set<(pairingUrl: string) => void>();
+const pendingPairingAppLinks: string[] = [];
+ipcRenderer.on(IpcChannels.DESKTOP_PAIRING_APP_LINK_CHANNEL, (_event, value: unknown) => {
+  if (typeof value !== "string") return;
+  if (pairingAppLinkListeners.size === 0) {
+    pendingPairingAppLinks.push(value);
+    return;
+  }
+  for (const listener of pairingAppLinkListeners) listener(value);
+});
 
 function isDesktopAppearanceWatchReason(
   reason: unknown,
@@ -206,6 +216,11 @@ contextBridge.exposeInMainWorld("desktopBridge", {
     const handler = () => listener();
     ipcRenderer.on(IpcChannels.SET_NOTIFICATION_BADGE_CHANNEL, handler);
     return () => ipcRenderer.removeListener(IpcChannels.SET_NOTIFICATION_BADGE_CHANNEL, handler);
+  },
+  onTrackpadScrollBegin: (listener) => {
+    const handler = () => listener();
+    ipcRenderer.on(IpcChannels.TRACKPAD_SCROLL_BEGIN_CHANNEL, handler);
+    return () => ipcRenderer.removeListener(IpcChannels.TRACKPAD_SCROLL_BEGIN_CHANNEL, handler);
   },
   onTrackpadScrollEnd: (listener) => {
     const handler = () => listener();
@@ -450,6 +465,15 @@ contextBridge.exposeInMainWorld("desktopBridge", {
           IpcChannels.DESKTOP_APP_ACTIVATION_REQUEST_CHANNEL,
           wrappedListener,
         );
+      };
+    },
+  },
+  pairingAppLink: {
+    onLink: (listener) => {
+      pairingAppLinkListeners.add(listener);
+      for (const pairingUrl of pendingPairingAppLinks.splice(0)) listener(pairingUrl);
+      return () => {
+        pairingAppLinkListeners.delete(listener);
       };
     },
   },

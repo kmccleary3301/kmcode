@@ -453,11 +453,10 @@ it.live(
         expect(readOnlyResponse.message).toContain("cannot grant this access");
 
         // A read-only code can approve read-only access.
-        const readOnlyCode = yield* auth.issuePairingCredential({ scopes: ["orchestration:read"] });
         const readOnlyApproval = yield* decide(handler, params, {
           _tag: "pairing-code",
           access: "read-only",
-          code: readOnlyCode.credential,
+          code: readOnly.credential,
         });
         expect(readOnlyApproval.status).toBe(200);
         const readOnlyToken = yield* handler(

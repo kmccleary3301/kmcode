@@ -30,6 +30,7 @@ export const PinnedGitHubCredential = Context.Reference<{
   readonly host: string;
   readonly token: Redacted.Redacted<string>;
   readonly credentialFingerprint: string;
+  readonly source?: GitHubCredentials.GitHubCredentialSource;
 } | null>("t3/sourceControl/PinnedGitHubCredential", { defaultValue: () => null });
 
 /**
@@ -75,7 +76,11 @@ export class GitHubApiRateLimitError extends Schema.TaggedError<GitHubApiRateLim
 
 export class GitHubApiNotFoundError extends Schema.TaggedError<GitHubApiNotFoundError>()(
   "GitHubApiNotFoundError",
-  { host: Schema.String, operation: Schema.String },
+  {
+    host: Schema.String,
+    operation: Schema.String,
+    credential: Schema.optionalKey(GitHubCredentials.GitHubCredentialSource),
+  },
 ) {
   override get message(): string {
     return "GitHub could not find the requested resource, or the credential cannot see it.";
@@ -155,10 +160,12 @@ export class GitHubApi extends Context.Service<
     readonly graphql: (input: GitHubGraphQlInput) => Effect.Effect<string, GitHubApiError>;
     readonly rest: (input: GitHubRestInput) => Effect.Effect<GitHubRestResponse, GitHubApiError>;
     /** The credential a request to `host` would carry right now. */
-    readonly credential: (
-      host: string,
-    ) => Effect.Effect<
-      { readonly token: Redacted.Redacted<string>; readonly fingerprint: string },
+    readonly credential: (host: string) => Effect.Effect<
+      {
+        readonly token: Redacted.Redacted<string>;
+        readonly fingerprint: string;
+        readonly source?: GitHubCredentials.GitHubCredentialSource;
+      },
       GitHubApiError
     >;
   }
@@ -360,10 +367,14 @@ export const make = Effect.gen(function* () {
             operation: "credential",
           });
         }
-        return { token: pinned.token, fingerprint: pinned.credentialFingerprint };
+        return {
+          token: pinned.token,
+          fingerprint: pinned.credentialFingerprint,
+          ...(pinned.source === undefined ? {} : { source: pinned.source }),
+        };
       }
       const held = yield* credentials.get(normalized);
-      return { token: held.token, fingerprint: held.fingerprint };
+      return { token: held.token, fingerprint: held.fingerprint, source: held.source };
     },
   );
 
@@ -391,7 +402,7 @@ export const make = Effect.gen(function* () {
       "http.request.method": input.request.method,
       "url.path": new URL(input.request.url).pathname,
     });
-    const { token, fingerprint } = yield* credential(host);
+    const { token, fingerprint, source } = yield* credential(host);
     const scope = yield* SourceControlRateLimit.CredentialScope;
     // REST spends `core` and GraphQL its own quota, each with its own reserve. Every REST path
     // this reads today is `core`; a `search/` read would need its own resource here. A refusal
@@ -492,7 +503,13 @@ export const make = Effect.gen(function* () {
             credentials
               .invalidate(host)
               .pipe(Effect.andThen(Effect.fail(new GitHubApiAuthenticationError(context)))),
-          NotFound: () => Effect.fail(new GitHubApiNotFoundError(context)),
+          NotFound: () =>
+            Effect.fail(
+              new GitHubApiNotFoundError({
+                ...context,
+                ...(source === undefined ? {} : { credential: source }),
+              }),
+            ),
           Failed: ({ messages }) =>
             Effect.fail(
               new GitHubApiResponseError({

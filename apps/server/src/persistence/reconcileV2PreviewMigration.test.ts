@@ -42,6 +42,10 @@ describe("V2 preview upgrade", () => {
         [59, "McpAppModelContext"],
         [60, "PackContextHandoffDeliveryIds"],
         [61, "TurnItemPositionRunIds"],
+        [62, "ActiveTurnItemIndexes"],
+        [63, "SubagentDeliveryState"],
+        [64, "ThreadMessageSearch"],
+        [65, "ExcludeAttachmentPlaceholdersFromSearch"],
       ]);
       assert.deepStrictEqual(yield* runMigrations(), []);
       assert.deepStrictEqual(yield* sql`SELECT * FROM orchestration_v2_legacy_imports`, imports);
@@ -126,6 +130,10 @@ describe("V2 preview upgrade", () => {
         [59, "McpAppModelContext"],
         [60, "PackContextHandoffDeliveryIds"],
         [61, "TurnItemPositionRunIds"],
+        [62, "ActiveTurnItemIndexes"],
+        [63, "SubagentDeliveryState"],
+        [64, "ThreadMessageSearch"],
+        [65, "ExcludeAttachmentPlaceholdersFromSearch"],
       ]);
     }).pipe(Effect.provide(NodeSqliteClient.layer({ filename: ":memory:" }))),
   );

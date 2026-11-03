@@ -1,6 +1,9 @@
 // @effect-diagnostics nodeBuiltinImport:off globalFetchInEffect:off - Hosted handoff test uses a real localhost listener without an OpenAI account.
+import * as NodeFS from "node:fs";
 import * as NodeHttp from "node:http";
-import * as NodePath from "@effect/platform-node/NodePath";
+import * as NodeOS from "node:os";
+import * as NodePath from "node:path";
+import * as NodePathLayer from "@effect/platform-node/NodePath";
 import { codexAuthHandoffUrl, readCodexAuthDelivery } from "@t3tools/shared/codexAuthHandoff";
 import { EnvironmentId, ProviderInstanceId, resolveProductIdentity } from "@t3tools/contracts";
 import { HostProcessArguments } from "@t3tools/shared/hostProcess";
@@ -8,7 +11,7 @@ import { assert, describe, it } from "@effect/vitest";
 import * as Cause from "effect/Cause";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
-import { beforeEach, vi } from "vite-plus/test";
+import { afterAll, beforeEach, vi } from "vite-plus/test";
 
 const { createClerkBridgeMock, storageAdapter, storageMock } = vi.hoisted(() => ({
   createClerkBridgeMock: vi.fn(),
@@ -19,6 +22,10 @@ const { createClerkBridgeMock, storageAdapter, storageMock } = vi.hoisted(() => 
   },
   storageMock: vi.fn(),
 }));
+const clerkStateDir = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "t3-desktop-clerk-"));
+afterAll(() => {
+  NodeFS.rmSync(clerkStateDir, { recursive: true, force: true });
+});
 
 vi.mock("@clerk/electron", () => ({
   createClerkBridge: createClerkBridgeMock,
@@ -34,6 +41,7 @@ import * as FileSystem from "effect/FileSystem";
 import * as ElectronApp from "../electron/ElectronApp.ts";
 import * as ElectronShell from "../electron/ElectronShell.ts";
 import * as ElectronWindow from "../electron/ElectronWindow.ts";
+import * as IpcChannels from "../ipc/channels.ts";
 import * as DesktopClerk from "./DesktopClerk.ts";
 import * as DesktopEnvironment from "./DesktopEnvironment.ts";
 import * as DesktopPreReadyFileSystem from "./DesktopPreReadyFileSystem.ts";
@@ -50,9 +58,10 @@ const layerDesktopClerk = (
     openSystemSettings: () => Effect.succeed(false),
     copyText: () => Effect.void,
   },
+  electronAppOverrides: Partial<ElectronApp.ElectronApp["Service"]> = {},
 ) => {
   const environment = DesktopEnvironment.DesktopEnvironment.of({
-    stateDir: "/tmp/t3-state",
+    stateDir: clerkStateDir,
     isDevelopment,
     appDataDirectory: "/tmp/app-data",
     platform,
@@ -64,12 +73,14 @@ const layerDesktopClerk = (
       Effect.sync(() => {
         events.push(`setPath:${name}:${value}`);
       }),
+    on: () => Effect.void,
+    ...electronAppOverrides,
   } as unknown as ElectronApp.ElectronApp["Service"];
 
   return DesktopClerk.layer.pipe(
     Layer.provide(
       Layer.mergeAll(
-        NodePath.layerPosix,
+        NodePathLayer.layerPosix,
         Layer.succeed(DesktopEnvironment.DesktopEnvironment, environment),
         Layer.succeed(ElectronApp.ElectronApp, electronApp),
         Layer.succeed(ElectronShell.ElectronShell, shell),
@@ -97,15 +108,21 @@ describe("DesktopClerk", () => {
     return Effect.gen(function* () {
       yield* Effect.scoped(Layer.build(layerDesktopClerk(true, events)));
 
-      assert.deepEqual(createClerkBridgeMock.mock.calls, [
-        [
-          {
-            storage: storageAdapter,
-            passkeys: true,
-            renderer: { scheme: "t3code-dev", host: "app" },
-          },
-        ],
+      assert.equal(createClerkBridgeMock.mock.calls.length, 1);
+      const options = createClerkBridgeMock.mock.calls[0]?.[0];
+      assert.deepEqual(
+        { passkeys: options?.passkeys, renderer: options?.renderer },
+        { passkeys: true, renderer: { scheme: "t3code-dev", host: "app" } },
+      );
+      assert.deepEqual(Object.keys(options?.storage ?? {}).sort(), [
+        "getItem",
+        "removeItem",
+        "setItem",
       ]);
+      assert.deepEqual(storageMock.mock.calls, [
+        [{ path: NodePath.join(NodePath.resolve(clerkStateDir), "clerk") }],
+      ]);
+      assert.notStrictEqual(createClerkBridgeMock.mock.calls[0]?.[0]?.storage, storageAdapter);
       assert.equal(cleanup.mock.calls.length, 1);
       // The bridge acquires Electron's single-instance lock at creation, and
       // the lock both lives in and creates the userData directory — so the
@@ -164,12 +181,12 @@ describe("DesktopClerk", () => {
       const error = yield* Effect.scoped(Layer.build(layerDesktopClerk())).pipe(Effect.flip);
 
       assert.instanceOf(error, DesktopClerk.DesktopClerkBridgeInitializationError);
-      assert.equal(error.stateDir, "/tmp/t3-state");
+      assert.equal(error.stateDir, clerkStateDir);
       assert.equal(error.isDevelopment, true);
       assert.strictEqual(error.cause, cause);
       assert.equal(
         error.message,
-        'Failed to initialize the desktop Clerk bridge for state directory "/tmp/t3-state" (development: true).',
+        `Failed to initialize the desktop Clerk bridge for state directory "${clerkStateDir}" (development: true).`,
       );
     });
   });
@@ -190,12 +207,12 @@ describe("DesktopClerk", () => {
       if (exit._tag === "Failure") {
         const error = Cause.squash(exit.cause);
         assert.instanceOf(error, DesktopClerk.DesktopClerkBridgeCleanupError);
-        assert.equal(error.stateDir, "/tmp/t3-state");
+        assert.equal(error.stateDir, clerkStateDir);
         assert.equal(error.isDevelopment, false);
         assert.strictEqual(error.cause, cause);
         assert.equal(
           error.message,
-          'Failed to clean up the desktop Clerk bridge for state directory "/tmp/t3-state" (development: false).',
+          `Failed to clean up the desktop Clerk bridge for state directory "${clerkStateDir}" (development: false).`,
         );
       }
     });
@@ -221,14 +238,58 @@ describe("DesktopClerk", () => {
 
       assert.isTrue(Exit.isSuccess(exit));
       assert.equal(quit.mock.calls.length, 0);
-      assert.deepEqual(registeredEvents, ["open-url", "second-instance"]);
+      assert.deepEqual(registeredEvents, ["open-url", "browser-window-created", "second-instance"]);
     }).pipe(
-      Effect.provide(layerDesktopClerk()),
+      Effect.provide(layerDesktopClerk(true, [], "darwin", undefined, undefined, electronApp)),
       Effect.provideService(ElectronApp.ElectronApp, electronApp),
       Effect.provideService(ElectronWindow.ElectronWindow, electronWindow),
     );
   });
 
+  it.effect("queues pairing deep links received before the renderer is ready", () => {
+    storageMock.mockReturnValue(storageAdapter);
+    createClerkBridgeMock.mockReturnValue({ cleanup: vi.fn(), isPrimaryInstance: true });
+    const listeners = new Map<string, (...args: unknown[]) => void>();
+    const delivered = Promise.withResolvers<void>();
+    const send = vi.fn((_channel: string, _pairingUrl: string) => delivered.resolve());
+    const window = {
+      webContents: {
+        getURL: () => "t3code-dev://app/",
+        send,
+        on: vi.fn(),
+        removeListener: vi.fn(),
+      },
+    };
+    const electronApp = {
+      on: (name: string, listener: (...args: unknown[]) => void) =>
+        Effect.sync(() => {
+          listeners.set(name, listener);
+        }),
+    } as unknown as ElectronApp.ElectronApp["Service"];
+    const electronWindow = {
+      currentMainOrFirst: Effect.succeed(Option.some(window)),
+    } as unknown as ElectronWindow.ElectronWindow["Service"];
+    const pairingUrl = "https://vps.example.com/pair#token=abc";
+    const appLink = "t3code://pair?pairingUrl=https%3A%2F%2Fvps.example.com%2Fpair%23token%3Dabc";
+
+    return Effect.gen(function* () {
+      const clerk = yield* DesktopClerk.DesktopClerk;
+      const event = { preventDefault: vi.fn() };
+      listeners.get("open-url")!(event, appLink);
+      assert.equal(event.preventDefault.mock.calls.length, 1);
+
+      yield* clerk.configure;
+      yield* Effect.promise(() => delivered.promise);
+      assert.deepEqual(send.mock.calls, [
+        [IpcChannels.DESKTOP_PAIRING_APP_LINK_CHANNEL, pairingUrl],
+      ]);
+    }).pipe(
+      Effect.scoped,
+      Effect.provide(layerDesktopClerk(true, [], "darwin", undefined, undefined, electronApp)),
+      Effect.provideService(ElectronApp.ElectronApp, electronApp),
+      Effect.provideService(ElectronWindow.ElectronWindow, electronWindow),
+    );
+  });
   it.effect("quits and interrupts startup in a secondary instance", () => {
     storageMock.mockReturnValue(storageAdapter);
     createClerkBridgeMock.mockReturnValue({ cleanup: vi.fn(), isPrimaryInstance: false });
@@ -249,9 +310,9 @@ describe("DesktopClerk", () => {
 
       assert.isTrue(Exit.hasInterrupts(exit));
       assert.equal(quit.mock.calls.length, 1);
-      assert.deepEqual(registeredEvents, []);
+      assert.deepEqual(registeredEvents, ["open-url"]);
     }).pipe(
-      Effect.provide(layerDesktopClerk()),
+      Effect.provide(layerDesktopClerk(true, [], "darwin", undefined, undefined, electronApp)),
       Effect.provideService(ElectronApp.ElectronApp, electronApp),
       Effect.provideService(ElectronWindow.ElectronWindow, electronWindow),
     );
@@ -297,7 +358,7 @@ it.effect(
       assert.equal(event.preventDefault.mock.calls.length, 1);
     }).pipe(
       Effect.scoped,
-      Effect.provide(layerDesktopClerk()),
+      Effect.provide(layerDesktopClerk(true, [], "darwin", undefined, undefined, electronApp)),
       Effect.provideService(ElectronApp.ElectronApp, electronApp),
       Effect.provideService(ElectronWindow.ElectronWindow, electronWindow),
     );
@@ -375,7 +436,7 @@ it.effect.each(["startup", "open-url"] as const)(
         assert.strictEqual(delivery?.flowId, request.flowId);
         assert.strictEqual(delivery?.returnUrl, request.returnUrl);
       }).pipe(
-        Effect.provide(layerDesktopClerk(true, [], "darwin", undefined, shell)),
+        Effect.provide(layerDesktopClerk(true, [], "darwin", undefined, shell, electronApp)),
         Effect.provideService(HostProcessArguments, entry === "startup" ? ["t3", link] : ["t3"]),
         Effect.provideService(ElectronApp.ElectronApp, electronApp),
         Effect.provideService(

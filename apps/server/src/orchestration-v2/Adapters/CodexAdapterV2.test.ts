@@ -16,6 +16,7 @@ import {
   type ModelSelection,
   NodeId,
   type OrchestrationV2AppThread,
+  type OrchestrationV2Subagent,
   type OrchestrationV2ProviderThread,
   type OrchestrationV2ProviderTurn,
   type OrchestrationV2TurnItem,
@@ -35,20 +36,26 @@ import { SpawnExecutableResolution } from "@t3tools/shared/shell";
 import * as CodexClient from "effect-codex-app-server/client";
 import * as CodexError from "effect-codex-app-server/errors";
 import * as CodexReplay from "effect-codex-app-server/replay";
+import * as Cause from "effect/Cause";
 import * as DateTime from "effect/DateTime";
 import * as Deferred from "effect/Deferred";
 import * as Crypto from "effect/Crypto";
 import * as Effect from "effect/Effect";
+import * as Exit from "effect/Exit";
 import * as Predicate from "effect/Predicate";
 import * as FileSystem from "effect/FileSystem";
 import { MCP_APP_OUTPUT_KEY, readMcpAppReference } from "@t3tools/shared/mcpApp";
+import { toolOutputImages } from "@t3tools/shared/toolOutput";
 import { resolveAttachmentPathById } from "../../attachmentStore.ts";
 import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
 import * as Path from "effect/Path";
+import * as Queue from "effect/Queue";
 import * as PlatformError from "effect/PlatformError";
 import * as Ref from "effect/Ref";
 import * as Schema from "effect/Schema";
+import * as Sink from "effect/Sink";
+import * as Stdio from "effect/Stdio";
 import * as Stream from "effect/Stream";
 import { TestClock } from "effect/testing";
 import { ChildProcess, ChildProcessSpawner } from "effect/process";
@@ -67,6 +74,7 @@ import {
   ProviderAdapterOpenSessionError,
   ProviderAdapterRollbackThreadError,
   ProviderAdapterV2RuntimePolicy,
+  ProviderAdapterEventStreamError,
   type ProviderAdapterV2Event,
   type ProviderAdapterV2TurnInput,
 } from "../ProviderAdapter.ts";
@@ -80,6 +88,7 @@ const replayTranscriptJson = Schema.fromJsonString(CodexReplay.CodexAppServerRep
 const encodeReplayTranscriptJson = Schema.encodeEffect(replayTranscriptJson);
 const decodeReplayTranscriptJson = Schema.decodeUnknownEffect(replayTranscriptJson);
 const encodeStringJson = Schema.encodeEffect(Schema.fromJsonString(Schema.String));
+const isProviderAdapterEventStreamError = Schema.is(ProviderAdapterEventStreamError);
 
 describe("Codex context usage compatibility", () => {
   const previous: ModelSelection = {
@@ -522,7 +531,7 @@ describe("CodexAdapterV2 runtime policy", () => {
       );
       assert.include(
         params.additionalContext?.t3_code_orchestration?.value ?? "",
-        "structured object, never as JSON text",
+        "When asked only to schedule, use `schedule_task` without running its prompt.",
       );
     }),
   );
@@ -1570,6 +1579,7 @@ function codexReplayPreamble(input: {
   readonly prompt: string;
   /** Text the adapter should send, when it differs from what the user typed. */
   readonly sentPrompt?: string;
+  readonly effort?: string;
 }): Array<CodexReplay.CodexAppServerReplayEntry> {
   return [
     {
@@ -1622,6 +1632,7 @@ function codexReplayPreamble(input: {
           thread: {
             id: input.nativeThreadId,
             sessionId: input.nativeThreadId,
+            projectId: null,
             forkedFromId: null,
             preview: "",
             ephemeral: false,
@@ -1667,6 +1678,7 @@ function codexReplayPreamble(input: {
           approvalsReviewer: "user",
           sandboxPolicy: { type: "dangerFullAccess" },
           summary: "detailed",
+          ...(input.effort === undefined ? {} : { effort: input.effort }),
         },
       },
     },
@@ -1713,6 +1725,146 @@ function withReplayRequestId(
     ? { ...entry, frame: { ...entry.frame, id } }
     : entry;
 }
+
+describe("CodexAdapterV2 process exit", () => {
+  it.effect.each([
+    { exit: "numeric", active: false },
+    { exit: "SIGKILL", active: false },
+    { exit: "numeric", active: true },
+    { exit: "SIGKILL", active: true },
+  ] as const)("retires the shared session after $exit (active turn: $active)", ({ exit, active }) =>
+    Effect.gen(function* () {
+      const scenario = `process-exit-${exit}-${active}`;
+      const nativeThreadId = `native-${scenario}`;
+      const nativeTurnId = `turn-${scenario}`;
+      const input = yield* Queue.unbounded<Uint8Array, Cause.Done>();
+      const emit = (frame: unknown) =>
+        Queue.offer(input, new TextEncoder().encode(JSON.stringify(frame) + "\n"));
+      const outputEnded = yield* Deferred.make<void>();
+      const turnStarted = yield* Deferred.make<void>();
+      const turnCompleted = yield* Deferred.make<void>();
+      const events: Array<ProviderAdapterV2Event> = [];
+      const preamble = codexReplayPreamble({ nativeThreadId, nativeTurnId, prompt: "work" });
+      const terminationError =
+        exit === "numeric"
+          ? new CodexError.CodexAppServerProcessExitedError({ code: 17, pid: 52 })
+          : new CodexError.CodexAppServerTransportError({
+              operation: "read-process-exit-status",
+              pid: 52,
+              cause: PlatformError.systemError({
+                _tag: "Unknown",
+                module: "ChildProcess",
+                method: "exitCode",
+                cause: new Error("Process terminated by SIGKILL"),
+              }),
+            });
+      const client = yield* CodexClient.make(
+        Stdio.make({
+          args: Effect.succeed([]),
+          stdin: Stream.fromQueue(input),
+          stdout: () =>
+            Sink.forEach((chunk: string | Uint8Array) =>
+              Effect.gen(function* () {
+                const frame = JSON.parse(
+                  typeof chunk === "string" ? chunk : new TextDecoder().decode(chunk),
+                ) as { readonly id?: number; readonly method: string };
+                const response = preamble.find(
+                  (entry) =>
+                    entry.type === "emit_inbound" &&
+                    entry.label === frame.method &&
+                    Predicate.isObject(entry.frame) &&
+                    "id" in entry.frame,
+                );
+                if (response?.type === "emit_inbound") {
+                  yield* emit(response.frame);
+                }
+              }),
+            ).pipe(Sink.ensuring(Deferred.succeed(outputEnded, undefined))),
+          stderr: () => Sink.drain,
+        }),
+        {},
+        Effect.succeed(terminationError),
+      );
+      const adapter = CodexAdapterV2.makeCodexAdapterV2({
+        instanceId: CodexAdapterV2.CODEX_DEFAULT_INSTANCE_ID,
+        settings: DEFAULT_CODEX_SETTINGS,
+        environment: {},
+        clientFactory: { open: () => Effect.succeed(client) },
+        crypto: yield* Crypto.Crypto,
+        fileSystem: yield* FileSystem.FileSystem,
+        idAllocator: yield* IdAllocator.IdAllocatorV2,
+        serverConfig: yield* makeReplayServerConfig(scenario).pipe(Effect.orDie),
+      });
+      const threadId = ThreadId.make(`thread-${scenario}`);
+      const runtime = yield* adapter.openSession({
+        threadId,
+        providerSessionId: ProviderSessionId.make(`session-${scenario}`),
+        modelSelection: CODEX_TEST_MODEL_SELECTION,
+        runtimePolicy: CODEX_TEST_RUNTIME_POLICY,
+      });
+      const eventReader = yield* runtime.events.pipe(
+        Stream.runForEach((event) =>
+          Effect.sync(() => events.push(event)).pipe(
+            Effect.andThen(
+              event.type === "provider_turn.updated" && event.providerTurn.status === "running"
+                ? Deferred.succeed(turnStarted, undefined)
+                : event.type === "turn.terminal"
+                  ? Deferred.succeed(turnCompleted, undefined)
+                  : Effect.void,
+            ),
+          ),
+        ),
+        Effect.forkScoped,
+      );
+      const providerThread = yield* runtime.ensureThread({
+        threadId,
+        modelSelection: CODEX_TEST_MODEL_SELECTION,
+        runtimePolicy: CODEX_TEST_RUNTIME_POLICY,
+      });
+      yield* runtime.startTurn(
+        makeCodexTestTurnInput({
+          threadId,
+          providerThread,
+          now: yield* DateTime.now,
+          attemptId: RunAttemptId.make(`attempt-${scenario}`),
+          text: "work",
+        }),
+      );
+      yield* emit({
+        method: "turn/started",
+        params: {
+          threadId: nativeThreadId,
+          turn: makeCodexReplayTurn({ id: nativeTurnId, status: "inProgress" }),
+        },
+      });
+      yield* Deferred.await(turnStarted);
+      if (!active) {
+        yield* emit({
+          method: "turn/completed",
+          params: {
+            threadId: nativeThreadId,
+            turn: makeCodexReplayTurn({ id: nativeTurnId, status: "completed" }),
+          },
+        });
+        yield* Deferred.await(turnCompleted);
+        assert.isTrue(
+          events.some((event) => event.type === "turn.terminal" && event.status === "completed"),
+        );
+      }
+
+      yield* Queue.end(input);
+      yield* Deferred.await(outputEnded);
+      const rpcError = yield* client.request("thread/list", {}).pipe(Effect.flip);
+      assert.strictEqual(rpcError, terminationError);
+      const readerExit = yield* Fiber.await(eventReader);
+      assert.isTrue(
+        Exit.isFailure(readerExit) &&
+          isProviderAdapterEventStreamError(Cause.squash(readerExit.cause)),
+        "the session manager must receive process death so it can retire the shared process",
+      );
+    }).pipe(Effect.scoped, Effect.provide(Layer.mergeAll(IdAllocator.layer, NodeServices.layer))),
+  );
+});
 
 describe("CodexAdapterV2 session initialize", () => {
   const openReplaySession = (
@@ -1910,15 +2062,20 @@ describe("CodexAdapterV2 post-settle continuation", () => {
     onEvent: (event: ProviderAdapterV2Event) => Effect.Effect<unknown> = () => Effect.void,
     onRequest: (method: string, params: unknown) => Effect.Effect<void> = () => Effect.void,
     readChildMetadata?: Parameters<typeof withCodexReplayChildMetadata>[2],
+    beforeEmitInbound?: CodexReplay.CodexAppServerReplayDriver["beforeEmitInbound"],
   ) =>
     Effect.gen(function* () {
+      const driver = yield* CodexReplay.makeReplayDriver(
+        transcript,
+        beforeEmitInbound === undefined ? {} : { beforeEmitInbound },
+      );
       const fileSystem = yield* FileSystem.FileSystem;
       const idAllocator = yield* IdAllocator.IdAllocatorV2;
       const serverConfig = yield* makeReplayServerConfig(transcript.scenario).pipe(Effect.orDie);
       const continuationRequests: Array<ProviderContinuationRequest> = [];
       const clientFactory: CodexAdapterV2.CodexAppServerClientFactoryShape = {
         open: (openInput) =>
-          Layer.build(CodexReplay.layerReplay(transcript)).pipe(
+          Layer.build(CodexReplay.layerReplayWithDriver(driver)).pipe(
             Effect.mapError(
               (cause) =>
                 new ProviderAdapterOpenSessionError({
@@ -3551,7 +3708,7 @@ describe("CodexAdapterV2 post-settle continuation", () => {
     answers: ReadonlyArray<{
       readonly id: string;
       readonly text: string;
-      readonly phase?: "commentary" | "final_answer" | null;
+      readonly phase?: "commentary" | "partial_answer" | "final_answer" | null;
       readonly omitPhase?: boolean;
       readonly streamed?: boolean;
       readonly completionDelayMs?: number;
@@ -3645,6 +3802,308 @@ describe("CodexAdapterV2 post-settle continuation", () => {
       ],
     });
   };
+
+  it.effect("projects generated images into the final Codex message", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const scenario = "codex-generated-image";
+        const result = "aW1hZ2UtYnl0ZXMtdXNlZC1ieS1jb2RleA==";
+        const base = finalAnswerTranscript(scenario, [{ id: "answer", text: "Done." }]);
+        const transcript = makeCodexReplayTranscript({
+          scenario,
+          entries: [
+            ...base.entries.slice(0, -1),
+            {
+              type: "emit_inbound",
+              label: "image/completed",
+              frame: {
+                method: "item/completed",
+                params: {
+                  threadId: `native-${scenario}-thread`,
+                  turnId: `native-${scenario}-turn`,
+                  item: {
+                    type: "imageGeneration",
+                    id: "image-0",
+                    status: "completed",
+                    result,
+                    savedPath: "/tmp/generated.png",
+                  },
+                },
+              },
+            },
+            ...base.entries.slice(-1),
+          ],
+        });
+        const harness = yield* makeCodexReplayHarness(transcript);
+        const now = yield* DateTime.now;
+        yield* harness.runtime.startTurn(
+          makeCodexTestTurnInput({
+            threadId: harness.threadId,
+            providerThread: harness.providerThread,
+            now,
+            attemptId: RunAttemptId.make("attempt-codex-generated-image"),
+            text: "Reply with the requested recovery marker.",
+          }),
+        );
+        yield* harness.firstTerminal;
+        const messages = assistantMessages(harness.events);
+        assert.strictEqual(
+          messages.at(-1)?.message.text,
+          `Done.
+
+![](</tmp/generated.png>)`,
+        );
+        assert.notInclude(encodeUnknownJson(harness.events), result);
+      }).pipe(Effect.provide(Layer.merge(IdAllocator.layer, NodeServices.layer))),
+    ),
+  );
+
+  it.effect.each(["complete", "stop"] as const)(
+    "retains generated images after settlement until %s",
+    (outcome) =>
+      Effect.gen(function* () {
+        const scenario = "codex-retained-image";
+        const base = finalAnswerTranscript(scenario, [{ id: "answer", text: "Done." }]);
+        const completions = {
+          first: yield* Deferred.make<void>(),
+          second: yield* Deferred.make<void>(),
+        };
+        const projected = yield* Deferred.make<void>();
+        const drained = yield* Deferred.make<void>();
+        const firstText = `Done.
+
+![](</tmp/first.png>)`;
+        const imageEvent = (image: "first" | "second", phase: "started" | "completed") => ({
+          type: "emit_inbound" as const,
+          label: `${image}-${phase}`,
+          frame: {
+            method: `item/${phase}`,
+            params: {
+              threadId: `native-${scenario}-thread`,
+              turnId: `native-${scenario}-turn`,
+              item: {
+                type: "imageGeneration",
+                id: image,
+                status: phase === "started" ? "inProgress" : "completed",
+                result: "",
+                ...(phase === "completed" ? { savedPath: `/tmp/${image}.png` } : {}),
+              },
+            },
+          },
+        });
+        const harness = yield* makeCodexReplayHarness(
+          makeCodexReplayTranscript({
+            scenario,
+            entries: [
+              ...base.entries.slice(0, -2),
+              imageEvent("first", "started"),
+              imageEvent("second", "started"),
+              ...base.entries.slice(-2),
+              imageEvent("first", "completed"),
+              imageEvent("second", "completed"),
+            ],
+          }),
+          (event) =>
+            event.type === "message.updated" && event.message.text === firstText
+              ? Deferred.succeed(projected, undefined)
+              : event.type === "background_work.updated" && !event.pending
+                ? Deferred.succeed(drained, undefined)
+                : Effect.void,
+          undefined,
+          undefined,
+          (entry) =>
+            entry.label === "first-completed"
+              ? Deferred.await(completions.first)
+              : entry.label === "second-completed"
+                ? Deferred.await(completions.second)
+                : Effect.void,
+        );
+        yield* harness.runtime.startTurn(
+          makeCodexTestTurnInput({
+            threadId: harness.threadId,
+            providerThread: harness.providerThread,
+            now: yield* DateTime.now,
+            attemptId: RunAttemptId.make("attempt-retained-image"),
+            text: "Reply with the requested recovery marker.",
+          }),
+        );
+        yield* harness.firstTerminal;
+        const pending = Effect.all([
+          harness.runtime.hasPendingBackgroundWorkForThread!(harness.providerThread),
+          harness.hasPendingBackgroundWork,
+        ]);
+        assert.deepEqual(yield* pending, [true, true]);
+        assert.strictEqual(assistantMessages(harness.events).at(-1)?.message.text, "Done.");
+        const cleared = () =>
+          harness.events.some(
+            (event) => event.type === "background_work.updated" && !event.pending,
+          );
+
+        if (outcome === "complete") {
+          yield* Deferred.succeed(completions.first, undefined);
+          yield* Deferred.await(projected);
+          assert.deepEqual(yield* pending, [true, true]);
+          assert.isFalse(cleared());
+          yield* Deferred.succeed(completions.second, undefined);
+        } else {
+          yield* harness.runtime.interruptTurn({
+            providerThread: harness.providerThread,
+            providerTurnId: harness.terminalEvents()[0]!.providerTurnId,
+            requestRuntimeRestart: true,
+          });
+        }
+        yield* Deferred.await(drained);
+        assert.deepEqual(yield* pending, [false, false]);
+        assert.lengthOf(harness.terminalEvents(), 1);
+        const indexOf = (predicate: (event: ProviderAdapterV2Event) => boolean) =>
+          harness.events.findIndex(predicate);
+        const started = indexOf(
+          (event) => event.type === "background_work.updated" && event.pending,
+        );
+        const terminal = indexOf((event) => event.type === "turn.terminal");
+        const finished = indexOf(
+          (event) => event.type === "background_work.updated" && !event.pending,
+        );
+        assert.isAtLeast(started, 0);
+        assert.isAbove(terminal, started);
+        assert.isAbove(finished, terminal);
+        if (outcome === "complete") {
+          const messages = assistantMessages(harness.events);
+          const projectedBoth = indexOf(
+            (event) =>
+              event.type === "message.updated" &&
+              event.message.text ===
+                `${firstText}
+
+![](</tmp/second.png>)`,
+          );
+          assert.isAbove(projectedBoth, terminal);
+          assert.isAbove(finished, projectedBoth);
+          assert.strictEqual(messages.at(-1)?.message.id, messages[0]?.message.id);
+          assert.strictEqual(messages.at(-1)?.message.streaming, false);
+        }
+      }).pipe(Effect.scoped, Effect.provide(Layer.mergeAll(IdAllocator.layer, NodeServices.layer))),
+  );
+  it.effect.each([false, true])(
+    "preserves a final answer that repeats a preceding partial answer (streamed: %s)",
+    (streamed) =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const transcript = finalAnswerTranscript("codex-partial-then-final", [
+            { id: "partial", text: "CODEX_RECOVERY_OK", phase: "partial_answer", streamed },
+            { id: "final", text: "CODEX_RECOVERY_OK", phase: "final_answer", streamed },
+          ]);
+          const harness = yield* makeCodexReplayHarness(transcript);
+          const now = yield* DateTime.now;
+          yield* harness.runtime.startTurn(
+            makeCodexTestTurnInput({
+              threadId: harness.threadId,
+              providerThread: harness.providerThread,
+              now,
+              attemptId: RunAttemptId.make("attempt-codex-partial-then-final"),
+              text: "Reply with the requested recovery marker.",
+            }),
+          );
+          yield* harness.firstTerminal;
+          assert.deepEqual(
+            assistantMessages(harness.events).map((event) => event.message.text),
+            ["CODEX_RECOVERY_OK", "CODEX_RECOVERY_OK"],
+          );
+        }).pipe(Effect.provide(Layer.merge(IdAllocator.layer, NodeServices.layer))),
+      ),
+  );
+
+  it.effect.each(["before", "after"] as const)(
+    "rejects a previous run's native turn when it completes %s the new start response",
+    (completionOrder) =>
+      Effect.gen(function* () {
+        const nativeThreadId = "reused-turn-thread";
+        const nativeTurnId = "reused-turn";
+        const preamble = codexReplayPreamble({ nativeThreadId, nativeTurnId, prompt: "work" });
+        const retry = codexReplayPreamble({
+          nativeThreadId,
+          nativeTurnId: "retry-turn",
+          prompt: "work",
+        });
+        const completion: CodexReplay.CodexAppServerReplayEntry = {
+          type: "emit_inbound",
+          label: "original turn completed",
+          frame: {
+            method: "turn/completed",
+            params: {
+              threadId: nativeThreadId,
+              turn: makeCodexReplayTurn({ id: nativeTurnId, status: "completed" }),
+            },
+          },
+        };
+        const harness = yield* makeCodexReplayHarness(
+          makeCodexReplayTranscript({
+            scenario: `reused-turn-${completionOrder}`,
+            entries: [
+              ...preamble,
+              withReplayRequestId(preamble[5]!, 4),
+              ...(completionOrder === "before" ? [completion] : []),
+              withReplayRequestId(preamble[6]!, 4),
+              ...(completionOrder === "after" ? [completion] : []),
+              ...retry.slice(5, 7).map((entry) => withReplayRequestId(entry, 5)),
+              {
+                type: "emit_inbound",
+                label: "retry completed",
+                frame: {
+                  method: "turn/completed",
+                  params: {
+                    threadId: nativeThreadId,
+                    turn: makeCodexReplayTurn({ id: "retry-turn", status: "completed" }),
+                  },
+                },
+              },
+            ],
+          }),
+        );
+        const first = makeCodexTestTurnInput({
+          threadId: harness.threadId,
+          providerThread: harness.providerThread,
+          now: yield* DateTime.now,
+          attemptId: RunAttemptId.make("original"),
+          text: "work",
+        });
+        yield* harness.runtime.startTurn(first);
+        const result = yield* harness.runtime
+          .startTurn({
+            ...first,
+            runId: RunId.make("replacement"),
+            attemptId: RunAttemptId.make("replacement"),
+            rootNodeId: NodeId.make("replacement"),
+            runOrdinal: 2,
+            providerTurnOrdinal: 2,
+          })
+          .pipe(Effect.result);
+        assert.equal(result._tag, "Failure");
+        if (result._tag !== "Failure") return;
+        assert.equal(result.failure._tag, "ProviderAdapterTurnStartError");
+        yield* harness.firstTerminal;
+        assert.deepEqual(
+          harness.terminalEvents().map((event) => event.runOrdinal),
+          [1],
+        );
+        yield* harness.runtime.startTurn({
+          ...first,
+          runId: RunId.make("retry"),
+          attemptId: RunAttemptId.make("retry"),
+          rootNodeId: NodeId.make("retry"),
+          runOrdinal: 3,
+          providerTurnOrdinal: 3,
+        });
+        yield* awaitUntil(() => harness.terminalEvents().length >= 2, "second terminal event");
+        assert.deepEqual(
+          harness.terminalEvents().map((event) => [event.runOrdinal, event.status]),
+          [
+            [1, "completed"],
+            [3, "completed"],
+          ],
+        );
+      }).pipe(Effect.scoped, Effect.provide(Layer.merge(IdAllocator.layer, NodeServices.layer))),
+  );
 
   it.effect("suppresses a trailing empty final answer after a non-empty final answer", () =>
     Effect.scoped(
@@ -5140,6 +5599,124 @@ describe("CodexAdapterV2 post-settle continuation", () => {
       { type: "runtime_exit", status: "success" },
     ],
   });
+  const interruptSubagentTurnAfterStopTranscript = makeCodexReplayTranscript({
+    scenario: "codex-interrupt-subagent-turn-after-stop",
+    entries: [
+      ...interruptSubagentCommandTranscript.entries.slice(0, -1),
+      {
+        type: "emit_inbound",
+        label: "turn/started/child-after-stop",
+        frame: {
+          method: "turn/started",
+          params: {
+            threadId: INTERRUPT_CHILD_NATIVE_THREAD,
+            turn: makeCodexReplayTurn({
+              id: INTERRUPT_LATE_CHILD_NATIVE_TURN,
+              status: "inProgress",
+            }),
+          },
+        },
+      },
+      {
+        type: "expect_outbound",
+        label: "turn/interrupt/child-after-stop",
+        frame: {
+          id: 7,
+          method: "turn/interrupt",
+          params: {
+            threadId: INTERRUPT_CHILD_NATIVE_THREAD,
+            turnId: INTERRUPT_LATE_CHILD_NATIVE_TURN,
+          },
+        },
+      },
+      {
+        type: "emit_inbound",
+        label: "turn/interrupt/child-after-stop",
+        frame: { id: 7, result: {} },
+      },
+      {
+        type: "emit_inbound",
+        label: "thread/goal/updated/root",
+        frame: {
+          method: "thread/goal/updated",
+          params: {
+            threadId: INTERRUPT_NATIVE_THREAD,
+            turnId: null,
+            goal: {
+              threadId: INTERRUPT_NATIVE_THREAD,
+              objective: INTERRUPT_PROMPT,
+              status: "paused",
+              tokenBudget: null,
+              tokensUsed: 0,
+              timeUsedSeconds: 0,
+              createdAt: 1782622440,
+              updatedAt: 1782622450,
+            },
+          },
+        },
+      },
+      { type: "runtime_exit", status: "success" },
+    ],
+  });
+
+  it.effect(
+    "keeps reading notifications while interrupting a child turn that starts after Stop",
+    () =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const harness = yield* makeCodexReplayHarness(interruptSubagentTurnAfterStopTranscript);
+          const now = yield* DateTime.now;
+
+          yield* harness.runtime.startTurn(
+            makeCodexTestTurnInput({
+              threadId: harness.threadId,
+              providerThread: harness.providerThread,
+              now,
+              attemptId: RunAttemptId.make("attempt-codex-interrupt-subagent-turn-after-stop"),
+              text: INTERRUPT_PROMPT,
+            }),
+          );
+          yield* awaitUntil(
+            () =>
+              harness.events.some(
+                (event) =>
+                  event.type === "turn_item.updated" &&
+                  event.turnItem.type === "command_execution" &&
+                  event.turnItem.nativeItemRef?.nativeId === INTERRUPT_CHILD_COMMAND_ITEM &&
+                  event.turnItem.status === "running",
+              ),
+            "running child command item",
+          );
+          const providerTurnId = harness.events.find(
+            (event): event is Extract<ProviderAdapterV2Event, { type: "provider_turn.updated" }> =>
+              event.type === "provider_turn.updated" && event.threadId === harness.threadId,
+          )?.providerTurn.id;
+          assert.isDefined(providerTurnId);
+
+          yield* harness.runtime.interruptTurn({
+            providerThread: harness.providerThread,
+            providerTurnId,
+          });
+          yield* harness.firstTerminal;
+          yield* awaitUntil(
+            () =>
+              harness.events.some(
+                (event) =>
+                  event.type === "provider_thread.updated" &&
+                  event.providerThread.goal?.status === "paused",
+              ),
+            "paused goal update after the late child interrupt",
+          );
+          assert.isFalse(
+            harness.events.some(
+              (event) =>
+                event.type === "provider_turn.updated" &&
+                event.providerTurn.nativeTurnRef?.nativeId === INTERRUPT_LATE_CHILD_NATIVE_TURN,
+            ),
+          );
+        }).pipe(Effect.provide(Layer.merge(IdAllocator.layer, NodeServices.layer))),
+      ),
+  );
 
   const assertChildProviderTerminalBeforeRoot = (
     events: ReadonlyArray<ProviderAdapterV2Event>,
@@ -5297,14 +5874,9 @@ describe("CodexAdapterV2 post-settle continuation", () => {
         yield* TestClock.adjust("30 seconds");
         yield* awaitUntil(childTurnCompleted, "subagent turn completion");
         assert.lengthOf(harness.terminalEvents(), 1);
-      }).pipe(
-        Effect.provide(
-          Layer.mergeAll(IdAllocator.layer, NodeServices.layer),
-        ),
-      ),
+      }).pipe(Effect.provide(Layer.mergeAll(IdAllocator.layer, NodeServices.layer))),
     ),
   );
-
 
   const childInterruptResponseIndex = interruptSubagentCommandTranscript.entries.findIndex(
     (entry) => entry.type === "emit_inbound" && entry.label === "turn/interrupt/child",
@@ -6522,6 +7094,34 @@ describe("CodexAdapterV2 post-settle continuation", () => {
     ],
   });
 
+  const MCP_APP_DEFERRED_RESULT = {
+    content: [{ type: "text", text: "An interactive form is being shown to the user." }],
+    structuredContent: { status: "awaiting_user_submission" },
+  };
+  const mcpAppDeferredTranscript = makeCodexReplayTranscript({
+    scenario: MCP_APP_SCENARIO,
+    entries: mcpAppTranscript.entries.map((entry) =>
+      entry.type === "emit_inbound" && entry.label === "item/completed/app-tool"
+        ? {
+            ...entry,
+            frame: {
+              method: "item/completed",
+              params: {
+                item: {
+                  ...mcpAppToolItem("inProgress"),
+                  status: "failed",
+                  result: MCP_APP_DEFERRED_RESULT,
+                },
+                threadId: MCP_APP_NATIVE_THREAD,
+                turnId: MCP_APP_NATIVE_TURN,
+                completedAtMs: 1782622441500,
+              },
+            },
+          }
+        : entry,
+    ),
+  });
+
   it.effect("captures an MCP app's resource and holds the turn open until it lands", () =>
     Effect.scoped(
       Effect.gen(function* () {
@@ -6593,6 +7193,50 @@ describe("CodexAdapterV2 post-settle continuation", () => {
     ),
   );
 
+  it.effect("captures an MCP app from a tool call that defers to its form", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const appCaptured = yield* Deferred.make<OrchestrationV2TurnItem>();
+        const harness = yield* makeCodexReplayHarness(mcpAppDeferredTranscript, (event) =>
+          event.type === "turn_item.updated" &&
+          event.turnItem.type === "dynamic_tool" &&
+          event.turnItem.status === "failed"
+            ? Deferred.succeed(appCaptured, event.turnItem)
+            : Effect.void,
+        );
+
+        yield* harness.runtime.startTurn(
+          makeCodexTestTurnInput({
+            threadId: harness.threadId,
+            providerThread: harness.providerThread,
+            now: yield* DateTime.now,
+            attemptId: RunAttemptId.make("attempt-codex-mcp-app-deferred"),
+            text: MCP_APP_PROMPT,
+          }),
+        );
+        const item = yield* Deferred.await(appCaptured);
+        if (
+          item.type !== "dynamic_tool" ||
+          item.output === null ||
+          typeof item.output !== "object"
+        ) {
+          throw new Error("Expected a failed dynamic tool item with an MCP app.");
+        }
+        const reference = readMcpAppReference(
+          MCP_APP_OUTPUT_KEY in item.output ? item.output[MCP_APP_OUTPUT_KEY] : undefined,
+        );
+        if (reference === undefined) throw new Error("Expected a captured MCP app reference.");
+        assert.deepEqual("result" in item.output ? item.output.result : undefined, {
+          ...MCP_APP_DEFERRED_RESULT,
+          isError: true,
+        });
+        assert.equal(reference.server, "weather");
+        assert.equal(reference.tool, "get_weather");
+        assert.equal(reference.resourceUri, MCP_APP_RESOURCE);
+        assert.isFalse(yield* harness.hasPendingBackgroundWork);
+      }).pipe(Effect.provide(Layer.mergeAll(IdAllocator.layer, NodeServices.layer))),
+    ),
+  );
   // The turn fails while the app's resource read is still outstanding (Codex
   // never answers it), so the capture must be cancelled and its tool row
   // settled before the terminal event closes ingestion.
@@ -7081,6 +7725,94 @@ describe("CodexAdapterV2 post-settle continuation", () => {
       childTurnCompleted(RESUME_CHILD_TURN_2),
     ],
   });
+
+  it.effect.each(["activity", "spawn", "activity then spawn"] as const)(
+    "does not copy the parent's effort to a child first seen by %s",
+    (source) =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const created = yield* Deferred.make<OrchestrationV2AppThread>();
+          const modelReported = yield* Deferred.make<OrchestrationV2Subagent>();
+          const activity = {
+            type: "subAgentActivity",
+            id: "call-codex-child-effort",
+            kind: "started",
+            agentThreadId: RESUME_CHILD_THREAD,
+            agentPath: "/root/resume_agent",
+          };
+          const spawn = {
+            type: "collabAgentToolCall",
+            id: "call-codex-child-effort",
+            tool: "spawnAgent",
+            status: "completed",
+            senderThreadId: RESUME_NATIVE_THREAD,
+            receiverThreadIds: [RESUME_CHILD_THREAD],
+            model: "gpt-5.4",
+            reasoningEffort: "high",
+            agentsStates: { [RESUME_CHILD_THREAD]: { status: "completed", message: "finished" } },
+          };
+          const items =
+            source === "activity" ? [activity] : source === "spawn" ? [spawn] : [activity, spawn];
+          const transcript = makeCodexReplayTranscript({
+            scenario: `${RESUME_SCENARIO}-${source}`,
+            entries: [
+              ...codexReplayPreamble({
+                nativeThreadId: RESUME_NATIVE_THREAD,
+                nativeTurnId: RESUME_NATIVE_TURN,
+                prompt: RESUME_PROMPT,
+                effort: "low",
+              }),
+              ...items.map((item) => ({
+                type: "emit_inbound" as const,
+                frame: {
+                  method: "item/completed",
+                  params: {
+                    item,
+                    threadId: RESUME_NATIVE_THREAD,
+                    turnId: RESUME_NATIVE_TURN,
+                    completedAtMs: 1782622441000,
+                  },
+                },
+              })),
+            ],
+          });
+          const harness = yield* makeCodexReplayHarness(transcript, (event) =>
+            event.type === "app_thread.created"
+              ? Deferred.succeed(created, event.appThread)
+              : event.type === "subagent.updated" && event.subagent.model === "gpt-5.4"
+                ? Deferred.succeed(modelReported, event.subagent)
+                : Effect.void,
+          );
+          yield* harness.runtime.startTurn({
+            ...makeCodexTestTurnInput({
+              threadId: harness.threadId,
+              providerThread: harness.providerThread,
+              now: yield* DateTime.now,
+              attemptId: RunAttemptId.make("attempt-child-effort"),
+              text: RESUME_PROMPT,
+            }),
+            modelSelection: {
+              ...CODEX_TEST_MODEL_SELECTION,
+              options: [{ id: "reasoningEffort", value: "low" }],
+            },
+          });
+
+          const child = yield* Deferred.await(created);
+          assert.equal(
+            child.modelSelection.options?.find(({ id }) => id === "reasoningEffort")?.value,
+            source === "spawn" ? "high" : undefined,
+          );
+          assert.lengthOf(
+            harness.events.filter((event) => event.type === "app_thread.created"),
+            1,
+          );
+          if (source !== "activity") {
+            const task = yield* Deferred.await(modelReported);
+            assert.equal(task.model, "gpt-5.4");
+          }
+        }).pipe(Effect.provide(Layer.merge(IdAllocator.layer, NodeServices.layer))),
+      ),
+  );
 
   it.effect.each([
     { name: "current Codex Sol", model: "gpt-6-sol" },
@@ -8859,4 +9591,32 @@ describe("CodexAdapterV2 post-settle continuation", () => {
       }).pipe(Effect.scoped, Effect.provide(Layer.merge(IdAllocator.layer, NodeServices.layer))),
     );
   });
+  it.effect("translates Codex tool-output image data URLs into work-log image blocks", () =>
+    Effect.gen(function* () {
+      const output = yield* CodexAdapterV2.projectCodexDynamicToolItem({
+        type: "dynamicToolCall",
+        id: "exec-image",
+        tool: "exec",
+        status: "completed",
+        arguments: {},
+        contentItems: [
+          { type: "inputText", text: "Script completed" },
+          { type: "inputImage", imageUrl: "data:image/png;base64,iVBORw0KGgo=" },
+          { type: "inputImage", imageUrl: "https://example.test/remote.png" },
+          { type: "inputImage", imageUrl: "data:image/png;base64," },
+          { type: "inputAudio", audioUrl: "data:audio/wav;base64,AAAA" },
+        ],
+      });
+      assert.deepEqual(toolOutputImages(output.output), [
+        { mimeType: "image/png", data: "iVBORw0KGgo=" },
+      ]);
+      assert.deepEqual(output.output, [
+        { type: "inputText", text: "Script completed" },
+        { type: "image", mimeType: "image/png", data: "iVBORw0KGgo=" },
+        { type: "inputImage", imageUrl: "https://example.test/remote.png" },
+        { type: "inputImage", imageUrl: "data:image/png;base64," },
+        { type: "inputAudio", audioUrl: "data:audio/wav;base64,AAAA" },
+      ]);
+    }).pipe(Effect.provide(NodeServices.layer)),
+  );
 });

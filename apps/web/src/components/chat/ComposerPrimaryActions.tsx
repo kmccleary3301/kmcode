@@ -11,7 +11,7 @@ import { CornerUpRight, ListPlus } from "lucide";
 import { MorphIcon } from "~/components/MorphIcon";
 import { useEnvironmentIdentificationMode } from "~/hooks/useSettings";
 import { formatContextWindowTokens } from "~/lib/contextWindow";
-import { cn } from "~/lib/utils";
+import { cn, isMacPlatform } from "~/lib/utils";
 import { useShortcutModifierState } from "../../shortcutModifierState";
 import { StageBackdropButtonArt, useSidebarStageBackdropVariant } from "../SidebarStageBackdrop";
 import { Button } from "../ui/button";
@@ -40,6 +40,9 @@ interface ComposerPrimaryActionsProps {
   isRunning: boolean;
   /** Stop can reach a run, including one still preparing or starting. */
   canInterrupt: boolean;
+  forceStopAvailable?: boolean;
+  forceStopping?: boolean;
+  onForceStop?: () => void;
   followUpBehavior?: "queue" | "steer";
   alternateShortcutLabel?: string | null;
   showPlanFollowUpPrompt: boolean;
@@ -99,6 +102,8 @@ export const ComposerPrimaryActions = memo(function ComposerPrimaryActions({
   pendingAction,
   isRunning,
   canInterrupt,
+  forceStopAvailable = false,
+  forceStopping = false,
   followUpBehavior = "steer",
   alternateShortcutLabel = null,
   showPlanFollowUpPrompt,
@@ -116,6 +121,7 @@ export const ComposerPrimaryActions = memo(function ComposerPrimaryActions({
   onResume,
   onPreviousPendingQuestion,
   onInterrupt,
+  onForceStop,
   onImplementPlanInNewThread,
   compactBeforeSendTokens = null,
   goalCommandLabel = null,
@@ -141,7 +147,7 @@ export const ComposerPrimaryActions = memo(function ComposerPrimaryActions({
   );
 
   const renderStopGenerationButton = (insidePendingAction: boolean) => (
-    <Tooltip key="interrupt">
+    <Tooltip key={forceStopAvailable ? "force-stop" : "interrupt"}>
       <TooltipTrigger
         render={
           <button
@@ -151,12 +157,14 @@ export const ComposerPrimaryActions = memo(function ComposerPrimaryActions({
               insidePendingAction ? "size-8 sm:size-7" : "size-8 sm:h-8 sm:w-8",
             )}
             {...pointerFocusProps}
-            disabled={!canOperateThread}
+            disabled={!canOperateThread || (forceStopAvailable && forceStopping)}
             onClick={() => {
-              if (canOperateThread) onInterrupt();
+              if (!canOperateThread) return;
+              if (forceStopAvailable) onForceStop?.();
+              else onInterrupt();
             }}
             data-t3-part="stop-button"
-            aria-label="Stop generation"
+            aria-label={forceStopAvailable ? "Force stop generation" : "Stop generation"}
           />
         }
       >
@@ -164,14 +172,20 @@ export const ComposerPrimaryActions = memo(function ComposerPrimaryActions({
           <rect x="2" y="2" width="8" height="8" rx="1.5" />
         </svg>
       </TooltipTrigger>
-      <TooltipPopup>Interrupt</TooltipPopup>
+      <TooltipPopup>
+        {forceStopAvailable
+          ? forceStopping
+            ? "Force stopping..."
+            : "Force stop the agent and its processes"
+          : "Interrupt"}
+      </TooltipPopup>
     </Tooltip>
   );
 
   if (pendingAction) {
     return (
       <div className={cn("flex items-center justify-end", compact ? "gap-1.5" : "gap-2")}>
-        {canInterrupt ? renderStopGenerationButton(true) : null}
+        {canInterrupt || forceStopAvailable ? renderStopGenerationButton(true) : null}
         {pendingAction.questionIndex > 0 ? (
           compact ? (
             <Button
@@ -216,6 +230,9 @@ export const ComposerPrimaryActions = memo(function ComposerPrimaryActions({
         </button>
       </div>
     );
+  }
+  if (forceStopAvailable) {
+    return renderStopGenerationButton(false);
   }
 
   if (showPlanFollowUpPrompt && (promptHasText || !canResume)) {
@@ -315,7 +332,7 @@ export const ComposerPrimaryActions = memo(function ComposerPrimaryActions({
     (compactsBeforeSend
       ? `Summarize ${compactTokens} tokens of history, then send`
       : isRunning && !isEditingQueuedMessage && goalCommandLabel === null
-        ? `Click to ${followUpBehavior}, Ctrl/⌘-click${alternateShortcutLabel ? ` or ${alternateShortcutLabel}` : ""} to ${alternateAction}`
+        ? `Click to ${followUpBehavior}, ${isMacPlatform(navigator.platform) ? "⌘" : "Ctrl"}-click${alternateShortcutLabel ? ` or ${alternateShortcutLabel}` : ""} to ${alternateAction}`
         : submitLabel);
 
   const sendButton = (

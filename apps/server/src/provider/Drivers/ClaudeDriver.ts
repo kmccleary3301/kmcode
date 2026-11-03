@@ -251,6 +251,7 @@ export const ClaudeDriver: ProviderDriver<ClaudeSettings, ClaudeDriverEnv> = {
             Effect.map(stampIdentity),
           ),
         checkProvider,
+        invalidateUsageCache: Cache.invalidateAll(capabilitiesProbeCache),
         enrichSnapshot: ({ settings, snapshot, publishSnapshot }) =>
           resolveMaintenance().pipe(
             Effect.flatMap((maintenanceCapabilities) =>
@@ -259,6 +260,9 @@ export const ClaudeDriver: ProviderDriver<ClaudeSettings, ClaudeDriverEnv> = {
               }),
             ),
             Effect.provideService(HttpClient.HttpClient, httpClient),
+            Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
+            Effect.provideService(FileSystem.FileSystem, fileSystem),
+            Effect.provideService(Path.Path, path),
             Effect.flatMap((enrichedSnapshot) => publishSnapshot(enrichedSnapshot)),
           ),
       }).pipe(

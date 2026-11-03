@@ -29,6 +29,11 @@ import * as TestClock from "effect/testing/TestClock";
 
 import { toolOutputImages } from "@t3tools/shared/toolOutput";
 import * as SqlitePersistence from "../persistence/Sqlite.ts";
+import * as ProviderInstanceRegistry from "../provider/ProviderInstanceRegistry.ts";
+import {
+  defaultProviderContinuationIdentity,
+  type ProviderInstance,
+} from "../provider/ProviderDriver.ts";
 import * as EventSink from "./EventSink.ts";
 import * as EventStore from "./EventStore.ts";
 import * as IdAllocator from "./IdAllocator.ts";
@@ -43,6 +48,19 @@ import {
   selectInheritedBackgroundTurnItems,
 } from "./RunExecutionService.ts";
 
+const layerTestProviderInstanceRegistry = Layer.succeed(
+  ProviderInstanceRegistry.ProviderInstanceRegistry,
+  ProviderInstanceRegistry.ProviderInstanceRegistry.of({
+    getInstance: () => Effect.succeed(undefined),
+    listInstances: Effect.succeed([]),
+    listUnavailable: Effect.succeed([]),
+    streamChanges: Stream.empty,
+    subscribeChanges: Effect.die(
+      "ProviderEventIngestor tests do not subscribe to registry changes",
+    ),
+  }),
+);
+
 const layerTestDatabase = SqlitePersistence.layerMemory;
 const layerTestStores = Layer.merge(EventStore.layer, ProjectionStore.layer).pipe(
   Layer.provide(layerTestDatabase),
@@ -52,22 +70,26 @@ const layerTestEventSink = EventSink.layer.pipe(
   Layer.provide(Layer.mergeAll(layerTestStores, layerTestDatabase)),
 );
 
-const layerTest = Layer.mergeAll(
-  layerTestStores,
-  layerTestEventSink,
-  IdAllocator.layer,
-  ThreadCommandExecutor.layer,
-  ProviderEventIngestor.layer.pipe(
-    Layer.provide(
-      Layer.mergeAll(
-        layerTestStores,
-        layerTestEventSink,
-        IdAllocator.layer,
-        ThreadCommandExecutor.layer,
+const makeLayerTest = (instances = layerTestProviderInstanceRegistry) =>
+  Layer.mergeAll(
+    layerTestStores,
+    layerTestEventSink,
+    IdAllocator.layer,
+    ThreadCommandExecutor.layer,
+    ProviderEventIngestor.layer.pipe(
+      Layer.provide(
+        Layer.mergeAll(
+          layerTestStores,
+          layerTestEventSink,
+          IdAllocator.layer,
+          ThreadCommandExecutor.layer,
+          instances,
+        ),
       ),
     ),
-  ),
-);
+    instances,
+  );
+const layerTest = makeLayerTest();
 const modelSelection = {
   instanceId: ProviderInstanceId.make("codex"),
   model: "gpt-5.4",
@@ -135,6 +157,100 @@ function threadCreatedEvent(
 }
 
 const layer = it.layer(layerTest);
+
+it.effect("refreshes managed usage only for a stored usage-limit terminal", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const refreshed = yield* Deferred.make<void>();
+      const instanceId = ProviderInstanceId.make("cursor-work");
+      const driver = ProviderDriverKind.make("cursor");
+      const instance: ProviderInstance = {
+        instanceId,
+        driverKind: driver,
+        continuationIdentity: defaultProviderContinuationIdentity({
+          driverKind: driver,
+          instanceId,
+        }),
+        enabled: true,
+        displayName: undefined,
+        orchestrationAdapter: {
+          instanceId,
+          driver,
+          getCapabilities: () => Effect.die("unused"),
+          planSelectionTransition: () => Effect.die("unused"),
+          openSession: () => Effect.die("unused"),
+        },
+        textGeneration: {
+          generateBranchName: () => Effect.die("unused"),
+          generateCommitMessage: () => Effect.die("unused"),
+          generatePrContent: () => Effect.die("unused"),
+          generateThreadTitle: () => Effect.die("unused"),
+        },
+        snapshot: {
+          refreshUsage: Deferred.succeed(refreshed, undefined).pipe(Effect.asVoid),
+          getSnapshot: Effect.die("unused"),
+          refresh: Effect.die("unused"),
+          resolveMaintenance: () => Effect.die("unused"),
+          applyUsageLimits: () => Effect.die("unused"),
+          streamChanges: Stream.empty,
+        },
+      };
+      const lookups: Array<ProviderInstanceId> = [];
+      const instances = Layer.mock(ProviderInstanceRegistry.ProviderInstanceRegistry)({
+        getInstance: (id) =>
+          Effect.sync(() => {
+            lookups.push(id);
+            return id === instanceId ? instance : undefined;
+          }),
+      });
+      yield* Effect.gen(function* () {
+        const now = yield* DateTime.now;
+        const eventSink = yield* EventSink.EventSinkV2;
+        const ingestor = yield* ProviderEventIngestor.ProviderEventIngestorV2;
+        const idAllocator = yield* IdAllocator.IdAllocatorV2;
+        const threadEvent = yield* threadCreatedEvent(now);
+        yield* eventSink.write({ events: [threadEvent] });
+        const input = {
+          providerSessionId: yield* idAllocator.allocate.providerSession({
+            providerInstanceId: instanceId,
+            threadId: threadEvent.threadId,
+          }),
+          providerInstanceId: instanceId,
+          threadId: threadEvent.threadId,
+        };
+        for (const failureClass of ["validation_error", "usage_limit"] as const) {
+          const stored = yield* ingestor.ingestNormalized({
+            ...input,
+            event: {
+              type: "turn.terminal",
+              driver,
+              providerThreadId: idAllocator.derive.providerThread({
+                driver,
+                nativeThreadId: "limited",
+              }),
+              providerTurnId: idAllocator.derive.providerTurn({
+                driver,
+                nativeTurnId: failureClass,
+              }),
+              runOrdinal: 1,
+              failureItemOrdinal: 1,
+              status: "failed",
+              failure: makeProviderFailure({
+                class: failureClass,
+                message: "Provider rejected turn.",
+              }),
+              threadDisposition: "reusable",
+            },
+          });
+          assert.equal(stored.length, 1);
+          if (failureClass === "validation_error") assert.deepEqual(lookups, []);
+        }
+        assert.deepEqual(lookups, [instanceId]);
+        yield* Deferred.await(refreshed);
+      }).pipe(Effect.provide(makeLayerTest(instances)));
+    }),
+  ),
+);
 
 it.effect("records accepted billed turn usage once without billing the context window", () => {
   const recorded: Array<Readonly<Record<string, unknown>>> = [];

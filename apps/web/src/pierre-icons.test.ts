@@ -86,4 +86,22 @@ describe("Pierre file icons", () => {
   ])("gives a %s fence a language icon", (language) => {
     assert.isTrue(hasSpecificPierreIconForFileName(syntheticFileNameForLanguageId(language)));
   });
+
+  it.each([
+    ["luau", "lua"],
+    ["xsd", "xml"],
+    ["xsl", "xml"],
+    ["xslt", "xml"],
+  ])("gives %s files and fences the %s icon", (dialect, base) => {
+    const baseIcon = resolvePierreIconForEntry(`file.${base}`, "file")?.name;
+    assert.equal(baseIcon, `t3-file-icon-${base}`);
+    for (const path of [`src/init.${dialect}`, `src/INIT.${dialect.toUpperCase()}`]) {
+      assert.equal(resolvePierreIconForEntry(path, "file")?.name, baseIcon);
+      assert.isTrue(hasSpecificPierreIconForFileName(path));
+    }
+    assert.equal(
+      resolvePierreIconForEntry(syntheticFileNameForLanguageId(dialect), "file")?.name,
+      baseIcon,
+    );
+  });
 });

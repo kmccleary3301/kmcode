@@ -1,4 +1,6 @@
+import { ChatAttachmentId } from "@t3tools/contracts";
 import { describe, expect, it } from "vite-plus/test";
+import { ATTACHMENT_ONLY_BOOTSTRAP_PROMPT } from "@t3tools/shared/composerContextReferences";
 import { formatThreadTitleContext, limitTitleMessage } from "./ThreadTitleContext.ts";
 
 describe("thread title context", () => {
@@ -45,6 +47,30 @@ describe("thread title context", () => {
     }
     expect(formatThreadTitleContext([])).toEqual({ message: "", attachments: [] });
   });
+
+  it.each(["", "Ultrathink:\n"])(
+    "omits bootstrap text but keeps image attachments (%j)",
+    (prefix) => {
+      const attachments = [
+        {
+          type: "image" as const,
+          id: ChatAttachmentId.make("diagram"),
+          name: "diagram.png",
+          mimeType: "image/png",
+          sizeBytes: 10,
+        },
+      ];
+      const text = prefix + ATTACHMENT_ONLY_BOOTSTRAP_PROMPT;
+      expect(formatThreadTitleContext([{ role: "user", text, attachments }])).toEqual({
+        message: "USER:\n[Attachments: diagram.png]",
+        attachments,
+      });
+      expect(formatThreadTitleContext([{ role: "user", text }])).toEqual({
+        message: "",
+        attachments: [],
+      });
+    },
+  );
 
   it("omits reasoning traces from generated titles", () => {
     expect(

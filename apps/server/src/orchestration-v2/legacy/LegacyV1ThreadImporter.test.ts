@@ -1,10 +1,11 @@
 import { assert, it } from "@effect/vitest";
-import { EventId, ThreadId } from "@t3tools/contracts";
+import { EventId, ProjectId, ProviderInstanceId, ThreadId } from "@t3tools/contracts";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Tracer from "effect/Tracer";
 import * as SqlClient from "effect/sql/SqlClient";
+import * as Statement from "effect/sql/Statement";
 
 import * as SqlitePersistence from "../../persistence/Sqlite.ts";
 import { listLinkedPullRequestThreads } from "../../pullRequest/linkedThreads.ts";
@@ -34,6 +35,69 @@ const layerTest = Layer.mergeAll(
   layerEventSinkProvided,
   layerImporterProvided,
   layerProjectionMaintenanceProvided,
+);
+
+it.effect("caches the absent legacy transcript for a native V2 thread", () =>
+  Effect.gen(function* () {
+    const importer = yield* LegacyV1ThreadImporter.LegacyV1ThreadImporter;
+    const eventSink = yield* EventSink.EventSinkV2;
+    const projections = yield* ProjectionStore.ProjectionStoreV2;
+    const threadId = ThreadId.make("thread:v2-born");
+    const providerInstanceId = ProviderInstanceId.make("codex");
+    const now = DateTime.makeUnsafe("2026-01-01T00:00:00.000Z");
+    yield* eventSink.write({
+      events: [
+        {
+          id: EventId.make("event:v2-born"),
+          type: "thread.created",
+          threadId,
+          occurredAt: now,
+          payload: {
+            id: threadId,
+            projectId: ProjectId.make("project:v2-born"),
+            title: "Native V2 thread",
+            providerInstanceId,
+            modelSelection: { instanceId: providerInstanceId, model: "gpt-6" },
+            createdBy: "user",
+            creationSource: "web",
+            runtimeMode: "full-access",
+            interactionMode: "default",
+            branch: null,
+            worktreePath: null,
+            activeProviderThreadId: null,
+            lineage: { parentThreadId: null, relationshipToParent: null, rootThreadId: threadId },
+            forkedFrom: null,
+            createdAt: now,
+            updatedAt: now,
+            archivedAt: null,
+            settledOverride: null,
+            settledAt: null,
+            lastVisitedAt: null,
+            deletedAt: null,
+          },
+        },
+      ],
+    });
+    const before = yield* projections.getThreadProjection(threadId);
+    let legacyLookups = 0;
+    for (let read = 0; read < 3; read++) {
+      const summary = yield* importer.ensureTranscript(threadId).pipe(
+        Effect.provideService(Statement.CurrentTransformer, (statement) => {
+          const [query, parameters] = statement.compile();
+          if (
+            query.includes("FROM orchestration_v2_legacy_imports") &&
+            parameters[0] === threadId
+          ) {
+            legacyLookups++;
+          }
+          return Effect.succeed(statement);
+        }),
+      );
+      assert.deepEqual(summary, { importedThreadCount: 0, importedMessageCount: 0 });
+    }
+    assert.equal(legacyLookups, 1);
+    assert.deepEqual(yield* projections.getThreadProjection(threadId), before);
+  }).pipe(Effect.provide(layerTest)),
 );
 
 it.layer(layerTest)("LegacyV1ThreadImporter", (it) => {

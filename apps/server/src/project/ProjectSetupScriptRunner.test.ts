@@ -33,6 +33,8 @@ it.effect("resolves setup scripts through the standalone project service", () =>
   const closeIdle = vi.fn(
     (_input: Parameters<TerminalManager.TerminalManager["Service"]["closeIdle"]>[0]) => Effect.void,
   );
+  const getShell: TerminalManager.TerminalManager["Service"]["getShell"] = () =>
+    Effect.succeed("/bin/bash");
   const listeners: Array<Parameters<TerminalManager.TerminalManager["Service"]["subscribe"]>[0]> =
     [];
   const subscribe: TerminalManager.TerminalManager["Service"]["subscribe"] = (listener) =>
@@ -75,7 +77,13 @@ it.effect("resolves setup scripts through the standalone project service", () =>
         Layer.mock(ProjectService.ProjectService)({
           getById: () => Effect.succeed(Option.some(project)),
         }),
-        Layer.mock(TerminalManager.TerminalManager)({ open, write, subscribe, closeIdle }),
+        Layer.mock(TerminalManager.TerminalManager)({
+          open,
+          getShell,
+          write,
+          subscribe,
+          closeIdle,
+        }),
         ServerSettings.layerTest(),
         NodeCrypto.layer,
       ),
@@ -120,6 +128,8 @@ it.effect("resolves setup scripts through the standalone project service", () =>
       },
     });
     assert.equal(observed.status, "started");
+    // Completion uses the shell actually selected by TerminalManager.
+    assert.match(write.mock.calls[1]?.[0].data ?? "", /^\( vp install\r\); printf/);
     const listener = listeners[0]!;
     yield* listener({
       type: "output",

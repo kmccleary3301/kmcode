@@ -2,6 +2,7 @@ import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Schema from "effect/Schema";
 import * as Result from "effect/Result";
+import * as NodeOS from "node:os";
 import { SourceControlProviderError } from "@t3tools/contracts";
 import * as VcsProcess from "../vcs/VcsProcess.ts";
 import * as ForgejoCli from "./ForgejoCli.ts";
@@ -86,7 +87,8 @@ export const makeDiscovery = Effect.gen(function* () {
         logins.find((entry) => entry.default === "true") ||
         logins[0];
       const fj = yield* probeSourceControlProvider({
-        cwd,
+        // fj reads the cwd repository even with --host and fails on an unborn branch.
+        cwd: NodeOS.homedir(),
         process,
         spec: {
           ...discovery,

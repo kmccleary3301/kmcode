@@ -4,6 +4,7 @@ import {
   isLoopbackHost,
   newPreviewTabId,
   normalizePreviewUrl,
+  previewUrlWithoutCredentials,
   PreviewUrlNormalizationError,
 } from "./preview.ts";
 
@@ -53,16 +54,19 @@ describe("normalizePreviewUrl", () => {
     }
   });
 
-  it("rejects unsupported protocols", () => {
+  it.each([
+    ["ftp://example.com", "ftp:"],
+    ["mailto:alice@example.com", "mailto:"],
+  ])("rejects unsupported protocol %s", (url, protocol) => {
     try {
-      normalizePreviewUrl("ftp://example.com");
+      normalizePreviewUrl(url);
       expect.unreachable("expected URL normalization to fail");
     } catch (error) {
       expect(error).toBeInstanceOf(PreviewUrlNormalizationError);
       expect(error).toMatchObject({
-        inputLength: "ftp://example.com".length,
+        inputLength: url.length,
         reason: "unsupported-protocol",
-        protocol: "ftp:",
+        protocol,
       });
     }
   });
@@ -88,5 +92,17 @@ describe("normalizePreviewUrl", () => {
         /user|password|access_token|secret|fragment/,
       );
     }
+  });
+});
+
+describe("previewUrlWithoutCredentials", () => {
+  it("strips userinfo while preserving a loopback port, path, query, and hash", () => {
+    expect(
+      previewUrlWithoutCredentials("http://user:secret@localhost:3773/__preview/path?tab=1#/route"),
+    ).toBe("http://localhost:3773/__preview/path?tab=1#/route");
+  });
+
+  it("does not return an unparseable URL that could contain credentials", () => {
+    expect(previewUrlWithoutCredentials("http://user:secret@localhost:bad/path")).toBe("");
   });
 });

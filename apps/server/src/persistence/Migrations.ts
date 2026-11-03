@@ -76,6 +76,10 @@ import Migration0058 from "./Migrations/058_WebhookRelayDeliveries.ts";
 import Migration0059 from "./Migrations/059_McpAppModelContext.ts";
 import Migration0060 from "./Migrations/060_PackContextHandoffDeliveryIds.ts";
 import Migration0061 from "./Migrations/061_TurnItemPositionRunIds.ts";
+import Migration0062 from "./Migrations/062_ActiveTurnItemIndexes.ts";
+import Migration0063 from "./Migrations/063_SubagentDeliveryState.ts";
+import Migration0064 from "./Migrations/064_ThreadMessageSearch.ts";
+import Migration0065 from "./Migrations/065_ExcludeAttachmentPlaceholdersFromSearch.ts";
 
 /**
  * Migration loader with all migrations defined inline.
@@ -151,6 +155,10 @@ export const migrationEntries = [
   [59, "McpAppModelContext", Migration0059],
   [60, "PackContextHandoffDeliveryIds", Migration0060],
   [61, "TurnItemPositionRunIds", Migration0061],
+  [62, "ActiveTurnItemIndexes", Migration0062],
+  [63, "SubagentDeliveryState", Migration0063],
+  [64, "ThreadMessageSearch", Migration0064],
+  [65, "ExcludeAttachmentPlaceholdersFromSearch", Migration0065],
 ] as const;
 
 export const migrationManifest = migrationEntries.map(([id, name]) => [id, name] as const);

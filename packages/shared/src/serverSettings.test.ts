@@ -1,5 +1,7 @@
 import {
   DEFAULT_SERVER_SETTINGS,
+  ServerSettings,
+  ServerSettingsPatch,
   ProjectId,
   ProviderDriverKind,
   ProviderInstanceId,
@@ -7,6 +9,7 @@ import {
   type ServerProvider,
 } from "@t3tools/contracts";
 import * as Duration from "effect/Duration";
+import * as Schema from "effect/Schema";
 import { describe, expect, it } from "vite-plus/test";
 import { resolveServerBackgroundActivitySettings } from "./backgroundActivitySettings.ts";
 import { createModelSelection } from "./model.ts";
@@ -19,6 +22,9 @@ import {
   resolveProjectAgentBrowserAccess,
   resolveProjectAutoPull,
 } from "./serverSettings.ts";
+
+const decodeServerSettings = Schema.decodeUnknownSync(ServerSettings);
+const decodeServerSettingsPatch = Schema.decodeUnknownSync(ServerSettingsPatch);
 
 /** Settings after the server has folded legacy per-project fields into `projectSettingsOverrides`. */
 const FOLDED_SERVER_SETTINGS = { ...DEFAULT_SERVER_SETTINGS, projectSettingsFolded: true };
@@ -41,6 +47,36 @@ describe("serverSettings helpers", () => {
       logsAfterDays: 30,
     });
   });
+  it("retains stored unknown overrides but rejects new unknown patch keys", () => {
+    const projectId = ProjectId.make("project-a");
+    const current = decodeServerSettings({
+      projectSettingsFolded: true,
+      projectSettingsOverrides: {
+        [projectId]: { defaultAutoPull: true, addedByNewerServer: 3 },
+      },
+    });
+    const patch = decodeServerSettingsPatch({
+      projectSettingsOverrides: {
+        [projectId]: { defaultAutoPull: false, addedByNewerServer: 4, addedByNewerClient: "x" },
+      },
+    });
+
+    const updated = applyServerSettingsPatch(current, patch);
+    expect(updated.projectSettingsOverrides[projectId]).toEqual({
+      defaultAutoPull: false,
+      addedByNewerServer: 3,
+    });
+    const reset = applyServerSettingsPatch(updated, {
+      projectSettingsOverrides: { [projectId]: {} },
+    });
+    expect(reset.projectSettingsOverrides[projectId]).toEqual({ addedByNewerServer: 3 });
+    expect(
+      applyServerSettingsPatch(reset, {
+        projectSettingsOverrides: { [projectId]: null },
+      }).projectSettingsOverrides[projectId],
+    ).toBeUndefined();
+  });
+
   it("replaces GitHub host choices so a cleared account pin does not survive", () => {
     const pinned = applyServerSettingsPatch(DEFAULT_SERVER_SETTINGS, {
       github: { hosts: { "github.com": { account: "work", enabled: true } } },
@@ -436,7 +472,7 @@ describe("serverSettings helpers", () => {
     expect(isModelSelectionProviderEnabled(settings, sourceControlWriterModelSelection)).toBe(
       false,
     );
-    expect(resolveSourceControlWriterModelSelection(settings)).toBe(
+    expect(resolveSourceControlWriterModelSelection(settings, undefined, null)).toBe(
       settings.textGenerationModelSelection,
     );
     expect(settings.sourceControlWriterModelSelection).toBe(sourceControlWriterModelSelection);
@@ -471,7 +507,7 @@ describe("serverSettings helpers", () => {
       skills: [],
     } satisfies ServerProvider;
 
-    expect(resolveSourceControlWriterModelSelection(settings, [unavailableProvider])).toBe(
+    expect(resolveSourceControlWriterModelSelection(settings, [unavailableProvider], null)).toBe(
       settings.textGenerationModelSelection,
     );
     expect(settings.sourceControlWriterModelSelection).toBe(sourceControlWriterModelSelection);
@@ -506,10 +542,82 @@ describe("serverSettings helpers", () => {
       skills: [],
     } satisfies ServerProvider;
 
-    expect(resolveSourceControlWriterModelSelection(settings, [incapableProvider])).toBe(
+    expect(resolveSourceControlWriterModelSelection(settings, [incapableProvider], null)).toBe(
       settings.textGenerationModelSelection,
     );
     expect(settings.sourceControlWriterModelSelection).toBe(sourceControlWriterModelSelection);
+  });
+
+  it("falls back from a writer provider this project turned off", () => {
+    const instanceId = ProviderInstanceId.make("codex_writer");
+    const projectId = ProjectId.make("project-a");
+    const sourceControlWriterModelSelection = createModelSelection(instanceId, "gpt-5.4-mini");
+    const settings = {
+      ...DEFAULT_SERVER_SETTINGS,
+      providerInstances: {
+        [instanceId]: { driver: ProviderDriverKind.make("codex"), enabled: true, config: {} },
+      },
+      projectSettingsOverrides: {
+        [projectId]: { providerInstances: { [instanceId]: { enabled: false } } },
+      },
+      sourceControlWriterModelSelection,
+    };
+    const provider = {
+      instanceId,
+      driver: ProviderDriverKind.make("codex"),
+      enabled: true,
+      installed: true,
+      version: null,
+      status: "ready",
+      auth: { status: "authenticated" },
+      checkedAt: "2026-07-27T00:00:00.000Z",
+      models: [],
+      slashCommands: [],
+      skills: [],
+    } satisfies ServerProvider;
+
+    expect(resolveSourceControlWriterModelSelection(settings, [provider], projectId)).toBe(
+      settings.textGenerationModelSelection,
+    );
+    expect(resolveSourceControlWriterModelSelection(settings, [provider], null)).toBe(
+      sourceControlWriterModelSelection,
+    );
+  });
+
+  it("keeps a writer on an instance the project turned on while the machine has it off", () => {
+    const instanceId = ProviderInstanceId.make("codex_writer");
+    const projectId = ProjectId.make("project-a");
+    const sourceControlWriterModelSelection = createModelSelection(instanceId, "gpt-5.4-mini");
+    const settings = {
+      ...DEFAULT_SERVER_SETTINGS,
+      providerInstances: {
+        [instanceId]: { driver: ProviderDriverKind.make("codex"), enabled: false, config: {} },
+      },
+      projectSettingsOverrides: {
+        [projectId]: { providerInstances: { [instanceId]: { enabled: true } } },
+      },
+      sourceControlWriterModelSelection,
+    };
+    const provider = {
+      instanceId,
+      driver: ProviderDriverKind.make("codex"),
+      enabled: true,
+      installed: true,
+      version: null,
+      status: "ready",
+      auth: { status: "authenticated" },
+      checkedAt: "2026-07-27T00:00:00.000Z",
+      models: [],
+      slashCommands: [],
+      skills: [],
+    } satisfies ServerProvider;
+
+    expect(resolveSourceControlWriterModelSelection(settings, [provider], projectId)).toBe(
+      sourceControlWriterModelSelection,
+    );
+    expect(resolveSourceControlWriterModelSelection(settings, [provider], null)).toBe(
+      settings.textGenerationModelSelection,
+    );
   });
 
   it("replaces providerInstances maps so omitted instance fields are cleared", () => {

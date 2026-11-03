@@ -66,6 +66,7 @@ export function ComposerUsageLimits({
               detail={account.plan}
               limits={account.limits}
               now={now}
+              accentColor={account.accentColor}
               trailing={index === 0 ? close : undefined}
               footer={
                 resetCreditInput && account.limits.resetCredits ? (

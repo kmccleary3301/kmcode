@@ -359,9 +359,9 @@ function ProjectDetail({
               : [`This removes ${members.length} grouped project entries.`]),
             ...(projectThreads.length > 0
               ? [
-                  "This permanently clears conversation history for those threads and any archived threads.",
+                  "Those threads and any archived threads are deleted from KM Code. Provider sessions are kept.",
                 ]
-              : ["This permanently clears any archived conversation history."]),
+              : ["Any archived threads are deleted from KM Code. Provider sessions are kept."]),
             isWholeGroup && !hasOtherMembers
               ? "This removes only the project entries, not the files on disk."
               : "Other entries in this grouped project are unaffected.",

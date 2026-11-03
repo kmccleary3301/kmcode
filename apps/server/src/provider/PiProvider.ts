@@ -18,13 +18,16 @@ import { causeErrorTag } from "@t3tools/shared/observability";
 import { resolveSpawnCommand } from "@t3tools/shared/shell";
 import { compareSemverVersions } from "@t3tools/shared/semver";
 import * as DateTime from "effect/DateTime";
+import * as FileSystem from "effect/FileSystem";
 import * as Effect from "effect/Effect";
 import * as Stream from "effect/Stream";
 import * as Exit from "effect/Exit";
 import * as Option from "effect/Option";
 import * as Result from "effect/Result";
-import { HttpClient } from "effect/http";
+import * as Schema from "effect/Schema";
 import { ChildProcess, ChildProcessSpawner } from "effect/process";
+import * as Path from "effect/Path";
+import { HttpClient } from "effect/http";
 
 import {
   buildPiRpcLaunch,
@@ -72,6 +75,7 @@ const PI_RPC_DISCOVERY_TIMEOUT_MS = 15_000;
 interface PiDiscovery extends PiDiscoveredCommands {
   readonly models: ReadonlyArray<ServerProviderModel>;
   readonly authenticated: boolean;
+  readonly unavailableActiveModel: { readonly provider: string; readonly id: string } | undefined;
 }
 
 function piModelsFromSettings(
@@ -163,11 +167,21 @@ const discoverPiViaRpc = (
       dialect.binary,
     );
     const { slashCommands, skills } = parsePiDiscoveredCommands(commandsData);
+    const activeModel = recordField(stateData, "model");
+    const activeProvider = recordString(activeModel, "provider");
+    const activeModelId = recordString(activeModel, "id");
+    const unavailableActiveModel =
+      activeProvider !== undefined &&
+      activeModelId !== undefined &&
+      !discoveredModels.some((model) => model.subProvider === activeProvider)
+        ? { provider: activeProvider, id: activeModelId }
+        : undefined;
     return {
       models: discoveredModels,
       slashCommands: withPiBuiltinSlashCommands(slashCommands),
       skills,
       authenticated: discoveredModels.length > 0,
+      unavailableActiveModel,
     } satisfies PiDiscovery;
   }).pipe(Effect.scoped);
 
@@ -189,6 +203,57 @@ const runPiVersionCommand = (
       }),
     );
   });
+
+const PI_AUTH_CHECK_VERSION = "0.84.1";
+const decodePiAuthCheck = Schema.decodeUnknownOption(
+  Schema.fromJsonString(Schema.Struct({ reason: Schema.optional(Schema.String) })),
+);
+
+const describeUnavailablePiModel = Effect.fn("PiProviderStatus.describeUnavailablePiModel")(
+  function* (
+    dialect: PiDialect,
+    piSettings: PiSettings,
+    environment: NodeJS.ProcessEnv,
+    version: string,
+    launchArgs: ReadonlyArray<string>,
+    model: { readonly provider: string; readonly id: string },
+  ) {
+    const label = `${dialect.displayName} default (${model.provider}/${model.id})`;
+    const unavailable = `${label} uses ${model.provider}, which has no available models in ${dialect.displayName}. Choose another model, or check that provider's setup and the ${dialect.displayName} launch arguments.`;
+    if (
+      dialect.binary !== "pi" ||
+      compareSemverVersions(version, PI_AUTH_CHECK_VERSION) < 0 ||
+      launchArgs.includes("--api-key")
+    ) {
+      return unavailable;
+    }
+    const command = piSettings.binaryPath || dialect.binary;
+    const output = yield* resolveSpawnCommand(
+      command,
+      ["auth", "check", "--provider", model.provider, "--json", "--no-refresh"],
+      { env: environment },
+    ).pipe(
+      Effect.flatMap((spawnCommand) =>
+        spawnAndCollect(
+          command,
+          ChildProcess.make(spawnCommand.command, spawnCommand.args, {
+            env: environment,
+            shell: spawnCommand.shell,
+          }),
+        ),
+      ),
+      Effect.timeout(VERSION_PROBE_TIMEOUT_MS),
+      Effect.option,
+    );
+    const missingCredentials = Option.exists(
+      Option.flatMap(output, (result) => decodePiAuthCheck(result.stdout)),
+      (check) => check.reason === "credentials_not_configured",
+    );
+    return missingCredentials
+      ? `${label} has no credentials configured for ${model.provider}. Choose another model, or run \`pi\` in a terminal and use /login or configure its API key.`
+      : unavailable;
+  },
+);
 
 export function buildInitialPiProviderSnapshot(
   dialect: PiDialect,
@@ -407,6 +472,18 @@ export const checkPiProviderStatus = Effect.fn("checkPiProviderStatus")(function
 
   const discovery = discoveryExit.value.value;
   const models = piModelsFromSettings(dialect, piSettings.customModels, discovery.models);
+  const message = !discovery.authenticated
+    ? `${name} has no usable models. Run \`${binary}\` in a terminal and use /login, or configure an API key in ${dialect.agentDir}.`
+    : discovery.unavailableActiveModel === undefined
+      ? undefined
+      : yield* describeUnavailablePiModel(
+          dialect,
+          piSettings,
+          environment,
+          version,
+          resolvedLaunchArgs.args,
+          discovery.unavailableActiveModel,
+        );
   return buildServerProvider({
     presentation,
     enabled: piSettings.enabled,
@@ -417,13 +494,10 @@ export const checkPiProviderStatus = Effect.fn("checkPiProviderStatus")(function
     probe: {
       installed: true,
       version,
+      // Other Pi models still work when only the default is unavailable.
       status: discovery.authenticated ? "ready" : "warning",
       auth: { status: discovery.authenticated ? "authenticated" : "unauthenticated", type: "pi" },
-      ...(discovery.authenticated
-        ? {}
-        : {
-            message: `${name} has no usable models. Run \`${binary}\` in a terminal and use /login, or configure an API key in ${dialect.agentDir}.`,
-          }),
+      ...(message === undefined ? {} : { message }),
     },
   });
 });
@@ -434,12 +508,18 @@ export const enrichPiSnapshot = (input: {
   readonly enableProviderUpdateChecks?: boolean;
   readonly publishSnapshot: (snapshot: ServerProvider) => Effect.Effect<void>;
   readonly httpClient: HttpClient.HttpClient;
+  readonly spawner: ChildProcessSpawner.ChildProcessSpawner["Service"];
+  readonly fileSystem: FileSystem.FileSystem;
+  readonly path: Path.Path;
 }): Effect.Effect<void> => {
   const { snapshot, publishSnapshot } = input;
   return enrichProviderSnapshotWithVersionAdvisory(snapshot, input.maintenanceCapabilities, {
     enableProviderUpdateChecks: input.enableProviderUpdateChecks,
   }).pipe(
     Effect.provideService(HttpClient.HttpClient, input.httpClient),
+    Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, input.spawner),
+    Effect.provideService(FileSystem.FileSystem, input.fileSystem),
+    Effect.provideService(Path.Path, input.path),
     Effect.flatMap((enrichedSnapshot) => publishSnapshot(enrichedSnapshot)),
     Effect.catchCause((cause) =>
       Effect.logWarning("Pi version advisory enrichment failed", {

@@ -23,13 +23,13 @@ import { cn } from "~/lib/utils";
  * span with tabIndex for a tooltip) gets the focus outline.
  */
 const contextChipVariants = cva(
-  "inline-flex h-[1.41em] max-w-full items-center gap-[0.33em] rounded-[0.5em] border px-[0.5em] align-middle font-medium text-[0.86em] leading-none [&_svg]:block [&_svg]:size-[1.17em] [&_svg]:shrink-0 [&_svg]:self-center [button&,a&,[data-popup-open]&]:cursor-pointer [button&,a&]:transition-colors [button&,a&]:motion-reduce:transition-none focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-foreground disabled:cursor-default",
+  "group inline-flex h-[1.41em] max-w-full items-center gap-[0.33em] rounded-[0.5em] border px-[0.5em] align-middle font-medium text-[0.86em] leading-none [&_svg]:block [&_svg]:size-[1.17em] [&_svg]:shrink-0 [&_svg]:self-center [button&,a&,[data-popup-open]&]:cursor-pointer [button&,a&]:transition-colors [button&,a&]:motion-reduce:transition-none focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-foreground disabled:cursor-default",
   {
     defaultVariants: { kind: "neutral" },
     variants: {
       kind: {
         neutral: "border-border/70 bg-accent/40 text-foreground",
-        image: "[--context-chip-accent:oklch(0.62_0.16_16)]",
+        image: "[--context-chip-accent:var(--primary)]",
         video: "[--context-chip-accent:oklch(0.62_0.16_48)]",
         file: "[--context-chip-accent:oklch(0.62_0.136_237)]",
         mention: "[--context-chip-accent:oklch(0.62_0.11_215)]",
@@ -55,7 +55,6 @@ const contextChipVariants = cva(
     compoundVariants: [
       {
         kind: [
-          "image",
           "video",
           "file",
           "mention",
@@ -74,6 +73,11 @@ const contextChipVariants = cva(
         ],
         className:
           "[--context-chip-border:color-mix(in_oklab,var(--context-chip-accent)_34%,var(--contrast-border))] [--context-chip-border-hover:color-mix(in_oklab,var(--context-chip-accent)_48%,var(--contrast-border))] [--context-chip-foreground:color-mix(in_oklab,var(--context-chip-accent)_22%,var(--contrast-foreground))] border-(--context-chip-border) bg-(--context-chip-accent)/11 text-(--context-chip-foreground) [button:enabled&,a&]:hover:border-(--context-chip-border-hover) [button:enabled&,a&]:hover:bg-(--context-chip-accent)/17",
+      },
+      {
+        kind: "image",
+        className:
+          "[--context-chip-foreground:color-mix(in_oklab,var(--context-chip-accent)_22%,var(--contrast-foreground))] border-transparent bg-(--context-chip-accent)/11 text-(--context-chip-foreground) [button:enabled&,a&]:hover:bg-primary/17 [button:enabled&,a&]:hover:text-primary [button:enabled&,a&]:active:bg-primary/22 [button:enabled&,a&]:active:text-primary",
       },
       // State colors win over any kind.
       { state: "unresolved", className: "text-foreground" },

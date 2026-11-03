@@ -24,8 +24,8 @@ setting you are editing, the layers icon counts them and the chain lists each on
 click a project to jump to it, or **Reset all** to make those projects follow the environment
 again.
 
-Providers and diagnostics are per machine: they show one environment at a time, the primary
-one until you pick another. Every other setting fans out to the selection.
+Provider registrations, credentials and diagnostics are per machine, so Provider settings shows one environment at a time, the primary
+one until you pick another. A project can override whether a configured provider is enabled; reset its override to inherit the environment's value.
 
 On mobile, open **Settings** and use the filter in its header to choose connected environments
 and a project. The filter stays available in server-setting pages. With **All projects** selected,

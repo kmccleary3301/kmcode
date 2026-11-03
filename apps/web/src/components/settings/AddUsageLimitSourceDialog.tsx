@@ -1,4 +1,4 @@
-import { type EnvironmentId, UsageLimitSourceId } from "@t3tools/contracts";
+import { type EnvironmentId, type UnifiedSettings, UsageLimitSourceId } from "@t3tools/contracts";
 import { useState } from "react";
 
 import { useUpdateEnvironmentSettings } from "../../hooks/useSettings";
@@ -20,7 +20,12 @@ import { Label } from "../ui/label";
  * are kept so `foo-bar.com` and `foo.bar.com` do not collide; anything else
  * (a port's colon, a path) is folded to a dash.
  */
-function sourceIdFromUrl(url: string): UsageLimitSourceId {
+function sourceIdFromUrl(
+  url: string,
+  sources: UnifiedSettings["usageLimitSources"],
+): UsageLimitSourceId {
+  const saved = Object.entries(sources).find(([, source]) => source.url === url);
+  if (saved) return UsageLimitSourceId.make(saved[0]);
   let host = url;
   try {
     host = new URL(url).host;
@@ -31,7 +36,13 @@ function sourceIdFromUrl(url: string): UsageLimitSourceId {
     .toLowerCase()
     .replace(/[^a-z0-9.-]+/g, "-")
     .replace(/^-+|-+$/g, "");
-  return UsageLimitSourceId.make(`cliproxy-${slug || "hub"}`);
+  // Settings merge by ID, so adding a different hub must not replace an existing entry.
+  const base = `cliproxy-${slug || "hub"}`;
+  let id = base;
+  for (let suffix = 2; Object.hasOwn(sources, id); suffix += 1) {
+    id = `${base}-${suffix}`;
+  }
+  return UsageLimitSourceId.make(id);
 }
 
 /**
@@ -44,11 +55,13 @@ export function AddUsageLimitSourceDialog({
   onOpenChange,
   environmentId,
   environmentLabel,
+  sources,
 }: {
   readonly open: boolean;
   readonly onOpenChange: (open: boolean) => void;
   readonly environmentId: EnvironmentId;
   readonly environmentLabel: string;
+  readonly sources: UnifiedSettings["usageLimitSources"];
 }) {
   const updateSettings = useUpdateEnvironmentSettings(environmentId);
   const [label, setLabel] = useState("");
@@ -65,7 +78,7 @@ export function AddUsageLimitSourceDialog({
 
   const save = () => {
     if (!canSave) return;
-    const id = sourceIdFromUrl(trimmedUrl);
+    const id = sourceIdFromUrl(trimmedUrl, sources);
     // The patch names only this entry; the server merges it into its map.
     updateSettings({
       usageLimitSources: {

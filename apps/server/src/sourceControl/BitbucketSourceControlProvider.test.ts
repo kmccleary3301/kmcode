@@ -8,7 +8,12 @@ import * as BitbucketSourceControlProvider from "./BitbucketSourceControlProvide
 
 function makeProvider(bitbucket: Partial<BitbucketApi.BitbucketApi["Service"]>) {
   return BitbucketSourceControlProvider.make.pipe(
-    Effect.provide(Layer.mock(BitbucketApi.BitbucketApi)(bitbucket)),
+    Effect.provide(
+      Layer.mock(BitbucketApi.BitbucketApi)({
+        ...bitbucket,
+        servesHost: bitbucket.servesHost ?? ((host) => host === "bitbucket.org"),
+      }),
+    ),
   );
 }
 

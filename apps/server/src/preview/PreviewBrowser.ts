@@ -339,13 +339,14 @@ export const makePreviewBrowser = Effect.fn("PreviewBrowser.make")(function* (
         yield* fs.remove(destination, { recursive: true, force: true });
         yield* fs.rename(unpacked, destination);
       }).pipe(Effect.scoped);
-      // Older builds and abandoned staging directories. Two servers can share a
-      // home, so a staging directory touched within the last hour may be another
-      // server's install in progress and stays.
+      // Shared homes may still use the newest other version or staging directories touched within the last hour.
       const entries = yield* fs.readDirectory(installRoot);
+      const previous = entries
+        .filter((name) => name !== release.version && !name.startsWith("."))
+        .toSorted((left, right) => right.localeCompare(left, "en", { numeric: true }))[0];
       const now = yield* Clock.currentTimeMillis;
       yield* Effect.forEach(
-        entries.filter((name) => name !== release.version),
+        entries.filter((name) => name !== release.version && name !== previous),
         (name) =>
           Effect.gen(function* () {
             const target = path.join(installRoot, name);

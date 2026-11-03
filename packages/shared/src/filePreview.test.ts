@@ -9,6 +9,7 @@ import {
   isWorkspaceBrowserPreviewPath,
   isWorkspaceImagePreviewPath,
   isWorkspacePreviewEntryPath,
+  isWorkspaceTextPreviewPath,
   isWorkspaceVideoPreviewPath,
   mediaKindFromPath,
 } from "./filePreview.ts";
@@ -35,11 +36,18 @@ describe("workspace file previews", () => {
     expect(isWorkspaceImagePreviewPath(path)).toBe(true);
     expect(isWorkspacePreviewEntryPath(path)).toBe(true);
   });
+  it.each(["README.md", "src/index.ts", "data.csv"])(
+    "recognizes source preview path %s",
+    (path) => {
+      expect(isWorkspaceTextPreviewPath(path)).toBe(true);
+      expect(isWorkspacePreviewEntryPath(path)).toBe(true);
+    },
+  );
 
   it.each([
-    "README.md",
-    "src/index.ts",
-    "image.png.ts",
+    "archive.tar",
+    "image.bin",
+    "document.exe",
     "png",
     "image.png#notes.txt",
     "image.svg?notes.txt",
@@ -89,6 +97,8 @@ describe("attachment preview classification", () => {
     ["example.json", "application/octet-stream", "text"],
     ["README.md", "text/plain", "markdown"],
     ["component.tsx", "", "text"],
+    ["component.ts", "video/mp2t", "text"],
+    ["component.ts", "video/vnd.dlna.mpeg-tts", "text"],
     ["report.pdf", "application/pdf", "pdf"],
     ["page.HTML", "", "html"],
     ["recording.mp3", "", "audio"],

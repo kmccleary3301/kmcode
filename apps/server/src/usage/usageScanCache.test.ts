@@ -106,6 +106,50 @@ describe("scan cache round trip", () => {
     expect(restored.get("/codex.jsonl")).toEqual(original.get("/codex.jsonl"));
   });
 
+  it("rescans Claude entries from a v5 cache for advisor usage", () => {
+    const original = cacheWith([["/claude.jsonl", 100, [record()]]]);
+    const v5 = { ...encodeScanCache(original), version: 5 };
+
+    const restored = decodeScanCache(JSON.parse(JSON.stringify(v5)));
+    const cached = original.get("/claude.jsonl");
+    expect(restored.get("/claude.jsonl")).toEqual({
+      ...cached,
+      size: -1,
+      position: { resumeOffset: 0, guardLength: 0, guardHash: 0, codexState: null },
+    });
+  });
+
+  it("restores a Codex sequence-start signature", () => {
+    const cache: ScanCache = new Map([
+      [
+        "/codex.jsonl",
+        {
+          size: 80,
+          mtimeMs: 400,
+          provider: "codex",
+          records: [],
+          tailRecords: [],
+          position: position({
+            codexState: {
+              model: "gpt-6-astra",
+              speed: "standard",
+              sessionId: "session-c",
+              lastUsageSignature: '{"input_tokens":1}',
+              sequenceStartSignature: '[1785561469919,"{\\"input_tokens\\":1}"]',
+              sawSessionMeta: true,
+              suppressingForkCopies: false,
+              forkCopyAnchorMs: 0,
+            },
+          }),
+        },
+      ],
+    ]);
+
+    const restored = decodeScanCache(JSON.parse(JSON.stringify(encodeScanCache(cache))));
+
+    expect(restored.get("/codex.jsonl")).toEqual(cache.get("/codex.jsonl"));
+  });
+
   it("drops an entry whose persisted parse state is corrupt", () => {
     // Resuming with a bad reducer state would attach appended usage to the
     // wrong model or replay fork-copied history; that entry must cold parse.

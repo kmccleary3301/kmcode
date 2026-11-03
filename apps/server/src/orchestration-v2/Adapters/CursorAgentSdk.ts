@@ -37,6 +37,20 @@ export class CursorAgentSdkRunnerError extends Schema.TaggedError<CursorAgentSdk
 
 const isCursorAgentSdkRunnerError = Schema.is(CursorAgentSdkRunnerError);
 
+const CURSOR_USAGE_LIMIT_CODE =
+  /^(?:resource_exhausted|rate_limited(?:_changeable)?|\w*_usage_limit|\w*_rate_limit(?:_exceeded)?)$/i;
+
+export function isCursorUsageLimitError(cause: unknown): boolean {
+  const error = isCursorAgentSdkRunnerError(cause) ? cause.cause : cause;
+  if (typeof error !== "object" || error === null) return false;
+  const code = Reflect.get(error, "code");
+  return (
+    Reflect.get(error, "name") === "RateLimitError" ||
+    Reflect.get(error, "status") === 429 ||
+    (typeof code === "string" && CURSOR_USAGE_LIMIT_CODE.test(code))
+  );
+}
+
 export interface CursorAgentSdkOpenInput {
   readonly operation: "create" | "resume";
   readonly agentId?: string;

@@ -195,6 +195,7 @@ import {
   isTrailingDoubleClick,
   orderItemsByPreferredIds,
   planSidebarThreadDrop,
+  resolveSidebarReorderableThreadKeys,
   reduceSidebarProjectScopeMenuState,
   resolveAdjacentThreadId,
   resolveSidebarSweepKeys,
@@ -362,8 +363,7 @@ function JumpHintBadge(props: { label: string }) {
 // Self-ticking so only this span re-renders each second, not the whole row.
 function WorkingDuration(props: { startedAt: string | null; workCompletedAt?: string | null }) {
   const startedMs = props.startedAt !== null ? Date.parse(props.startedAt) : Number.NaN;
-  const endMs =
-    props.workCompletedAt != null ? Date.parse(props.workCompletedAt) : Date.now();
+  const endMs = props.workCompletedAt != null ? Date.parse(props.workCompletedAt) : Date.now();
   const [, setTick] = useState(0);
   useEffect(() => {
     if (!Number.isFinite(startedMs) || props.workCompletedAt != null) return;
@@ -693,13 +693,20 @@ function SortableSidebarMarker(props: {
   marker: SidebarListMarker;
   className?: string;
   children?: ReactNode;
+  revealOverflow?: boolean;
   "data-testid"?: string;
 }) {
-  const { setNodeRef, transform, transition } = useSortable({
+  const { node, setNodeRef, transform, transition } = useSortable({
     id: sidebarMarkerId(props.marker),
     disabled: { draggable: true },
     animateLayoutChanges: animateSidebarLayoutChanges,
   });
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- keep the projected drop hint in the scroll viewport
+  useLayoutEffect(() => {
+    if (props.revealOverflow && transform?.y !== undefined) {
+      node.current?.firstElementChild?.scrollIntoView({ block: "nearest", inline: "nearest" });
+    }
+  }, [node, props.revealOverflow, transform?.y]);
   return (
     <li
       ref={setNodeRef}
@@ -731,6 +738,7 @@ function SidebarSectionPlaceholder(props: {
       marker={props.marker}
       data-testid={`sidebar-${props.marker}`}
       className="relative mx-0.5 -mb-px h-0"
+      revealOverflow={props.marker === "settled-placeholder" && props.showHint}
     >
       {props.showHint ? (
         <div
@@ -1983,6 +1991,13 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
   }
 
   const diff = latestRunDiff(thread);
+  const remoteMachineIcon = isRemote ? (
+    <span className="inline-flex shrink-0 items-center text-sidebar-muted-foreground/70">
+      <EnvironmentMachineIcon aria-hidden kind={props.environmentMachine} className="size-3.5" />
+    </span>
+  ) : null;
+  const metaLineEmpty =
+    !thread.branch && terminalStatusIcon === null && prBadge === null && diff === null;
 
   return (
     <li
@@ -2088,9 +2103,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
                         </Tooltip>
                       ) : (
                         <span
-                          ref={
-                            topStatus.icon === "working" ? observeVisibleAnimation : undefined
-                          }
+                          ref={topStatus.icon === "working" ? observeVisibleAnimation : undefined}
                           className={cn(
                             "inline-flex items-center gap-1 font-medium",
                             topStatus.className,
@@ -2210,55 +2223,58 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
                   release click still fires and is consumed. */}
               {props.sweepAction !== null ? dragDestination : null}
             </div>
-            <div className="mt-1 flex min-w-0">
+            <div className="mt-1 flex min-w-0 items-center gap-1.5">
               {title}
               {isRegeneratingTitle ? (
                 <span role="status" className="sr-only">
                   Regenerating title
                 </span>
               ) : null}
-            </div>
-            <div className="mt-0.5 flex min-w-0 items-center gap-1.5 text-secondary-label text-xs">
-              {/* Always the branch. The plan step used to take this slot while
-                  working, but it truncated to a half-sentence and dropped the
-                  branch, so the row lost its most stable identifier. */}
-              {thread.branch ? (
-                <>
-                  <ThreadWorktreeIndicator thread={thread} />
-                  <span className="flex min-w-0 flex-1 text-muted-foreground/40">
-                    <MiddleTruncate value={thread.branch} showTitle={false} />
-                  </span>
-                </>
-              ) : (
-                <span className="flex-1" />
-              )}
-              {terminalStatusIcon}
-              {prBadge}
-              {diff ? (
-                <span className="shrink-0 font-mono">
-                  <span className="text-diff-addition-foreground">+{diff.insertions}</span>{" "}
-                  <span className="text-diff-deletion-foreground">−{diff.deletions}</span>
+              {metaLineEmpty ? (
+                <span aria-hidden className="inline-flex shrink-0 items-center gap-1">
+                  {remoteMachineIcon}
+                  <SidebarProviderStack
+                    thread={thread}
+                    providerEntryByInstanceId={props.providerEntryByInstanceId}
+                  />
                 </span>
               ) : null}
-              <span
-                aria-hidden
-                className="pointer-events-none ml-auto inline-flex shrink-0 items-center gap-1"
-              >
-                {isRemote ? (
-                  <span className="inline-flex shrink-0 items-center text-sidebar-muted-foreground/70">
-                    <EnvironmentMachineIcon
-                      aria-hidden
-                      kind={props.environmentMachine}
-                      className="size-3.5"
-                    />
+            </div>
+            {metaLineEmpty ? null : (
+              <div className="mt-0.5 flex min-w-0 items-center gap-1.5 text-secondary-label text-xs">
+                {/* Always the branch. The plan step used to take this slot while
+                    working, but it truncated to a half-sentence and dropped the
+                    branch, so the row lost its most stable identifier. */}
+                {thread.branch ? (
+                  <>
+                    <ThreadWorktreeIndicator thread={thread} />
+                    <span className="flex min-w-0 flex-1 text-muted-foreground/40">
+                      <MiddleTruncate value={thread.branch} showTitle={false} />
+                    </span>
+                  </>
+                ) : (
+                  <span className="flex-1" />
+                )}
+                {terminalStatusIcon}
+                {prBadge}
+                {diff ? (
+                  <span className="shrink-0 font-mono">
+                    <span className="text-diff-addition-foreground">+{diff.insertions}</span>{" "}
+                    <span className="text-diff-deletion-foreground">−{diff.deletions}</span>
                   </span>
                 ) : null}
-                <SidebarProviderStack
-                  thread={thread}
-                  providerEntryByInstanceId={props.providerEntryByInstanceId}
-                />
-              </span>
-            </div>
+                <span
+                  aria-hidden
+                  className="pointer-events-none ml-auto inline-flex shrink-0 items-center gap-1"
+                >
+                  {remoteMachineIcon}
+                  <SidebarProviderStack
+                    thread={thread}
+                    providerEntryByInstanceId={props.providerEntryByInstanceId}
+                  />
+                </span>
+              </div>
+            )}
           </div>
           {props.jumpLabel ? <JumpHintBadge label={props.jumpLabel} /> : null}
         </TooltipTrigger>
@@ -2525,6 +2541,7 @@ export default function Sidebar() {
   );
   const environments = useEnvironmentIdentities();
   const serverConfigs = useAtomValue(environmentServerConfigsAtom);
+  const connectedEnvironmentIds = useConnectedEnvironmentIds();
   const primaryEnvironmentId = usePrimaryEnvironmentId();
   const clearSelection = useThreadSelectionStore((s) => s.clearSelection);
   const setSelectionAnchor = useThreadSelectionStore((s) => s.setAnchor);
@@ -2828,8 +2845,12 @@ export default function Sidebar() {
       workingShelfEnabled && isSidebarThreadWorking(thread) ? working : active;
     const snoozed: EnvironmentThreadShell[] = [];
     const settled: EnvironmentThreadShell[] = [];
-    const draggable = new Set<string>();
-    const activeReorderable = new Set<string>();
+    const { draggableThreadKeys: draggable, activeReorderableThreadKeys: activeReorderable } =
+      resolveSidebarReorderableThreadKeys({
+        threads: visible,
+        serverConfigs,
+        connectedEnvironmentIds,
+      });
     for (const thread of visible) {
       const capabilities = serverConfigs.get(thread.environmentId)?.environment.capabilities;
       // Threads on servers without the settlement capability (old server,
@@ -2839,12 +2860,6 @@ export default function Sidebar() {
       const supportsSettlement = capabilities?.threadSettlement === true;
       const supportsSnooze = capabilities?.threadSnooze === true;
       const threadKey = scopedThreadKey(scopeThreadRef(thread.environmentId, thread.id));
-      if (capabilities?.threadActiveReorder === true) activeReorderable.add(threadKey);
-      // Older servers retain their existing drag actions. Active placement
-      // additionally requires its own ordering capability at the drop target.
-      if (capabilities?.threadPinning === true && capabilities.threadPinReorder === true) {
-        draggable.add(threadKey);
-      }
       if (optimisticDrop?.key === threadKey) {
         const projected = applySidebarThreadDrop(
           thread,
@@ -2918,6 +2933,7 @@ export default function Sidebar() {
       snoozeNow: preciseNow,
     };
   }, [
+    connectedEnvironmentIds,
     nowMinute,
     optimisticDrop,
     scopedProjectKeys,
@@ -2941,9 +2957,8 @@ export default function Sidebar() {
     ],
     [activeThreads, pinnedThreads, settledThreads, snoozedThreads, workingThreads],
   );
-  const searchEnvironmentIds = useConnectedEnvironmentIds();
   // useThreadSearch owns the debounce and the two-character floor.
-  const threadSearch = useThreadSearch(searchEnvironmentIds, threadSearchQuery);
+  const threadSearch = useThreadSearch(connectedEnvironmentIds, threadSearchQuery);
   const threadSearchMatchByKey = useMemo(
     () =>
       new Map(threadSearch.matches.map((match) => [threadSearchMatchKey(match), match] as const)),

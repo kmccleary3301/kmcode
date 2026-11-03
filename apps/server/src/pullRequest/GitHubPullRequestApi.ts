@@ -997,6 +997,13 @@ const decodeRevisionRefs = Schema.decodeUnknownOption(
   ),
 );
 
+/** Where a pull request's head forked off its base, the commit its patch is computed from. */
+const decodeMergeBase = Schema.decodeUnknownOption(
+  Schema.fromJsonString(
+    Schema.Struct({ merge_base_commit: Schema.Struct({ sha: Schema.String }) }),
+  ),
+);
+
 const decodeMergeMessageResponse = Schema.decodeUnknownResult(
   Schema.fromJsonString(
     Schema.Struct({
@@ -1126,8 +1133,13 @@ export const make = Effect.gen(function* () {
       const unavailable = () => new GitHubViewerLoginUnavailableError({ cwd: input.cwd });
       const host = input.host.toLowerCase();
       // A missing or signed-out credential keeps its own error, so the page can say which.
-      const { token, fingerprint: key } = yield* api.credential(host);
-      const credential = { host, token, credentialFingerprint: key };
+      const { token, fingerprint: key, source } = yield* api.credential(host);
+      const credential = {
+        host,
+        token,
+        credentialFingerprint: key,
+        ...(source === undefined ? {} : { source }),
+      };
       // A cold page may ask several times. Wait per credential and check again after the
       // first verification; cancellation releases the next waiter without losing its request.
       return yield* Effect.acquireUseRelease(
@@ -1174,13 +1186,14 @@ export const make = Effect.gen(function* () {
     use,
   ) =>
     captureVerifiedCredential(input).pipe(
-      Effect.flatMap(({ host, token, accountId, viewer, credentialFingerprint }) =>
+      Effect.flatMap(({ host, token, accountId, viewer, credentialFingerprint, source }) =>
         use({ accountId, viewer, credentialFingerprint }).pipe(
           Effect.provideService(SourceControlRateLimit.CredentialScope, credentialFingerprint),
           Effect.provideService(GitHubApi.PinnedGitHubCredential, {
             host,
             token,
             credentialFingerprint,
+            ...(source === undefined ? {} : { source }),
           }),
         ),
       ),
@@ -1436,6 +1449,29 @@ export const make = Effect.gen(function* () {
           });
         }
 
+        // The pull request patch starts at its merge base, not a base branch that may have moved.
+        // Compare page 2 carries that commit separately; failures fall back to the base tip.
+        const oldRef =
+          input.commit === undefined && input.changeType !== "new"
+            ? yield* api
+                .rest({
+                  host: input.host,
+                  operation: "getPullRequestDiffFileContents",
+                  path: `repos/${owner}/${name}/compare/${baseRef}...${headRef}?per_page=1&page=2`,
+                  timeout: DIFF_TIMEOUT,
+                })
+                .pipe(
+                  Effect.map((response) =>
+                    decodeMergeBase(response.body).pipe(
+                      Option.map((compare) => compare.merge_base_commit.sha),
+                      Option.filter(isCommitSha),
+                      Option.getOrElse(() => baseRef ?? ""),
+                    ),
+                  ),
+                  Effect.orElseSucceed(() => baseRef ?? ""),
+                )
+            : (baseRef ?? "");
+
         const readFile = (revision: string, filePath: string) =>
           api
             .rest({
@@ -1465,9 +1501,7 @@ export const make = Effect.gen(function* () {
 
         const [oldContents, newContents] = yield* Effect.all(
           [
-            input.changeType === "new"
-              ? Effect.succeed("")
-              : readFile(baseRef ?? "", input.oldPath),
+            input.changeType === "new" ? Effect.succeed("") : readFile(oldRef, input.oldPath),
             input.changeType === "deleted" ? Effect.succeed("") : readFile(headRef, input.newPath),
           ],
           { concurrency: 2 },

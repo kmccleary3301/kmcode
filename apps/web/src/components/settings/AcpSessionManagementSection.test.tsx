@@ -298,6 +298,84 @@ describe("AcpSessionManagementSection", () => {
       input: { instanceId, projectId, providerId: "google" },
     });
   });
+
+  it.each(["Save", "Disable"] as const)(
+    "keeps other provider edits through a %s refetch",
+    async (action) => {
+      const response = {
+        _tag: "Success" as const,
+        value: {
+          providers: ["google", "other"].map((providerId) => ({
+            providerId,
+            supported: ["openai"],
+            required: false,
+            current: { apiType: "openai", baseUrl: "https://api.example.test/v1" },
+          })),
+        },
+      };
+      commands.listProviders.mockResolvedValue(response);
+      (findByLabel(render(), "List providers").props.onClick as (() => void) | undefined)?.();
+      await flushPromises();
+
+      const changeValue = (label: string, value: string) => {
+        const input = findByAriaLabel(render(), label);
+        (input.props.onValueChange as ((nextValue: string) => void) | undefined)?.(value);
+      };
+      changeValue("other base URL", "https://other.example.test/v1");
+      changeValue("other write-only headers JSON", '{"X-Test":"unsaved"}');
+      changeValue("google write-only headers JSON", '{"X-Test":"saved"}');
+
+      let resolveReload!: (value: typeof response) => void;
+      const reload = new Promise<typeof response>((resolve) => {
+        resolveReload = resolve;
+      });
+      commands.listProviders.mockReturnValueOnce(reload);
+      let resolveMutation!: () => void;
+      const mutation = new Promise<void>((resolve) => {
+        resolveMutation = resolve;
+      });
+      const command = action === "Save" ? commands.setProvider : commands.disableProvider;
+      command.mockReturnValueOnce(
+        mutation.then(() => ({
+          _tag: "Success" as const,
+          value: action === "Save" ? { configured: true } : { disabled: true },
+        })),
+      );
+      (findByLabel(render(), action).props.onClick as (() => void) | undefined)?.();
+      await flushPromises();
+      expect(findByLabel(render(), "Refresh").props.disabled).toBe(true);
+      resolveMutation();
+      await flushPromises();
+      expect(commands.listProviders).toHaveBeenCalledTimes(2);
+
+      let tree = render();
+      expect(findByLabel(tree, "Loading").props.disabled).toBe(true);
+      const otherBaseUrl = findByAriaLabel(tree, "other base URL");
+      expect(otherBaseUrl.props.disabled).toBeFalsy();
+      (otherBaseUrl.props.onValueChange as ((nextValue: string) => void) | undefined)?.(
+        "https://newer.example.test/v1",
+      );
+      resolveReload(response);
+      await flushPromises();
+
+      tree = render();
+      expect(findByAriaLabel(tree, "other base URL").props.value).toBe(
+        "https://newer.example.test/v1",
+      );
+      expect(findByAriaLabel(tree, "other write-only headers JSON").props.value).toBe(
+        '{"X-Test":"unsaved"}',
+      );
+      expect(findByAriaLabel(tree, "google write-only headers JSON").props.value).toBe("");
+
+      (findByLabel(tree, "Refresh").props.onClick as (() => void) | undefined)?.();
+      await flushPromises();
+      tree = render();
+      expect(findByAriaLabel(tree, "other base URL").props.value).toBe(
+        "https://api.example.test/v1",
+      );
+      expect(findByAriaLabel(tree, "other write-only headers JSON").props.value).toBe("");
+    },
+  );
 });
 
 it("imports with task access even when provider configuration is read-only", async () => {

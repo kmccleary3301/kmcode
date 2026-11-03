@@ -17,6 +17,7 @@ import {
   defaultInstanceIdForDriver,
   resolveProviderInstanceEnabled,
   type ModelSelection,
+  type ProjectId,
   type ProviderDriverKind,
   ProviderInstanceId,
   type ServerProvider,
@@ -156,14 +157,14 @@ export function deriveProviderEntriesByEnvironment(
     readonly [
       string,
       ReadonlyArray<ServerProvider>,
-      Pick<ServerSettings, "providerInstances" | "providers">?,
+      Pick<ServerSettings, "providerInstances" | "providers" | "projectSettingsOverrides">?,
     ]
   >,
 ): ReadonlyMap<string, ReadonlyMap<string, ProviderInstanceEntry>> {
   const byEnvironment = new Map<string, ReadonlyMap<string, ProviderInstanceEntry>>();
   for (const [environmentId, providers, settings] of providersByEnvironment) {
     const derived = deriveProviderInstanceEntries(providers);
-    const entries = settings ? applyProviderInstanceSettings(derived, settings) : derived;
+    const entries = settings ? applyProviderInstanceSettings(derived, settings, null) : derived;
     byEnvironment.set(
       environmentId,
       new Map(entries.map((entry) => [entry.instanceId as string, entry] as const)),
@@ -178,6 +179,9 @@ export function deriveProviderEntriesByEnvironment(
  * settings write, so picker visibility must follow settings rather than waiting
  * for probe reconciliation.
  *
+ * `projectId` scopes enabled state to one project. `null` deliberately means
+ * environment-wide, for surfaces such as cross-project thread lists.
+ *
  * Only built-in default instances have a legacy `providers` entry. Every
  * other instance exists through `providerInstances`; if it is absent there,
  * its streamed snapshot is stale (for example immediately after deletion)
@@ -185,7 +189,8 @@ export function deriveProviderEntriesByEnvironment(
  */
 export function applyProviderInstanceSettings(
   entries: ReadonlyArray<ProviderInstanceEntry>,
-  settings: Pick<ServerSettings, "providerInstances" | "providers">,
+  settings: Pick<ServerSettings, "providerInstances" | "providers" | "projectSettingsOverrides">,
+  projectId: ProjectId | null,
 ): ReadonlyArray<ProviderInstanceEntry> {
   const legacyProviders = settings.providers as Readonly<
     Record<string, { readonly enabled?: boolean } | undefined>
@@ -198,11 +203,16 @@ export function applyProviderInstanceSettings(
     const legacyProvider = Object.hasOwn(legacyProviders, entry.driverKind)
       ? legacyProviders[entry.driverKind]
       : undefined;
-    const enabled = explicitInstance
+    const machineEnabled = explicitInstance
       ? resolveProviderInstanceEnabled(explicitInstance)
       : entry.isDefault && legacyProvider
         ? (legacyProvider.enabled ?? entry.enabled)
         : false;
+    const enabled =
+      (projectId === null
+        ? undefined
+        : settings.projectSettingsOverrides[projectId]?.providerInstances?.[entry.instanceId]
+            ?.enabled) ?? machineEnabled;
     if (entry.driverKind !== "acpRegistry" || explicitInstance === undefined) {
       return enabled === entry.enabled ? entry : { ...entry, enabled };
     }

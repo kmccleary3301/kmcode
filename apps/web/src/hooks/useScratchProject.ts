@@ -9,7 +9,7 @@ import type { EnvironmentId } from "@t3tools/contracts";
 import { useCallback } from "react";
 
 import { stackedThreadToast, toastManager } from "~/components/ui/toast";
-import { useEnvironments } from "~/state/environments";
+import { useEnvironments, usePrimaryEnvironmentId } from "~/state/environments";
 import { projectEnvironment } from "~/state/projects";
 import { useAtomCommand } from "~/state/use-atom-command";
 import { useNewThreadHandler } from "./useHandleNewThread";
@@ -32,6 +32,7 @@ function reportScratchFailure(title: string, error: unknown) {
  */
 export function useScratchProject() {
   const { environments } = useEnvironments();
+  const primaryEnvironmentId = usePrimaryEnvironmentId();
   const openScratch = useAtomCommand(projectEnvironment.openScratch, { reportFailure: false });
   const handleNewThread = useNewThreadHandler();
 
@@ -47,18 +48,20 @@ export function useScratchProject() {
     [environments],
   );
 
-  // A thread without a project starts on the machine the user is working on,
-  // and only there. With no current machine (the hosted app with nothing
-  // open), it starts on the one machine that offers it, never a silent pick.
+  // The primary environment wins; use the current environment only when it
+  // offers scratch and the primary does not, then fall back to a sole provider.
   const scratchEnvironmentId = useCallback(
-    (current: EnvironmentId | null): EnvironmentId | null => {
-      if (current !== null) return scratchWorkspaceRootFor(current) !== null ? current : null;
+    (fallback: EnvironmentId | null): EnvironmentId | null => {
+      if (primaryEnvironmentId !== null && scratchWorkspaceRootFor(primaryEnvironmentId) !== null) {
+        return primaryEnvironmentId;
+      }
+      if (fallback !== null && scratchWorkspaceRootFor(fallback) !== null) return fallback;
       const offering = environments.filter(
         (entry) => scratchWorkspaceRootFor(entry.environmentId) !== null,
       );
       return offering.length === 1 ? (offering[0]?.environmentId ?? null) : null;
     },
-    [environments, scratchWorkspaceRootFor],
+    [environments, primaryEnvironmentId, scratchWorkspaceRootFor],
   );
 
   /** Resolves to the scratch project once it is in this client's store. */

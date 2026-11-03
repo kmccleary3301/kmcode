@@ -38,6 +38,7 @@ import {
   useResourceTelemetry,
   useResourceTelemetryHistory,
 } from "../../lib/resourceTelemetryState";
+import { formatBytes } from "../../lib/formatBytes";
 import { cn } from "../../lib/utils";
 import { ensureLocalApi } from "../../localApi";
 import { serverEnvironment } from "../../state/server";
@@ -64,18 +65,6 @@ const HISTORY_WINDOWS = [
   { label: "30m", windowMs: 30 * 60_000, bucketMs: 60_000 },
   { label: "1h", windowMs: 60 * 60_000, bucketMs: 2 * 60_000 },
 ] as const;
-
-function formatBytes(value: number): string {
-  if (value < 1_024) return `${Math.round(value)} B`;
-  const units = ["KB", "MB", "GB", "TB"] as const;
-  let next = value;
-  let unitIndex = -1;
-  do {
-    next /= 1_024;
-    unitIndex += 1;
-  } while (next >= 1_024 && unitIndex < units.length - 1);
-  return `${next.toFixed(next >= 100 ? 0 : next >= 10 ? 1 : 2)} ${units[unitIndex]}`;
-}
 
 function formatRate(value: number): string {
   return `${formatBytes(value)}/s`;
@@ -1006,7 +995,7 @@ export function ResourceTelemetryDiagnostics({
           </div>
         }
       >
-        <div className="overflow-hidden rounded-2xl border border-border/70 bg-card shadow-sm/5">
+        <div className="overflow-hidden rounded-[inherit]">
           <div className="flex flex-col gap-3 border-b border-border/60 bg-linear-to-r from-muted/45 via-muted/20 to-transparent px-4 py-4 sm:flex-row sm:items-center sm:justify-between sm:px-5">
             <div>
               <div className="text-3xs font-semibold uppercase tracking-widest text-muted-foreground/70">
@@ -1114,7 +1103,7 @@ export function ResourceTelemetryDiagnostics({
           ) : null
         }
       >
-        <div className="grid overflow-hidden rounded-2xl border border-border/70 bg-card shadow-xs/5 md:grid-cols-2 md:divide-x md:divide-border/60">
+        <div className="grid overflow-hidden rounded-[inherit] md:grid-cols-2 md:divide-x md:divide-border/60">
           <div className="px-4 py-4 sm:px-5">
             <div className="mb-3 flex items-center gap-2 text-3xs font-semibold uppercase tracking-widest text-muted-foreground/70">
               <span className="flex size-6 items-center justify-center rounded-md bg-muted/60">
@@ -1251,7 +1240,7 @@ export function ResourceTelemetryDiagnostics({
           </div>
         }
       >
-        <div className="overflow-hidden rounded-2xl border border-border/70 bg-card shadow-xs/5">
+        <div className="overflow-hidden rounded-[inherit]">
           {history.error ? (
             <div className="flex items-start gap-2 border-b border-destructive/20 bg-destructive/5 px-4 py-3 text-xs text-destructive sm:px-5">
               <AlertTriangleIcon className="mt-0.5 size-3.5 shrink-0" />
@@ -1274,7 +1263,7 @@ export function ResourceTelemetryDiagnostics({
           ) : null
         }
       >
-        <div className="overflow-hidden rounded-2xl border border-border/70 bg-card shadow-xs/5">
+        <div className="overflow-hidden rounded-[inherit]">
           <ProcessTable
             processes={snapshot?.processes ?? []}
             canMaintainEnvironment={canMaintainEnvironment}
@@ -1291,7 +1280,7 @@ export function ResourceTelemetryDiagnostics({
           <span className="text-3xs text-muted-foreground/55">Logical bytes by operation</span>
         }
       >
-        <div className="overflow-hidden rounded-2xl border border-border/70 bg-card shadow-xs/5">
+        <div className="overflow-hidden rounded-[inherit]">
           <div className="bg-muted/15 px-4 py-3 text-2xs leading-relaxed text-muted-foreground sm:px-5">
             Native counters identify which process is reading or writing. These application-level
             counters identify known KM Code operations so process spikes can be correlated with

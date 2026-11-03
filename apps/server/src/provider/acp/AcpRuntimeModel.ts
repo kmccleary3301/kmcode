@@ -51,6 +51,7 @@ export interface AcpAgentTerminalState {
   readonly command?: string;
   readonly cwd?: string;
   readonly output: string;
+  readonly outputBytes: number;
   readonly exitStatus?: EffectAcpSchema.TerminalExitStatus;
   /** Incomplete trailing UTF-8 bytes retained until the next output update. */
   readonly pendingOutputBytes?: Uint8Array;
@@ -62,6 +63,7 @@ type AcpAgentTerminalUpdate = Extract<
 >;
 
 const MAX_ACP_TERMINAL_OUTPUT_BYTES = 16 * 1024 * 1024;
+const ACP_TERMINAL_OUTPUT_TRIM_BYTES = 1024 * 1024;
 const MAX_ACP_TERMINAL_FRAME_BYTES = MAX_ACP_TERMINAL_OUTPUT_BYTES;
 
 function isBase64DataCode(code: number): boolean {
@@ -133,12 +135,24 @@ function decodeTerminalOutputChunk(
     : { text, pendingOutputBytes: Uint8Array.from(bytes.subarray(completeEnd)) };
 }
 
-function truncateTerminalOutput(output: string): string {
-  const bytes = Buffer.from(output, "utf8");
-  if (bytes.length <= MAX_ACP_TERMINAL_OUTPUT_BYTES) return output;
-  let start = bytes.length - MAX_ACP_TERMINAL_OUTPUT_BYTES;
+function appendTerminalOutput(
+  output: string,
+  outputBytes: number,
+  text: string,
+): { readonly output: string; readonly outputBytes: number } {
+  if (text.length === 0) return { output, outputBytes };
+  const nextOutput = `${output}${text}`;
+  const nextOutputBytes = outputBytes + Buffer.byteLength(text, "utf8");
+  if (nextOutputBytes <= MAX_ACP_TERMINAL_OUTPUT_BYTES) {
+    return { output: nextOutput, outputBytes: nextOutputBytes };
+  }
+  const bytes = Buffer.from(nextOutput, "utf8");
+  let start = bytes.length - MAX_ACP_TERMINAL_OUTPUT_BYTES + ACP_TERMINAL_OUTPUT_TRIM_BYTES;
   while (start < bytes.length && (bytes[start]! & 0xc0) === 0x80) start += 1;
-  return bytes.subarray(start).toString("utf8");
+  return {
+    output: bytes.subarray(start).toString("utf8"),
+    outputBytes: bytes.length - start,
+  };
 }
 
 /** Applies an ACP v2 agent-owned terminal snapshot or chunk to display state. */
@@ -146,14 +160,14 @@ export function applyAcpAgentTerminalUpdate(
   previous: AcpAgentTerminalState | undefined,
   update: AcpAgentTerminalUpdate,
 ): AcpAgentTerminalState {
-  const current = previous ?? { output: "" };
+  const current = previous ?? { output: "", outputBytes: 0 };
   if (update.sessionUpdate === "terminal_output_chunk") {
     const decoded = decodeTerminalOutputChunk(current.pendingOutputBytes, update.data);
     if (decoded === undefined) return current;
     const { pendingOutputBytes: _pendingOutputBytes, ...withoutPendingOutputBytes } = current;
     return {
       ...withoutPendingOutputBytes,
-      output: truncateTerminalOutput(`${current.output}${decoded.text}`),
+      ...appendTerminalOutput(current.output, current.outputBytes, decoded.text),
       ...(decoded.pendingOutputBytes === undefined
         ? {}
         : { pendingOutputBytes: decoded.pendingOutputBytes }),
@@ -181,7 +195,7 @@ export function applyAcpAgentTerminalUpdate(
       const { pendingOutputBytes: _pendingOutputBytes, ...withoutPendingOutputBytes } = next;
       next = {
         ...withoutPendingOutputBytes,
-        output: truncateTerminalOutput(decoded.text),
+        ...appendTerminalOutput("", 0, decoded.text),
         ...(decoded.pendingOutputBytes === undefined
           ? {}
           : { pendingOutputBytes: decoded.pendingOutputBytes }),
@@ -199,7 +213,7 @@ export function applyAcpAgentTerminalUpdate(
     const { pendingOutputBytes: _pendingOutputBytes, ...withoutPendingOutputBytes } = next;
     next = {
       ...withoutPendingOutputBytes,
-      output: truncateTerminalOutput(`${next.output}${pendingText}`),
+      ...appendTerminalOutput(next.output, next.outputBytes, pendingText),
       exitStatus: update.exitStatus,
     };
   }
@@ -498,6 +512,7 @@ function normalizeToolCallStatus(
     case "completed":
       return "completed";
     case "failed":
+    case "cancelled":
       return "failed";
     default:
       return fallback;
@@ -1430,17 +1445,15 @@ export function parseSessionUpdateEvent(params: EffectAcpSchema.SessionNotificat
         step: entry.content.trim().length > 0 ? entry.content.trim() : `Step ${index + 1}`,
         status: normalizePlanStepStatus(entry.status),
       }));
-      if (plan.length > 0) {
-        events.push({
-          _tag: "PlanUpdated",
-          payload: {
-            nativePlanId: "legacy",
-            kind: "items",
-            plan,
-          },
-          rawPayload: params,
-        });
-      }
+      events.push({
+        _tag: "PlanUpdated",
+        payload: {
+          nativePlanId: "legacy",
+          kind: "items",
+          plan,
+        },
+        rawPayload: params,
+      });
       break;
     }
     case "plan_update": {

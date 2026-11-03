@@ -232,13 +232,7 @@ const buildEntry = <R>(input: {
     }
 
     const typedConfig = decodeResult.success;
-    const childScope = yield* Scope.make();
-    // Attach the child scope to the registry's parent scope: if the
-    // registry scope closes, each surviving instance's child scope is
-    // closed through this finalizer. `reconcile` manually closes the
-    // child scope on remove/replace; subsequent close via the parent's
-    // finalizer is a no-op because `Scope.close` is idempotent.
-    yield* Scope.addFinalizer(parentScope, Scope.close(childScope, Exit.void).pipe(Effect.ignore));
+    const childScope = yield* Scope.fork(parentScope);
 
     const createResult = yield* driver
       .create({
@@ -313,7 +307,13 @@ const makeReconcile = <R>(input: {
           replacedIds.add(instanceId);
         }
       }
-      for (const id of [...removedIds, ...replacedIds]) {
+      const retiredIds = [...removedIds, ...replacedIds];
+      if (retiredIds.length > 0) {
+        const remaining = new Map(previousEntries);
+        for (const id of retiredIds) remaining.delete(id);
+        yield* Ref.set(state.entries, remaining);
+      }
+      for (const id of retiredIds) {
         const live = previousEntries.get(id);
         if (live) {
           yield* Scope.close(live.scope, Exit.void).pipe(Effect.ignore);

@@ -50,6 +50,20 @@ describe("delimited file previews", () => {
       expect(parseDelimitedPreview(`${text}\nextra`, delimiter).truncated).toBe(true);
     });
   });
+  it("reads worker pages beyond the old row, column and cell limits", () => {
+    const text = Array.from({ length: 128 }, (_, row) =>
+      Array.from({ length: 40 }, (_, column) => `${row}:${column}`).join(","),
+    ).join("\n");
+    const result = parseDelimitedPreview(text, ",", {
+      maxRows: 128,
+      maxColumns: 1024,
+      maxCellLength: 1024,
+    });
+    expect(result.rows).toHaveLength(128);
+    expect(result.rows[127]).toHaveLength(40);
+    expect(result.rows[127]?.[39]).toBe("127:39");
+    expect(result.truncated).toBe(false);
+  });
   it("bounds rows, columns and cell length and reports partial content", () => {
     const table = parseDelimitedPreview(
       Array.from({ length: 101 }, () =>

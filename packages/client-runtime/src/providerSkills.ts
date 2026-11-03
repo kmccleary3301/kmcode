@@ -133,6 +133,24 @@ export function hasCurrentProviderWorkspaceSnapshot(
   );
 }
 
+/** A refresh counts as progress when it is current or has a newer server scan timestamp. */
+export function hasProviderWorkspaceSnapshotRefreshProgressed(
+  previousProvider: ServerProvider | null | undefined,
+  refreshedProvider: ServerProvider | null | undefined,
+  cwd: string | null | undefined,
+  nowMs: number,
+): boolean {
+  const refreshedSnapshot =
+    refreshedProvider && resolveProviderWorkspaceSnapshot(refreshedProvider, cwd);
+  const previousSnapshot =
+    previousProvider && resolveProviderWorkspaceSnapshot(previousProvider, cwd);
+  return Boolean(
+    hasCompleteProviderWorkspaceSnapshot(refreshedProvider, cwd) &&
+    (hasCurrentProviderWorkspaceSnapshot(refreshedProvider, cwd, nowMs) ||
+      refreshedSnapshot?.checkedAt !== previousSnapshot?.checkedAt),
+  );
+}
+
 export function resolveProviderSkillsForCwd(
   provider: ServerProvider,
   cwd: string | null | undefined,

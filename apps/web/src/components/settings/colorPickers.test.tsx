@@ -121,6 +121,38 @@ describe("shared color controls in settings", () => {
     expect(onCommit).not.toHaveBeenCalled();
   });
 
+  it("supports Home and End for hue without changing saturation or brightness", async () => {
+    const onChange = vi.fn();
+    await act(async () => {
+      renderer = create(<ThemeColorField role="accent" value="#408080" onChange={onChange} />);
+    });
+    const hue = "Accent color hue";
+    const saturation = "Accent color saturation";
+    const brightness = "Accent color brightness";
+
+    const saturationValue = slider(saturation).props.value;
+    const brightnessValue = slider(brightness).props.value;
+
+    expect(await key(hue, "Home")).toHaveBeenCalledOnce();
+    await frame();
+    expect(slider(hue).props["aria-valuenow"]).toBe(0);
+    expect(slider(saturation).props.value).toBe(saturationValue);
+    expect(slider(brightness).props.value).toBe(brightnessValue);
+    expect(onChange).toHaveBeenLastCalledWith("accent", "#804040");
+
+    expect(await key(hue, "End")).toHaveBeenCalledOnce();
+    await frame();
+    expect(slider(hue).props["aria-valuenow"]).toBe(360);
+    expect(slider(saturation).props.value).toBe(saturationValue);
+    expect(slider(brightness).props.value).toBe(brightnessValue);
+    expect(onChange).toHaveBeenLastCalledWith("accent", "#804040");
+
+    await key(hue, "ArrowRight", true);
+    await frame();
+    expect(slider(hue).props["aria-valuenow"]).toBe(10);
+    expect(onChange).toHaveBeenLastCalledWith("accent", "#804b40");
+  });
+
   it("supports Home/End and clamps each axis without changing the other", async () => {
     const onCommit = vi.fn();
     await act(async () => {
@@ -249,6 +281,44 @@ describe("shared color controls in settings", () => {
     await act(async () => clearButtons()[0]!.props.onClick());
     expect(onCommit).toHaveBeenLastCalledWith("");
     expect(clearButtons()).toHaveLength(0);
+  });
+
+  it("adds the displayed fallback accent color without changing it", async () => {
+    const onCommit = vi.fn();
+    await act(async () => {
+      renderer = create(
+        <ProviderAccentColorPicker displayName="Codex" value={undefined} onCommit={onCommit} />,
+      );
+    });
+    const addButtons = () =>
+      renderer!.root.findAll(
+        (node) => node.type === "button" && node.props.children === "Add color",
+      );
+    expect(addButtons()).toHaveLength(1);
+    expect(onCommit).not.toHaveBeenCalled();
+    await act(async () => addButtons()[0]!.props.onClick());
+    expect(onCommit).toHaveBeenCalledExactlyOnceWith("#2563eb");
+    expect(addButtons()).toHaveLength(0);
+  });
+
+  it("syncs provider color changes into the open picker", async () => {
+    const onCommit = vi.fn();
+    const render = (value: string | undefined) => (
+      <ProviderAccentColorPicker displayName="Codex" value={value} onCommit={onCommit} />
+    );
+    await act(async () => {
+      renderer = create(render("#ff0000"));
+    });
+    await act(async () => renderer!.update(render("#00ff00")));
+    const hexInput = () => renderer!.root.findByProps({ "aria-label": "Custom hex accent color" });
+    expect(hexInput().props.value).toBe("#00ff00");
+    expect(slider("Accent color hue").props["aria-valuenow"]).toBe(120);
+
+    await act(async () => {
+      hexInput().props.onChange({ currentTarget: { value: "#00FF00" } });
+    });
+    expect(onCommit).toHaveBeenLastCalledWith("#00FF00");
+    expect(hexInput().props.value).toBe("#00FF00");
   });
 
   it("keeps provider debounce at the consumer and commits pending color on unmount", async () => {

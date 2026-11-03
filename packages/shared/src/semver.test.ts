@@ -29,6 +29,15 @@ describe("semver helpers", () => {
     expect(normalizeSemverVersion("20-rc.1")).toBe("20.0.0-rc.1");
     expect(parseSemver("20")).toEqual({ major: 20, minor: 0, patch: 0, prerelease: [] });
   });
+  it("preserves prerelease hyphens and ignores build metadata", () => {
+    expect(normalizeSemverVersion("20-alpha-1")).toBe("20.0.0-alpha-1");
+    expect(parseSemver("1.2.3-alpha-1.2+build.45")).toEqual({
+      major: 1,
+      minor: 2,
+      patch: 3,
+      prerelease: ["alpha-1", "2"],
+    });
+  });
 
   it("compares shorthand versions numerically instead of lexically", () => {
     // Regression: "20" vs "9" previously fell back to string comparison, which

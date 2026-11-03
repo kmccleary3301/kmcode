@@ -5,6 +5,7 @@ import * as NodeFSP from "node:fs/promises";
 import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
 import * as NodeSqlite from "node:sqlite";
+import * as NodeZlib from "node:zlib";
 
 import { assert, describe, it } from "@effect/vitest";
 import * as NodeServices from "@effect/platform-node/NodeServices";
@@ -17,6 +18,8 @@ import {
   UsageDay,
   type UsageSummaryInput,
 } from "@t3tools/contracts";
+import * as Clock from "effect/Clock";
+import * as DateTime from "effect/DateTime";
 import * as Duration from "effect/Duration";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
@@ -158,6 +161,79 @@ function totalOutputTokens(summary: { buckets: readonly { totals: { outputTokens
 }
 
 describe("UsageService", () => {
+  it.live("counts compressed Codex rollouts across refresh, rewrites, and cache restarts", () =>
+    Effect.gen(function* () {
+      const { home, settings } = yield* setup;
+      const sessions = NodePath.join(home, "codex", "sessions");
+      const compressedPath = NodePath.join(sessions, "compressed.jsonl.zst");
+      const rollout = (id: string, output: number) =>
+        [
+          { type: "session_meta", payload: { id } },
+          { type: "turn_context", payload: { model: "gpt-6-astra" } },
+        ]
+          .map((line) => encodeUnknownJsonString(line))
+          .join("\n") +
+        "\n" +
+        encodeUnknownJsonString({
+          type: "event_msg",
+          timestamp: "2026-08-01T10:00:00Z",
+          payload: {
+            type: "token_count",
+            info: { last_token_usage: { input_tokens: 10, output_tokens: output } },
+          },
+        }) +
+        "\n";
+      const compressed = rollout("compressed-session", 23);
+      yield* Effect.promise(async () => {
+        await NodeFSP.mkdir(sessions, { recursive: true });
+        await NodeFSP.writeFile(
+          NodePath.join(sessions, "plain.jsonl"),
+          rollout("plain-session", 17),
+        );
+        await NodeFSP.writeFile(compressedPath, NodeZlib.zstdCompressSync(compressed));
+      });
+      yield* Effect.gen(function* () {
+        const service = yield* UsageService.make;
+        const first = yield* service.readSummary(WINDOW);
+        assert.strictEqual(totalOutputTokens(first), 40);
+        assert.strictEqual(
+          first.sources.find((source) => source.fingerprint.provider === "codex")?.distinctSessions,
+          2,
+        );
+        assert.deepStrictEqual((yield* service.readSummary(WINDOW)).buckets, first.buckets);
+        // The same rollout may remain in a plain file while compression finishes.
+        yield* Effect.promise(() =>
+          NodeFSP.writeFile(NodePath.join(sessions, "copy.jsonl"), compressed),
+        );
+        assert.strictEqual(totalOutputTokens(yield* service.readSummary(WINDOW)), 40);
+        yield* Effect.promise(() =>
+          NodeFSP.writeFile(
+            compressedPath,
+            NodeZlib.zstdCompressSync(
+              compressed +
+                encodeUnknownJsonString({
+                  type: "event_msg",
+                  timestamp: "2026-08-01T10:00:05Z",
+                  payload: {
+                    type: "token_count",
+                    info: { last_token_usage: { input_tokens: 10, output_tokens: 31 } },
+                  },
+                }) +
+                "\n",
+            ),
+          ),
+        );
+        const rewritten = yield* service.readSummary(WINDOW);
+        assert.strictEqual(totalOutputTokens(rewritten), 71);
+        assert.deepStrictEqual((yield* service.readSummary(WINDOW)).buckets, rewritten.buckets);
+        const restarted = yield* UsageService.make;
+        assert.deepStrictEqual((yield* restarted.readSummary(WINDOW)).buckets, rewritten.buckets);
+      }).pipe(
+        Effect.scoped,
+        Effect.provide(layerService({ prefix: "usage-compressed-codex", home, settings })),
+      );
+    }).pipe(Effect.scoped),
+  );
   it.live.each([
     { explicitDefault: true, label: "explicit" },
     { explicitDefault: false, label: "legacy" },
@@ -863,7 +939,7 @@ describe("UsageService", () => {
 
         yield* Effect.gen(function* () {
           const { stateDir } = yield* ServerConfig.ServerConfig;
-          const cachePath = NodePath.join(stateDir, "usage-scan-cache-v5.json");
+          const cachePath = NodePath.join(stateDir, "usage-scan-cache-v6.json");
           const legacyPath = NodePath.join(stateDir, "usage-scan-cache.json");
           yield* (yield* UsageService.make).readSummary(WINDOW);
 
@@ -1125,20 +1201,36 @@ describe("UsageService", () => {
   it.live("reports saved usage of a removed directory only for windows it reaches", () =>
     Effect.gen(function* () {
       const { transcript, settings, home } = yield* setup;
+      const now = yield* DateTime.now;
+      const transcriptTime = DateTime.subtract(now, { days: 1 });
+      const transcriptTimestamp = DateTime.formatIso(transcriptTime);
+      const transcriptDay = transcriptTimestamp.slice(0, 10);
+      const laterDay = DateTime.formatIso(DateTime.add(transcriptTime, { days: 1 })).slice(0, 10);
+      const lastWrite = (yield* Clock.currentTimeMillis) / 1000;
       yield* Effect.promise(async () => {
-        await NodeFSP.writeFile(transcript, claudeLine(1, 5));
-        const lastWrite = Date.parse("2026-08-01T10:00:00Z") / 1000;
+        await NodeFSP.writeFile(
+          transcript,
+          claudeLine(1, 5).replace("2026-08-01T10:00:00Z", transcriptTimestamp),
+        );
         await NodeFSP.utimes(transcript, lastWrite, lastWrite);
       });
       const service = yield* UsageService.make.pipe(
         Effect.provide(layerService({ prefix: "usage-service-saved-window-test", home, settings })),
       );
-      const first = yield* service.readSummary(WINDOW);
+      const first = yield* service.readSummary({
+        timeZone: "UTC",
+        sinceDay: UsageDay.make(transcriptDay),
+        untilDay: UsageDay.make(transcriptDay),
+      });
       yield* Effect.promise(() =>
         NodeFSP.rm(NodePath.join(home, "claude", "projects"), { recursive: true }),
       );
 
-      const reached = yield* service.readSummary(WINDOW);
+      const reached = yield* service.readSummary({
+        timeZone: "UTC",
+        sinceDay: UsageDay.make(transcriptDay),
+        untilDay: UsageDay.make(transcriptDay),
+      });
       assert.deepStrictEqual(reached.buckets, first.buckets);
       assert.strictEqual(reached.sources[0]?.status, "ok");
 
@@ -1146,8 +1238,8 @@ describe("UsageService", () => {
       // that still reads it, so it adds nothing to a window after its last write.
       const later = yield* service.readSummary({
         timeZone: "UTC",
-        sinceDay: UsageDay.make("2026-08-10"),
-        untilDay: UsageDay.make("2026-08-12"),
+        sinceDay: UsageDay.make(laterDay),
+        untilDay: UsageDay.make(laterDay),
       });
       assert.deepStrictEqual(later.buckets, []);
       assert.strictEqual(later.sources[0]?.status, "missing");

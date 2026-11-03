@@ -25,6 +25,9 @@ const layerSetup = Layer.effectDiscard(
     // seconds (event-loop stalls, client disconnects). A power loss can drop the newest
     // commits; the database stays consistent and a process crash loses nothing.
     yield* sql`PRAGMA synchronous = NORMAL;`;
+    // Keep statement journals and sort spills off the main thread's disk path.
+    // Large statements and open savepoints can increase peak memory use.
+    yield* sql`PRAGMA temp_store = MEMORY;`;
     // PASSIVE checkpoints never shrink the -wal file, so it otherwise keeps its
     // largest size until the last connection closes.
     yield* sql.unsafe(`PRAGMA journal_size_limit = ${WAL_SIZE_LIMIT_BYTES};`);

@@ -90,6 +90,7 @@ it.effect("forwards orchestrator-resolved runtime requests to the live adapter",
         responseCapability: {
           type: "live",
           providerSessionId,
+          supportsFeedback: true,
         },
         createdAt: DateTime.makeUnsafe("2026-07-29T00:00:00.000Z"),
         resolvedAt: DateTime.makeUnsafe("2026-07-29T00:00:01.000Z"),
@@ -116,14 +117,16 @@ it.effect("forwards orchestrator-resolved runtime requests to the live adapter",
       threadId,
       providerSessionId,
       requestId,
-      decision: "accept",
+      decision: "decline",
+      feedback: "Run it in a safer manner.",
     });
 
     assert.equal(getSession.mock.calls.length, 1);
     assert.equal(respondToRuntimeRequest.mock.calls.length, 1);
     assert.deepEqual(respondToRuntimeRequest.mock.calls[0]?.[0], {
       requestId,
-      decision: "accept",
+      decision: "decline",
+      feedback: "Run it in a safer manner.",
     });
   }).pipe(Effect.provide(layerTest));
 });

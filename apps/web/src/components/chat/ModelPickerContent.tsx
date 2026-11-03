@@ -47,6 +47,8 @@ import {
 } from "../ui/combobox";
 import { ModelEsque } from "./providerIconUtils";
 import { isCommandPaletteOpen } from "../../commandPaletteBus";
+import { isImeCompositionKey } from "../CommandPalette.logic";
+import { registerModelPickerContent } from "../../modelPickerVisibility";
 import { useEnvironmentQuery } from "../../state/query";
 import { primaryServerKeybindingsAtom, serverEnvironment } from "../../state/server";
 import { useAtomCommand } from "../../state/use-atom-command";
@@ -168,7 +170,7 @@ export function adjacentModelPickerProvider(input: {
 }
 
 const EMPTY_MODEL_JUMP_LABELS = new Map<string, string>();
-const MODEL_LIST_ESTIMATED_ITEM_SIZE = 52;
+const MODEL_LIST_ESTIMATED_ITEM_SIZE = 32;
 
 function ModelListSeparator() {
   return <div className="h-0.5" />;
@@ -220,6 +222,8 @@ export const ModelPickerContent = memo(function ModelPickerContent(props: {
     onToggleModel,
   } = props;
   const [searchQuery, setSearchQuery] = useState("");
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- publishes this picker's mount to global keydown handlers
+  useLayoutEffect(() => registerModelPickerContent(), []);
   const [showTopScrollFade, setShowTopScrollFade] = useState(false);
   const [showBottomScrollFade, setShowBottomScrollFade] = useState(false);
   const searchInputRef = useRef<HTMLInputElement>(null);
@@ -950,7 +954,12 @@ export const ModelPickerContent = memo(function ModelPickerContent(props: {
 
   useEffect(() => {
     const onWindowKeyDown = (event: globalThis.KeyboardEvent) => {
-      if (event.defaultPrevented || event.repeat || isCommandPaletteOpen()) {
+      if (
+        event.defaultPrevented ||
+        event.repeat ||
+        isImeCompositionKey(event.isComposing, event.keyCode) ||
+        isCommandPaletteOpen()
+      ) {
         return;
       }
 
@@ -1176,6 +1185,16 @@ export const ModelPickerContent = memo(function ModelPickerContent(props: {
                   setSearchQuery(e.target.value);
                 }}
                 onKeyDown={(e) => {
+                  if (isImeCompositionKey(e.nativeEvent.isComposing, e.keyCode)) {
+                    if (
+                      "preventBaseUIHandler" in e &&
+                      typeof e.preventBaseUIHandler === "function"
+                    ) {
+                      e.preventBaseUIHandler();
+                    }
+                    e.stopPropagation();
+                    return;
+                  }
                   if (
                     showSidebar &&
                     !e.altKey &&

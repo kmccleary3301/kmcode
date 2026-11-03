@@ -136,6 +136,7 @@ export function fromRunner(name: string, run: Runner): TextGeneration.TextGenera
           previousTitle: input.previousTitle,
           linkedContext: input.linkedContext,
           attachments: input.attachments,
+          policy: input.policy,
         }),
       });
       return {

@@ -55,6 +55,7 @@ import * as ProviderEventIngestor from "./ProviderEventIngestor.ts";
 import type { ProjectionStoreV2Error } from "./ProjectionStore.ts";
 import { makeProviderFailure, makeProviderFailureTurnItem } from "./ProviderFailure.ts";
 import * as RunFinalizationService from "./RunFinalizationService.ts";
+import { userFacingDatabaseErrorMessage } from "./UserFacingErrors.ts";
 
 export interface ProviderEventRoutingState {
   readonly ownedThreadIds: ReadonlySet<ThreadId>;
@@ -532,6 +533,8 @@ export function routeProviderEvent(
             state.ownedProviderTurnIds.has(event.runtimeRequest.providerTurnId)),
         state,
       ];
+    case "background_work.updated":
+      return [state.ownedProviderTurnIds.has(event.providerTurnId), state];
     case "run.execution-ended":
       return !state.rootTurnEnded &&
         event.threadId === input.threadId &&
@@ -1058,8 +1061,10 @@ export const layer: Layer.Layer<
           ) =>
             Effect.gen(function* () {
               if ((yield* Ref.get(rootWorkCompletedAt)) !== null) return;
-              const { delegatedCompletion: _delegatedCompletion, ...runWithoutDelegatedCompletion } =
-                input.run;
+              const {
+                delegatedCompletion: _delegatedCompletion,
+                ...runWithoutDelegatedCompletion
+              } = input.run;
               const run: OrchestrationV2Run = {
                 ...runWithoutDelegatedCompletion,
                 workCompletedAt: event.workCompletedAt,
@@ -1090,6 +1095,7 @@ export const layer: Layer.Layer<
           const rootRunFinalized = yield* Ref.make(false);
           const providerThreadOwnerLost = yield* Ref.make(false);
           const activeChildProviderTurns = yield* Ref.make<ReadonlySet<ProviderTurnId>>(new Set());
+          const pendingBackgroundProviderTurns = new Set<ProviderTurnId>();
           const activeChildSubagents = yield* Ref.make<ReadonlySet<NodeId>>(new Set());
           const activeBackgroundTurnItems = yield* Ref.make<
             ReadonlySet<OrchestrationV2TurnItem["id"]>
@@ -1279,6 +1285,9 @@ export const layer: Layer.Layer<
             ) {
               return true;
             }
+            if (pendingBackgroundProviderTurns.size > 0) {
+              return false;
+            }
             const childProviderTurns = yield* Ref.get(activeChildProviderTurns);
             if (childProviderTurns.size > 0) {
               return false;
@@ -1413,6 +1422,13 @@ export const layer: Layer.Layer<
                   yield* Ref.set(rootTerminalSeen, true);
                   yield* finalizeRootRun(event);
                 }
+                if (event.type === "background_work.updated") {
+                  if (event.pending) {
+                    pendingBackgroundProviderTurns.add(event.providerTurnId);
+                  } else {
+                    pendingBackgroundProviderTurns.delete(event.providerTurnId);
+                  }
+                }
                 yield* trackChildLifecycle(event, deliveredEvent !== null);
               }),
             ),
@@ -1445,8 +1461,9 @@ export const layer: Layer.Layer<
                                   Ref.get(openRunOwnedSubagents).pipe(
                                     Effect.flatMap((openSubagents) =>
                                       Ref.get(rootWorkCompletedAt).pipe(
-                                        Effect.flatMap((workCompletedAt) =>
-                                          writeFinalRunEvents({
+                                        Effect.flatMap((workCompletedAt) => {
+                                          const squashed = Cause.squash(cause);
+                                          return writeFinalRunEvents({
                                             run: input.run,
                                             rootNode: input.rootNode,
                                             checkpointScope: input.checkpointScope,
@@ -1461,7 +1478,8 @@ export const layer: Layer.Layer<
                                             openRunOwnedSubagents: openSubagents,
                                             terminal: makeFailedTerminalEvent(
                                               makeProviderFailure({
-                                                cause: Cause.squash(cause),
+                                                cause: squashed,
+                                                message: userFacingDatabaseErrorMessage(squashed),
                                                 class: "unknown",
                                               }),
                                               latestItemOrdinal + 1,
@@ -1471,8 +1489,8 @@ export const layer: Layer.Layer<
                                             ...(workCompletedAt === null
                                               ? {}
                                               : { workCompletedAt }),
-                                          }),
-                                        ),
+                                          });
+                                        }),
                                       ),
                                     ),
                                   ),
@@ -1600,7 +1618,9 @@ export const layer: Layer.Layer<
                                   makeProviderFailure({
                                     cause: Cause.squash(cause),
                                     // A failed ownership read is not the provider's fault.
-                                    class: Exit.isFailure(shouldStart) ? "unknown" : "provider_error",
+                                    class: Exit.isFailure(shouldStart)
+                                      ? "unknown"
+                                      : "provider_error",
                                   }),
                                   latestItemOrdinal + 1,
                                 ),
@@ -1637,6 +1657,7 @@ export function makeInterruptResultTurnItem(input: {
   readonly rootNode: OrchestrationV2ExecutionNode;
   readonly providerThread: OrchestrationV2ProviderThread;
   readonly completedAt: DateTime.Utc;
+  readonly message?: string;
 }): OrchestrationV2TurnItem {
   return {
     id: input.idAllocator.derive.runSignalTurnItem({
@@ -1660,6 +1681,6 @@ export function makeInterruptResultTurnItem(input: {
     completedAt: input.completedAt,
     updatedAt: input.completedAt,
     type: "run_interrupt_result",
-    message: "Run interrupted by user",
+    message: input.message ?? "Run interrupted by user",
   };
 }

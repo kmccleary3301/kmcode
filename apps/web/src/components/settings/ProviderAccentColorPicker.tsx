@@ -15,11 +15,20 @@ const FALLBACK_ACCENT_COLOR = "#2563eb";
 function ProviderCustomColorPanel(props: {
   readonly value: string;
   readonly onCommit: (value: string) => void;
+  readonly showAddButton: boolean;
 }) {
   const { onCommit } = props;
   const [hsv, setHsv] = useState(() => hexToHsv(props.value));
   const currentColor = hsvToHex(hsv.h, hsv.s, hsv.v);
   const [hexDraft, setHexDraft] = useState<string | null>(null);
+  const [syncedValue, setSyncedValue] = useState(props.value);
+  if (syncedValue !== props.value) {
+    setSyncedValue(props.value);
+    if (currentColor !== props.value.toLowerCase()) {
+      setHsv(hexToHsv(props.value));
+      setHexDraft(null);
+    }
+  }
 
   const commitHsv = useCallback(
     (nextHsv: HsvColor) => {
@@ -59,6 +68,15 @@ function ProviderCustomColorPanel(props: {
           aria-label="Custom hex accent color"
           spellCheck={false}
         />
+        {props.showAddButton ? (
+          <PopoverClose
+            render={
+              <Button type="button" size="compact" onClick={() => onCommit(currentColor)}>
+                Add color
+              </Button>
+            }
+          />
+        ) : null}
       </div>
     </div>
   );
@@ -95,6 +113,7 @@ function ProviderCustomColorPicker(props: {
         <ProviderCustomColorPanel
           value={normalized ?? FALLBACK_ACCENT_COLOR}
           onCommit={props.onCommit}
+          showAddButton={!normalized}
         />
         {normalized ? (
           <div className="border-t border-border/60 p-1">

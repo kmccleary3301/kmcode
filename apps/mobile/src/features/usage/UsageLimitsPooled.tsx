@@ -19,6 +19,8 @@ import { Linking, Pressable, ScrollView, View } from "react-native";
 import { Defs, Path, Pattern, Rect, Svg } from "react-native-svg";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 
+import { normalizeProviderAccentColor } from "@t3tools/client-runtime/state/provider-instance-display";
+
 import { SymbolView } from "../../components/AppSymbol";
 import { AppText as Text } from "../../components/AppText";
 import { ProviderIcon } from "../../components/ProviderIcon";
@@ -136,7 +138,7 @@ function PoolWindowCard({
             >
               <AccountSegment
                 remaining={remainingPercent(window)}
-                color={color}
+                color={normalizeProviderAccentColor(account.accentColor) ?? color}
                 pending={Boolean(window.resetsAt)}
               />
               <View pointerEvents="none" className="absolute inset-0 items-center justify-center">
@@ -153,6 +155,7 @@ function PoolWindowCard({
           if (!window) return null;
           const credits = account.limits.resetCredits?.availableCount ?? 0;
           const resetsIn = formatResetsIn(window, now);
+          const segmentColor = normalizeProviderAccentColor(account.accentColor) ?? color;
           return (
             <Pressable
               key={account.key}
@@ -162,7 +165,12 @@ function PoolWindowCard({
               onPress={() => openAccount(account)}
               className="min-h-[44px] flex-row items-center gap-2 active:opacity-60"
             >
-              <View className="size-5 items-center justify-center overflow-hidden rounded-md bg-subtle-strong">
+              <View className="relative size-5 items-center justify-center overflow-hidden rounded-md bg-subtle-strong">
+                <View
+                  pointerEvents="none"
+                  className="absolute inset-0"
+                  style={{ backgroundColor: segmentColor, opacity: 0.35 }}
+                />
                 <Text className="text-xs font-t3-medium tabular-nums text-foreground">
                   {index + 1}
                 </Text>

@@ -233,6 +233,7 @@ export const make = Effect.gen(function* () {
       threadRestartContinuation: true,
       projectSettingsOverrides: true,
       threadSnooze: true,
+      threadForceStop: true,
       environmentThemes: true,
       usageLimitSources: true,
       usagePriceOverrides: true,
@@ -249,6 +250,7 @@ export const make = Effect.gen(function* () {
       threadPullRequestLinking: true,
       serverResolvedCommandContext: true,
       environmentIcon: true,
+      npmReleaseLookup: true,
       projectCloneTracking: true,
       ...(serverSelfUpdate === null ? {} : { serverSelfUpdate }),
       ...(serverInstallation === null ? {} : { serverInstallation }),
@@ -259,6 +261,7 @@ export const make = Effect.gen(function* () {
         : {}),
       ...(desktopAppUpdate ? { desktopAppUpdate: true } : {}),
       serverBrowser: true,
+      ...(hostPlatform === "win32" ? {} : { localServerStop: true }),
     },
   };
 

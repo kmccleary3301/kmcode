@@ -35,15 +35,19 @@ import * as ProviderSessionManager from "./ProviderSessionManager.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import * as ThreadCommandExecutor from "./ThreadCommandExecutor.ts";
 
-const layerManagementDependencies = (options: {
-  readonly serverSettings?: Parameters<typeof ServerSettings.layerTest>[0];
-  readonly getSession?: ProviderSessionManager.ProviderSessionManagerV2["Service"]["get"];
-  readonly hasReceipt?: boolean;
-} = {}) =>
+const layerManagementDependencies = (
+  options: {
+    readonly serverSettings?: Parameters<typeof ServerSettings.layerTest>[0];
+    readonly getSession?: ProviderSessionManager.ProviderSessionManagerV2["Service"]["get"];
+    readonly hasReceipt?: boolean;
+    readonly sessionOverrides?: Partial<ProviderSessionManager.ProviderSessionManagerV2["Service"]>;
+  } = {},
+) =>
   Layer.mergeAll(
     ThreadCommandExecutor.layer,
     Layer.mock(ProviderSessionManager.ProviderSessionManagerV2)({
       get: options.getSession ?? (() => Effect.succeed(Option.none())),
+      ...options.sessionOverrides,
     }),
     ServerSettings.layerTest(options.serverSettings).pipe(Layer.orDie),
     Layer.mock(CommandReceiptStore.CommandReceiptStoreV2)({
@@ -566,7 +570,10 @@ it.effect("defers settlement from its own active turn and settles only after com
       expect(result).toEqual({ settlesWhenTurnEnds: true });
       yield* Deferred.await(subscribed);
       status = "completed";
-      yield* Queue.offer(events, stored(1, { type: "run.updated", payload: { id: runId, status } }));
+      yield* Queue.offer(
+        events,
+        stored(1, { type: "run.updated", payload: { id: runId, status } }),
+      );
       expect(yield* Deferred.await(settlementCommand)).toBe(
         CommandId.make(`server:settle-after-run:${runId}`),
       );
@@ -641,45 +648,53 @@ it.effect("stops only a running Claude workflow coordinator through its live nat
   }),
 );
 
-it.effect("reports unsupported workflow-stop targets without opening or stopping another provider", () =>
-  Effect.gen(function* () {
-    const projectId = ProjectId.make("project:thread-management:unsupported-workflow");
-    const threadId = ThreadId.make("thread:thread-management:unsupported-workflow");
-    const subagentId = NodeId.make("node:thread-management:unsupported-workflow");
-    const providerInstanceId = ProviderInstanceId.make("codex");
-    const driver = ProviderDriverKind.make("codex");
-    const projection = {
-      thread: { id: threadId, projectId, deletedAt: null, runtimeMode: "auto", interactionMode: "default" },
-      subagents: [
-        {
-          id: subagentId,
-          threadId,
-          origin: "provider_native",
-          driver,
-          providerInstanceId,
-          status: "running",
-          workflow: { phases: [], agents: [] },
+it.effect(
+  "reports unsupported workflow-stop targets without opening or stopping another provider",
+  () =>
+    Effect.gen(function* () {
+      const projectId = ProjectId.make("project:thread-management:unsupported-workflow");
+      const threadId = ThreadId.make("thread:thread-management:unsupported-workflow");
+      const subagentId = NodeId.make("node:thread-management:unsupported-workflow");
+      const providerInstanceId = ProviderInstanceId.make("codex");
+      const driver = ProviderDriverKind.make("codex");
+      const projection = {
+        thread: {
+          id: threadId,
+          projectId,
+          deletedAt: null,
+          runtimeMode: "auto",
+          interactionMode: "default",
         },
-      ],
-      runs: [],
-      providerThreads: [],
-    } as unknown as OrchestrationV2ThreadProjection;
-    const layerTest = ThreadManagementService.layer.pipe(
-      Layer.provide(
-        Layer.mergeAll(
-          Layer.mock(Orchestrator.OrchestratorV2)({
-            getThreadRecords: () => Effect.succeed(projection),
-          }),
-          layerManagementDependencies(),
+        subagents: [
+          {
+            id: subagentId,
+            threadId,
+            origin: "provider_native",
+            driver,
+            providerInstanceId,
+            status: "running",
+            workflow: { phases: [], agents: [] },
+          },
+        ],
+        runs: [],
+        providerThreads: [],
+      } as unknown as OrchestrationV2ThreadProjection;
+      const layerTest = ThreadManagementService.layer.pipe(
+        Layer.provide(
+          Layer.mergeAll(
+            Layer.mock(Orchestrator.OrchestratorV2)({
+              getThreadRecords: () => Effect.succeed(projection),
+            }),
+            layerManagementDependencies(),
+          ),
         ),
-      ),
-    );
-    const service = yield* ThreadManagementService.ThreadManagementService.pipe(
-      Effect.provide(layerTest),
-    );
-    const error = yield* Effect.flip(service.stopWorkflow({ threadId, subagentId }));
-    expect(error.reason).toBe("unsupported");
-  }),
+      );
+      const service = yield* ThreadManagementService.ThreadManagementService.pipe(
+        Effect.provide(layerTest),
+      );
+      const error = yield* Effect.flip(service.stopWorkflow({ threadId, subagentId }));
+      expect(error.reason).toBe("unsupported");
+    }),
 );
 
 it.effect("blocks provider dispatch when the project override disables its instance", () =>
@@ -702,10 +717,11 @@ it.effect("blocks provider dispatch when the project override disables its insta
         Layer.mergeAll(
           Layer.mock(Orchestrator.OrchestratorV2)({
             getThreadRecords: () => Effect.succeed(projection),
-            dispatch: () => Effect.sync(() => {
-              dispatched = true;
-              return { sequence: 1 } as never;
-            }),
+            dispatch: () =>
+              Effect.sync(() => {
+                dispatched = true;
+                return { sequence: 1 } as never;
+              }),
           }),
           layerManagementDependencies({
             serverSettings: {
@@ -935,5 +951,217 @@ it.effect("stops a reused delegated child and cancels only its queued follow-up"
 
     expect(stoppedThreads).toEqual([childThreadId, grandchildThreadId]);
     expect(cancelledRuns).toEqual([followupRunId]);
+  }),
+);
+it.effect.each([
+  {
+    name: "releases the unresponsive thread's provider session",
+    runStatus: "running" as const,
+    turnStatus: "running" as const,
+    otherThreads: [] as ReadonlyArray<ThreadId>,
+    releaseResult: true,
+    expectedOutcome: "released" as const,
+    expectedDetaches: 0,
+  },
+  {
+    name: "keeps a session shared with another working thread",
+    runStatus: "running" as const,
+    turnStatus: "running" as const,
+    otherThreads: [ThreadId.make("thread:thread-management:force-stop-sibling")],
+    releaseResult: true,
+    expectedOutcome: "shared" as const,
+    expectedDetaches: 1,
+  },
+  {
+    name: "detaches when a sibling becomes busy before release",
+    runStatus: "running" as const,
+    turnStatus: "running" as const,
+    otherThreads: [] as ReadonlyArray<ThreadId>,
+    releaseResult: false,
+    expectedOutcome: "shared" as const,
+    expectedDetaches: 1,
+  },
+  {
+    name: "settles a completed run's still-running background work",
+    runStatus: "completed" as const,
+    turnStatus: "completed" as const,
+    otherThreads: [ThreadId.make("thread:thread-management:force-stop-sibling")],
+    releaseResult: true,
+    expectedOutcome: "shared" as const,
+    expectedDetaches: 1,
+  },
+])("Force stop $name", (row) =>
+  Effect.gen(function* () {
+    const threadId = ThreadId.make("thread:thread-management:force-stop");
+    const providerSessionId = ProviderSessionId.make("provider-session:force-stop");
+    const providerThreadId = ProviderThreadId.make("provider-thread:force-stop");
+    const providerTurnId = "provider-turn:force-stop";
+    const runId = RunId.make("run:thread-management:force-stop");
+    const dispatched: Array<OrchestrationV2ServerCommand> = [];
+    const released: Array<ProviderSessionId> = [];
+    const detached = yield* Deferred.make<void>();
+    const detachCalls: Array<ThreadId> = [];
+    const projection = {
+      thread: { id: threadId, deletedAt: null },
+      runs: [
+        { id: runId, ordinal: 1, status: row.runStatus, activeAttemptId: "attempt" },
+        { id: RunId.make("run:force-stop-queued"), ordinal: 2, status: "queued" },
+      ],
+      providerThreads: [{ id: providerThreadId, appThreadId: threadId, providerSessionId }],
+      providerTurns: [
+        {
+          id: providerTurnId,
+          providerThreadId,
+          runAttemptId: "attempt",
+          status: row.turnStatus,
+        },
+      ],
+    } as never;
+    const layerTest = ThreadManagementService.layer.pipe(
+      Layer.provide(
+        Layer.mergeAll(
+          Layer.mock(Orchestrator.OrchestratorV2)({
+            getThreadRecords: () => Effect.succeed(projection),
+            dispatch: (command) =>
+              Effect.sync(() => {
+                dispatched.push(command);
+                return { sequence: 1 } as never;
+              }),
+          }),
+          layerManagementDependencies({
+            sessionOverrides: {
+              get: () => Effect.succeed(Option.some({} as never)),
+              otherWorkingThreads: () => Effect.succeed(row.otherThreads),
+              releaseUnlessBusy: ({ providerSessionId: releasedId }) =>
+                Effect.sync(() => {
+                  released.push(releasedId);
+                  return row.releaseResult;
+                }),
+              detach: ({ threadId: detachedThreadId }) =>
+                Effect.sync(() => {
+                  detachCalls.push(detachedThreadId);
+                }).pipe(Effect.andThen(Deferred.succeed(detached, undefined))),
+            },
+          }),
+        ),
+      ),
+    );
+    const result = yield* ThreadManagementService.ThreadManagementService.pipe(
+      Effect.flatMap((service) =>
+        Effect.gen(function* () {
+          const result = yield* service.forceStopThread({ threadId, runId });
+          if (row.expectedDetaches > 0) yield* Deferred.await(detached);
+          return result;
+        }),
+      ),
+      Effect.provide(layerTest),
+    );
+
+    expect(result).toEqual({
+      outcome: row.expectedOutcome,
+      sharedWithThreadIds: row.otherThreads,
+    });
+    expect(dispatched).toMatchObject([
+      {
+        type: "thread.background-work.settle",
+        threadId,
+        providerThreadId,
+        providerTurnId,
+        reason: "Force stopped by user",
+      },
+    ]);
+    expect(released).toEqual(row.otherThreads.length === 0 ? [providerSessionId] : []);
+    expect(detachCalls).toEqual(Array.from({ length: row.expectedDetaches }, () => threadId));
+  }),
+);
+
+it.effect("reports a provider session teardown that exceeds the wait as still releasing", () =>
+  Effect.gen(function* () {
+    const threadId = ThreadId.make("thread:thread-management:force-stop-releasing");
+    const runId = RunId.make("run:thread-management:force-stop-releasing");
+    const providerSessionId = ProviderSessionId.make("provider-session:force-stop-releasing");
+    const providerThreadId = ProviderThreadId.make("provider-thread:force-stop-releasing");
+    const projection = {
+      thread: { id: threadId, deletedAt: null },
+      runs: [{ id: runId, ordinal: 1, status: "running", activeAttemptId: "attempt" }],
+      providerThreads: [{ id: providerThreadId, appThreadId: threadId, providerSessionId }],
+      providerTurns: [
+        {
+          id: "provider-turn:force-stop-releasing",
+          providerThreadId,
+          runAttemptId: "attempt",
+          status: "running",
+        },
+      ],
+    } as never;
+    const layerTest = ThreadManagementService.layer.pipe(
+      Layer.provide(
+        Layer.mergeAll(
+          Layer.mock(Orchestrator.OrchestratorV2)({
+            getThreadRecords: () => Effect.succeed(projection),
+            dispatch: () => Effect.succeed({ sequence: 1 } as never),
+          }),
+          layerManagementDependencies({
+            sessionOverrides: {
+              get: () => Effect.succeed(Option.some({} as never)),
+              otherWorkingThreads: () => Effect.succeed([]),
+              releaseUnlessBusy: () => Effect.never,
+            },
+          }),
+        ),
+      ),
+    );
+    const stopping = yield* ThreadManagementService.ThreadManagementService.pipe(
+      Effect.flatMap((service) => service.forceStopThread({ threadId, runId })),
+      Effect.provide(layerTest),
+      Effect.forkChild,
+    );
+    yield* TestClock.adjust("10 seconds");
+    expect(yield* Fiber.join(stopping)).toEqual({
+      outcome: "releasing",
+      sharedWithThreadIds: [],
+    });
+  }),
+);
+
+it.effect("Force stop refuses a superseded run before touching its provider session", () =>
+  Effect.gen(function* () {
+    const threadId = ThreadId.make("thread:thread-management:force-stop-superseded");
+    const stoppedRunId = RunId.make("run:thread-management:force-stop-old");
+    let releaseCalled = false;
+    const projection = {
+      thread: { id: threadId, deletedAt: null },
+      runs: [
+        { id: stoppedRunId, ordinal: 1, status: "running" },
+        { id: RunId.make("run:thread-management:force-stop-new"), ordinal: 2, status: "running" },
+      ],
+      providerThreads: [],
+      providerTurns: [],
+    } as never;
+    const layerTest = ThreadManagementService.layer.pipe(
+      Layer.provide(
+        Layer.mergeAll(
+          Layer.mock(Orchestrator.OrchestratorV2)({
+            getThreadRecords: () => Effect.succeed(projection),
+          }),
+          layerManagementDependencies({
+            sessionOverrides: {
+              releaseUnlessBusy: () =>
+                Effect.sync(() => {
+                  releaseCalled = true;
+                  return true;
+                }),
+            },
+          }),
+        ),
+      ),
+    );
+    const error = yield* Effect.gen(function* () {
+      const service = yield* ThreadManagementService.ThreadManagementService;
+      return yield* Effect.flip(service.forceStopThread({ threadId, runId: stoppedRunId }));
+    }).pipe(Effect.provide(layerTest));
+
+    expect(error.reason).toBe("superseded");
+    expect(releaseCalled).toBe(false);
   }),
 );

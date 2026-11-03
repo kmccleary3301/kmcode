@@ -173,11 +173,62 @@ describe("surface shortcuts", () => {
   const actions = [
     { shortcut: "B", available: true, label: "Browser" },
     { shortcut: "D", available: false, label: "Diff" },
+    { shortcut: "T", available: true, label: "Terminal" },
+    { shortcut: "M", available: true, label: "Device" },
   ] as const;
 
   it("matches available surface shortcuts case-insensitively", () => {
     expect(surfaceShortcutActionForKey(actions, shortcutEvent("b"))).toBe(actions[0]);
     expect(surfaceShortcutActionForKey(actions, shortcutEvent("B"))).toBe(actions[0]);
+  });
+
+  it("falls back to the physical key for non-Latin letters and marks", () => {
+    expect(surfaceShortcutActionForKey(actions, shortcutEvent("\u0438", { code: "KeyB" }))).toBe(
+      actions[0],
+    );
+    expect(surfaceShortcutActionForKey(actions, shortcutEvent("\u03b2", { code: "KeyB" }))).toBe(
+      actions[0],
+    );
+    expect(surfaceShortcutActionForKey(actions, shortcutEvent("\u0e34", { code: "KeyB" }))).toBe(
+      actions[0],
+    );
+    expect(
+      surfaceShortcutActionForKey(actions, shortcutEvent("\u0644\u0627", { code: "KeyB" })),
+    ).toBe(actions[0]);
+    expect(
+      surfaceShortcutActionForKey(actions, shortcutEvent("\u0432", { code: "KeyD" })),
+    ).toBeNull();
+  });
+
+  it("follows the typed letter on Latin layouts that move it", () => {
+    expect(surfaceShortcutActionForKey(actions, shortcutEvent("x", { code: "KeyB" }))).toBeNull();
+    expect(surfaceShortcutActionForKey(actions, shortcutEvent("X", { code: "KeyB" }))).toBeNull();
+    expect(surfaceShortcutActionForKey(actions, shortcutEvent("b", { code: "KeyN" }))).toBe(
+      actions[0],
+    );
+  });
+
+  it("keeps accented Latin letters, punctuation, and dead keys as typed", () => {
+    expect(
+      surfaceShortcutActionForKey(actions, shortcutEvent("\u00e8", { code: "KeyT" })),
+    ).toBeNull();
+    expect(surfaceShortcutActionForKey(actions, shortcutEvent(",", { code: "KeyM" }))).toBeNull();
+    expect(
+      surfaceShortcutActionForKey(actions, shortcutEvent("Dead", { code: "KeyT" })),
+    ).toBeNull();
+  });
+
+  it("leaves AltGr text alone unless it is a plain letter", () => {
+    const getModifierState = (key: string) => key === "AltGraph";
+    expect(
+      surfaceShortcutActionForKey(
+        actions,
+        shortcutEvent("\u00b5", { code: "KeyM", getModifierState }),
+      ),
+    ).toBeNull();
+    expect(
+      surfaceShortcutActionForKey(actions, shortcutEvent("b", { code: "KeyB", getModifierState })),
+    ).toBe(actions[0]);
   });
 
   it("does not activate unavailable surfaces", () => {

@@ -166,6 +166,7 @@ describe("renderCliShim", () => {
     );
     expect(bare).toEqual([]);
     expect(lines).toContain('set "T3CODE_CLI_PATH=C:\\Users\\José\\.t3\\bin\\t3.cmd"');
+    expect(lines).toContain('set "T3CODE_DESKTOP_CLI_LAUNCHER=1"');
   });
 
   it("switches the Windows console to UTF-8 only when a path needs it", () => {

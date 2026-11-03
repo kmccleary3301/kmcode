@@ -14,6 +14,7 @@ import {
   ChevronDownIcon,
   ChevronRightIcon,
   Columns2Icon,
+  FlaskConicalOffIcon,
   FolderTreeIcon,
   InfoIcon,
   MessageSquareOffIcon,
@@ -60,7 +61,9 @@ import { DiffPanelLoadingState } from "../DiffPanelShell";
 import { DiffCommentAnnotation } from "../diffs/DiffCommentAnnotation";
 import { DiffFileTree } from "../diffs/DiffFileTree";
 import { useCodeViewFileReveal } from "../diffs/useCodeViewFileReveal";
-import { diffFileTreeEntries } from "../diffs/diffFileTree.logic";
+import { diffFileTreeEntries, orderDiffFilesLikeTree } from "../diffs/diffFileTree.logic";
+import { useHideTestFiles } from "../diffs/useHideTestFiles";
+import { isTestChangedFile } from "~/lib/changedFileKind";
 import { StyledDiffCodeView } from "../diffs/StyledDiffCodeView";
 import { Button } from "../ui/button";
 import { MorphIcon } from "~/components/MorphIcon";
@@ -80,6 +83,7 @@ import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 import { PendingReviewCommentCard, ReviewThreadCard } from "./PullRequestReviewAnnotation";
 import {
   isFileDiffCollapsed,
+  getFileViewedRange,
   isLineInFileDiff,
   toggleFileDiffFoldForViewed,
   type DiffFoldOverride,
@@ -223,6 +227,9 @@ function PullRequestCodeTab({
   const { resolvedTheme } = useTheme();
   const settings = useClientSettings();
   const [toggledFiles, setToggledFiles] = useState<ReadonlySet<string>>(() => new Set());
+  const [hideTestFiles, setHideTestFiles] = useHideTestFiles();
+  const [lastViewedFileKey, setLastViewedFileKey] = useState<string | null>(null);
+  const [revealedFilePath, setRevealedFilePath] = useState<string | null>(null);
   // A change of any size can carry hundreds of commits, and a menu that long is a scroll rather
   // than a choice. The rest arrive ten at a time, on request.
   const [visibleCommitCount, setVisibleCommitCount] = useState(COMMIT_PAGE_SIZE);
@@ -273,6 +280,8 @@ function PullRequestCodeTab({
     setVisibleCommitCount(COMMIT_PAGE_SIZE);
     setOrphansOpen(false);
     setSliceState({ key: scopeKey, cursor: null, slices: NO_SLICES });
+    setLastViewedFileKey(null);
+    setRevealedFilePath(null);
     parseCache.current.clear();
   }, [scopeKey]);
 
@@ -292,7 +301,7 @@ function PullRequestCodeTab({
   // text would cost more with every slice, which is the wall the slicing exists to remove.
   useEffect(() => {
     const data = diffQuery.data;
-    if (data === null) return;
+    if (data === null || diffQuery.isPending) return;
     setSliceState((previous) => {
       const slices = previous.key === scopeKey ? previous.slices : NO_SLICES;
       const next = {
@@ -329,7 +338,7 @@ function PullRequestCodeTab({
       // after it go with the replacement: their cursors were positions in the old diff.
       return { key: scopeKey, cursor, slices: [...slices.slice(0, index), next] };
     });
-  }, [cursor, diffQuery.data, scopeKey]);
+  }, [cursor, diffQuery.data, diffQuery.isPending, scopeKey]);
   // The refresh button rereads from the first page rather than the page the reader is on:
   // pages are positions in one snapshot of the diff, and a fresh snapshot starts over.
   const refreshFirstDiffPage = useAtomRefresh(
@@ -401,15 +410,27 @@ function PullRequestCodeTab({
       }),
     [loadedSlices, resolvedTheme, scopeKey, ignoreWhitespace],
   );
-  // Ordered within a slice rather than across them: ordering the accumulated set would let a late
-  // slice push a file the reader is part way through further down the page.
-  const files = useMemo(
+  const loadedFiles = useMemo(
     () =>
-      parsedSlices.flatMap((parsed) =>
-        parsed?.kind === "files" ? orderDiffFiles(parsed.files) : [],
+      orderDiffFilesLikeTree(
+        parsedSlices.flatMap((parsed) =>
+          parsed?.kind === "files" ? orderDiffFiles(parsed.files) : [],
+        ),
       ),
     [parsedSlices],
   );
+  const testFileCount = useMemo(
+    () => loadedFiles.filter((file) => isTestChangedFile(resolveFileDiffPath(file))).length,
+    [loadedFiles],
+  );
+  const files = useMemo(() => {
+    if (!hideTestFiles) return loadedFiles;
+    return loadedFiles.filter((file) => {
+      const path = resolveFileDiffPath(file);
+      return path === revealedFilePath || !isTestChangedFile(path);
+    });
+  }, [hideTestFiles, loadedFiles, revealedFilePath]);
+  const hiddenTestFileCount = loadedFiles.length - files.length;
   const filePaths = useMemo(() => files.map((file) => resolveFileDiffPath(file)), [files]);
   // Offered under a commit scope as well as from the whole change, because reading a change one
   // commit at a time is what the scope is for. The tick is kept against the change request rather
@@ -652,13 +673,23 @@ function PullRequestCodeTab({
   // back. Folding is still held as the reader's difference from the toolbar's default rather
   // than derived from what has been ticked, so folding everything ticks nothing off.
   const setFileViewed = useCallback(
-    (fileKey: string, path: string, viewed: boolean) => {
-      setViewed(path, viewed);
+    (fileKey: string, viewed: boolean, extendRange: boolean) => {
+      const range = getFileViewedRange(
+        annotatedFiles,
+        fileKey,
+        extendRange ? lastViewedFileKey : null,
+      );
+      setLastViewedFileKey(fileKey);
+      for (const file of range) setViewed(file.path, viewed);
       setToggledFiles((current) =>
-        toggleFileDiffFoldForViewed(fileKey, viewed, effectiveFoldOverride, current),
+        range.reduce(
+          (next, file) =>
+            toggleFileDiffFoldForViewed(file.fileKey, viewed, effectiveFoldOverride, next),
+          current,
+        ),
       );
     },
-    [effectiveFoldOverride, setViewed],
+    [annotatedFiles, effectiveFoldOverride, lastViewedFileKey, setViewed],
   );
 
   const requestTreeReveal = useCodeViewFileReveal(viewer, scopeKey);
@@ -666,6 +697,7 @@ function PullRequestCodeTab({
     (path: string) => {
       const item = items.find((candidate) => resolveFileDiffPath(candidate.fileDiff) === path);
       if (item === undefined) return;
+      setRevealedFilePath(path);
       if (item.collapsed === true) toggleFile(item.id);
       requestTreeReveal(item.id);
     },
@@ -846,7 +878,13 @@ function PullRequestCodeTab({
             <Checkbox
               aria-label={stale ? "Changed" : "Viewed"}
               checked={viewed}
-              onCheckedChange={(next) => setFileViewedRef.current(item.id, path, next === true)}
+              onCheckedChange={(next, details) =>
+                setFileViewedRef.current(
+                  item.id,
+                  next === true,
+                  "shiftKey" in details.event && details.event.shiftKey === true,
+                )
+              }
             />
             {stale ? (
               <Tooltip>
@@ -1124,6 +1162,11 @@ function PullRequestCodeTab({
             {files.length} {files.length === 1 ? "file" : "files"}
             {nextCursor === null ? "" : "+"}
           </span>
+          {hiddenTestFileCount > 0 ? (
+            <Button type="button" size="xs" variant="link" onClick={() => setHideTestFiles(false)}>
+              {hiddenTestFileCount} test {hiddenTestFileCount === 1 ? "file" : "files"} hidden
+            </Button>
+          ) : null}
           {filesViewed.enabled && files.length > 0 ? (
             <span className="flex min-w-0 items-center gap-1 tabular-nums">
               {/* Named on a host that keeps no record of its own, so the reader is told whose
@@ -1296,6 +1339,26 @@ function PullRequestCodeTab({
             {wordWrap ? "Disable line wrapping" : "Enable line wrapping"}
           </TooltipPopup>
         </Tooltip>
+        {testFileCount > 0 ? (
+          <Tooltip>
+            <TooltipTrigger
+              render={
+                <Toggle
+                  aria-label="Hide test files"
+                  variant="ghost"
+                  size="sm"
+                  pressed={hideTestFiles}
+                  onPressedChange={(pressed) => setHideTestFiles(Boolean(pressed))}
+                />
+              }
+            >
+              <FlaskConicalOffIcon className="size-3.5" />
+            </TooltipTrigger>
+            <TooltipPopup side="top">
+              {hideTestFiles ? "Show test files" : "Hide test files"}
+            </TooltipPopup>
+          </Tooltip>
+        ) : null}
         {fileKeys.length > 0 ? (
           <Tooltip>
             <TooltipTrigger

@@ -112,17 +112,21 @@ interface HarnessOptions {
 function makeHarness(options: HarnessOptions = {}) {
   const layerDatabase = SqlitePersistence.layerMemory;
   const layerRegistry = ProviderAdapterRegistry.layerFromAdapters([adapter]);
+  const layerServerSettings = ServerSettings.layerTest({
+    ...options.serverSettings,
+    responseStreamingMode: "turn",
+  }).pipe(Layer.orDie);
   const layerOrchestrator = ProviderReplayHarness.layerWithRegistry(
     { name: "thread-launch" },
     layerRegistry,
     {
       databaseLayer: layerDatabase,
       runEffectWorker: false,
+      serverSettingsLayer: layerServerSettings,
       ...(options.serverSettings === undefined ? {} : { serverSettings: options.serverSettings }),
     },
   );
   const layerReceipts = CommandReceiptStore.layer.pipe(Layer.provide(layerDatabase));
-  const layerServerSettings = ServerSettings.layerTest(options.serverSettings);
   const layerThreadManagement = ThreadManagement.layer.pipe(Layer.provide(layerOrchestrator));
   const layerOutbox = EffectOutbox.layer.pipe(Layer.provide(layerDatabase));
   const createWorktree = vi.fn(
@@ -1357,6 +1361,109 @@ it.effect("shows the fetch diagnosis when preparing a worktree from origin fails
   }).pipe(Effect.provide(harness.layer));
 });
 
+it.effect("rejects a preparation retry after the project disables its provider", () => {
+  let fetchAttempts = 0;
+  const harness = makeHarness({
+    fetchRemote: () =>
+      fetchAttempts++ === 0
+        ? Effect.fail(
+            new GitCommandError({
+              operation: "GitVcsDriver.fetchRemote",
+              command: "git",
+              cwd: project.workspaceRoot,
+              detail: "Git could not reach the remote.",
+              exitCode: 128,
+            }),
+          )
+        : Effect.void,
+  });
+  return Effect.gen(function* () {
+    const launches = yield* ThreadLaunch.ThreadLaunchService;
+    const settings = yield* ServerSettings.ServerSettingsService;
+    const threads = yield* ThreadManagement.ThreadManagementService;
+    const launched = yield* launches.launch(
+      launchInput({
+        command: "command:launch:disabled-preparation-retry",
+        thread: "thread:launch:disabled-preparation-retry",
+        message: "Start from origin",
+        workspace: { type: "worktree", baseRef: "main", startFromOrigin: true },
+      }),
+    );
+    yield* waitUntil(() =>
+      threads
+        .getThreadProjection(launched.threadId)
+        .pipe(Effect.map((projection) => projection.runs[0]?.status === "failed")),
+    );
+    yield* settings.updateSettings({
+      projectSettingsOverrides: {
+        [projectId]: { providerInstances: { [modelSelection.instanceId]: { enabled: false } } },
+      },
+    });
+
+    const error = yield* launches
+      .retryPreparation({
+        commandId: CommandId.make("command:launch:disabled-preparation-retry:retry"),
+        threadId: launched.threadId,
+        runId: launched.projection.runs[0]!.id,
+      })
+      .pipe(Effect.flip);
+
+    assert.equal(error._tag, "ThreadManagementProviderInstanceDisabledError");
+    assert.equal((yield* threads.getThreadProjection(launched.threadId)).runs[0]?.status, "failed");
+    assert.equal(fetchAttempts, 1);
+  }).pipe(Effect.provide(harness.layer));
+});
+
+it.effect("does not release a prepared run after the project disables its provider", () => {
+  return Effect.gen(function* () {
+    const setupEntered = yield* Deferred.make<void>();
+    const allowSetup = yield* Deferred.make<void>();
+    const harness = makeHarness({
+      runSetup: () =>
+        Deferred.succeed(setupEntered, undefined).pipe(
+          Effect.andThen(Deferred.await(allowSetup)),
+          Effect.as({ status: "no-script" as const }),
+        ),
+    });
+    yield* Effect.gen(function* () {
+      const launches = yield* ThreadLaunch.ThreadLaunchService;
+      const settings = yield* ServerSettings.ServerSettingsService;
+      const threads = yield* ThreadManagement.ThreadManagementService;
+      const outbox = yield* EffectOutbox.EffectOutboxV2;
+      const launched = yield* launches.launch(
+        launchInput({
+          command: "command:launch:disable-during-preparation",
+          thread: "thread:launch:disable-during-preparation",
+          message: "Prepare a worktree",
+          workspace: { type: "worktree", baseRef: "main" },
+        }),
+      );
+      yield* Deferred.await(setupEntered);
+      yield* settings.updateSettings({
+        projectSettingsOverrides: {
+          [projectId]: { providerInstances: { [modelSelection.instanceId]: { enabled: false } } },
+        },
+      });
+      yield* Deferred.succeed(allowSetup, undefined);
+      yield* waitUntil(() =>
+        threads
+          .getThreadProjection(launched.threadId)
+          .pipe(Effect.map((projection) => projection.runs[0]?.status === "failed")),
+      );
+      const effects = yield* outbox.listByCommandId(
+        CommandId.make("command:launch:disable-during-preparation:release"),
+      );
+      assert.isFalse(
+        effects.some(
+          (effect) =>
+            effect.request.type === "provider-turn.start" &&
+            effect.request.runId === launched.projection.runs[0]?.id,
+        ),
+      );
+    }).pipe(Effect.provide(harness.layer));
+  });
+});
+
 it.effect("retries a failed workspace preparation on the same run", () => {
   let fetchFailures = 1;
   const harness = makeHarness({
@@ -1980,10 +2087,9 @@ it.effect("prepareRun reserves a deferred workspace preparation exactly once", (
         threadId: input.threadId!,
         runId: preparing.runs[0]!.id,
       };
-      yield* Effect.all(
-        [launches.prepareRun(prepareInput), launches.prepareRun(prepareInput)],
-        { concurrency: "unbounded" },
-      );
+      yield* Effect.all([launches.prepareRun(prepareInput), launches.prepareRun(prepareInput)], {
+        concurrency: "unbounded",
+      });
       yield* Deferred.await(setupEntered);
       assert.equal(harness.createWorktree.mock.calls.length, 1);
       assert.equal(harness.runSetup.mock.calls.length, 1);
@@ -2353,37 +2459,40 @@ it.effect.each([0, 1])("releases an async setup before its completion with exit 
   }),
 );
 
-it.effect("rejects launch before side effects when the project disables its provider instance", () => {
-  const threadId = ThreadId.make("thread:launch:provider-disabled");
-  const harness = makeHarness({
-    serverSettings: {
-      projectSettingsOverrides: {
-        [projectId]: {
-          providerInstances: { [modelSelection.instanceId]: { enabled: false } },
+it.effect(
+  "rejects launch before side effects when the project disables its provider instance",
+  () => {
+    const threadId = ThreadId.make("thread:launch:provider-disabled");
+    const harness = makeHarness({
+      serverSettings: {
+        projectSettingsOverrides: {
+          [projectId]: {
+            providerInstances: { [modelSelection.instanceId]: { enabled: false } },
+          },
         },
       },
-    },
-  });
-  return Effect.gen(function* () {
-    const launches = yield* ThreadLaunch.ThreadLaunchService;
-    const threads = yield* ThreadManagement.ThreadManagementService;
-    const error = yield* launches
-      .launch(
-        launchInput({
-          command: "command:launch:provider-disabled",
-          thread: threadId,
-          message: "must not launch",
-          workspace: { type: "worktree", baseRef: "main" },
-        }),
-      )
-      .pipe(Effect.flip);
+    });
+    return Effect.gen(function* () {
+      const launches = yield* ThreadLaunch.ThreadLaunchService;
+      const threads = yield* ThreadManagement.ThreadManagementService;
+      const error = yield* launches
+        .launch(
+          launchInput({
+            command: "command:launch:provider-disabled",
+            thread: threadId,
+            message: "must not launch",
+            workspace: { type: "worktree", baseRef: "main" },
+          }),
+        )
+        .pipe(Effect.flip);
 
-    assert.equal(error._tag, "ThreadLaunchError");
-    assert.equal(error.operation, "resolve-project");
-    assert.isTrue(
-      Schema.is(ThreadManagement.ThreadManagementProviderInstanceDisabledError)(error.cause),
-    );
-    assert.isNull(yield* threads.getThreadShell(threadId));
-    assert.equal(harness.createWorktree.mock.calls.length, 0);
-  }).pipe(Effect.provide(harness.layer));
-});
+      assert.equal(error._tag, "ThreadLaunchError");
+      assert.equal(error.operation, "resolve-project");
+      assert.isTrue(
+        Schema.is(ThreadManagement.ThreadManagementProviderInstanceDisabledError)(error.cause),
+      );
+      assert.isNull(yield* threads.getThreadShell(threadId));
+      assert.equal(harness.createWorktree.mock.calls.length, 0);
+    }).pipe(Effect.provide(harness.layer));
+  },
+);

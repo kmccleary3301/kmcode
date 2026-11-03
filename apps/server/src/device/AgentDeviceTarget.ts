@@ -1,3 +1,7 @@
+import { DeviceOperationError } from "@t3tools/contracts";
+import * as Duration from "effect/Duration";
+import { HttpClient, HttpClientRequest, HttpClientResponse } from "effect/http";
+
 import * as Crypto from "effect/Crypto";
 import * as Effect from "effect/Effect";
 import * as Hex from "effect/encoding/Hex";
@@ -27,6 +31,39 @@ export const agentDeviceConfigPath = (stateDir: string, hostId: string, path: Pa
 
 export const agentDeviceSession = (threadId: string, hostId: string, deviceId: string) =>
   key(JSON.stringify([threadId, hostId, deviceId])).pipe(Effect.map((hash) => `t3-${hash}`));
+
+const AgentCloseResult = Schema.Union([
+  Schema.Struct({ result: Schema.Struct({ ok: Schema.Literal(true) }) }),
+  Schema.Struct({
+    error: Schema.Struct({
+      data: Schema.Struct({ code: Schema.Literal("SESSION_NOT_FOUND") }),
+    }),
+  }),
+]);
+
+/** Ends an agent-device session on a running daemon; an already-released session succeeds. */
+export const releaseAgentDeviceSession =
+  (http: HttpClient.HttpClient, endpoint: AgentDeviceEndpoint) => (session: string) =>
+    HttpClientRequest.post(`${endpoint.baseUrl}/rpc`).pipe(
+      HttpClientRequest.bearerToken(endpoint.token),
+      HttpClientRequest.bodyJson({
+        jsonrpc: "2.0",
+        id: session,
+        method: "agent_device.command",
+        params: { command: "close", session, positionals: [], flags: {} },
+      }),
+      Effect.flatMap((request) => http.pipe(HttpClient.withScope).execute(request)),
+      // agent-device reports an already-released session as HTTP 404.
+      Effect.filterOrElse((response) => response.status === 404, HttpClientResponse.filterStatusOk),
+      Effect.flatMap(HttpClientResponse.schemaBodyJson(AgentCloseResult)),
+      Effect.scoped,
+      Effect.timeout(Duration.seconds(15)),
+      Effect.asVoid,
+      Effect.mapError(
+        (cause) =>
+          new DeviceOperationError({ operation: "close", reason: "request_failed", cause }),
+      ),
+    );
 
 export const writeAgentDeviceConfig = Effect.fn("AgentDeviceTarget.writeConfig")(function* (
   file: string,

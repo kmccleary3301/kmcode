@@ -27,6 +27,7 @@ import * as Schema from "effect/Schema";
 
 import { getModelSelectionStringOptionValue } from "@t3tools/shared/model";
 import * as AnalyticsService from "../telemetry/AnalyticsService.ts";
+import * as ProviderInstanceRegistry from "../provider/ProviderInstanceRegistry.ts";
 import * as EventSink from "./EventSink.ts";
 import * as ProjectionStore from "./ProjectionStore.ts";
 import * as IdAllocator from "./IdAllocator.ts";
@@ -256,6 +257,7 @@ export const layer: Layer.Layer<
   | IdAllocator.IdAllocatorV2
   | ProjectionStore.ProjectionStoreV2
   | ThreadCommandExecutor.ThreadCommandExecutor
+  | ProviderInstanceRegistry.ProviderInstanceRegistry
 > = Layer.effect(
   ProviderEventIngestorV2,
   Effect.gen(function* () {
@@ -263,6 +265,8 @@ export const layer: Layer.Layer<
     const projections = yield* ProjectionStore.ProjectionStoreV2;
     const idAllocator = yield* IdAllocator.IdAllocatorV2;
     const threadCommands = yield* ThreadCommandExecutor.ThreadCommandExecutor;
+    const providerInstanceRegistry = yield* ProviderInstanceRegistry.ProviderInstanceRegistry;
+    const scope = yield* Effect.scope;
     const analytics = yield* ProviderTurnAnalytics;
     const completedTurnAnalytics = new Set<string>();
 
@@ -512,6 +516,8 @@ export const layer: Layer.Layer<
           case "run.execution-ended":
             // RunExecutionService persists this guarded control milestone.
             return [];
+          case "background_work.updated":
+            return [];
           case "turn.terminal":
             const dismissed = yield* dismissNativeUserInputs(input, input.event.providerTurnId);
             if (input.event.status !== "failed") {
@@ -615,7 +621,23 @@ export const layer: Layer.Layer<
           ),
           Effect.tap((storedEvents) =>
             Effect.gen(function* () {
-              if (storedEvents.length === 0 || input.event.type !== "provider_turn.updated") return;
+              if (storedEvents.length === 0) return;
+              if (
+                input.event.type === "turn.terminal" &&
+                input.event.status === "failed" &&
+                input.event.failure.class === "usage_limit"
+              ) {
+                const instance = yield* providerInstanceRegistry.getInstance(
+                  input.providerInstanceId,
+                );
+                if (instance?.snapshot.refreshUsage !== undefined) {
+                  yield* instance.snapshot.refreshUsage.pipe(
+                    Effect.ignoreCause({ log: true }),
+                    Effect.forkIn(scope, { startImmediately: true }),
+                  );
+                }
+              }
+              if (input.event.type !== "provider_turn.updated") return;
               const providerTurn = input.event.providerTurn;
               if (
                 providerTurn.status !== "completed" &&

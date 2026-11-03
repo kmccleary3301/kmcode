@@ -46,7 +46,7 @@ function commandItem(
     updatedAt: DateTime.makeUnsafe("2026-09-08T00:00:00.000Z"),
     type: "command_execution",
     input: 'rg "command not found"',
-    exitCode: 0,
+    exitCode: undefined,
     ...fields,
   };
 }
@@ -81,6 +81,22 @@ describe("workEntryIndicatesToolFailure", () => {
       expect(JSON.stringify(toolItemForDisplay(structuredPayload))).not.toContain('"output":');
     },
   );
+
+  it.each([
+    "logs/app.log:12: Error: ENOENT: no such file or directory",
+    "fixtures/ci.txt:3: Process exited with exit code 2",
+  ])("trusts a zero exit code over failure text in the output and command: %s", (output) => {
+    const entry: WorkLogPresentationEntry = {
+      ...base,
+      tone: "tool",
+      itemType: "command_execution",
+      toolLifecycleStatus: "completed",
+      command: 'rg -n "ENOENT|exit code" logs fixtures',
+      structuredPayload: commandItem({ output, exitCode: 0, outputIndicatesFailure: true }),
+    };
+    expect(workEntryIndicatesToolFailure(entry)).toBe(false);
+    expect(workEntryDisplayIndicatesToolFailure(entry)).toBe(false);
+  });
 
   it("is true for error tone", () => {
     expect(
@@ -1158,8 +1174,9 @@ describe("tool step headlines", () => {
   });
 
   it("puts verb tense on status and prefers a curated name for unknown tools", () => {
-    expect(deriveToolVerbObject({ toolName: "read", args: { path: "a/b.ts" }, running: true }))
-      .toMatchObject({ verb: "Reading", object: "a/b.ts", objectIsPath: true });
+    expect(
+      deriveToolVerbObject({ toolName: "read", args: { path: "a/b.ts" }, running: true }),
+    ).toMatchObject({ verb: "Reading", object: "a/b.ts", objectIsPath: true });
     expect(
       deriveToolVerbObject({
         toolName: "mcp__t3-code__t3_thread_read",
@@ -1182,9 +1199,9 @@ describe("workEntryCoalesceCategory", () => {
 
   it("merges exploration and edits, keeps commands alone, and pools generic tools", () => {
     expect(workEntryCoalesceCategory(entry({ requestKind: "file-read" }))).toBe("explore");
-    expect(workEntryCoalesceCategory(entry({ itemType: "file_change", changedFiles: ["a.ts"] }))).toBe(
-      "edit",
-    );
+    expect(
+      workEntryCoalesceCategory(entry({ itemType: "file_change", changedFiles: ["a.ts"] })),
+    ).toBe("edit");
     expect(
       workEntryCoalesceCategory(entry({ itemType: "command_execution", command: "pnpm test" })),
     ).toBe("individual");

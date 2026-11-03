@@ -13,6 +13,7 @@ import {
   CheckIcon,
   ChevronDownIcon,
   Columns2Icon,
+  FlaskConicalOffIcon,
   FolderTreeIcon,
   PilcrowIcon,
   Rows3Icon,
@@ -56,6 +57,8 @@ import { DiffStatLabel } from "./chat/DiffStatLabel";
 import { AnnotatableCodeView, type AnnotatableCodeViewHandle } from "./diffs/AnnotatableCodeView";
 import { DiffFileTree } from "./diffs/DiffFileTree";
 import { diffFileTreeEntries } from "./diffs/diffFileTree.logic";
+import { isTestChangedFile } from "~/lib/changedFileKind";
+import { useHideTestFiles } from "./diffs/useHideTestFiles";
 import { Button } from "./ui/button";
 import { MorphIcon } from "~/components/MorphIcon";
 import { ToggleGroup, Toggle } from "./ui/toggle-group";
@@ -209,6 +212,7 @@ export default function DiffPanel({
     false,
     Schema.Boolean,
   );
+  const [hideTestFiles, setHideTestFiles] = useHideTestFiles();
   const [baseRefQuery, setBaseRefQuery] = useState("");
   const [collapsedDiffFiles, setCollapsedDiffFiles] = useState<CollapsedDiffFilesState>(() => ({
     scopeKey: null,
@@ -531,6 +535,17 @@ export default function DiffPanel({
     () => renderableFiles.map(getCachedFileEntry),
     [renderableFiles],
   );
+  const testFileCount = useMemo(
+    () => renderableFiles.filter((file) => isTestChangedFile(resolveFileDiffPath(file))).length,
+    [renderableFiles],
+  );
+  const shownFileEntries = useMemo(() => {
+    if (!hideTestFiles) return renderableFileEntries;
+    return renderableFileEntries.filter(({ fileDiff }) => {
+      const path = resolveFileDiffPath(fileDiff);
+      return path === selectedFilePath || !isTestChangedFile(path);
+    });
+  }, [hideTestFiles, renderableFileEntries, selectedFilePath]);
   const defaultCollapsedDiffFileKeys = useMemo(
     () =>
       settings.diffFilesCollapsed
@@ -554,7 +569,7 @@ export default function DiffPanel({
   );
   const codeViewFiles = useMemo(
     () =>
-      renderableFileEntries
+      shownFileEntries
         .filter(({ fileDiff }) => !lazySource || readyFilePaths.has(resolveFileDiffPath(fileDiff)))
         .map(({ fileDiff, fileKey, fileVersion }) => {
           return {
@@ -568,13 +583,17 @@ export default function DiffPanel({
               fileDiff.cacheKey?.endsWith(":pending") === true,
           };
         }),
-    [collapsedDiffFileKeys, renderableFileEntries, lazySource, readyFilePaths],
+    [collapsedDiffFileKeys, shownFileEntries, lazySource, readyFilePaths],
   );
   const diffFileKeys = useMemo(
     () => renderableFileEntries.map((file) => file.fileKey),
     [renderableFileEntries],
   );
-  const allDiffFilesCollapsed = areAllDiffFilesCollapsed(diffFileKeys, collapsedDiffFileKeys);
+  const shownFileKeys = useMemo(
+    () => shownFileEntries.map((file) => file.fileKey),
+    [shownFileEntries],
+  );
+  const allDiffFilesCollapsed = areAllDiffFilesCollapsed(shownFileKeys, collapsedDiffFileKeys);
   const diffLineStat = useMemo(() => {
     if (!selectedTurn && selectedGitSource?.files) {
       return selectedGitSource.files.reduce(
@@ -587,7 +606,10 @@ export default function DiffPanel({
     }
     return getDiffLineStat(renderableFiles);
   }, [renderableFiles, selectedGitSource, selectedTurn]);
-  const fileTreeEntries = useMemo(() => diffFileTreeEntries(renderableFiles), [renderableFiles]);
+  const fileTreeEntries = useMemo(
+    () => diffFileTreeEntries(shownFileEntries.map(({ fileDiff }) => fileDiff)),
+    [shownFileEntries],
+  );
   const selectedDiffFileKey = selectedFilePath
     ? (codeViewFiles.find((candidate) => candidate.filePath === selectedFilePath)?.fileKey ?? null)
     : null;
@@ -716,10 +738,10 @@ export default function DiffPanel({
 
       return {
         scopeKey: collapseScopeKey,
-        fileKeys: toggleAllDiffFiles(diffFileKeys, currentKeys),
+        fileKeys: toggleAllDiffFiles(shownFileKeys, currentKeys),
       };
     });
-  }, [collapseScopeKey, defaultCollapsedDiffFileKeys, diffFileKeys]);
+  }, [collapseScopeKey, defaultCollapsedDiffFileKeys, shownFileKeys]);
 
   const selectTurn = (runId: RunId) => {
     if (!routeThreadRef) return;
@@ -1036,6 +1058,28 @@ export default function DiffPanel({
             {diffIgnoreWhitespace ? "Show whitespace changes" : "Hide whitespace changes"}
           </TooltipPopup>
         </Tooltip>
+        {testFileCount > 0 && (
+          <Tooltip>
+            <TooltipTrigger
+              render={
+                <Toggle
+                  aria-label="Hide test files"
+                  variant="ghost"
+                  size="sm"
+                  pressed={hideTestFiles}
+                  onPressedChange={(pressed) => setHideTestFiles(Boolean(pressed))}
+                />
+              }
+            >
+              <FlaskConicalOffIcon className="size-3.5" />
+            </TooltipTrigger>
+            <TooltipPopup side="top">
+              {hideTestFiles
+                ? `Show ${testFileCount} hidden test ${testFileCount === 1 ? "file" : "files"}`
+                : "Hide test files"}
+            </TooltipPopup>
+          </Tooltip>
+        )}
         {diffFileKeys.length > 0 && (
           <Tooltip>
             <TooltipTrigger

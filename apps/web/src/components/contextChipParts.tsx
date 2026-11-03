@@ -207,7 +207,9 @@ export function ImageChipButton({
       ) : (
         <ImageIcon />
       )}
-      <ContextChipLabel className="max-w-72">{middleTruncateAttachmentName(name)}</ContextChipLabel>
+      <ContextChipLabel className="max-w-72 overflow-x-clip text-ellipsis whitespace-nowrap group-hover:underline">
+        {middleTruncateAttachmentName(name)}
+      </ContextChipLabel>
       <span className="shrink-0 text-3xs text-current">{size}</span>
       {suffix ? <span className="text-3xs text-current">{suffix}</span> : null}
     </ContextChip>
@@ -281,7 +283,7 @@ function FileChipContent(props: {
       ) : (
         <PierreEntryIcon pathValue={props.name} kind="file" theme={props.theme} />
       )}
-      <ContextChipLabel className="max-w-72">
+      <ContextChipLabel className="max-w-72 overflow-x-clip text-ellipsis whitespace-nowrap group-hover:underline">
         {middleTruncateAttachmentName(props.name)}
       </ContextChipLabel>
       <span className="shrink-0 text-3xs text-current">{props.size}</span>

@@ -273,9 +273,24 @@ const linkAntigravityUserSkills = Effect.fn("linkAntigravityUserSkills")(functio
     [links[1], targets[1]],
   ] as const) {
     yield* Effect.gen(function* () {
+      // The harness creates these folders itself, and mkdir fails on a dangling link.
+      if (!(yield* fs.exists(target))) {
+        const linked = yield* fs.readLink(link).pipe(
+          Effect.as(true),
+          Effect.orElseSucceed(() => false),
+        );
+        if (linked) yield* fs.remove(link);
+        return;
+      }
       const existing = yield* fs.readLink(link).pipe(
         Effect.map((value): string | undefined => path.resolve(path.dirname(link), value)),
         Effect.catchReason("PlatformError", "NotFound", () => Effect.undefined),
+        Effect.catch((error) =>
+          Effect.tryPromise(() => NodeFSP.rmdir(link)).pipe(
+            Effect.as(undefined),
+            Effect.mapError(() => error),
+          ),
+        ),
       );
       if (existing === target) return;
       if (existing !== undefined) {

@@ -21,6 +21,10 @@ export function createOrchestrationEnvironmentAtoms<R, E>(
         label: "environment-data:orchestration-v2:stop-workflow",
         tag: ORCHESTRATION_V2_WS_METHODS.stopWorkflow,
       }),
+      forceStopThread: createEnvironmentRpcCommand(runtime, {
+        label: "environment-data:orchestration-v2:force-stop-thread",
+        tag: ORCHESTRATION_V2_WS_METHODS.forceStopThread,
+      }),
       threadProjection: createEnvironmentRpcQueryAtomFamily(runtime, {
         label: "environment-data:orchestration-v2:thread-projection",
         tag: ORCHESTRATION_V2_WS_METHODS.getThreadProjection,
@@ -62,6 +66,17 @@ export function createOrchestrationEnvironmentAtoms<R, E>(
     fullThreadDiff: createEnvironmentRpcQueryAtomFamily(runtime, {
       label: "environment-data:orchestration:full-thread-diff",
       tag: ORCHESTRATION_V2_WS_METHODS.getFullThreadDiff,
+    }),
+    threadFind: createEnvironmentRpcQueryAtomFamily(runtime, {
+      label: "environment-data:orchestration:thread-find",
+      tag: ORCHESTRATION_V2_WS_METHODS.searchThread,
+      staleTimeMs: 0,
+      idleTtlMs: 0,
+    }),
+    threadFindProgressive: createEnvironmentRpcSubscriptionAtomFamily(runtime, {
+      label: "environment-data:orchestration:thread-find-progressive",
+      tag: ORCHESTRATION_V2_WS_METHODS.searchThreadStream,
+      idleTtlMs: 0,
     }),
     threadSearch: createEnvironmentRpcQueryAtomFamily(runtime, {
       label: "environment-data:orchestration:thread-search",

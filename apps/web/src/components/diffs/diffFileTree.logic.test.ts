@@ -8,6 +8,7 @@ import {
   collectDirectoryPaths,
   diffFileTreePositions,
   diffFileTreeEntries,
+  orderDiffFilesLikeTree,
 } from "./diffFileTree.logic";
 
 function file(type: FileDiffMetadata["type"], name: string, prevName = name): FileDiffMetadata {
@@ -57,6 +58,26 @@ describe("collectDirectoryPaths", () => {
       "apps/",
       "apps/web/",
       "apps/web/src/",
+    ]);
+  });
+});
+
+describe("orderDiffFilesLikeTree", () => {
+  it("keeps test files beside their first-seen source files in tree order", () => {
+    expect(
+      orderDiffFilesLikeTree([
+        file("change", "server/device/Host.ts"),
+        file("change", "web/settings.ts"),
+        file("change", "server/ws.ts"),
+        file("change", "server/device/Host.test.ts"),
+        file("change", "web/settings.test.ts"),
+      ]).map((entry) => entry.name),
+    ).toEqual([
+      "server/device/Host.ts",
+      "server/device/Host.test.ts",
+      "server/ws.ts",
+      "web/settings.ts",
+      "web/settings.test.ts",
     ]);
   });
 });

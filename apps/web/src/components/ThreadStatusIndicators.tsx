@@ -402,12 +402,16 @@ function ThreadPullRequestMiniListItem({
   const Icon = presentation?.Icon ?? PullRequestGlyph.pullRequest;
   const content = (
     <>
+      {/* Rows top-align so a title that wraps hangs under itself; the icon centres on the first line. */}
       <Icon
         aria-hidden
-        className={cn("size-3 shrink-0", presentation?.toneClassName ?? "stroke-muted-foreground")}
+        className={cn(
+          "mt-[calc((1lh_-_0.75rem)/2)] size-3 shrink-0",
+          presentation?.toneClassName ?? "stroke-muted-foreground",
+        )}
       />
       <span className="shrink-0 font-mono tabular-nums">#{number}</span>
-      <span className="min-w-0 truncate text-foreground/75">{title}</span>
+      <span className="min-w-0 line-clamp-2 text-foreground/75">{title}</span>
       {children}
     </>
   );
@@ -418,14 +422,14 @@ function ThreadPullRequestMiniListItem({
           href={url}
           target="_blank"
           rel="noopener noreferrer"
-          className="flex min-w-0 items-center gap-2 rounded-sm px-1 py-1 hover:bg-accent focus-visible:bg-accent focus-visible:outline-2 focus-visible:outline-ring"
+          className="flex min-w-0 items-start gap-2 rounded-sm px-1 py-1 hover:bg-accent focus-visible:bg-accent focus-visible:outline-2 focus-visible:outline-ring"
           onPointerDown={(event) => event.stopPropagation()}
           onClick={(event) => onOpenPullRequest(event, url)}
         >
           {content}
         </a>
       ) : (
-        <div className="flex min-w-0 items-center gap-2">{content}</div>
+        <div className="flex min-w-0 items-start gap-2">{content}</div>
       )}
     </li>
   );

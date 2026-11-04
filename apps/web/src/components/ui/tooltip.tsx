@@ -124,7 +124,9 @@ function TooltipPopup({
           data-slot="tooltip-popup"
           data-t3-part="tooltip"
         >
-          <div className="px-2 py-1" data-slot="tooltip-viewport">
+          {/* min-w-0: as a flex item the viewport would otherwise refuse to shrink below its
+              content's one-line width, and nowrap/truncated text would spill past the card. */}
+          <div className="min-w-0 px-2 py-1" data-slot="tooltip-viewport">
             {children}
           </div>
         </TooltipPrimitive.Popup>

@@ -289,9 +289,11 @@ export function ApertureEmbedFrame(props: {
                 size="xs"
                 variant="ghost-muted"
                 aria-pressed={live}
-                onClick={() =>
-                  setMode(live ? { kind: "pinned", asOf: reference.asOf } : { kind: "live" })
-                }
+                onClick={() => {
+                  // Claim the live slot in this event, so the frame never renders live while marked hidden.
+                  liveFrame.current?.update({ live: !live, visible });
+                  setMode(live ? { kind: "pinned", asOf: reference.asOf } : { kind: "live" });
+                }}
               />
             }
           >

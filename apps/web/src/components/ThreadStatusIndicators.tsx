@@ -47,6 +47,7 @@ import {
 
 import type { SidebarThreadSummary } from "../types";
 import { formatWorktreePathForDisplay } from "../worktreeCleanup";
+import { ScrollArea } from "./ui/scroll-area";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "./ui/tooltip";
 import { pullRequestListLines } from "./pullRequest/pullRequestListLines";
 import {
@@ -353,32 +354,36 @@ export function ThreadPullRequestsMiniList({
   );
   if (lines.length === 0) return null;
   return (
-    <ul className="flex flex-col gap-1">
-      {lines.map((line) => {
-        const snapshot = line.link.snapshot;
-        const presentation =
-          snapshot === null
-            ? null
-            : resolvePullRequestState({ state: snapshot.state, isDraft: snapshot.isDraft });
-        return (
-          <ThreadPullRequestMiniListItem
-            key={`${line.link.host}/${line.link.repository}#${line.link.number}`}
-            number={line.link.number}
-            url={line.link.url}
-            title={snapshot?.title ?? line.link.repository}
-            presentation={presentation}
-            depth={line.depth}
-            onOpenPullRequest={onOpenPullRequest}
-          >
-            {line.stack ? (
-              <span className="ml-auto shrink-0 pl-1 text-3xs">
-                {line.stack.kind === "native" ? "stack" : "chain"} · {line.stack.size}
-              </span>
-            ) : null}
-          </ThreadPullRequestMiniListItem>
-        );
-      })}
-    </ul>
+    // Capped: a long-lived thread can link dozens of pull requests, and an uncapped list ran
+    // past the window. The overlay scrollbar takes no layout space, so the rows reserve its lane.
+    <ScrollArea scrollFade className="h-auto max-h-[min(20rem,50dvh)]">
+      <ul className="flex flex-col gap-1 pr-2.5">
+        {lines.map((line) => {
+          const snapshot = line.link.snapshot;
+          const presentation =
+            snapshot === null
+              ? null
+              : resolvePullRequestState({ state: snapshot.state, isDraft: snapshot.isDraft });
+          return (
+            <ThreadPullRequestMiniListItem
+              key={`${line.link.host}/${line.link.repository}#${line.link.number}`}
+              number={line.link.number}
+              url={line.link.url}
+              title={snapshot?.title ?? line.link.repository}
+              presentation={presentation}
+              depth={line.depth}
+              onOpenPullRequest={onOpenPullRequest}
+            >
+              {line.stack ? (
+                <span className="ml-auto shrink-0 pl-1 text-3xs">
+                  {line.stack.kind === "native" ? "stack" : "chain"} · {line.stack.size}
+                </span>
+              ) : null}
+            </ThreadPullRequestMiniListItem>
+          );
+        })}
+      </ul>
+    </ScrollArea>
   );
 }
 

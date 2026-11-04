@@ -80,6 +80,7 @@ import * as ApertureConnection from "./aperture/ApertureConnection.ts";
 import * as ApertureEmbedBridge from "./aperture/ApertureEmbedBridge.ts";
 import * as ApertureEmbedToken from "./aperture/ApertureEmbedToken.ts";
 import * as ApertureRuntime from "./aperture/ApertureRuntime.ts";
+import * as ApertureWidgetStore from "./aperture/ApertureWidgetStore.ts";
 import * as ProjectEnrichmentService from "./project/ProjectEnrichmentService.ts";
 import * as NativeAppIconResolver from "./assets/NativeAppIconResolver.ts";
 import * as AntigravityInstallation from "./provider/AntigravityInstallation.ts";
@@ -206,6 +207,7 @@ const layerApertureCore = Layer.mergeAll(
   ApertureConnection.layer,
   ApertureEmbedToken.layer,
   ApertureRuntime.layer,
+  ApertureWidgetStore.layer,
 ).pipe(
   Layer.provideMerge(FetchHttpClient.layer),
   Layer.provideMerge(layerServerSettings),

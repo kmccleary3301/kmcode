@@ -32,6 +32,26 @@ export interface ConsoleMessage {
   readonly level: "log" | "info" | "warning" | "error";
   readonly text: string;
 }
+export interface HtmlRenderBrowserRequest {
+  readonly requestId: string;
+  readonly url: string;
+  readonly method: string;
+  readonly headers: Readonly<Record<string, string>>;
+  readonly postData?: string;
+  readonly frameId?: string;
+  readonly resourceType?: string;
+}
+
+export interface HtmlRenderBrowserResponse {
+  readonly status: number;
+  readonly statusText: string;
+  readonly headers: Readonly<Record<string, string>>;
+  readonly body: Uint8Array;
+}
+
+export type HtmlRenderBrowserRequestHandler = (
+  request: HtmlRenderBrowserRequest,
+) => Effect.Effect<HtmlRenderBrowserResponse, never>;
 
 const MAX_CONSOLE_MESSAGES = 20;
 const MAX_CONSOLE_TEXT_CHARS = 500;
@@ -94,7 +114,12 @@ const decodeExceptionThrown = Schema.decodeUnknownOption(
 const decodeRequestPaused = Schema.decodeUnknownOption(
   Schema.Struct({
     requestId: Schema.String,
-    request: Schema.Struct({ url: Schema.String }),
+    request: Schema.Struct({
+      url: Schema.String,
+      method: Schema.String,
+      headers: Schema.optional(Schema.Record(Schema.String, Schema.String)),
+      postData: Schema.optional(Schema.String),
+    }),
     frameId: Schema.optional(Schema.String),
     resourceType: Schema.optional(Schema.String),
   }),
@@ -160,6 +185,9 @@ const MEASURE_EXPRESSION =
 const Ignored = Schema.Unknown;
 const Navigation = Schema.Struct({ errorText: Schema.optional(Schema.String) });
 const Measured = Schema.Struct({ result: Schema.Struct({ value: Schema.Finite }) });
+const Evaluated = Schema.Struct({
+  result: Schema.Struct({ value: Schema.Unknown }),
+});
 
 interface PageEvents {
   /** The page's main frame, which only ever shows `PAGE_URL`. */
@@ -169,6 +197,8 @@ interface PageEvents {
   loaded: Deferred.Deferred<void, BrowserFailure> | undefined;
   readonly consoleMessages: Array<ConsoleMessage>;
   omittedConsoleMessages: number;
+  readonly requestHandler: HtmlRenderBrowserRequestHandler | undefined;
+  readonly denyExternalDocuments: boolean;
 }
 
 /**
@@ -301,13 +331,43 @@ const launchBrowser = Effect.fnUntraced(function* (input: {
       if (url === PAGE_URL && body !== undefined) {
         return fulfillPage(sessionId, paused.requestId, body);
       }
+      if (page.requestHandler && url.startsWith(`${PAGE_ORIGIN}/`)) {
+        return page
+          .requestHandler({
+            requestId: paused.requestId,
+            url,
+            method: paused.request.method,
+            headers: paused.request.headers ?? {},
+            ...(paused.request.postData === undefined ? {} : { postData: paused.request.postData }),
+            ...(paused.frameId === undefined ? {} : { frameId: paused.frameId }),
+            ...(paused.resourceType === undefined ? {} : { resourceType: paused.resourceType }),
+          })
+          .pipe(
+            Effect.flatMap((response) =>
+              post(
+                "Fetch.fulfillRequest",
+                {
+                  requestId: paused.requestId,
+                  responseCode: response.status,
+                  responsePhrase: response.statusText,
+                  responseHeaders: Object.entries(response.headers).map(([name, value]) => ({
+                    name,
+                    value,
+                  })),
+                  body: Buffer.from(response.body).toString("base64"),
+                },
+                sessionId,
+              ),
+            ),
+          );
+      }
       // A frame inside the page may show another site; Local Network Access
       // still covers it. The main frame and T3's own origin serve nothing else.
       const otherSiteFrame =
         paused.resourceType === "Document" &&
         paused.frameId !== page.mainFrameId &&
         !url.startsWith(`${PAGE_ORIGIN}/`);
-      return otherSiteFrame
+      return otherSiteFrame && !page.denyExternalDocuments
         ? post("Fetch.continueRequest", { requestId: paused.requestId }, sessionId)
         : post(
             "Fetch.failRequest",
@@ -409,7 +469,13 @@ const launchBrowser = Effect.fnUntraced(function* (input: {
     });
 
   /** A fresh page at `width`; each `load` navigates it and measures the settled layout. */
-  const openPage = Effect.fnUntraced(function* (width: number) {
+  const openPage = Effect.fnUntraced(function* (
+    width: number,
+    options?: {
+      readonly requestHandler?: HtmlRenderBrowserRequestHandler;
+      readonly denyExternalDocuments?: boolean;
+    },
+  ) {
     const { targetId } = yield* send(
       "Target.createTarget",
       { url: "about:blank" },
@@ -427,6 +493,8 @@ const launchBrowser = Effect.fnUntraced(function* (input: {
       loaded: undefined,
       consoleMessages: [],
       omittedConsoleMessages: 0,
+      requestHandler: options?.requestHandler,
+      denyExternalDocuments: options?.denyExternalDocuments ?? false,
     };
     pages.set(sessionId, events);
     yield* send("Page.enable", {}, Ignored, sessionId);
@@ -492,6 +560,13 @@ const launchBrowser = Effect.fnUntraced(function* (input: {
       );
       return Math.max(0, Math.ceil(measured.result.value));
     });
+    const evaluate = (expression: string, awaitPromise: boolean) =>
+      send(
+        "Runtime.evaluate",
+        { expression, awaitPromise, returnByValue: true },
+        Evaluated,
+        sessionId,
+      ).pipe(Effect.map(({ result }) => result.value));
 
     const screenshot = (height: number) =>
       send(
@@ -522,7 +597,7 @@ const launchBrowser = Effect.fnUntraced(function* (input: {
       Effect.ignore,
     );
 
-    return { load, screenshot, consoleMessages, close };
+    return { load, screenshot, consoleMessages, evaluate, close };
   });
 
   return { openPage };
@@ -563,6 +638,57 @@ export const captureHtmlScreenshot = Effect.fn("headlessChrome.captureHtmlScreen
     const capturedHeight = Math.max(1, Math.min(contentHeight, MAX_CAPTURE_HEIGHT));
     const png = yield* page.screenshot(capturedHeight);
     return { png, contentHeight, capturedHeight, consoleMessages: page.consoleMessages() };
+  },
+  Effect.scoped,
+  Effect.timeoutOrElse({
+    duration: CAPTURE_TIMEOUT,
+    orElse: () =>
+      Effect.fail(
+        new HtmlRenderBrowserError({
+          reason: `the page did not finish loading within ${CAPTURE_TIMEOUT}`,
+        }),
+      ),
+  }),
+);
+
+/** Captures a page after its host-provided readiness promise resolves. */
+export const captureHtmlScreenshotWithRequests = Effect.fn(
+  "headlessChrome.captureHtmlScreenshotWithRequests",
+)(
+  function* (input: {
+    readonly executable: string;
+    readonly noSandbox: boolean;
+    readonly html: string;
+    readonly width: number;
+    readonly waitExpression: string;
+    readonly contentHeightExpression: string;
+    readonly requestHandler: HtmlRenderBrowserRequestHandler;
+  }) {
+    const path = yield* Path.Path;
+    const directory = yield* scratchDirectory;
+    const browser = yield* launchBrowser({
+      executable: input.executable,
+      noSandbox: input.noSandbox,
+      profileDirectory: path.join(directory, "profile"),
+    });
+    const page = yield* browser.openPage(input.width, {
+      requestHandler: input.requestHandler,
+      denyExternalDocuments: true,
+    });
+    yield* page.load(pageBody(input.html), "");
+    const pageState = yield* page.evaluate(input.waitExpression, true);
+    const height = yield* page.evaluate(input.contentHeightExpression, false);
+    const contentHeight =
+      typeof height === "number" && Number.isFinite(height) ? Math.max(0, Math.ceil(height)) : 0;
+    const capturedHeight = Math.max(1, Math.min(contentHeight, MAX_CAPTURE_HEIGHT));
+    const encodedPng = yield* page.screenshot(capturedHeight);
+    return {
+      png: new Uint8Array(Buffer.from(encodedPng, "base64")),
+      contentHeight,
+      capturedHeight,
+      consoleMessages: page.consoleMessages(),
+      pageState,
+    };
   },
   Effect.scoped,
   Effect.timeoutOrElse({

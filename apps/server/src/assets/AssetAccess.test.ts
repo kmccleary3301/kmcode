@@ -33,6 +33,7 @@ import * as T3ProjectFileLoader from "../project/T3ProjectFileLoader.ts";
 import * as WorkspacePaths from "../workspace/WorkspacePaths.ts";
 import { assetFileResponse } from "../http.ts";
 import * as ApertureRuntime from "../aperture/ApertureRuntime.ts";
+import * as ApertureWidgetStore from "../aperture/ApertureWidgetStore.ts";
 import { ASSET_ROUTE_PREFIX, issueAssetUrl, resolveAsset } from "./AssetAccess.ts";
 import * as NativeAppIconResolver from "./NativeAppIconResolver.ts";
 import { openMediaFile } from "./MediaFile.ts";
@@ -114,6 +115,20 @@ const apertureRuntimeTestService: ApertureRuntime.ApertureRuntime["Service"] = {
   getCached: () => Effect.succeed(null),
 };
 
+const apertureWidgetModule = "export default 42;";
+const apertureWidgetVersion = "a".repeat(64);
+const apertureWidgetNotFound = new ApertureWidgetStore.ApertureWidgetError({
+  code: "not_found",
+  message: "Widget version not found.",
+});
+const apertureWidgetStoreTestService: ApertureWidgetStore.ApertureWidgetStore["Service"] = {
+  push: () => Effect.fail(apertureWidgetNotFound),
+  module: ({ id, version }) =>
+    id === "demo-widget" && version === apertureWidgetVersion
+      ? Effect.succeed(apertureWidgetModule)
+      : Effect.fail(apertureWidgetNotFound),
+};
+
 const layerTest = Layer.mergeAll(
   NodeHttpPlatform.layer,
   Layer.mock(Orchestrator.OrchestratorV2)({
@@ -134,6 +149,7 @@ const layerTest = Layer.mergeAll(
   ),
   NativeAppIconResolver.layer.pipe(Layer.provide(layerConfig)),
   Layer.succeed(ApertureRuntime.ApertureRuntime, apertureRuntimeTestService),
+  Layer.succeed(ApertureWidgetStore.ApertureWidgetStore, apertureWidgetStoreTestService),
   ServerSecretStore.layer.pipe(Layer.provide(layerConfig)),
 ).pipe(Layer.provideMerge(NodeServices.layer));
 
@@ -1420,6 +1436,37 @@ describe("AssetAccess", () => {
     }).pipe(Effect.provide(layerTest)),
   );
 
+  it.effect("issues and resolves pinned Aperture widget module assets", () =>
+    Effect.gen(function* () {
+      const resolveUrl = (relativeUrl: string) => {
+        const suffix = relativeUrl.slice(`${ASSET_ROUTE_PREFIX}/`.length);
+        const separator = suffix.indexOf("/");
+        return resolveAsset(suffix.slice(0, separator), suffix.slice(separator + 1));
+      };
+      const resource: {
+        readonly _tag: "aperture-widget";
+        readonly id: string;
+        readonly version: string;
+      } = {
+        _tag: "aperture-widget",
+        id: "demo-widget",
+        version: apertureWidgetVersion,
+      };
+      const issued = yield* issueAssetUrl({ resource });
+      expect(issued.relativeUrl.endsWith(`/${resource.id}.${resource.version}.txt`)).toBe(true);
+      expect(yield* resolveUrl(issued.relativeUrl)).toEqual({
+        kind: "aperture-widget",
+        id: resource.id,
+        version: resource.version,
+        bytes: new TextEncoder().encode(apertureWidgetModule),
+      });
+
+      const unknown = yield* issueAssetUrl({
+        resource: { ...resource, version: "b".repeat(64) },
+      });
+      expect(yield* resolveUrl(unknown.relativeUrl)).toBeNull();
+    }).pipe(Effect.provide(layerTest)),
+  );
   it.effect("serves GitHub-hosted pull request media through the repository's credential", () =>
     Effect.gen(function* () {
       const resolve = (relativeUrl: string) => {

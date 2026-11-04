@@ -59,6 +59,13 @@ const SVG_CONTENT_SECURITY_POLICY = "default-src 'none'; style-src 'unsafe-inlin
 // No modals: agent HTML can open without a click (inline renders, and mobile
 // loads it as the top document), and must not raise blocking dialogs.
 const HTML_CONTENT_SECURITY_POLICY = "sandbox allow-scripts allow-forms allow-popups";
+// The Aperture runtime runs agent-written widgets, and every Aperture byte must reach it through
+// the host bridge. The header repeats the runtime's own meta policy so network access stays
+// closed, and its sandbox also drops the forms and popups that a meta policy cannot restrict.
+const APERTURE_RUNTIME_CONTENT_SECURITY_POLICY =
+  "default-src 'none'; script-src 'unsafe-inline' blob:; style-src 'unsafe-inline'; " +
+  "img-src data: blob:; font-src data: blob:; connect-src 'none'; worker-src blob:; " +
+  "form-action 'none'; sandbox allow-scripts";
 
 // Types a browser may render as a document if a proxy strips the disposition
 // header. Downloads of these fall back to octet-stream.
@@ -418,6 +425,16 @@ export const layerAssetRoute = HttpRouter.add(
     );
     if (!asset) {
       return HttpServerResponse.text("Not Found", { status: 404 });
+    }
+    if (asset.kind === "aperture-runtime") {
+      return HttpServerResponse.uint8Array(asset.bytes, {
+        contentType: "text/html; charset=utf-8",
+        headers: {
+          "Cache-Control": "private, max-age=3600",
+          "Content-Security-Policy": APERTURE_RUNTIME_CONTENT_SECURITY_POLICY,
+          "X-Content-Type-Options": "nosniff",
+        },
+      });
     }
     if (asset.kind === "bytes") {
       return HttpServerResponse.uint8Array(asset.bytes, {

@@ -76,6 +76,10 @@ import * as ServerRuntimeStartup from "./serverRuntimeStartup.ts";
 import * as AgentAwarenessRelay from "./relay/AgentAwarenessRelay.ts";
 import { hasCloudPublicConfig } from "./cloud/publicConfig.ts";
 import * as ServerSettings from "./serverSettings.ts";
+import * as ApertureConnection from "./aperture/ApertureConnection.ts";
+import * as ApertureEmbedBridge from "./aperture/ApertureEmbedBridge.ts";
+import * as ApertureEmbedToken from "./aperture/ApertureEmbedToken.ts";
+import * as ApertureRuntime from "./aperture/ApertureRuntime.ts";
 import * as ProjectEnrichmentService from "./project/ProjectEnrichmentService.ts";
 import * as NativeAppIconResolver from "./assets/NativeAppIconResolver.ts";
 import * as AntigravityInstallation from "./provider/AntigravityInstallation.ts";
@@ -198,6 +202,16 @@ const layerServerSettings = ServerSettings.layer.pipe(
   Layer.provide(ServerSecretStore.layer),
   Layer.provideMerge(SqlitePersistence.layerConfigExclusive),
 );
+const layerApertureCore = Layer.mergeAll(
+  ApertureConnection.layer,
+  ApertureEmbedToken.layer,
+  ApertureRuntime.layer,
+).pipe(
+  Layer.provideMerge(FetchHttpClient.layer),
+  Layer.provideMerge(layerServerSettings),
+  Layer.provideMerge(ServerSecretStore.layer),
+);
+const layerAperture = ApertureEmbedBridge.layer.pipe(Layer.provideMerge(layerApertureCore));
 
 const layerNativeTelemetry = NativeTelemetryClient.layer.pipe(
   Layer.provide(ResourceMonitorBinary.layer),
@@ -645,6 +659,7 @@ const layerRuntimeDependencies = layerRuntimeCoreDependencies.pipe(
   Layer.provideMerge(RemoteOpenTargets.layer),
   Layer.provideMerge(DirectEndpoints.layer),
   Layer.provideMerge(ServerLifecycleEvents.layer),
+  Layer.provideMerge(layerAperture),
   Layer.provide(NetService.layer),
 );
 

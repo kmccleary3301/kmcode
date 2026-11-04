@@ -58,6 +58,7 @@ import { expandHomePathWith } from "../pathExpansion.ts";
 import * as ProjectFaviconResolver from "../project/ProjectFaviconResolver.ts";
 import * as WorkspacePaths from "../workspace/WorkspacePaths.ts";
 import * as NativeAppIconResolver from "./NativeAppIconResolver.ts";
+import * as ApertureRuntime from "../aperture/ApertureRuntime.ts";
 import { openMediaFile, readMediaFileHeader, type OpenMediaFile } from "./MediaFile.ts";
 
 export const ASSET_ROUTE_PREFIX = "/api/assets";
@@ -159,6 +160,12 @@ const AssetClaimsSchema = Schema.Union([
     cwd: Schema.String,
     expiresAt: Schema.Number,
   }),
+  Schema.Struct({
+    version: Schema.Literal(1),
+    kind: Schema.Literal("aperture-runtime"),
+    runtimeVersion: Schema.String,
+    expiresAt: Schema.Number,
+  }),
 ]);
 type AssetClaims = typeof AssetClaimsSchema.Type;
 
@@ -187,8 +194,12 @@ export type ResolvedAsset =
       /** When the signed URL that granted this stops working, which bounds how long a client
           may keep the bytes it fetched with it. */
       readonly expiresAt: number;
+    }
+  | {
+      readonly kind: "aperture-runtime";
+      readonly version: string;
+      readonly bytes: Uint8Array;
     };
-
 function decodeClaims(encodedPayload: string): AssetClaims | null {
   try {
     return Option.getOrNull(decodeAssetClaims(base64UrlDecodeUtf8(encodedPayload)));
@@ -765,6 +776,16 @@ export const issueAssetUrl = Effect.fn("AssetAccess.issueAssetUrl")(function* (i
       fileName = githubMediaFileName(fetchUrl);
       break;
     }
+    case "aperture-runtime": {
+      claims = {
+        version: 1,
+        kind: "aperture-runtime",
+        runtimeVersion: input.resource.version,
+        expiresAt,
+      };
+      fileName = "runtime.html";
+      break;
+    }
   }
 
   const secretStore = yield* ServerSecretStore.ServerSecretStore;
@@ -874,6 +895,25 @@ export const resolveAsset = Effect.fn("AssetAccess.resolveAsset")(function* (
       cwd: claims.cwd,
       expiresAt: claims.expiresAt,
     } satisfies ResolvedAsset;
+  }
+  if (claims.kind === "aperture-runtime") {
+    const runtime = yield* ApertureRuntime.ApertureRuntime;
+    const cached = yield* runtime.getCached(claims.runtimeVersion);
+    if (cached !== null) {
+      return {
+        kind: "aperture-runtime",
+        version: claims.runtimeVersion,
+        bytes: cached,
+      } satisfies ResolvedAsset;
+    }
+    const latest = yield* runtime.getLatest.pipe(Effect.option);
+    return Option.isSome(latest) && latest.value.version === claims.runtimeVersion
+      ? ({
+          kind: "aperture-runtime",
+          version: latest.value.version,
+          bytes: latest.value.bytes,
+        } satisfies ResolvedAsset)
+      : null;
   }
 
   if (claims.kind === "tool-output-image") {

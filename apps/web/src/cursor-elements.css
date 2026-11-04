@@ -376,7 +376,8 @@
       mask-repeat: repeat-x;
       animation-name: cursor-shimmer-window;
       animation-duration: 2.2s;
-      animation-timing-function: steps(66);
+      /* One step per frame at the shimmer frame rate (Settings > Appearance). */
+      animation-timing-function: steps(calc(var(--shimmer-fps, 30) * 2.2));
     }
     /* The copy sits over the label itself, one tile into the window. */
     & > .shimmer-clip .shimmer-copy {
@@ -385,7 +386,7 @@
       -webkit-text-fill-color: var(--foreground);
       animation-name: cursor-shimmer-copy;
       animation-duration: 2.2s;
-      animation-timing-function: steps(66);
+      animation-timing-function: steps(calc(var(--shimmer-fps, 30) * 2.2));
     }
   }
 }

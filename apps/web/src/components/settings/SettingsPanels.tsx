@@ -50,6 +50,7 @@ import {
   MIN_TERMINAL_FONT_SIZE,
   MIN_TEXT_FONT_SIZE,
   type QuitConfirmationMode,
+  SHIMMER_FRAME_RATES,
   SidebarProjectSortOrder,
 } from "@t3tools/contracts/settings";
 import { resolveServerBackgroundActivitySettings } from "@t3tools/shared/backgroundActivitySettings";
@@ -169,7 +170,7 @@ import {
   resolveBackgroundActivityProfileOption,
 } from "./SettingsPanels.logic";
 import {
-  PolicyTooltip,
+  InfoTooltip,
   SETTINGS_PICKER_TRIGGER_CLASSNAME,
   SettingResetButton,
   SettingsPageContainer,
@@ -583,6 +584,9 @@ export function useSettingsRestore(onRestored?: () => void) {
       ...(settings.panelAnimationDurationMs !== DEFAULT_UNIFIED_SETTINGS.panelAnimationDurationMs
         ? ["Panel animations"]
         : []),
+      ...(settings.shimmerFrameRate !== DEFAULT_UNIFIED_SETTINGS.shimmerFrameRate
+        ? ["Shimmer frame rate"]
+        : []),
       ...(settings.environmentIdentificationMode !==
       DEFAULT_UNIFIED_SETTINGS.environmentIdentificationMode
         ? ["Environment identification"]
@@ -742,6 +746,7 @@ export function useSettingsRestore(onRestored?: () => void) {
       settings.fontSizeTerminal,
       settings.glassOpacity,
       settings.panelAnimationDurationMs,
+      settings.shimmerFrameRate,
       settings.responseStreamingMode,
       settings.persistComposerContextStrip,
       settings.enableProviderUpdateChecks,
@@ -853,6 +858,7 @@ export function useSettingsRestore(onRestored?: () => void) {
       environmentIdentificationMode: DEFAULT_UNIFIED_SETTINGS.environmentIdentificationMode,
       glassOpacity: DEFAULT_UNIFIED_SETTINGS.glassOpacity,
       panelAnimationDurationMs: DEFAULT_UNIFIED_SETTINGS.panelAnimationDurationMs,
+      shimmerFrameRate: DEFAULT_UNIFIED_SETTINGS.shimmerFrameRate,
       sidebarThreadPreviewCount: DEFAULT_UNIFIED_SETTINGS.sidebarThreadPreviewCount,
       sidebarProjectGroupingMode: DEFAULT_UNIFIED_SETTINGS.sidebarProjectGroupingMode,
       sidebarProjectSortOrder: DEFAULT_UNIFIED_SETTINGS.sidebarProjectSortOrder,
@@ -1573,6 +1579,56 @@ export function AppearanceSettingsPanel() {
                     <SelectItem key={count} value={String(count)}>
                       {count === 0 ? "Running only" : `Latest ${count}`}
                       {count === DEFAULT_UNIFIED_SETTINGS.liveStepsKeptOpen ? " (default)" : ""}
+                    </SelectItem>
+                  ))}
+                </SelectPopup>
+              </Select>
+            </div>
+          }
+        />
+
+        <SettingsRow
+          id={searchableSetting("shimmer-frame-rate").id}
+          title={
+            <span className="inline-flex items-center gap-1.5">
+              {searchableSetting("shimmer-frame-rate").title}
+              <InfoTooltip label="Why shimmer has a frame rate">
+                Each shimmer frame is a GPU redraw, and a busy view can have several labels
+                shimmering at once. A lower rate uses less GPU and CPU; a higher one looks smoother.
+                Only labels on screen in a visible window shimmer.
+              </InfoTooltip>
+            </span>
+          }
+          description="How many times a second live labels redraw their shimmer."
+          resetAction={
+            settings.shimmerFrameRate !== DEFAULT_UNIFIED_SETTINGS.shimmerFrameRate ? (
+              <SettingResetButton
+                label="shimmer frame rate"
+                onClick={() =>
+                  updateSettings({ shimmerFrameRate: DEFAULT_UNIFIED_SETTINGS.shimmerFrameRate })
+                }
+              />
+            ) : null
+          }
+          control={
+            <div className="w-full sm:w-40">
+              <Select
+                value={String(settings.shimmerFrameRate)}
+                onValueChange={(value) => {
+                  const shimmerFrameRate = SHIMMER_FRAME_RATES.find(
+                    (rate) => String(rate) === value,
+                  );
+                  if (shimmerFrameRate !== undefined) updateSettings({ shimmerFrameRate });
+                }}
+              >
+                <SelectTrigger size="sm" className="w-full min-w-0" aria-label="Shimmer frame rate">
+                  <SelectValue>{`${settings.shimmerFrameRate} fps`}</SelectValue>
+                </SelectTrigger>
+                <SelectPopup align="end" alignItemWithTrigger={false}>
+                  {SHIMMER_FRAME_RATES.map((rate) => (
+                    <SelectItem key={rate} value={String(rate)}>
+                      {rate} fps
+                      {rate === DEFAULT_UNIFIED_SETTINGS.shimmerFrameRate ? " (default)" : ""}
                     </SelectItem>
                   ))}
                 </SelectPopup>
@@ -3187,10 +3243,10 @@ export function GeneralSettingsPanel() {
           title={
             <span className="inline-flex items-center gap-1.5">
               {searchableSetting("background-activity").title}
-              <PolicyTooltip>
+              <InfoTooltip label="Background policy details">
                 This shared policy gates background work such as Git refreshes and provider health
                 probes after their individual intervals elapse.
-              </PolicyTooltip>
+              </InfoTooltip>
             </span>
           }
           description={backgroundActivityDescription}

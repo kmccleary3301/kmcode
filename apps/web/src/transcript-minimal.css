@@ -702,9 +702,10 @@
    (ShimmerLayers). The label rests at 55% and a 4rem band lifts it to full:
    the copy adds its remaining 45% (plus-lighter, inside the label's own group)
    under a soft-edged window, which sums to the 55%-to-100% mask it replaces.
-   30 fps: each frame of a sweep costs a compositor frame, and the soft band
-   still reads as smooth motion; visibleAnimation keeps every sweep in phase
-   so their steps land on the same frames. */
+   It steps once per frame at the shimmer frame rate (Settings > Appearance,
+   30 fps by default): each frame of a sweep costs a compositor frame, and the
+   soft band still reads as smooth motion. visibleAnimation keeps every sweep
+   in phase so their steps land on the same frames. */
 @media (prefers-reduced-motion: no-preference) and (forced-colors: none) {
   .minimal-text-shimmer,
   .km-transcript:is(
@@ -742,7 +743,7 @@
       mix-blend-mode: plus-lighter;
       animation-name: minimal-shine-window;
       animation-duration: 1.83s;
-      animation-timing-function: steps(55);
+      animation-timing-function: steps(calc(var(--shimmer-fps, 30) * 1.83));
       animation-direction: alternate;
     }
     /* The copy takes the label's colour, whatever its own layout classes set. */
@@ -753,7 +754,7 @@
       -webkit-text-fill-color: currentColor;
       animation-name: minimal-shine-copy;
       animation-duration: 1.83s;
-      animation-timing-function: steps(55);
+      animation-timing-function: steps(calc(var(--shimmer-fps, 30) * 1.83));
       animation-direction: alternate;
     }
   }

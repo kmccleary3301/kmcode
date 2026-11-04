@@ -49,7 +49,7 @@ vi.mock("./settingsLayout", () => ({
     </section>
   ),
   SettingsSearchTarget: ({ children }: { children: ReactNode }) => <>{children}</>,
-  PolicyTooltip: ({ children }: { children: ReactNode }) => <>{children}</>,
+  InfoTooltip: ({ children }: { children: ReactNode }) => <>{children}</>,
   SettingResetButton: () => null,
   useSettingsSearchTargetId: () => null,
 }));

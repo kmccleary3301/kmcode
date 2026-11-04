@@ -661,14 +661,15 @@ html[data-mobile-composer-route-transition="true"]::view-transition-old(t3-mobil
       mask-repeat: no-repeat;
       animation-name: live-tool-shine-window;
       animation-duration: 2.2s;
-      animation-timing-function: steps(30);
+      /* Its own 30 steps a cycle, fewer if the shimmer frame rate is lower. */
+      animation-timing-function: steps(min(30, calc(var(--shimmer-fps, 30) * 2.2)));
     }
     & > .shimmer-clip .shimmer-copy {
       inset-inline: 0;
       -webkit-text-fill-color: var(--contrast-foreground);
       animation-name: live-tool-shine-copy;
       animation-duration: 2.2s;
-      animation-timing-function: steps(30);
+      animation-timing-function: steps(min(30, calc(var(--shimmer-fps, 30) * 2.2)));
     }
   }
 }
@@ -727,7 +728,8 @@ html[data-mobile-composer-route-transition="true"]::view-transition-old(t3-mobil
     transparent 100%
   );
   mask-repeat: no-repeat;
-  animation: live-activity-focus 2.2s steps(66) infinite;
+  /* One step per frame at the shimmer frame rate (Settings > Appearance). */
+  animation: live-activity-focus 2.2s steps(calc(var(--shimmer-fps, 30) * 2.2)) infinite;
   animation-play-state: var(--visible-animation-state, paused);
   will-change: var(--visible-animation-will-change, auto);
 
@@ -740,7 +742,7 @@ html[data-mobile-composer-route-transition="true"]::view-transition-old(t3-mobil
 
 @utility live-activity-focus-counter {
   width: 100%;
-  animation: live-activity-focus-counter 2.2s steps(66) infinite;
+  animation: live-activity-focus-counter 2.2s steps(calc(var(--shimmer-fps, 30) * 2.2)) infinite;
   animation-play-state: var(--visible-animation-state, paused);
   will-change: var(--visible-animation-will-change, auto);
 

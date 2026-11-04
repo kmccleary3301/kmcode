@@ -722,6 +722,22 @@ describe("ClientSettings panel animations", () => {
   });
 });
 
+describe("ClientSettings shimmer frame rate", () => {
+  it("keeps existing clients at 30 fps", () => {
+    expect(decodeClientSettings({}).shimmerFrameRate).toBe(30);
+  });
+
+  it.each([12, 120])("accepts an offered rate: %s", (value) => {
+    expect(decodeClientSettingsPatch({ shimmerFrameRate: value })).toEqual({
+      shimmerFrameRate: value,
+    });
+  });
+
+  it.each([0, 25, 29.5])("rejects a rate the picker does not offer: %s", (value) => {
+    expect(() => decodeClientSettingsPatch({ shimmerFrameRate: value })).toThrow();
+  });
+});
+
 describe("ClientSettings environment identification", () => {
   it("defaults to artwork and accepts each presentation mode", () => {
     expect(decodeClientSettings({}).environmentIdentificationMode).toBe("artwork");

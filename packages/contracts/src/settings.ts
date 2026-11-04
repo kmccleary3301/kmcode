@@ -125,6 +125,15 @@ export const PanelAnimationDurationMs = Schema.Int.check(
 );
 export type PanelAnimationDurationMs = typeof PanelAnimationDurationMs.Type;
 const DEFAULT_PANEL_ANIMATION_DURATION_MS: PanelAnimationDurationMs = 0;
+/**
+ * Frames per second for live-label shimmer sweeps. Each frame of a sweep is a
+ * GPU composite, and several labels can sweep at once, so a lower rate trades
+ * smoothness for GPU and CPU time.
+ */
+export const SHIMMER_FRAME_RATES = [12, 15, 24, 30, 60, 120] as const;
+export const ShimmerFrameRate = Schema.Literals(SHIMMER_FRAME_RATES);
+export type ShimmerFrameRate = typeof ShimmerFrameRate.Type;
+const DEFAULT_SHIMMER_FRAME_RATE: ShimmerFrameRate = 30;
 /** How many of a running turn's latest edits, commands and subagents Minimal+ keeps open. */
 export const MIN_LIVE_STEPS_KEPT_OPEN = 0;
 export const MAX_LIVE_STEPS_KEPT_OPEN = 8;
@@ -377,6 +386,9 @@ export const ClientSettingsSchema = Schema.Struct({
   // layout work on every frame, which is noticeable on lower-power clients.
   panelAnimationDurationMs: PanelAnimationDurationMs.pipe(
     Schema.withDecodingDefault(Effect.succeed(DEFAULT_PANEL_ANIMATION_DURATION_MS)),
+  ),
+  shimmerFrameRate: ShimmerFrameRate.pipe(
+    Schema.withDecodingDefault(Effect.succeed(DEFAULT_SHIMMER_FRAME_RATE)),
   ),
   browserDefaultViewport: PreviewViewportSetting.pipe(
     Schema.withDecodingDefault(Effect.succeed(DEFAULT_BROWSER_VIEWPORT)),
@@ -2009,6 +2021,7 @@ export const ClientSettingsPatch = Schema.Struct({
   loadBalancingWeights: Schema.optionalKey(LoadBalancingWeights),
   appearanceContrast: Schema.optionalKey(AppearanceContrast),
   panelAnimationDurationMs: Schema.optionalKey(PanelAnimationDurationMs),
+  shimmerFrameRate: Schema.optionalKey(ShimmerFrameRate),
   browserDefaultViewport: Schema.optionalKey(PreviewViewportSetting),
   browserDefaultZoomFactor: Schema.optionalKey(PreviewZoomFactor),
   browserDefaultAppearance: Schema.optionalKey(PreviewAppearancePreference),

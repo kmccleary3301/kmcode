@@ -632,13 +632,13 @@
     .cursor-subagent-shimmer.minimal-agent-roll-in {
       animation:
         minimal-line-in 300ms var(--ease-disclosure),
-        minimal-shine 1.83s linear infinite alternate;
+        minimal-shine 1.83s steps(55) infinite alternate;
       animation-play-state: running, var(--visible-animation-state, paused);
     }
     .cursor-subagent-shimmer.motion-swap-text {
       animation:
         minimal-swap 300ms var(--ease-disclosure),
-        minimal-shine 1.83s linear infinite alternate;
+        minimal-shine 1.83s steps(55) infinite alternate;
       animation-play-state: running, var(--visible-animation-state, paused);
     }
     /* The band lights the whole line, so the line's own greys step aside. */
@@ -731,7 +731,10 @@
     );
     mask-size: calc(100% + 40rem) 100%;
     mask-repeat: no-repeat;
-    animation: minimal-shine 1.83s linear infinite alternate;
+    /* 30 fps: every frame of a sweep costs a full compositor frame, and the
+       soft band still reads as smooth motion at this rate. visibleAnimation
+       keeps every sweep in phase so their steps land on the same frames. */
+    animation: minimal-shine 1.83s steps(55) infinite alternate;
     animation-play-state: var(--visible-animation-state, paused);
   }
   .km-transcript:is(

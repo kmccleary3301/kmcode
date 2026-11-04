@@ -372,7 +372,7 @@
   -webkit-background-clip: text;
   background-clip: text;
   -webkit-text-fill-color: transparent;
-  animation: cursor-shimmer 2.2s linear infinite;
+  animation: cursor-shimmer 2.2s steps(66) infinite;
   /* Off screen it holds still: a background sweep repaints every frame. */
   animation-play-state: var(--visible-animation-state, paused);
 }
@@ -382,7 +382,7 @@
 .cursor-subagent-shimmer.motion-swap-text {
   animation:
     motion-swap-text-in var(--motion-duration) var(--ease-disclosure),
-    cursor-shimmer 2.2s linear infinite;
+    cursor-shimmer 2.2s steps(66) infinite;
   animation-play-state: running, var(--visible-animation-state, paused);
 }
 @keyframes cursor-shimmer {

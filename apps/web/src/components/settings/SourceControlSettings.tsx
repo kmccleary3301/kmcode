@@ -62,7 +62,7 @@ import { GitHubTokenSettings } from "./GitHubTokenSettings";
 import { RedactedSensitiveText } from "./RedactedSensitiveText";
 import { SourceControlWritingSettingsSection } from "./SourceControlWritingSettings";
 import {
-  PolicyTooltip,
+  InfoTooltip,
   SettingResetButton,
   SettingsPageContainer,
   SettingsSearchTarget,
@@ -388,11 +388,11 @@ function GitFetchIntervalSettings() {
         <div className="min-w-0 space-y-1">
           <div className="flex min-w-0 items-center gap-1">
             <span className="text-xs font-medium text-foreground">{setting.title}</span>
-            <PolicyTooltip>
+            <InfoTooltip label="Background policy details">
               This interval is configured for Git only. The shared Background activity policy still
               decides whether Git refreshes may run when the timer fires. Custom intervals appear as
               Advanced in General settings.
-            </PolicyTooltip>
+            </InfoTooltip>
             <span
               className={cn(
                 "inline-flex size-5 shrink-0 items-center justify-center transition-opacity",

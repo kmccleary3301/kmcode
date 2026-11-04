@@ -144,14 +144,20 @@ export function SettingsSearchTarget({
 /** Layout for the composer model/traits pickers in a settings row: drop the composer's max-width. */
 export const SETTINGS_PICKER_TRIGGER_CLASSNAME = "min-w-0 max-w-none shrink-0";
 
-/** Info affordance explaining how a setting interacts with the shared background policy. */
-export function PolicyTooltip({ children }: { readonly children: string }) {
+/** Info affordance beside a setting's title; `label` names it for assistive tech. */
+export function InfoTooltip({
+  label,
+  children,
+}: {
+  readonly label: string;
+  readonly children: string;
+}) {
   return (
     <Tooltip>
       <TooltipTrigger
         delay={200}
         render={
-          <Button size="icon-micro" variant="ghost-muted" aria-label="Background policy details">
+          <Button size="icon-micro" variant="ghost-muted" aria-label={label}>
             <InfoIcon className="size-3.5" />
           </Button>
         }

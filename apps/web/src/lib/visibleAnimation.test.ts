@@ -67,6 +67,12 @@ beforeEach(() => {
     innerHeight: 800,
   });
   vi.stubGlobal("IntersectionObserver", TestIntersectionObserver);
+  // Phase alignment runs in a frame; these tests cover play state only.
+  vi.stubGlobal(
+    "requestAnimationFrame",
+    vi.fn(() => 1),
+  );
+  vi.stubGlobal("cancelAnimationFrame", vi.fn());
 });
 
 afterEach(() => {
@@ -136,8 +142,8 @@ describe("observeVisibleAnimation", () => {
   });
 
   it("shares observers, releases the final ref, and ignores late callbacks after remount", () => {
-    const addVisibility = vi.spyOn(page, "addEventListener");
-    const removeVisibility = vi.spyOn(page, "removeEventListener");
+    const addDocument = vi.spyOn(page, "addEventListener");
+    const removeDocument = vi.spyOn(page, "removeEventListener");
     const addMotion = vi.spyOn(motion, "addEventListener");
     const removeMotion = vi.spyOn(motion, "removeEventListener");
     const first = animationElement();
@@ -145,7 +151,8 @@ describe("observeVisibleAnimation", () => {
     const detachFirst = attach(first.element);
     const detachSecond = attach(second.element);
     expect(observers).toHaveLength(1);
-    expect(addVisibility).toHaveBeenCalledTimes(1);
+    // One visibilitychange and one animationstart listener, shared by every ref.
+    expect(addDocument).toHaveBeenCalledTimes(2);
     expect(addMotion).toHaveBeenCalledTimes(1);
 
     const previousObserver = observers[0]!;
@@ -157,7 +164,7 @@ describe("observeVisibleAnimation", () => {
 
     detachSecond?.();
     expect(previousObserver.disconnect).toHaveBeenCalledTimes(1);
-    expect(removeVisibility).toHaveBeenCalledTimes(1);
+    expect(removeDocument).toHaveBeenCalledTimes(2);
     expect(removeMotion).toHaveBeenCalledTimes(1);
 
     attach(second.element);

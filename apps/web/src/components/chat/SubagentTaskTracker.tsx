@@ -46,6 +46,7 @@ import { useChangedSinceMount, useSmoothHeight } from "~/lib/motion";
 import { useHeldSubagentActivity } from "./useHeldSubagentActivity";
 import { RollingText } from "./RollingText";
 import { observeVisibleAnimation } from "~/lib/visibleAnimation";
+import { ShimmerLayers } from "../ui/shimmer";
 import {
   LiveViewPausedNote,
   useSubagentLiveContent,
@@ -874,19 +875,21 @@ function SubagentTaskRow(props: {
             isActive && "cursor-subagent-shimmer",
           )}
         >
-          <span className="minimal-agent-title">{title}</span>
-          {minimalActivityLine ? (
-            <span
-              key={isActive ? "live" : activityKey}
-              className={cn(
-                "minimal-agent-activity",
-                isFailed && "minimal-agent-activity-failed",
-                !isActive && minimalActivityLineChanged && "motion-swap-text",
-              )}
-            >
-              {isActive ? <RollingText text={minimalActivityLine} /> : minimalActivityLine}
-            </span>
-          ) : null}
+          <ShimmerLayers active={isActive} copyClassName="minimal-agent-text">
+            <span className="minimal-agent-title">{title}</span>
+            {minimalActivityLine ? (
+              <span
+                key={isActive ? "live" : activityKey}
+                className={cn(
+                  "minimal-agent-activity",
+                  isFailed && "minimal-agent-activity-failed",
+                  !isActive && minimalActivityLineChanged && "motion-swap-text",
+                )}
+              >
+                {isActive ? <RollingText text={minimalActivityLine} /> : minimalActivityLine}
+              </span>
+            ) : null}
+          </ShimmerLayers>
         </span>
         {lineRoll.leaving ? (
           <span key={`${lineKey}-leaving`} className="minimal-agent-leaving" aria-hidden="true">
@@ -1056,10 +1059,12 @@ function SubagentTaskRow(props: {
             className="cursor-subagent-shimmer truncate text-xs text-muted-foreground motion-tint"
             data-native-current-tool={currentTool?.name ? "" : undefined}
           >
-            {currentTool?.name && currentTool.intent?.trim() ? (
-              <span className="sr-only">{currentTool.name}: </span>
-            ) : null}
-            <RollingText text={heldActivity.text} />
+            <ShimmerLayers active copyClassName="truncate text-xs">
+              {currentTool?.name && currentTool.intent?.trim() ? (
+                <span className="sr-only">{currentTool.name}: </span>
+              ) : null}
+              <RollingText text={heldActivity.text} />
+            </ShimmerLayers>
           </div>
         ) : summaryLine ? (
           <div

@@ -244,6 +244,12 @@ export const SETTINGS_SEARCH_ITEMS = [
     ],
   },
   {
+    id: "shimmer-frame-rate",
+    title: "Shimmer frame rate",
+    to: "/settings/appearance",
+    searchTerms: ["fps frames shine sweep animation gpu cpu battery performance smooth"],
+  },
+  {
     id: "transcript-loaders",
     title: "Loaders",
     to: "/settings/appearance",

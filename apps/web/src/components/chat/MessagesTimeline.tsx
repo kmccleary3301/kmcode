@@ -256,6 +256,7 @@ import { TerminalContextInlineChip } from "./TerminalContextInlineChip";
 import { Popover, PopoverPopup, PopoverTrigger } from "../ui/popover";
 import { BottomStickJumpButton, useBottomStick } from "../ui/bottom-stick";
 import { Spinner } from "../ui/spinner";
+import { ShimmerLayers } from "../ui/shimmer";
 import { Tooltip, TooltipPopup, TooltipTrigger, TooltipScrollDismissArea } from "../ui/tooltip";
 import { WorktreeSetupCard } from "./WorktreeSetupCard";
 import {
@@ -4804,8 +4805,10 @@ function LiveActivityContent({
           labelText
         ) : (
           <span className={labelClassName}>
-            {labelText}
-            <ToolIntentTag intent={intent} />
+            <ShimmerLayers active={active} copyClassName="flex min-w-0 items-baseline gap-1.5">
+              {labelText}
+              <ToolIntentTag intent={intent} />
+            </ShimmerLayers>
           </span>
         )
       }
@@ -5155,10 +5158,16 @@ function WorkGroupHeader(props: {
               props.active && !props.failed && "live-tool-shine",
             )}
           >
-            <span className="min-w-0 truncate">
-              <DiffStatSummary text={props.label} diffStats={props.diffStats} />
-            </span>
-            <ToolIntentTag intent={intent} />
+            <ShimmerLayers
+              // Terminal holds its group labels still.
+              active={Boolean(props.active && !props.failed && !isTerminal)}
+              copyClassName="flex min-w-0 items-baseline gap-1.5"
+            >
+              <span className="min-w-0 truncate">
+                <DiffStatSummary text={props.label} diffStats={props.diffStats} />
+              </span>
+              <ToolIntentTag intent={intent} />
+            </ShimmerLayers>
           </span>
           {props.subline ? (
             <span className="block truncate font-mono text-sm leading-5 text-muted-foreground">
@@ -7002,7 +7011,9 @@ function WorkEntryLogRow(props: WorkEntryRowProps) {
                     thoughtSettledLive && !rolls && "motion-swap-text",
                   )}
                 >
-                  <RollingText text={thoughtVerb} />
+                  <ShimmerLayers active={reasoningLive} copyClassName="cursor-thinking-header">
+                    <RollingText text={thoughtVerb} />
+                  </ShimmerLayers>
                 </span>
               ) : threadLabel ? (
                 <ThreadReadLabel

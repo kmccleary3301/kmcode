@@ -358,39 +358,52 @@
   }
 }
 
-/* A sweep of foreground across muted text marks live work. */
-.cursor-subagent-shimmer {
-  background: linear-gradient(
-    90deg,
-    var(--muted-foreground) 0%,
-    var(--muted-foreground) 35%,
-    var(--foreground) 50%,
-    var(--muted-foreground) 65%,
-    var(--muted-foreground) 100%
-  );
-  background-size: 250% 100%;
-  -webkit-background-clip: text;
-  background-clip: text;
-  -webkit-text-fill-color: transparent;
-  animation: cursor-shimmer 2.2s linear infinite;
-  /* Off screen it holds still: a background sweep repaints every frame. */
-  animation-play-state: var(--visible-animation-state, paused);
+/* A sweep of foreground across muted text marks live work (ShimmerLayers).
+   The band sits mid-tile in a mask tile two and a half labels wide, as in the
+   repeating gradient it replaces; the window holds two tiles so the next band
+   is already in place as one leaves. Over a cycle the tiles travel from
+   -1.5 to +2.25 label widths. */
+@media (prefers-reduced-motion: no-preference) and (forced-colors: none) {
+  .cursor-subagent-shimmer {
+    & > .shimmer-base[data-live] {
+      -webkit-text-fill-color: var(--muted-foreground);
+    }
+    & > .shimmer-clip > .shimmer-window {
+      left: -250%;
+      width: 500%;
+      mask-image: linear-gradient(90deg, transparent 35%, #000 50%, transparent 65%);
+      mask-size: 50% 100%;
+      mask-repeat: repeat-x;
+      animation-name: cursor-shimmer-window;
+      animation-duration: 2.2s;
+      /* One step per frame at the shimmer frame rate (Settings > Appearance). */
+      animation-timing-function: steps(calc(var(--shimmer-fps, 30) * 2.2));
+    }
+    /* The copy sits over the label itself, one tile into the window. */
+    & > .shimmer-clip .shimmer-copy {
+      left: 50%;
+      width: 20%;
+      -webkit-text-fill-color: var(--foreground);
+      animation-name: cursor-shimmer-copy;
+      animation-duration: 2.2s;
+      animation-timing-function: steps(calc(var(--shimmer-fps, 30) * 2.2));
+    }
+  }
 }
-/* A live line that just changed resolves in and keeps its sweep. An element
-   runs one animation list, so the swap is listed beside the sweep instead
-   of replacing it. */
-.cursor-subagent-shimmer.motion-swap-text {
-  animation:
-    motion-swap-text-in var(--motion-duration) var(--ease-disclosure),
-    cursor-shimmer 2.2s linear infinite;
-  animation-play-state: running, var(--visible-animation-state, paused);
-}
-@keyframes cursor-shimmer {
+@keyframes cursor-shimmer-window {
   from {
-    background-position: 100% 0;
+    transform: translateX(-30%);
   }
   to {
-    background-position: -150% 0;
+    transform: translateX(45%);
+  }
+}
+@keyframes cursor-shimmer-copy {
+  from {
+    transform: translateX(150%);
+  }
+  to {
+    transform: translateX(-225%);
   }
 }
 
@@ -617,11 +630,6 @@
   [data-composer-status-bump] {
     transition: opacity var(--motion-duration) ease-out !important;
     transform: none !important;
-  }
-  .cursor-subagent-shimmer {
-    animation: none;
-    background: none;
-    -webkit-text-fill-color: currentColor;
   }
   [data-ascii-loader] > span,
   [data-terminal-spinner] > span,

@@ -42,6 +42,7 @@ import { useTurnItemDetail } from "../../state/queries";
 import { cn } from "~/lib/utils";
 import { observeVisibleAnimation } from "~/lib/visibleAnimation";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
+import { ShimmerLayers } from "../ui/shimmer";
 import { OmpToolPane } from "./omp-pane/OmpToolPane";
 import { GlyphSwap } from "./GlyphSwap";
 import { ompPaneModel, type OmpPaneModel } from "./omp-pane/ompPaneModel";
@@ -1168,6 +1169,7 @@ export function ToolWorkEntryCard(props: {
   // KM and Minimal shine the whole live line (verb and object); Terminal's
   // legend shines the verb alone.
   const lineShine = !isTerminal && summaryData.isRunning;
+  const verbShine = summaryData.isRunning && !lineShine;
   const verbView = (
     <>
       {props.icon ? (
@@ -1175,14 +1177,16 @@ export function ToolWorkEntryCard(props: {
           {props.icon}
         </span>
       ) : null}
-      <RollingText
-        text={summaryData.verb}
-        data-tool-verb
+      <span
         className={cn(
           "shrink-0 font-sans font-medium text-foreground/90",
-          summaryData.isRunning && !lineShine && "live-tool-shine",
+          verbShine && "live-tool-shine",
         )}
-      />
+      >
+        <ShimmerLayers active={verbShine} underlay>
+          <RollingText text={summaryData.verb} data-tool-verb />
+        </ShimmerLayers>
+      </span>
     </>
   );
   // The last non-empty output line usually names the failure ("command not found").
@@ -1241,8 +1245,16 @@ export function ToolWorkEntryCard(props: {
               lineShine && "live-tool-shine",
             )}
           >
-            {verbView}
-            {objectView}
+            <ShimmerLayers
+              active={lineShine}
+              // Outside a styled transcript (the agents panel) the line takes
+              // live-tool-shine's own look, which tints beneath the text.
+              underlay
+              copyClassName="flex min-w-0 items-baseline gap-1.5 text-sm"
+            >
+              {verbView}
+              {objectView}
+            </ShimmerLayers>
           </div>
         </div>
       </div>
@@ -1292,11 +1304,20 @@ export function ToolWorkEntryCard(props: {
               lineShine && "live-tool-shine",
             )}
           >
-            {verbView}
-            {objectView}
-            {rowMeta}
-            {/* Last, so Minimal can hold it against the line's right edge. */}
-            {minimalLook ? <ToolIntentTag intent={summaryData.intent} /> : null}
+            <ShimmerLayers
+              active={lineShine}
+              underlay
+              copyClassName={cn(
+                "flex min-w-0 items-baseline gap-1.5",
+                stackedIntent ? "tool-heading-details text-xs" : "text-sm",
+              )}
+            >
+              {verbView}
+              {objectView}
+              {rowMeta}
+              {/* Last, so Minimal can hold it against the line's right edge. */}
+              {minimalLook ? <ToolIntentTag intent={summaryData.intent} /> : null}
+            </ShimmerLayers>
           </div>
           {failureLine ? (
             <div

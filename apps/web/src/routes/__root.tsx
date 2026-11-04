@@ -294,6 +294,12 @@ function ContrastAppearanceSync() {
     applyAppearanceContrast(document.documentElement, appearanceContrast);
   }, [appearanceContrast]);
 
+  // Shimmer sweeps step once per frame at this rate (their timings read --shimmer-fps).
+  const shimmerFrameRate = useClientSettings((settings) => settings.shimmerFrameRate);
+  useEffect(() => {
+    document.documentElement.style.setProperty("--shimmer-fps", String(shimmerFrameRate));
+  }, [shimmerFrameRate]);
+
   return null;
 }
 

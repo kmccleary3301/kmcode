@@ -107,7 +107,7 @@ import {
   PROVIDER_HEALTH_INTERVAL_STEP_SECONDS,
 } from "./SettingsPanels.logic";
 import {
-  PolicyTooltip,
+  InfoTooltip,
   SettingResetButton,
   SettingsPageContainer,
   SettingsRow,
@@ -1337,11 +1337,11 @@ export function EnvironmentProviderSettings({
           title={
             <span className="inline-flex items-center gap-1.5">
               {searchableSetting("provider-health-check-interval").title}
-              <PolicyTooltip>
+              <InfoTooltip label="Background policy details">
                 This interval is configured here, then the shared Background activity policy decides
                 whether provider probes may run when the timer fires. Custom intervals appear as
                 Advanced in General settings.
-              </PolicyTooltip>
+              </InfoTooltip>
             </span>
           }
           description="Refresh provider status, versions, and models in the background. Set to 0 to disable."

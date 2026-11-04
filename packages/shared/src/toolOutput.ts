@@ -4,6 +4,7 @@ import {
 } from "@t3tools/contracts";
 import * as Predicate from "effect/Predicate";
 
+import { isApertureEmbedReference, type ApertureEmbedReference } from "./apertureEmbed.ts";
 import {
   HTML_RENDER_TOOL_NAME,
   readHtmlRenderReference,
@@ -190,6 +191,26 @@ export function htmlRenderFromToolItem(item: {
   if (resolveT3McpToolId(item.toolName) !== HTML_RENDER_TOOL_NAME) return undefined;
   const output = compactDynamicToolOutput(item.output);
   return output?.isError ? undefined : output?.htmlRender;
+}
+
+/** The inline Aperture figure/widget produced by a completed render tool call. */
+export function apertureEmbedFromToolItem(item: {
+  readonly toolName: string | null | undefined;
+  readonly output?: unknown;
+}): ApertureEmbedReference | undefined {
+  const toolId = resolveT3McpToolId(item.toolName);
+  if (toolId !== "aperture_figure_render" && toolId !== "aperture_widget_render") {
+    return undefined;
+  }
+  const budget: ResultReadBudget = {
+    remainingBytes: MAX_PARSED_BYTES,
+    remainingNodes: MAX_ENVELOPE_NODES,
+    exceeded: false,
+  };
+  const result = readResult(item.output, budget);
+  if (result.failed || budget.exceeded || result.data === undefined) return undefined;
+  const reference = result.data.apertureEmbed;
+  return isApertureEmbedReference(reference) ? reference : undefined;
 }
 
 /**

@@ -63,7 +63,14 @@ export type T3McpToolSummaryAction =
   | "browser"
   | "device"
   | "html-preview"
-  | "html-render";
+  | "html-render"
+  | "aperture-status"
+  | "aperture-query"
+  | "aperture-figure-preview"
+  | "aperture-figure-render"
+  | "aperture-widget-push"
+  | "aperture-widget-preview"
+  | "aperture-widget-render";
 
 export interface T3McpToolDefinition {
   readonly displayName: string;
@@ -325,6 +332,31 @@ const T3_MCP_TOOLS: Readonly<Record<string, T3McpToolDefinition>> = {
   t3_thread_send_attachments: tool(["Send", "Sending", "Sent", "attachments"], "attachment-send"),
   html_preview: tool(["Preview", "Previewing", "Previewed", "an HTML page"], "html-preview"),
   html_render: tool(["Render", "Rendering", "Rendered", "an HTML page"], "html-render"),
+  aperture_status: tool(
+    ["Check", "Checking", "Checked", "Aperture's connection"],
+    "aperture-status",
+  ),
+  aperture_query: tool(["Query", "Querying", "Queried", "Aperture data"], "aperture-query"),
+  aperture_figure_preview: tool(
+    ["Preview", "Previewing", "Previewed", "an Aperture figure"],
+    "aperture-figure-preview",
+  ),
+  aperture_figure_render: tool(
+    ["Render", "Rendering", "Rendered", "an Aperture figure"],
+    "aperture-figure-render",
+  ),
+  aperture_widget_push: tool(
+    ["Publish", "Publishing", "Published", "an Aperture widget"],
+    "aperture-widget-push",
+  ),
+  aperture_widget_preview: tool(
+    ["Preview", "Previewing", "Previewed", "an Aperture widget"],
+    "aperture-widget-preview",
+  ),
+  aperture_widget_render: tool(
+    ["Render", "Rendering", "Rendered", "an Aperture widget"],
+    "aperture-widget-render",
+  ),
 };
 
 /**

@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vite-plus/test";
 
 import {
+  apertureEmbedFromToolItem,
   compactDynamicToolOutput,
   MAX_TOOL_OUTPUT_IMAGES,
   omitToolOutputImageData,
@@ -144,6 +145,72 @@ describe("compactDynamicToolOutput", () => {
       },
     });
     expect(compactDynamicToolOutput(compact)).toEqual(compact);
+  });
+});
+
+describe("apertureEmbedFromToolItem", () => {
+  const reference = {
+    refId: "ref-1",
+    kind: "figure",
+    spec: { mark: "line" },
+    entity: "admin",
+    project: "demo",
+    title: "Loss",
+    height: 320,
+    mode: "pinned",
+    asOf: "2026-11-04T12:00:00.000Z",
+    runtime: { version: "runtime-1" },
+    embedToken: "signed-token",
+  };
+
+  it("accepts figure and widget render outputs from T3 MCP names", () => {
+    for (const toolName of [
+      "mcp__t3-code__aperture_figure_render",
+      "mcp__t3-code__aperture_widget_render",
+    ]) {
+      expect(
+        apertureEmbedFromToolItem({
+          toolName,
+          output: { structuredContent: { apertureEmbed: reference } },
+        }),
+      ).toEqual(reference);
+    }
+    const widgetReference = {
+      ...reference,
+      kind: "widget",
+      spec: undefined,
+      widget: { id: "loss-widget", version: "version-1" },
+    };
+    expect(
+      apertureEmbedFromToolItem({
+        toolName: "mcp__t3-code__aperture_widget_render",
+        output: [{ type: "text", text: JSON.stringify({ apertureEmbed: widgetReference }) }],
+      }),
+    ).toEqual(widgetReference);
+  });
+
+  it("rejects errors, malformed references, and tools from other servers", () => {
+    for (const item of [
+      {
+        toolName: "mcp__t3-code__aperture_figure_render",
+        output: { isError: true, structuredContent: { apertureEmbed: reference } },
+      },
+      {
+        toolName: "mcp__t3-code__aperture_figure_render",
+        output: { apertureEmbed: { ...reference, height: 79 } },
+      },
+      {
+        toolName: "mcp__t3-code__aperture_figure_preview",
+        output: { apertureEmbed: reference },
+      },
+      {
+        toolName: "mcp__other__aperture_figure_render",
+        output: { apertureEmbed: reference },
+      },
+      { toolName: null, output: { apertureEmbed: reference } },
+    ]) {
+      expect(apertureEmbedFromToolItem(item)).toBeUndefined();
+    }
   });
 });
 

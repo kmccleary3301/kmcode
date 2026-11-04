@@ -54,9 +54,22 @@ import * as McpToolAccess from "../../McpToolAccess.ts";
 import { liveThreadsLayer } from "../../McpToolAccess.testkit.ts";
 import * as PreviewAutomationBroker from "../../PreviewAutomationBroker.ts";
 import * as ApertureHandlers from "./handlers.ts";
-import { ApertureFigureRenderTool, ApertureQueryTool, ApertureToolkit } from "./tools.ts";
+import {
+  ApertureFigureRenderTool,
+  ApertureQueryTool,
+  ApertureStatusTool,
+  ApertureToolkit,
+  ApertureWidgetListTool,
+  ApertureWidgetDeleteTool,
+  ApertureWidgetPreviewTool,
+  ApertureWidgetPreviewToolkit,
+  ApertureWidgetPushTool,
+} from "./tools.ts";
 
-const threadId = ThreadId.make("thread:aperture");
+const threadId = ThreadId.make("thread-aperture");
+const widgetIdPrefix = "km-thread-a-";
+const widgetId = `${widgetIdPrefix}demo-widget`;
+const foreignWidgetId = "km-other-t-demo-widget";
 const runtimeVersion = "a".repeat(64);
 const encodeJson = Schema.encodeSync(Schema.fromJsonString(Schema.Unknown));
 const decodeQueryBody = Schema.decodeUnknownSync(
@@ -94,10 +107,14 @@ const historyResponse = {
 const makeHarness = (fixture: {
   readonly enabled?: boolean;
   readonly embedErrors?: AperturePreview.AperturePreviewResult["embedErrors"];
+  readonly dataStatus?: AperturePreview.AperturePreviewResult["dataStatus"];
+  readonly pushDiagnostics?: ReadonlyArray<ApertureWidgetStore.ApertureWidgetDiagnostic>;
 }) =>
   Effect.gen(function* () {
     const requests = yield* Ref.make<ReadonlyArray<ApertureConnection.ApertureRequestInput>>([]);
     const issued = yield* Ref.make<ReadonlyArray<ApertureEmbedTokenIssueInput>>([]);
+    const widgetCalls = yield* Ref.make<ReadonlyArray<string>>([]);
+    const previewCalls = yield* Ref.make(0);
     const dependencies = Layer.mergeAll(
       liveThreadsLayer,
       Layer.succeed(McpInvocationContext.McpInvocationContext, {
@@ -114,6 +131,13 @@ const makeHarness = (fixture: {
       }),
       ServerSettings.layerTest(apertureSettings(fixture.enabled ?? true)),
       Layer.mock(ApertureConnection.ApertureConnection)({
+        viewer: Effect.succeed({
+          user: { id: "viewer-1", username: "viewer" },
+          memberships: [],
+        }),
+        projects: () => Effect.succeed([]),
+        health: Effect.succeed(true),
+        ready: Effect.succeed(true),
         request: (input) =>
           Ref.update(requests, (all) => [...all, input]).pipe(
             Effect.as(
@@ -129,23 +153,48 @@ const makeHarness = (fixture: {
       }),
       Layer.mock(AperturePreview.AperturePreview)({
         preview: (input) =>
-          Effect.succeed({
-            png: new Uint8Array([137, 80, 78, 71]),
-            width: input.width,
-            contentHeight: 312.4,
-            capturedHeight: 313,
-            consoleMessages: [],
-            embedErrors: fixture.embedErrors ?? [],
-            failedRequests: [],
-            runtimeVersion,
-          }),
+          Ref.update(previewCalls, (count) => count + 1).pipe(
+            Effect.as({
+              png: new Uint8Array([137, 80, 78, 71]),
+              width: input.width,
+              contentHeight: 312.4,
+              capturedHeight: 313,
+              consoleMessages: [],
+              embedErrors: fixture.embedErrors ?? [],
+              failedRequests: [],
+              dataStatus: fixture.dataStatus ?? "unknown",
+              runtimeVersion,
+            }),
+          ),
       }),
       Layer.mock(ApertureEmbedToken.ApertureEmbedToken)({
         issue: (input) =>
           Ref.update(issued, (all) => [...all, input]).pipe(Effect.as("signed-embed-token")),
       }),
       Layer.mock(ApertureWidgetStore.ApertureWidgetStore)({
-        module: () => Effect.succeed("export default function Widget() {}"),
+        push: (input) =>
+          Ref.update(widgetCalls, (all) => [...all, `push:${input.id}`]).pipe(
+            Effect.as({
+              id: input.id,
+              version: fixture.pushDiagnostics === undefined ? "c".repeat(64) : null,
+              diagnostics: fixture.pushDiagnostics ?? [],
+            }),
+          ),
+        module: ({ id }) =>
+          Ref.update(widgetCalls, (all) => [...all, `module:${id}`]).pipe(
+            Effect.as("export default function Widget() {}"),
+          ),
+        list: ({ prefix }) =>
+          Ref.update(widgetCalls, (all) => [...all, `list:${prefix}`]).pipe(
+            Effect.as([
+              {
+                id: `${prefix}demo-widget`,
+                version: "d".repeat(64),
+                updatedAt: "2026-11-04T00:00:00.000Z",
+              },
+            ]),
+          ),
+        delete: ({ id }) => Ref.update(widgetCalls, (all) => [...all, `delete:${id}`]),
       }),
       NodeServices.layer,
     );
@@ -154,7 +203,7 @@ const makeHarness = (fixture: {
       McpToolAccess.HandlersLayer.layer(ApertureHandlers.layerFigurePreview),
       McpToolAccess.HandlersLayer.layer(ApertureHandlers.layerWidgetPreview),
     ).pipe(Layer.provideMerge(dependencies));
-    return { layer, requests, issued };
+    return { layer, requests, issued, widgetCalls, previewCalls };
   });
 
 describe("Aperture MCP tools", () => {
@@ -220,6 +269,168 @@ describe("Aperture MCP tools", () => {
           expect(yield* Ref.get(harness.issued)).toMatchObject([
             { threadId, entity: "admin", project: "demo", asOf },
           ]);
+        }).pipe(Effect.provide(harness.layer));
+      }),
+    );
+  });
+
+  it("reports a thread-scoped widget prefix and lists/deletes only that namespace", async () => {
+    await Effect.runPromise(
+      Effect.gen(function* () {
+        const harness = yield* makeHarness({});
+        yield* Effect.gen(function* () {
+          const toolkit = yield* ApertureToolkit;
+          const statusResults = yield* toolkit
+            .handle("aperture_status", {})
+            .pipe(Stream.unwrap, Stream.runCollect);
+          const status = yield* Schema.decodeUnknownEffect(ApertureStatusTool.successSchema)(
+            statusResults.at(-1)?.result,
+          );
+          expect(status.widgetIdPrefix).toBe(widgetIdPrefix);
+
+          const listedResults = yield* toolkit
+            .handle("aperture_widget_list", {})
+            .pipe(Stream.unwrap, Stream.runCollect);
+          const listed = yield* Schema.decodeUnknownEffect(ApertureWidgetListTool.successSchema)(
+            listedResults.at(-1)?.result,
+          );
+          expect(listed).toEqual({
+            widgetIdPrefix,
+            widgets: [
+              {
+                id: widgetId,
+                version: "d".repeat(64),
+                updatedAt: "2026-11-04T00:00:00.000Z",
+              },
+            ],
+          });
+
+          const deletedResults = yield* toolkit
+            .handle("aperture_widget_delete", { id: widgetId })
+            .pipe(Stream.unwrap, Stream.runCollect);
+          const deleted = yield* Schema.decodeUnknownEffect(ApertureWidgetDeleteTool.successSchema)(
+            deletedResults.at(-1)?.result,
+          );
+          expect(deleted).toEqual({ id: widgetId, deleted: true });
+          expect(yield* Ref.get(harness.widgetCalls)).toEqual([
+            `list:${widgetIdPrefix}`,
+            `delete:${widgetId}`,
+          ]);
+        }).pipe(Effect.provide(harness.layer));
+      }),
+    );
+  });
+
+  it("returns original diagnostics, formatted locations, and source lines", async () => {
+    await Effect.runPromise(
+      Effect.gen(function* () {
+        const harness = yield* makeHarness({
+          pushDiagnostics: [
+            {
+              file: "widget.tsx",
+              line: 2,
+              column: 4,
+              severity: "error",
+              text: "Unexpected token",
+            },
+            {
+              file: "widget.tsx",
+              line: 1,
+              column: 1,
+              severity: "warning",
+              text: "Unused value",
+              lineText: " upstream line text ",
+            },
+          ],
+        });
+        yield* Effect.gen(function* () {
+          const toolkit = yield* ApertureToolkit;
+          const pushedResults = yield* toolkit
+            .handle("aperture_widget_push", {
+              id: widgetId,
+              source: "first line\r\n  source line  \r\nthird line",
+            })
+            .pipe(Stream.unwrap, Stream.runCollect);
+          const pushed = yield* Schema.decodeUnknownEffect(ApertureWidgetPushTool.successSchema)(
+            pushedResults.at(-1)?.result,
+          );
+          expect(pushed.diagnostics).toEqual([
+            {
+              file: "widget.tsx",
+              line: 2,
+              column: 4,
+              severity: "error",
+              text: "Unexpected token",
+              lineText: "  source line  ",
+              formatted: "widget.tsx:2:4: error: Unexpected token",
+            },
+            {
+              file: "widget.tsx",
+              line: 1,
+              column: 1,
+              severity: "warning",
+              text: "Unused value",
+              lineText: " upstream line text ",
+              formatted: "widget.tsx:1:1: warning: Unused value",
+            },
+          ]);
+        }).pipe(Effect.provide(harness.layer));
+      }),
+    );
+  });
+
+  it("reports preview data status and rejects foreign-thread widget ids before side effects", async () => {
+    await Effect.runPromise(
+      Effect.gen(function* () {
+        const harness = yield* makeHarness({ dataStatus: "empty" });
+        yield* Effect.gen(function* () {
+          const toolkit = yield* ApertureToolkit;
+          const previewToolkit = yield* ApertureWidgetPreviewToolkit;
+          const previewResults = yield* previewToolkit
+            .handle("aperture_widget_preview", {
+              id: widgetId,
+              version: "a".repeat(64),
+            })
+            .pipe(Stream.unwrap, Stream.runCollect);
+          const preview = yield* Schema.decodeUnknownEffect(
+            ApertureWidgetPreviewTool.successSchema,
+          )(previewResults.at(-1)?.result);
+          expect(preview.dataStatus).toBe("empty");
+
+          const foreignPush = yield* toolkit
+            .handle("aperture_widget_push", { id: foreignWidgetId, source: "source" })
+            .pipe(Stream.unwrap, Stream.runCollect);
+          const foreignPreview = yield* previewToolkit
+            .handle("aperture_widget_preview", {
+              id: foreignWidgetId,
+              version: "a".repeat(64),
+            })
+            .pipe(Stream.unwrap, Stream.runCollect);
+          const foreignRender = yield* toolkit
+            .handle("aperture_widget_render", {
+              id: foreignWidgetId,
+              version: "a".repeat(64),
+              title: "Foreign",
+              height: 300,
+            })
+            .pipe(Stream.unwrap, Stream.runCollect);
+          const foreignDelete = yield* toolkit
+            .handle("aperture_widget_delete", { id: foreignWidgetId })
+            .pipe(Stream.unwrap, Stream.runCollect);
+          for (const result of [
+            foreignPush.at(-1),
+            foreignPreview.at(-1),
+            foreignRender.at(-1),
+            foreignDelete.at(-1),
+          ]) {
+            expect(result).toMatchObject({
+              isFailure: true,
+              result: { code: "invalid_request" },
+            });
+          }
+          expect(yield* Ref.get(harness.widgetCalls)).toEqual([]);
+          expect(yield* Ref.get(harness.previewCalls)).toBe(1);
+          expect(yield* Ref.get(harness.issued)).toEqual([]);
         }).pipe(Effect.provide(harness.layer));
       }),
     );
@@ -328,6 +539,8 @@ const APERTURE_TOOL_NAMES = [
   "aperture_figure_render",
   "aperture_query",
   "aperture_status",
+  "aperture_widget_delete",
+  "aperture_widget_list",
   "aperture_widget_preview",
   "aperture_widget_push",
   "aperture_widget_render",

@@ -18,6 +18,20 @@ const RunIds = Schema.Array(NonEmptyString).check(Schema.isMaxLength(20));
 const MetricKeys = Schema.Array(NonEmptyString).check(Schema.isMaxLength(20));
 const SummaryFields = Schema.Array(NonEmptyString).check(Schema.isMaxLength(20));
 const ToolFailures = OrchestratorMcpFailure;
+const WidgetIdInput = Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(63));
+const WidgetIdGuidance =
+  "Use the widgetIdPrefix from aperture_status followed by a lowercase kebab-case slug; the full id must be at most 63 characters.";
+const WidgetFixLoop =
+  "For compile diagnostics, make at most five fix-and-push attempts; if compilation remains blocked, explain the diagnostics and do not preview or render. Never render a failed compile.";
+const WidgetDiagnosticSchema = Schema.Struct({
+  file: Schema.String,
+  line: Schema.Finite,
+  column: Schema.Finite,
+  severity: Schema.Literals(["error", "warning"]),
+  text: Schema.String,
+  lineText: Schema.optionalKey(Schema.String),
+  formatted: Schema.String,
+});
 const ACCURACY_RULE =
   "Accuracy rule: every number stated about Aperture data must come from aperture_query or a rendered widget with the same asOf. Pass aperture_query's asOf to render tools.";
 const ThreadDependencies = [
@@ -65,7 +79,7 @@ const ApertureHistorySummarySchema = Schema.Struct({
 });
 
 export const ApertureStatusTool = Tool.make("aperture_status", {
-  description: `Check whether Aperture is enabled and reachable. Returns the viewer, projects for the default entity, configured defaults, and runtime version when available. ${ACCURACY_RULE}`,
+  description: `Check whether Aperture is enabled and reachable. Returns the viewer, projects for the default entity, configured defaults, runtime version, and this caller's widgetIdPrefix when available. ${ACCURACY_RULE}`,
   success: Schema.Struct({
     enabled: Schema.Boolean,
     asOf: Schema.String,
@@ -74,6 +88,7 @@ export const ApertureStatusTool = Tool.make("aperture_status", {
     projects: Schema.Array(ApertureProjectSchema),
     defaultEntity: Schema.String,
     defaultProject: Schema.String,
+    widgetIdPrefix: Schema.String,
     runtimeVersion: Schema.optionalKey(Schema.String),
   }),
   failure: ToolFailures,
@@ -149,6 +164,7 @@ const PreviewSuccess = Schema.Struct({
   width: Schema.Int,
   capturedHeight: Schema.Int,
   runtimeVersion: Schema.String,
+  dataStatus: Schema.Literals(["present", "empty", "unknown"]),
   contentHeight: Schema.Finite,
   consoleMessages: Schema.Array(Schema.String),
   embedErrors: Schema.Array(
@@ -228,23 +244,15 @@ export const ApertureFigureRenderTool = Tool.make("aperture_figure_render", {
   .annotate(Tool.OpenWorld, false);
 
 export const ApertureWidgetPushTool = Tool.make("aperture_widget_push", {
-  description: `Compile and upload agent-written TSX to Aperture's development widget store. The source must default-export defineWidget({ id, ... }) with the same id you pass here; the runtime refuses a module whose defineWidget id differs. The diagnostics are returned verbatim; fix compile errors and push again before previewing or rendering. ${ACCURACY_RULE}`,
+  description: `Compile and upload agent-written TSX to Aperture's development widget store. ${WidgetIdGuidance} The source must default-export defineWidget({ id, ... }) with the same id you pass here; the runtime refuses a module whose defineWidget id differs. Aperture diagnostics preserve the source location and offending line. ${WidgetFixLoop} ${ACCURACY_RULE}`,
   parameters: Schema.Struct({
     source: Schema.String.check(Schema.isMinLength(1)),
-    id: NonEmptyString,
+    id: WidgetIdInput,
   }),
   success: Schema.Struct({
     id: Schema.String,
     version: Schema.NullOr(Schema.String),
-    diagnostics: Schema.Array(
-      Schema.Struct({
-        file: Schema.String,
-        line: Schema.Finite,
-        column: Schema.Finite,
-        severity: Schema.Literals(["error", "warning"]),
-        text: Schema.String,
-      }),
-    ),
+    diagnostics: Schema.Array(WidgetDiagnosticSchema),
   }),
   failure: ToolFailures,
   failureMode: "return",
@@ -260,10 +268,56 @@ export const ApertureWidgetPushTool = Tool.make("aperture_widget_push", {
   .annotate(Tool.Idempotent, false)
   .annotate(Tool.OpenWorld, true);
 
+export const ApertureWidgetListTool = Tool.make("aperture_widget_list", {
+  description:
+    "List Aperture widgets created by this thread, using its widgetIdPrefix from aperture_status.",
+  success: Schema.Struct({
+    widgetIdPrefix: Schema.String,
+    widgets: Schema.Array(
+      Schema.Struct({
+        id: Schema.String,
+        version: Schema.String,
+        updatedAt: Schema.String,
+      }),
+    ),
+  }),
+  failure: ToolFailures,
+  failureMode: "return",
+  dependencies: [
+    ...ThreadDependencies,
+    ServerSettings.ServerSettingsService,
+    ApertureWidgetStore.ApertureWidgetStore,
+  ],
+})
+  .annotate(Tool.Title, "List Aperture widgets")
+  .annotate(Tool.Readonly, true)
+  .annotate(Tool.Destructive, false)
+  .annotate(Tool.Idempotent, true)
+  .annotate(Tool.OpenWorld, false);
+
+export const ApertureWidgetDeleteTool = Tool.make("aperture_widget_delete", {
+  description:
+    "Delete one Aperture widget and all its upstream versions, restricted to this thread's widgetIdPrefix.",
+  parameters: Schema.Struct({ id: WidgetIdInput }),
+  success: Schema.Struct({ id: Schema.String, deleted: Schema.Boolean }),
+  failure: ToolFailures,
+  failureMode: "return",
+  dependencies: [
+    ...ThreadDependencies,
+    ServerSettings.ServerSettingsService,
+    ApertureWidgetStore.ApertureWidgetStore,
+  ],
+})
+  .annotate(Tool.Title, "Delete Aperture widget")
+  .annotate(Tool.Readonly, false)
+  .annotate(Tool.Destructive, true)
+  .annotate(Tool.Idempotent, false)
+  .annotate(Tool.OpenWorld, true);
+
 export const ApertureWidgetPreviewTool = Tool.make("aperture_widget_preview", {
-  description: `Render a pinned widget version in the live Aperture runtime and return a PNG with sizing and diagnostics. Use this before aperture_widget_render. Pass the asOf from aperture_query when discussing data. ${ACCURACY_RULE}`,
+  description: `Preview a pinned widget version in the live Aperture runtime and return a PNG, console messages, failed bridge requests, and data status. Use this before aperture_widget_render. ${WidgetFixLoop} Pass the asOf from aperture_query when discussing data. ${ACCURACY_RULE}`,
   parameters: Schema.Struct({
-    id: NonEmptyString,
+    id: WidgetIdInput,
     version: NonEmptyString,
     ...PreviewParameters.fields,
   }),
@@ -283,9 +337,9 @@ export const ApertureWidgetPreviewTool = Tool.make("aperture_widget_preview", {
   .annotate(Tool.OpenWorld, false);
 
 export const ApertureWidgetRenderTool = Tool.make("aperture_widget_render", {
-  description: `Show a pinned Aperture widget version inline in this thread, above your final reply. Do not announce or restate it. Pass asOf from aperture_query to keep its data aligned with your prose. Defaults to pinned mode. ${ACCURACY_RULE}`,
+  description: `Show a pinned Aperture widget version inline in this thread, above your final reply. Do not announce or restate it. ${WidgetIdGuidance} Only render a version from a successful compile; never render a failed compile. ${WidgetFixLoop} Pass asOf from aperture_query to keep its data aligned with your prose. Defaults to pinned mode. ${ACCURACY_RULE}`,
   parameters: Schema.Struct({
-    id: NonEmptyString,
+    id: WidgetIdInput,
     version: NonEmptyString,
     title: NonEmptyString,
     height: Schema.Int.check(Schema.isBetween({ minimum: 80, maximum: 2000 })),
@@ -324,6 +378,8 @@ export const ApertureToolkit = Toolkit.make(
   ApertureFigurePreviewTool,
   ApertureFigureRenderTool,
   ApertureWidgetPushTool,
+  ApertureWidgetListTool,
+  ApertureWidgetDeleteTool,
   ApertureWidgetPreviewTool,
   ApertureWidgetRenderTool,
 );
@@ -333,6 +389,8 @@ export const ApertureStandardToolkit = Toolkit.make(
   ApertureQueryTool,
   ApertureFigureRenderTool,
   ApertureWidgetPushTool,
+  ApertureWidgetListTool,
+  ApertureWidgetDeleteTool,
   ApertureWidgetRenderTool,
 );
 
@@ -353,8 +411,18 @@ export const apertureToolkitsWhen = (isEnabled: () => boolean): ApertureToolkitS
   const widgetPush = ApertureWidgetPushTool.annotate(McpSchema.EnabledWhen, isEnabled);
   const widgetPreview = ApertureWidgetPreviewTool.annotate(McpSchema.EnabledWhen, isEnabled);
   const widgetRender = ApertureWidgetRenderTool.annotate(McpSchema.EnabledWhen, isEnabled);
+  const widgetList = ApertureWidgetListTool.annotate(McpSchema.EnabledWhen, isEnabled);
+  const widgetDelete = ApertureWidgetDeleteTool.annotate(McpSchema.EnabledWhen, isEnabled);
   return {
-    standard: Toolkit.make(status, query, figureRender, widgetPush, widgetRender),
+    standard: Toolkit.make(
+      status,
+      query,
+      figureRender,
+      widgetPush,
+      widgetList,
+      widgetDelete,
+      widgetRender,
+    ),
     figurePreview: Toolkit.make(figurePreview),
     widgetPreview: Toolkit.make(widgetPreview),
   };

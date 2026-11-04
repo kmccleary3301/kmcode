@@ -58,6 +58,7 @@ export interface AperturePreviewResult {
     readonly code: string | null;
   }>;
   readonly runtimeVersion: string;
+  readonly dataStatus: "present" | "empty" | "unknown";
 }
 
 export type AperturePreviewErrorCode =
@@ -93,6 +94,201 @@ export class AperturePreview extends Context.Service<
 interface PreviewResponseBytesAccumulator {
   readonly chunks: Array<Uint8Array<ArrayBufferLike>>;
   readonly byteLength: number;
+}
+type PreviewDataStatus = AperturePreviewResult["dataStatus"];
+type PreviewDataQueryKind = "history" | "runs";
+
+interface PreviewArrowTable {
+  readonly position: number;
+  readonly vtable: number;
+  readonly vtableLength: number;
+  readonly objectLength: number;
+}
+
+const PREVIEW_RESPONSE_UTF8 = new TextDecoder("utf-8", { fatal: true });
+const isPreviewRecord = (value: unknown): value is Record<string, unknown> =>
+  typeof value === "object" && value !== null && !Array.isArray(value);
+
+const previewDataQueryKind = (
+  method: string,
+  path: string,
+  body: string | null,
+): PreviewDataQueryKind | null => {
+  const pathname = path.includes("?") ? path.slice(0, path.indexOf("?")) : path;
+  if (method !== "POST" || pathname !== "/api/v1/query" || body === null) return null;
+  let request: unknown;
+  try {
+    request = JSON.parse(body);
+  } catch {
+    return null;
+  }
+  if (!isPreviewRecord(request)) return null;
+  return request.kind === "history" || request.kind === "runs" ? request.kind : null;
+};
+
+const previewArrowTable = (
+  view: DataView,
+  position: number,
+  start: number,
+  end: number,
+): PreviewArrowTable | null => {
+  if (position < start || position + 4 > end) return null;
+  const vtable = position - view.getInt32(position, true);
+  if (vtable < start || vtable + 4 > end) return null;
+  const vtableLength = view.getUint16(vtable, true);
+  const objectLength = view.getUint16(vtable + 2, true);
+  if (
+    vtableLength < 4 ||
+    vtable + vtableLength > end ||
+    objectLength < 4 ||
+    position + objectLength > end
+  )
+    return null;
+  return { position, vtable, vtableLength, objectLength };
+};
+
+const previewArrowField = (
+  view: DataView,
+  table: PreviewArrowTable,
+  id: number,
+  length: number,
+  end: number,
+): number | null => {
+  const slot = table.vtable + 4 + id * 2;
+  if (slot + 2 > table.vtable + table.vtableLength) return null;
+  const offset = view.getUint16(slot, true);
+  if (offset === 0 || offset + length > table.objectLength) return null;
+  const position = table.position + offset;
+  return position + length <= end ? position : null;
+};
+
+const previewArrowStreamHasRows = (bytes: Uint8Array): boolean | undefined => {
+  try {
+    const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+    let position = 0;
+    let hasSchema = false;
+    let hasRows = false;
+    while (position < view.byteLength) {
+      if (position + 4 > view.byteLength) return undefined;
+      let metadataLength = view.getInt32(position, true);
+      let metadataStart = position + 4;
+      if (metadataLength === -1) {
+        if (position + 8 > view.byteLength) return undefined;
+        metadataLength = view.getInt32(position + 4, true);
+        metadataStart = position + 8;
+      } else if (metadataLength < 0) {
+        return undefined;
+      }
+      if (metadataLength === 0)
+        return hasSchema && metadataStart === view.byteLength ? hasRows : undefined;
+      const metadataEnd = metadataStart + metadataLength;
+      if (metadataLength < 4 || metadataEnd > view.byteLength) return undefined;
+      const message = previewArrowTable(
+        view,
+        metadataStart + view.getUint32(metadataStart, true),
+        metadataStart,
+        metadataEnd,
+      );
+      if (message === null) return undefined;
+      const version = previewArrowField(view, message, 0, 2, metadataEnd);
+      const headerType = previewArrowField(view, message, 1, 1, metadataEnd);
+      const headerOffset = previewArrowField(view, message, 2, 4, metadataEnd);
+      const bodyLengthField = previewArrowField(view, message, 3, 8, metadataEnd);
+      if (
+        version === null ||
+        headerType === null ||
+        headerOffset === null ||
+        view.getInt16(version, true) < 3
+      )
+        return undefined;
+      const header = previewArrowTable(
+        view,
+        headerOffset + view.getUint32(headerOffset, true),
+        metadataStart,
+        metadataEnd,
+      );
+      if (header === null) return undefined;
+      const bodyLength = bodyLengthField === null ? 0n : view.getBigInt64(bodyLengthField, true);
+      if (bodyLength < 0n || bodyLength > BigInt(view.byteLength - metadataEnd)) return undefined;
+      if (view.getUint8(headerType) === 1) {
+        if (hasSchema) return undefined;
+        hasSchema = true;
+      } else if (view.getUint8(headerType) === 3 && hasSchema) {
+        const rowCountField = previewArrowField(view, header, 0, 8, metadataEnd);
+        const rowCount = rowCountField === null ? 0n : view.getBigInt64(rowCountField, true);
+        if (rowCount < 0n) return undefined;
+        hasRows ||= rowCount > 0n;
+      } else {
+        return undefined;
+      }
+      position = metadataEnd + Number(bodyLength);
+    }
+  } catch {
+    return undefined;
+  }
+  return undefined;
+};
+
+const inspectJsonPreviewData = (
+  bytes: Uint8Array,
+  kind: PreviewDataQueryKind,
+): PreviewDataStatus => {
+  let response: unknown;
+  try {
+    response = JSON.parse(PREVIEW_RESPONSE_UTF8.decode(bytes));
+  } catch {
+    return "unknown";
+  }
+  if (!isPreviewRecord(response) || response.kind !== kind) return "unknown";
+  if (kind === "history") {
+    if (!Array.isArray(response.series)) return "unknown";
+    let hasRows = false;
+    for (const series of response.series) {
+      if (
+        !isPreviewRecord(series) ||
+        typeof series.run !== "string" ||
+        typeof series.key !== "string" ||
+        !Array.isArray(series.step) ||
+        !Array.isArray(series.x) ||
+        !Array.isArray(series.y)
+      )
+        return "unknown";
+      const points = series.step.length;
+      if (series.x.length !== points || series.y.length !== points) return "unknown";
+      hasRows ||= points > 0;
+    }
+    return hasRows ? "present" : "empty";
+  }
+  if (!Array.isArray(response.runs)) return "unknown";
+  for (const run of response.runs) {
+    if (!isPreviewRecord(run) || typeof run.id !== "string") return "unknown";
+  }
+  return response.runs.length > 0 ? "present" : "empty";
+};
+
+export function inspectAperturePreviewDataResponse(input: {
+  readonly kind: "history" | "runs";
+  readonly status: number;
+  readonly contentType: string | undefined;
+  readonly bytes: Uint8Array;
+}): PreviewDataStatus {
+  if (input.status < 200 || input.status >= 300) return "unknown";
+  const mediaType = input.contentType?.split(";", 1)[0]?.trim().toLowerCase();
+  if (mediaType === "application/json") return inspectJsonPreviewData(input.bytes, input.kind);
+  if (mediaType === "application/vnd.apache.arrow.stream") {
+    const hasRows = previewArrowStreamHasRows(input.bytes);
+    return hasRows === undefined ? "unknown" : hasRows ? "present" : "empty";
+  }
+  return "unknown";
+}
+
+export function resolveAperturePreviewDataStatus(
+  observations: ReadonlyArray<PreviewDataStatus>,
+): PreviewDataStatus {
+  if (observations.includes("present")) return "present";
+  return observations.length > 0 && observations.every((status) => status === "empty")
+    ? "empty"
+    : "unknown";
 }
 
 const PreviewHostStateSchema = Schema.Struct({
@@ -308,6 +504,7 @@ const make = Effect.gen(function* () {
       readonly status: number | null;
       readonly code: string | null;
     }> = [];
+    const dataStatusObservations: PreviewDataStatus[] = [];
     const handleRequest: HeadlessChrome.HtmlRenderBrowserRequestHandler = (request) =>
       Effect.gen(function* () {
         let url: URL;
@@ -359,6 +556,9 @@ const make = Effect.gen(function* () {
           });
         }
         const body = request.postData ?? null;
+        const dataQueryKind = previewDataQueryKind(request.method, path, body);
+        const dataObservationIndex =
+          dataQueryKind === null ? -1 : dataStatusObservations.push("unknown") - 1;
         const accept =
           Object.entries(request.headers).find(([name]) => name.toLowerCase() === "accept")?.[1] ??
           null;
@@ -460,6 +660,14 @@ const make = Effect.gen(function* () {
             code: null,
           });
         }
+        if (dataQueryKind !== null && dataObservationIndex !== -1) {
+          dataStatusObservations[dataObservationIndex] = inspectAperturePreviewDataResponse({
+            kind: dataQueryKind,
+            status: response.status,
+            contentType: response.headers["content-type"],
+            bytes,
+          });
+        }
         return {
           status: response.status,
           statusText: `HTTP ${response.status}`,
@@ -519,6 +727,7 @@ const make = Effect.gen(function* () {
       })),
       failedRequests,
       runtimeVersion: runtime.version,
+      dataStatus: resolveAperturePreviewDataStatus(dataStatusObservations),
     } satisfies AperturePreviewResult;
   });
 

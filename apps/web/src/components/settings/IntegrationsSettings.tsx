@@ -2,6 +2,7 @@ import { DeviceHostUpdates } from "../device/DeviceHostUpdates";
 import { DeviceToolVersions } from "../device/DeviceToolVersions";
 import { useScopedSettings, useUpdateScopedSettings } from "./useScopedSettings";
 import { ScopedSwitch } from "./ScopedSwitch";
+import { ApertureSettings } from "./ApertureSettings";
 import { DeviceHostsSettings } from "./DeviceHostsSettings";
 /**
  * Integrations settings - preferences for surfaces T3 Code embeds rather than
@@ -1516,6 +1517,24 @@ function BrowserProfilesSetting({ disabled }: { readonly disabled: boolean }) {
   );
 }
 
+function ApertureIntegrationSettings() {
+  const { environment } = useSettingsScope();
+  const environmentId =
+    environment?.connection.phase === "connected" ? environment.environmentId : null;
+
+  return (
+    <SettingsSection id={searchableSetting("aperture").id} title="Aperture">
+      {environmentId ? (
+        <ApertureSettings key={environmentId} environmentId={environmentId} />
+      ) : (
+        <p className="px-4 py-3 text-sm text-muted-foreground">
+          Connect an environment to configure its Aperture integration.
+        </p>
+      )}
+    </SettingsSection>
+  );
+}
+
 export function IntegrationsSettingsPanel() {
   // Client-local preview defaults are editable only where the preview exists.
   const previewDefaultsDisabled = !isElectron;
@@ -1547,6 +1566,7 @@ export function IntegrationsSettingsPanel() {
         )}
       </SettingsSection>
       <DeviceIntegrationSettings />
+      <ApertureIntegrationSettings />
     </SettingsPageContainer>
   );
 }

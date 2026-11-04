@@ -684,6 +684,14 @@ export const SETTINGS_SEARCH_ITEMS = [
     searchTerms: ["ssh remote simulator emulator ios android mac mini identity key connection"],
   },
   {
+    id: "aperture",
+    title: "Aperture",
+    to: "/settings/integrations",
+    scope: "environment-defaults",
+    searchTerms: ["Aperture API web URL entity project API key test connection"],
+    environmentOnly: true,
+  },
+  {
     id: "agent-device-access",
     title: "Agent device access",
     to: "/settings/integrations",

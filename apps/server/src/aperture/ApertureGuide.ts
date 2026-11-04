@@ -82,6 +82,8 @@ export default defineWidget({
 - The host supplies the background and the typeface. Use CSS variables: var(--plot-text), var(--plot-text-2), var(--plot-font-data), var(--plot-border), var(--plot-accent), var(--plot-space-3, 12px).
 - Colors for marks come from the theme prop (theme.color.accent and the rest of theme.color). Never hard-code hex colors, so dark and light hosts both work.
 - Fill the panel: height 100% and width 100%. minHeight is the floor.
+- The chart follows the reader's active KM Code theme (Parchment, Dracula, and so on) with no work from you. Do not pass a theme to the render tools unless the user asked for a specific look; then pass an Aperture theme id such as "nature", "mint-terminal" or "parchment-dark" as theme.
+- To style one widget yourself, override inside it: spread the prop (theme={{ ...theme, color: { ...theme.color, accent: "#c96442" } }}) or set CSS variables and inline styles. That wins over the host theme for what you change. There is no Tailwind in the runtime.
 
 ## Loop
 1. aperture_widget_push. If diagnostics come back, each has a formatted "file:line:col: severity: text" and the offending lineText. Fix exactly those lines and push again. Stop after five attempts, explain the last diagnostics to the user, and do not preview or render.

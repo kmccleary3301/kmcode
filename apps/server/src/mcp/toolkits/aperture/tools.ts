@@ -169,6 +169,13 @@ export const ApertureQueryTool = Tool.make("aperture_query", {
   .annotate(Tool.Idempotent, true)
   .annotate(Tool.OpenWorld, false);
 
+const ThemeOverride = Schema.optional(
+  NonEmptyString.annotate({
+    description:
+      'An Aperture theme id such as "nature", "mint-terminal" or "parchment-dark". Omit it: charts follow the reader\'s active KM Code theme. Set it only when the user asked for a specific look.',
+  }),
+);
+
 const PreviewParameters = Schema.Struct({
   entity: Schema.optional(NonEmptyString),
   project: Schema.optional(NonEmptyString),
@@ -176,6 +183,7 @@ const PreviewParameters = Schema.Struct({
     Schema.Int.annotate({ description: "CSS pixels; the server clamps this to 320–1600." }),
   ),
   appearance: Schema.optional(Schema.Literals(["light", "dark"])),
+  theme: ThemeOverride,
   asOf: Schema.optional(
     Schema.String.annotate({ description: "An ISO timestamp no later than now." }),
   ),
@@ -237,6 +245,7 @@ export const ApertureFigureRenderTool = Tool.make("aperture_figure_render", {
     title: NonEmptyString,
     height: Schema.Int.check(Schema.isBetween({ minimum: 80, maximum: 2000 })),
     mode: Schema.optional(Schema.Literals(["pinned", "live"])),
+    theme: ThemeOverride,
     entity: Schema.optional(NonEmptyString),
     project: Schema.optional(NonEmptyString),
     asOf: Schema.optional(
@@ -366,6 +375,7 @@ export const ApertureWidgetRenderTool = Tool.make("aperture_widget_render", {
     title: NonEmptyString,
     height: Schema.Int.check(Schema.isBetween({ minimum: 80, maximum: 2000 })),
     mode: Schema.optional(Schema.Literals(["pinned", "live"])),
+    theme: ThemeOverride,
     entity: Schema.optional(NonEmptyString),
     project: Schema.optional(NonEmptyString),
     asOf: Schema.optional(

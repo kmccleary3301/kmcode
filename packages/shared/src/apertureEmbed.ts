@@ -6,9 +6,29 @@ export type ApertureEmbedMode =
   | { readonly kind: "pinned"; readonly asOf: string }
   | { readonly kind: "live" };
 
+export const APERTURE_EMBED_THEME_COLOR_ROLES = [
+  "page",
+  "card",
+  "inset",
+  "raised",
+  "border",
+  "borderStrong",
+  "text",
+  "textSecondary",
+  "textMuted",
+  "textFaint",
+  "accent",
+  "warning",
+  "danger",
+] as const;
+export type ApertureEmbedThemeColorRole = (typeof APERTURE_EMBED_THEME_COLOR_ROLES)[number];
+
 export type ApertureEmbedTheme = {
   readonly appearance: "light" | "dark";
+  /** A registered Aperture theme id; empty when the host sends `colors` instead. */
   readonly vizTheme: string;
+  /** The host palette, laid over Aperture's appearance default when `vizTheme` does not resolve. */
+  readonly colors?: Readonly<Partial<Record<ApertureEmbedThemeColorRole, string>>>;
   readonly tokens: Readonly<Record<string, string>>;
 };
 
@@ -57,6 +77,7 @@ export const ApertureEmbedInit = Schema.Struct({
   theme: Schema.Struct({
     appearance: Schema.Literals(["light", "dark"]),
     vizTheme: Schema.String,
+    colors: Schema.optionalKey(Schema.Record(Schema.String, Schema.String)),
     tokens: Schema.Record(Schema.String, Schema.String),
   }),
   mode: Schema.Union([
@@ -194,6 +215,8 @@ export const ApertureEmbedReferenceSchema = Schema.Struct({
   height: Schema.Int.check(Schema.isBetween({ minimum: 80, maximum: 2000 })),
   mode: Schema.Literals(["pinned", "live"]),
   asOf: Schema.String.check(Schema.isNonEmpty()),
+  /** The Aperture theme the agent chose for this render; absent means follow the active KM Code theme. */
+  vizTheme: Schema.optionalKey(Schema.String.check(Schema.isNonEmpty())),
   runtime: Schema.Struct({ version: Schema.String.check(Schema.isNonEmpty()) }),
   webUrl: Schema.optionalKey(Schema.String),
   embedToken: Schema.String.check(Schema.isNonEmpty()),
@@ -254,10 +277,16 @@ export function isApertureEmbedMode(value: unknown): value is ApertureEmbedMode 
 }
 
 export function isApertureEmbedTheme(value: unknown): value is ApertureEmbedTheme {
+  const roles: readonly string[] = APERTURE_EMBED_THEME_COLOR_ROLES;
   return (
     isApertureEmbedRecord(value) &&
     (value.appearance === "light" || value.appearance === "dark") &&
     typeof value.vizTheme === "string" &&
+    (value.colors === undefined ||
+      (isApertureEmbedRecord(value.colors) &&
+        Object.entries(value.colors).every(
+          ([role, color]) => roles.includes(role) && typeof color === "string",
+        ))) &&
     isStringRecord(value.tokens)
   );
 }

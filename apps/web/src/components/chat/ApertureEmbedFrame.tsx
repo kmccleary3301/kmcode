@@ -20,13 +20,16 @@ import { useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from "re
 
 import { useAssetUrlRefresh, useFrameAssetSrc } from "~/assets/assetUrls";
 import { useHtmlRenderTheme } from "~/hooks/useHtmlRenderTheme";
+import { useTheme } from "~/hooks/useTheme";
 import { cn } from "~/lib/utils";
 import { apertureEnvironment } from "~/state/aperture";
 import { useAtomCommand } from "~/state/use-atom-command";
+import { getThemeDefinition, resolveThemeHalf } from "~/themePalette";
 
 import { Button } from "../ui/button";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 import { acquireApertureRequestSlot, registerApertureLiveFrame } from "./apertureEmbedSlots";
+import { apertureEmbedTheme } from "./apertureEmbedTheme";
 
 const isApertureFetchError = Schema.is(ApertureFetchError);
 
@@ -55,25 +58,22 @@ export function apertureAsOfLabel(asOf: string): string {
   return Number.isNaN(time) ? asOf : pinnedTimeFormat.format(time);
 }
 
-/** Aperture's own figure theme for the app's appearance, on the transcript's background and fonts. */
-function useApertureEmbedTheme(): ApertureEmbedTheme {
+/** Aperture's twin of the active KM Code theme (or its palette), unless the agent chose a theme. */
+function useApertureEmbedTheme(override: string | undefined): ApertureEmbedTheme {
   const theme = useHtmlRenderTheme();
-  return useMemo(() => {
-    const tokens: Record<string, string> = {};
-    for (const [token, variable] of [
-      ["--plot-page", "--background"],
-      ["--plot-font-ui", "--font-sans"],
-      ["--plot-font-mono", "--font-mono"],
-    ] as const) {
-      const value = theme.variables[variable];
-      if (value !== undefined) tokens[token] = value;
-    }
-    return {
-      appearance: theme.appearance,
-      vizTheme: theme.appearance === "dark" ? "mint-terminal" : "github-light",
-      tokens,
-    };
-  }, [theme]);
+  const { theme: preference, themeHalves } = useTheme();
+  const themeId =
+    getThemeDefinition(resolveThemeHalf(preference, themeHalves, theme.appearance))?.id ?? null;
+  return useMemo(
+    () =>
+      apertureEmbedTheme({
+        appearance: theme.appearance,
+        variables: theme.variables,
+        themeId,
+        override,
+      }),
+    [theme, themeId, override],
+  );
 }
 
 /** Issues a failed bridged request shows in the chrome; the rest the figure reports itself. */
@@ -263,7 +263,7 @@ export function ApertureEmbedFrame(props: {
     }
   };
 
-  const theme = useApertureEmbedTheme();
+  const theme = useApertureEmbedTheme(reference.vizTheme);
   const refresh = async () => {
     setIssue(null);
     setReady(false);

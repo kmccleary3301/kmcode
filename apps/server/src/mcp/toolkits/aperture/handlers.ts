@@ -40,6 +40,7 @@ interface ScopeOptions {
 interface PreviewOptions extends ScopeOptions {
   readonly width?: number | undefined;
   readonly appearance?: "light" | "dark" | undefined;
+  readonly theme?: string | undefined;
 }
 
 interface RenderOptions extends ScopeOptions {
@@ -49,6 +50,7 @@ interface RenderOptions extends ScopeOptions {
   readonly title: string;
   readonly height: number;
   readonly mode?: "pinned" | "live" | undefined;
+  readonly theme?: string | undefined;
 }
 
 /** Width the render tools measure at: the transcript column on a typical desktop window. */
@@ -282,6 +284,7 @@ const preview = (
         asOf,
         width: Math.min(1600, Math.max(320, options.width ?? RENDER_MEASURE_WIDTH)),
         appearance: options.appearance ?? "dark",
+        ...(options.theme === undefined ? {} : { vizTheme: options.theme }),
       })
       .pipe(Effect.mapError(previewFailure));
     return {
@@ -338,6 +341,7 @@ const render = (toolName: string, options: RenderOptions) =>
         asOf,
         width: RENDER_MEASURE_WIDTH,
         appearance: "dark",
+        ...(options.theme === undefined ? {} : { vizTheme: options.theme }),
       }),
     );
     if (Result.isSuccess(measured) && measured.success.embedErrors.length > 0) {
@@ -367,6 +371,7 @@ const render = (toolName: string, options: RenderOptions) =>
       height,
       mode: options.mode ?? "pinned",
       asOf,
+      ...(options.theme === undefined ? {} : { vizTheme: options.theme }),
       runtime: { version: runtimeDocument.version },
       ...(apertureSettings.webUrl.trim().length === 0 ? {} : { webUrl: apertureSettings.webUrl }),
       embedToken,

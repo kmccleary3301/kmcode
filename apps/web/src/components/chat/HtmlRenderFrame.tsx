@@ -8,16 +8,13 @@ import {
 import { Maximize2Icon } from "lucide-react";
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 
-import { useAssetUrlRefresh, useAssetUrlState } from "~/assets/assetUrls";
+import { useFrameAssetSrc } from "~/assets/assetUrls";
 
 import { HtmlRenderDocument } from "../files/BrowserDocumentFrame";
 import { Button } from "../ui/button";
 import { toastManager } from "../ui/toast";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 import { HtmlRenderDialog } from "./HtmlRenderDialog";
-
-// A frame may load its URL a little after mounting.
-const MIN_URL_LIFE_MS = 5 * 60_000;
 
 /**
  * An agent's HTML render inline in the thread: the page itself on the thread's
@@ -60,10 +57,7 @@ export function HtmlRenderFrame(props: {
     }),
     [attachmentId, fileName],
   );
-  // A cached URL with life left is reused, so the browser's cache serves the
-  // page again; one near expiry is minted afresh, since a frame cannot report a
-  // failed load. The page keeps its first URL for its lifetime.
-  const [src, setSrc] = useState<string | null>(null);
+  const { src, failed, refresh } = useFrameAssetSrc(props.environmentId, resource);
   const [expandedSrc, setExpandedSrc] = useState<string | null>(null);
   const { onFullscreenChange } = props;
   useEffect(() => {
@@ -71,33 +65,6 @@ export function HtmlRenderFrame(props: {
     onFullscreenChange?.(true);
     return () => onFullscreenChange?.(false);
   }, [expandedSrc, onFullscreenChange]);
-  const [failed, setFailed] = useState(false);
-  const assetUrl = useAssetUrlState(src === null ? props.environmentId : null, resource);
-  const cachedUrl = assetUrl._tag === "Success" ? assetUrl.url : null;
-  const cachedExpiresAt = assetUrl._tag === "Success" ? assetUrl.expiresAt : 0;
-  const cacheFailed = assetUrl._tag === "Failure";
-  const refresh = useAssetUrlRefresh(props.environmentId, resource);
-  // At most one mint per mount: expiry is server time and the check uses the
-  // client clock, so a skewed clock must not mint again on every update.
-  const minting = useRef(false);
-  useEffect(() => {
-    if (src !== null || minting.current) return;
-    if (cacheFailed) {
-      // oxlint-disable-next-line react/set-state-in-effect -- Mirrors the cached URL's failure.
-      setFailed(true);
-      return;
-    }
-    if (cachedUrl === null) return;
-    if (cachedExpiresAt - Date.now() > MIN_URL_LIFE_MS) {
-      setSrc(cachedUrl);
-      return;
-    }
-    minting.current = true;
-    void refresh().then(
-      (url) => (url === null ? setFailed(true) : setSrc(url)),
-      () => setFailed(true),
-    );
-  }, [cacheFailed, cachedExpiresAt, cachedUrl, refresh, src]);
 
   return (
     <div ref={boxRef} className="group/html-render relative" style={{ height }}>

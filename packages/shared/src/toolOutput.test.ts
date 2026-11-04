@@ -189,6 +189,18 @@ describe("apertureEmbedFromToolItem", () => {
     ).toEqual(widgetReference);
   });
 
+  it("still finds the reference in the compact output the timeline receives", () => {
+    const toolName = "mcp__t3-code__aperture_figure_render";
+    const wire = compactDynamicToolOutput([
+      {
+        type: "text",
+        text: JSON.stringify({ apertureEmbed: reference, message: "Shown to the reader." }),
+      },
+    ]);
+    expect(wire).toEqual({ apertureEmbed: reference });
+    expect(apertureEmbedFromToolItem({ toolName, output: wire })).toEqual(reference);
+  });
+
   it("rejects errors, malformed references, and tools from other servers", () => {
     for (const item of [
       {

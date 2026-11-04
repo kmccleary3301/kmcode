@@ -8,7 +8,7 @@ import {
 import { squashAtomCommandFailure } from "@t3tools/client-runtime/state/runtime";
 import type { AssetResource, EnvironmentId } from "@t3tools/contracts";
 import { AsyncResult } from "effect/reactivity";
-import { useCallback, useMemo } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { assetEnvironment } from "~/state/assets";
 import { useFilesystemReadAccess } from "~/state/filesystem";
@@ -56,6 +56,54 @@ export function useAssetUrlRefresh(
     if (result._tag === "Failure") throw squashAtomCommandFailure(result);
     return resolveAssetUrl(httpBaseUrl, result.value.relativeUrl);
   }, [environmentId, resource, refresh, httpBaseUrl]);
+}
+
+// A frame may load its URL a little after mounting.
+const MIN_FRAME_URL_LIFE_MS = 5 * 60_000;
+
+/**
+ * The signed URL a frame loads, fixed for the frame's lifetime: a new src would
+ * reload its document. A cached URL with life left is reused, so the browser's
+ * cache serves the document again; one near expiry is minted afresh, since a
+ * frame cannot report a failed load. `refresh` mints a URL for other uses.
+ */
+export function useFrameAssetSrc(
+  environmentId: EnvironmentId,
+  resource: AssetResource,
+): {
+  readonly src: string | null;
+  readonly failed: boolean;
+  readonly refresh: () => Promise<string | null>;
+} {
+  const [src, setSrc] = useState<string | null>(null);
+  const [failed, setFailed] = useState(false);
+  const assetUrl = useAssetUrlState(src === null ? environmentId : null, resource);
+  const cachedUrl = assetUrl._tag === "Success" ? assetUrl.url : null;
+  const cachedExpiresAt = assetUrl._tag === "Success" ? assetUrl.expiresAt : 0;
+  const cacheFailed = assetUrl._tag === "Failure";
+  const refresh = useAssetUrlRefresh(environmentId, resource);
+  // At most one mint per mount: expiry is server time and the check uses the
+  // client clock, so a skewed clock must not mint again on every update.
+  const minting = useRef(false);
+  useEffect(() => {
+    if (src !== null || minting.current) return;
+    if (cacheFailed) {
+      // oxlint-disable-next-line react/set-state-in-effect -- Mirrors the cached URL's failure.
+      setFailed(true);
+      return;
+    }
+    if (cachedUrl === null) return;
+    if (cachedExpiresAt - Date.now() > MIN_FRAME_URL_LIFE_MS) {
+      setSrc(cachedUrl);
+      return;
+    }
+    minting.current = true;
+    void refresh().then(
+      (url) => (url === null ? setFailed(true) : setSrc(url)),
+      () => setFailed(true),
+    );
+  }, [cacheFailed, cachedExpiresAt, cachedUrl, refresh, src]);
+  return { src, failed, refresh };
 }
 
 export function useAssetUrls(

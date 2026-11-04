@@ -41,6 +41,7 @@ interface CompactToolOutput {
   scheduledTaskId?: string;
   status?: "rolled_back";
   htmlRender?: HtmlRenderReference;
+  apertureEmbed?: ApertureEmbedReference;
   [MCP_APP_OUTPUT_KEY]?: McpAppReference;
   thread?: { threadId: string };
   threads?: Array<{ threadId?: string; status?: "rolled_back" }>;
@@ -127,6 +128,7 @@ export function compactDynamicToolOutput(value: unknown): CompactToolOutput | un
     if (data.status === "rolled_back") output.status = "rolled_back";
     const htmlRender = readHtmlRenderReference(data.htmlRender);
     if (htmlRender !== undefined) output.htmlRender = htmlRender;
+    if (isApertureEmbedReference(data.apertureEmbed)) output.apertureEmbed = data.apertureEmbed;
     const mcpApp = readMcpAppReference(data[MCP_APP_OUTPUT_KEY]);
     // Kept under its stored key, so the compact wire output reads back the same way.
     if (mcpApp !== undefined) output[MCP_APP_OUTPUT_KEY] = mcpApp;
@@ -202,15 +204,8 @@ export function apertureEmbedFromToolItem(item: {
   if (toolId !== "aperture_figure_render" && toolId !== "aperture_widget_render") {
     return undefined;
   }
-  const budget: ResultReadBudget = {
-    remainingBytes: MAX_PARSED_BYTES,
-    remainingNodes: MAX_ENVELOPE_NODES,
-    exceeded: false,
-  };
-  const result = readResult(item.output, budget);
-  if (result.failed || budget.exceeded || result.data === undefined) return undefined;
-  const reference = result.data.apertureEmbed;
-  return isApertureEmbedReference(reference) ? reference : undefined;
+  const output = compactDynamicToolOutput(item.output);
+  return output?.isError ? undefined : output?.apertureEmbed;
 }
 
 /**

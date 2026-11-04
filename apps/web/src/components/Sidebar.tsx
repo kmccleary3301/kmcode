@@ -172,6 +172,7 @@ import { cn } from "~/lib/utils";
 import { observeVisibleAnimation } from "~/lib/visibleAnimation";
 import { EnvironmentMachineIcon } from "./EnvironmentMachineIcon";
 import { AsciiLoader } from "./ui/ascii-loader";
+import { ShimmerLayers } from "./ui/shimmer";
 import { ProjectEnvironmentBadge } from "./ProjectEnvironmentBadge";
 import {
   buildDraftActionMenuItems,
@@ -2126,7 +2127,9 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
                             role="status"
                             className={cn(topStatus.icon === "working" && "minimal-text-shimmer")}
                           >
-                            {topStatus.label}
+                            <ShimmerLayers active={topStatus.icon === "working"}>
+                              {topStatus.label}
+                            </ShimmerLayers>
                           </span>
                           {status === "working" && !waitingOnBackgroundJob ? (
                             nativeWorkEnded ? (

@@ -831,8 +831,4 @@
   .live-tool-shine,
 .km-transcript[data-transcript-style="terminal"] .terminal-live-activity-label.live-tool-shine {
   color: var(--omp-muted);
-  background: none;
-  background-image: none;
-  background-clip: border-box;
-  animation: none;
 }

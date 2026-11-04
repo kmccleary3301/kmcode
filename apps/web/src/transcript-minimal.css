@@ -627,20 +627,6 @@
   }
 
   @media (prefers-reduced-motion: no-preference) and (forced-colors: none) {
-    /* A live line that rolls or swaps in keeps its band: an element runs one
-       animation list, so the entrance is listed beside the shine. */
-    .cursor-subagent-shimmer.minimal-agent-roll-in {
-      animation:
-        minimal-line-in 300ms var(--ease-disclosure),
-        minimal-shine 1.83s steps(55) infinite alternate;
-      animation-play-state: running, var(--visible-animation-state, paused);
-    }
-    .cursor-subagent-shimmer.motion-swap-text {
-      animation:
-        minimal-swap 300ms var(--ease-disclosure),
-        minimal-shine 1.83s steps(55) infinite alternate;
-      animation-play-state: running, var(--visible-animation-state, paused);
-    }
     /* The band lights the whole line, so the line's own greys step aside. */
     .tool-io-pane.borderless-step-row
       .tool-heading
@@ -712,7 +698,13 @@
     animation: minimal-digit-down 540ms var(--ease-disclosure);
   }
 }
-/* Shared minimal-style text sweep for live transcript and sidebar labels. */
+/* Shared minimal-style text sweep for live transcript and sidebar labels
+   (ShimmerLayers). The label rests at 55% and a 4rem band lifts it to full:
+   the copy adds its remaining 45% (plus-lighter, inside the label's own group)
+   under a soft-edged window, which sums to the 55%-to-100% mask it replaces.
+   30 fps: each frame of a sweep costs a compositor frame, and the soft band
+   still reads as smooth motion; visibleAnimation keeps every sweep in phase
+   so their steps land on the same frames. */
 @media (prefers-reduced-motion: no-preference) and (forced-colors: none) {
   .minimal-text-shimmer,
   .km-transcript:is(
@@ -721,21 +713,49 @@
       [data-transcript-style="km"]
     )
     :is(.live-tool-shine, .cursor-subagent-shimmer) {
-    -webkit-text-fill-color: currentColor;
-    background-image: none;
-    mask-image: linear-gradient(
-      90deg,
-      rgb(0 0 0 / 0.55) calc(50% - 2rem),
-      #000 50%,
-      rgb(0 0 0 / 0.55) calc(50% + 2rem)
-    );
-    mask-size: calc(100% + 40rem) 100%;
-    mask-repeat: no-repeat;
-    /* 30 fps: every frame of a sweep costs a full compositor frame, and the
-       soft band still reads as smooth motion at this rate. visibleAnimation
-       keeps every sweep in phase so their steps land on the same frames. */
-    animation: minimal-shine 1.83s steps(55) infinite alternate;
-    animation-play-state: var(--visible-animation-state, paused);
+    isolation: isolate;
+
+    & > .shimmer-base[data-live] {
+      opacity: 0.55;
+      -webkit-text-fill-color: currentColor;
+    }
+    /* The band lights the label from above; live-tool-shine's still copy
+       beneath it has no part here. */
+    & > .shimmer-clip {
+      z-index: auto;
+    }
+    & > .shimmer-clip > .shimmer-underlay {
+      display: none;
+    }
+    & > .shimmer-clip > .shimmer-window {
+      inset-inline: 0;
+      width: auto;
+      mask-image: linear-gradient(
+        90deg,
+        transparent calc(50% - 2rem),
+        #000 50%,
+        transparent calc(50% + 2rem)
+      );
+      mask-size: auto;
+      mask-repeat: no-repeat;
+      opacity: 0.45;
+      mix-blend-mode: plus-lighter;
+      animation-name: minimal-shine-window;
+      animation-duration: 1.83s;
+      animation-timing-function: steps(55);
+      animation-direction: alternate;
+    }
+    /* The copy takes the label's colour, whatever its own layout classes set. */
+    & > .shimmer-clip .shimmer-copy {
+      inset-inline: 0;
+      width: auto;
+      color: inherit;
+      -webkit-text-fill-color: currentColor;
+      animation-name: minimal-shine-copy;
+      animation-duration: 1.83s;
+      animation-timing-function: steps(55);
+      animation-direction: alternate;
+    }
   }
   .km-transcript:is(
       [data-transcript-style="minimal"],
@@ -841,12 +861,20 @@
     opacity: 0;
   }
 }
-@keyframes minimal-shine {
+@keyframes minimal-shine-window {
   from {
-    mask-position: 100% 0;
+    transform: translateX(-20rem);
   }
   to {
-    mask-position: 0% 0;
+    transform: translateX(20rem);
+  }
+}
+@keyframes minimal-shine-copy {
+  from {
+    transform: translateX(20rem);
+  }
+  to {
+    transform: translateX(-20rem);
   }
 }
 @media (prefers-reduced-motion: reduce) {

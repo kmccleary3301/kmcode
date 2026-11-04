@@ -66,6 +66,7 @@ import { GlyphSwap } from "./GlyphSwap";
 import { RollingText } from "./RollingText";
 import { EXCERPT_FOLD_DELAY_MS } from "./timelineActivityPolicy";
 import { observeVisibleAnimation } from "~/lib/visibleAnimation";
+import { ShimmerLayers } from "../ui/shimmer";
 import { useChildThreadLiveStep } from "./childThreadSteps";
 import { LiveViewPausedNote, useSubagentLiveContent } from "../../hooks/useSubagentLiveContent";
 import ChatMarkdown from "../ChatMarkdown";
@@ -758,17 +759,19 @@ function SubagentTimelineLink(props: {
                       ref={active ? observeVisibleAnimation : undefined}
                       className={cn("minimal-agent-text", active && "cursor-subagent-shimmer")}
                     >
-                      <span className="minimal-agent-title">{props.title}</span>
-                      {lineDetail ? (
-                        <span
-                          className={cn(
-                            "minimal-agent-activity",
-                            rowFailed && "minimal-agent-activity-failed",
-                          )}
-                        >
-                          {lineDetail}
-                        </span>
-                      ) : null}
+                      <ShimmerLayers active={active} copyClassName="minimal-agent-text">
+                        <span className="minimal-agent-title">{props.title}</span>
+                        {lineDetail ? (
+                          <span
+                            className={cn(
+                              "minimal-agent-activity",
+                              rowFailed && "minimal-agent-activity-failed",
+                            )}
+                          >
+                            {lineDetail}
+                          </span>
+                        ) : null}
+                      </ShimmerLayers>
                     </span>
                     {elapsed}
                   </div>
@@ -806,17 +809,19 @@ function SubagentTimelineLink(props: {
                       ref={active ? observeVisibleAnimation : undefined}
                       className={cn("minimal-agent-text", active && "cursor-subagent-shimmer")}
                     >
-                      <span className="minimal-agent-title">{props.title}</span>
-                      {lineDetail ? (
-                        <span
-                          className={cn(
-                            "minimal-agent-activity",
-                            rowFailed && "minimal-agent-activity-failed",
-                          )}
-                        >
-                          {lineDetail}
-                        </span>
-                      ) : null}
+                      <ShimmerLayers active={active} copyClassName="minimal-agent-text">
+                        <span className="minimal-agent-title">{props.title}</span>
+                        {lineDetail ? (
+                          <span
+                            className={cn(
+                              "minimal-agent-activity",
+                              rowFailed && "minimal-agent-activity-failed",
+                            )}
+                          >
+                            {lineDetail}
+                          </span>
+                        ) : null}
+                      </ShimmerLayers>
                     </span>
                     {elapsed}
                   </button>

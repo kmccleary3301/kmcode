@@ -571,32 +571,105 @@ html[data-mobile-composer-route-transition="true"]::view-transition-old(t3-mobil
   }
 }
 
-@keyframes live-tool-shine {
-  from {
-    background-position:
-      -4.5rem 0,
-      0 0;
-  }
-  to {
-    background-position:
-      calc(100% + 4.5rem) 0,
-      0 0;
+/* A live label's sweep (ShimmerLayers): the label sits in .shimmer-base and an
+   aria-hidden copy rides in .shimmer-window, which slides one way while the
+   copy slides back, so the band crosses text that holds still. Only
+   transforms animate, so the compositor draws every frame. live-tool-shine
+   (below), the minimal look (transcript-minimal.css) and the cursor look
+   (cursor-elements.css) dress this shared structure. Idle, or under reduced
+   motion, the copy stays hidden and the label's wrapper lays out as its
+   children alone. */
+:where(.shimmer-base) {
+  display: contents;
+}
+:where(.shimmer-clip) {
+  display: none;
+}
+@media (prefers-reduced-motion: no-preference) and (forced-colors: none) {
+  :where(.live-tool-shine, .cursor-subagent-shimmer, .minimal-text-shimmer) {
+    position: relative;
+
+    /* The wrapper stands in for the label's own box, so its children lay out
+       as they would directly inside it. */
+    & > .shimmer-base[data-live] {
+      display: inherit;
+      flex: 1 1 auto;
+      flex-flow: inherit;
+      place-items: inherit;
+      place-content: inherit;
+      gap: inherit;
+      min-width: 0;
+      overflow: inherit;
+      text-overflow: inherit;
+    }
+    & > .shimmer-clip {
+      display: block;
+      position: absolute;
+      inset: 0;
+      overflow: clip;
+      pointer-events: none;
+      user-select: none;
+    }
+    /* Each look sets the window's horizontal extent and mask, and the copy's. */
+    & > .shimmer-clip > .shimmer-window,
+    & > .shimmer-clip .shimmer-copy {
+      position: absolute;
+      inset-block: 0;
+      animation-iteration-count: infinite;
+      animation-play-state: var(--visible-animation-state, paused);
+      will-change: var(--visible-animation-will-change, auto);
+    }
   }
 }
 
+/* Painted under the label's own text, as the background-clip:text gradient
+   it replaces was: a still copy in the secondary label colour, crossed left to
+   right by a 4.5rem band of full contrast. The label's text goes transparent,
+   except where its children set their own colour and draw over the sweep. */
+@keyframes live-tool-shine-window {
+  from {
+    transform: translateX(-4.5rem);
+  }
+  to {
+    transform: translateX(100%);
+  }
+}
+@keyframes live-tool-shine-copy {
+  from {
+    transform: translateX(4.5rem);
+  }
+  to {
+    transform: translateX(-100%);
+  }
+}
 @utility live-tool-shine {
   @media (prefers-reduced-motion: no-preference) and (forced-colors: none) {
     color: transparent;
-    background-image:
-      linear-gradient(to right, transparent, var(--contrast-foreground), transparent),
-      linear-gradient(var(--contrast-secondary-label), var(--contrast-secondary-label));
-    background-size:
-      4.5rem 100%,
-      100% 100%;
-    background-repeat: no-repeat;
-    background-clip: text;
-    animation: live-tool-shine 2.2s steps(30) infinite;
-    animation-play-state: var(--visible-animation-state, paused);
+    isolation: isolate;
+    & > .shimmer-clip {
+      z-index: -1;
+    }
+    & > .shimmer-clip > .shimmer-underlay {
+      position: absolute;
+      inset: 0;
+      -webkit-text-fill-color: var(--contrast-secondary-label);
+    }
+    & > .shimmer-clip > .shimmer-window {
+      inset-inline: 0;
+      mask-image: linear-gradient(to right, transparent, #000, transparent);
+      mask-size: 4.5rem 100%;
+      mask-repeat: no-repeat;
+      animation-name: live-tool-shine-window;
+      animation-duration: 2.2s;
+      animation-timing-function: steps(30);
+    }
+    & > .shimmer-clip .shimmer-copy {
+      inset-inline: 0;
+      -webkit-text-fill-color: var(--contrast-foreground);
+      animation-name: live-tool-shine-copy;
+      animation-duration: 2.2s;
+      animation-timing-function: steps(30);
+    }
   }
 }
 

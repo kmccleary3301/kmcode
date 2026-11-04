@@ -56,6 +56,7 @@ import * as PreviewAutomationBroker from "../../PreviewAutomationBroker.ts";
 import * as ApertureHandlers from "./handlers.ts";
 import {
   ApertureFigureRenderTool,
+  ApertureGuideTool,
   ApertureQueryTool,
   ApertureStatusTool,
   ApertureToolkit,
@@ -321,6 +322,32 @@ describe("Aperture MCP tools", () => {
     );
   });
 
+  it("returns the guide with this thread's widget id prefix filled in, defaulting to the overview", async () => {
+    await Effect.runPromise(
+      Effect.gen(function* () {
+        const harness = yield* makeHarness({});
+        yield* Effect.gen(function* () {
+          const toolkit = yield* ApertureToolkit;
+          const guideFor = (params: { readonly topic?: "widgets" }) =>
+            toolkit.handle("aperture_guide", params).pipe(
+              Stream.unwrap,
+              Stream.runCollect,
+              Effect.flatMap((results) =>
+                Schema.decodeUnknownEffect(ApertureGuideTool.successSchema)(results.at(-1)?.result),
+              ),
+            );
+          const overview = yield* guideFor({});
+          expect(overview.topic).toBe("overview");
+          expect(overview.topics).toEqual(["overview", "widgets", "figures", "examples"]);
+
+          const widgets = yield* guideFor({ topic: "widgets" });
+          expect(widgets.text).toContain(`id: "${widgetIdPrefix}my-widget"`);
+          expect(widgets.text).not.toContain("PREFIX");
+        }).pipe(Effect.provide(harness.layer));
+      }),
+    );
+  });
+
   it("returns original diagnostics, formatted locations, and source lines", async () => {
     await Effect.runPromise(
       Effect.gen(function* () {
@@ -537,6 +564,7 @@ const decodeToolsListPayload = Schema.decodeUnknownEffect(ToolsListPayload);
 const APERTURE_TOOL_NAMES = [
   "aperture_figure_preview",
   "aperture_figure_render",
+  "aperture_guide",
   "aperture_query",
   "aperture_status",
   "aperture_widget_delete",

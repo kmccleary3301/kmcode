@@ -17,6 +17,7 @@ import * as ApertureEmbedPolicy from "../../../aperture/ApertureEmbedPolicy.ts";
 import * as ApertureEmbedToken from "../../../aperture/ApertureEmbedToken.ts";
 import * as AperturePreview from "../../../aperture/AperturePreview.ts";
 import * as ApertureRuntime from "../../../aperture/ApertureRuntime.ts";
+import { APERTURE_GUIDE_TOPICS, apertureGuideText } from "../../../aperture/ApertureGuide.ts";
 import * as ApertureWidgetStore from "../../../aperture/ApertureWidgetStore.ts";
 import * as ServerSettings from "../../../serverSettings.ts";
 import * as McpInvocationContext from "../../McpInvocationContext.ts";
@@ -447,6 +448,16 @@ const handlers = {
       };
     }),
   ),
+  aperture_guide: McpToolAccess.readsAsCaller(({ topic = "overview" }) =>
+    Effect.gen(function* () {
+      const threadId = yield* callerThreadId("aperture_guide");
+      return {
+        topic,
+        topics: APERTURE_GUIDE_TOPICS,
+        text: apertureGuideText(topic, widgetIdPrefixForThread(threadId)),
+      };
+    }),
+  ),
   aperture_query: McpToolAccess.readsAsCaller((input) =>
     Effect.gen(function* () {
       const apertureSettings = yield* readEnabledApertureSettings;
@@ -613,6 +624,7 @@ const handlers = {
 
 export const layerStandard = McpToolAccess.toLayer(ApertureStandardToolkit, {
   aperture_status: handlers.aperture_status,
+  aperture_guide: handlers.aperture_guide,
   aperture_query: handlers.aperture_query,
   aperture_figure_render: handlers.aperture_figure_render,
   aperture_widget_push: handlers.aperture_widget_push,

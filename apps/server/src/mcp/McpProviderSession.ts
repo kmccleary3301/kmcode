@@ -14,7 +14,7 @@ export interface McpProviderSessionConfig {
    * call would reject.
    */
   readonly browserToolsAvailable: boolean;
-  /** Capabilities the credential grants ("preview", "device"). */
+  /** Capabilities this credential grants ("preview", "device") plus the "aperture" setting signal. */
   readonly capabilities?: ReadonlySet<string>;
   /**
    * Set when the session may drive devices. Adapters spread this into the

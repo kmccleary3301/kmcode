@@ -10,6 +10,16 @@ describe("buildRuntimeInstructions", () => {
     expect(instructions).not.toContain("list_thread_pull_requests");
   });
 
+  it("adds Aperture instructions only when the capability is enabled", () => {
+    const withoutAperture = buildRuntimeInstructions({ harness: "Codex", aperture: false });
+    const withAperture = buildRuntimeInstructions({ harness: "Codex", aperture: true });
+
+    expect(buildRuntimeInstructions({ harness: "Codex" })).toBe(withoutAperture);
+    expect(withAperture.slice(withoutAperture.length)).toMatch(
+      /^\n\n<aperture>\n[^\n]*aperture_guide[^\n]*\n<\/aperture>$/,
+    );
+  });
+
   it("watches only when requested or work still waits, without polling", () => {
     const instructions = buildRuntimeInstructions({ harness: "Codex" });
     expect(instructions).toContain("Call watch_pull_request when asked to monitor or babysit");

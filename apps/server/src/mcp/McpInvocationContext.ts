@@ -16,6 +16,7 @@ import * as Fiber from "effect/Fiber";
 
 const ALL_MCP_CAPABILITIES = [
   "preview",
+  "aperture",
   "orchestration",
   "worktree",
   "device",

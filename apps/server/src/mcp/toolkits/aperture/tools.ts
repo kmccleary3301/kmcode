@@ -11,6 +11,7 @@ import * as ApertureRuntime from "../../../aperture/ApertureRuntime.ts";
 import * as ApertureWidgetStore from "../../../aperture/ApertureWidgetStore.ts";
 import * as McpInvocationContext from "../../McpInvocationContext.ts";
 import * as ThreadManagementService from "../../../orchestration-v2/ThreadManagementService.ts";
+import { APERTURE_GUIDE_TOPICS } from "../../../aperture/ApertureGuide.ts";
 import * as ServerSettings from "../../../serverSettings.ts";
 
 const NonEmptyString = Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(256));
@@ -79,7 +80,7 @@ const ApertureHistorySummarySchema = Schema.Struct({
 });
 
 export const ApertureStatusTool = Tool.make("aperture_status", {
-  description: `Check whether Aperture is enabled and reachable. Returns the viewer, projects for the default entity, configured defaults, runtime version, and this caller's widgetIdPrefix when available. ${ACCURACY_RULE}`,
+  description: `Start here for any Aperture request. Check whether Aperture is enabled and reachable. Returns the viewer, projects for the default entity, configured defaults, runtime version, and this caller's widgetIdPrefix when available. Next: aperture_query for data, aperture_guide before writing a widget or figure spec. ${ACCURACY_RULE}`,
   success: Schema.Struct({
     enabled: Schema.Boolean,
     asOf: Schema.String,
@@ -106,8 +107,29 @@ export const ApertureStatusTool = Tool.make("aperture_status", {
   .annotate(Tool.Idempotent, true)
   .annotate(Tool.OpenWorld, false);
 
+export const ApertureGuideTopicSchema = Schema.Literals(APERTURE_GUIDE_TOPICS);
+
+export const ApertureGuideTool = Tool.make("aperture_guide", {
+  description:
+    "Read the Aperture authoring guide before writing a widget or a figure spec. Topics: overview (which tool to use and the workflow, default), widgets (the TSX widget API, useLiveHistory, the id namespace, the push, fix, preview, render loop), figures (the figure spec), examples (three working widgets). Returns text with this thread's widget id prefix already filled in.",
+  parameters: Schema.Struct({ topic: Schema.optional(ApertureGuideTopicSchema) }),
+  success: Schema.Struct({
+    topic: ApertureGuideTopicSchema,
+    topics: Schema.Array(ApertureGuideTopicSchema),
+    text: Schema.String,
+  }),
+  failure: ToolFailures,
+  failureMode: "return",
+  dependencies: ThreadDependencies,
+})
+  .annotate(Tool.Title, "Aperture guide")
+  .annotate(Tool.Readonly, true)
+  .annotate(Tool.Destructive, false)
+  .annotate(Tool.Idempotent, true)
+  .annotate(Tool.OpenWorld, false);
+
 export const ApertureQueryTool = Tool.make("aperture_query", {
-  description: `Query Aperture runs, metric keys, or history summaries. Every result includes one server-captured asOf; history is queried with that same pinned cutoff. Runs and keys are bounded, and history accepts at most 20 run IDs and 20 keys. ${ACCURACY_RULE}`,
+  description: `Query Aperture runs, metric keys, or history summaries. Use it for every number you will state; to show a chart, use aperture_figure_* or aperture_widget_*. Every result includes one server-captured asOf; history is queried with that same pinned cutoff. Runs and keys are bounded, and history accepts at most 20 run IDs and 20 keys. ${ACCURACY_RULE}`,
   parameters: Schema.Struct({
     operation: Schema.Literals(["runs", "keys", "history"]),
     entity: Schema.optional(NonEmptyString),
@@ -191,7 +213,7 @@ const PreviewSuccess = Schema.Struct({
 });
 
 export const ApertureFigurePreviewTool = Tool.make("aperture_figure_preview", {
-  description: `Render a figure spec in the live Aperture runtime and return a PNG with sizing and diagnostics. Use this before aperture_figure_render. The result includes its pinned asOf. ${ACCURACY_RULE}`,
+  description: `Render a standard run-curves figure spec (aperture_guide topic "figures") in the live Aperture runtime and return a PNG with sizing and diagnostics. For rolling statistics, tables or custom layouts write a widget instead (aperture_widget_push). Use this before aperture_figure_render. The result includes its pinned asOf. ${ACCURACY_RULE}`,
   parameters: Schema.Struct({ spec: Schema.Unknown, ...PreviewParameters.fields }),
   success: PreviewSuccess,
   failure: ToolFailures,
@@ -244,7 +266,7 @@ export const ApertureFigureRenderTool = Tool.make("aperture_figure_render", {
   .annotate(Tool.OpenWorld, false);
 
 export const ApertureWidgetPushTool = Tool.make("aperture_widget_push", {
-  description: `Compile and upload agent-written TSX to Aperture's development widget store. ${WidgetIdGuidance} The source must default-export defineWidget({ id, ... }) with the same id you pass here; the runtime refuses a module whose defineWidget id differs. Aperture diagnostics preserve the source location and offending line. ${WidgetFixLoop} ${ACCURACY_RULE}`,
+  description: `Compile and upload agent-written TSX to Aperture's development widget store. Read aperture_guide topics "widgets" and "examples" first. ${WidgetIdGuidance} The source must default-export defineWidget({ id, ... }) with the same id you pass here; the runtime refuses a module whose defineWidget id differs. Aperture diagnostics preserve the source location and offending line. ${WidgetFixLoop} ${ACCURACY_RULE}`,
   parameters: Schema.Struct({
     source: Schema.String.check(Schema.isMinLength(1)),
     id: WidgetIdInput,
@@ -315,7 +337,7 @@ export const ApertureWidgetDeleteTool = Tool.make("aperture_widget_delete", {
   .annotate(Tool.OpenWorld, true);
 
 export const ApertureWidgetPreviewTool = Tool.make("aperture_widget_preview", {
-  description: `Preview a pinned widget version in the live Aperture runtime and return a PNG, console messages, failed bridge requests, and data status. Use this before aperture_widget_render. ${WidgetFixLoop} Pass the asOf from aperture_query when discussing data. ${ACCURACY_RULE}`,
+  description: `Preview a pinned widget version in the live Aperture runtime and return a PNG, console messages, failed bridge requests, and data status ("present", "empty" when the queries returned no points, "unknown" when no history query succeeded). Use this before aperture_widget_render and do not render when the data status is "empty". ${WidgetFixLoop} Pass the asOf from aperture_query when discussing data. ${ACCURACY_RULE}`,
   parameters: Schema.Struct({
     id: WidgetIdInput,
     version: NonEmptyString,
@@ -374,6 +396,7 @@ export const ApertureWidgetRenderTool = Tool.make("aperture_widget_render", {
 
 export const ApertureToolkit = Toolkit.make(
   ApertureStatusTool,
+  ApertureGuideTool,
   ApertureQueryTool,
   ApertureFigurePreviewTool,
   ApertureFigureRenderTool,
@@ -386,6 +409,7 @@ export const ApertureToolkit = Toolkit.make(
 
 export const ApertureStandardToolkit = Toolkit.make(
   ApertureStatusTool,
+  ApertureGuideTool,
   ApertureQueryTool,
   ApertureFigureRenderTool,
   ApertureWidgetPushTool,
@@ -405,6 +429,7 @@ export interface ApertureToolkitSet {
 
 export const apertureToolkitsWhen = (isEnabled: () => boolean): ApertureToolkitSet => {
   const status = ApertureStatusTool.annotate(McpSchema.EnabledWhen, isEnabled);
+  const guide = ApertureGuideTool.annotate(McpSchema.EnabledWhen, isEnabled);
   const query = ApertureQueryTool.annotate(McpSchema.EnabledWhen, isEnabled);
   const figurePreview = ApertureFigurePreviewTool.annotate(McpSchema.EnabledWhen, isEnabled);
   const figureRender = ApertureFigureRenderTool.annotate(McpSchema.EnabledWhen, isEnabled);
@@ -416,6 +441,7 @@ export const apertureToolkitsWhen = (isEnabled: () => boolean): ApertureToolkitS
   return {
     standard: Toolkit.make(
       status,
+      guide,
       query,
       figureRender,
       widgetPush,

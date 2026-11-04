@@ -6922,6 +6922,10 @@ export function makeAcpAdapterV2(
             text: buildRuntimeInstructions({
               harness: flavor.runtimeHarness ?? driver,
               model: turnInput.modelSelection.model,
+              aperture:
+                McpProviderSession.readMcpProviderSession(turnInput.threadId)?.capabilities?.has(
+                  "aperture",
+                ) === true,
             }),
           });
           return { prompt, instructionState: text === messageText ? undefined : instructionState };

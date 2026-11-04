@@ -372,10 +372,11 @@ let quietTimer;
 const maybeReady=()=>{
   if(state.embedErrors.length){clearTimeout(quietTimer);ready.resolve(snapshot());return}
   // A figure first sizes its loading state, then fetches its data; only a figure with data is settled.
+  // A widget's live-history hook publishes a response up to 250 ms after it lands, so its quiet window is longer.
   const settled=()=>state.contentHeight!==null&&state.pending===0&&(config.kind!=="figure"||state.fetched>0);
   if(!settled())return;
   clearTimeout(quietTimer);
-  quietTimer=setTimeout(()=>{if(settled())ready.resolve(snapshot())},180);
+  quietTimer=setTimeout(()=>{if(settled())ready.resolve(snapshot())},config.kind==="widget"?400:180);
 };
 const send=(message,transfer=[])=>frame.contentWindow&&frame.contentWindow.postMessage({v:1,...message},"*",transfer);
 const controllers=new Map();

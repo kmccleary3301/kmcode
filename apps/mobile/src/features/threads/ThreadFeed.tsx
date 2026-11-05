@@ -1610,6 +1610,34 @@ function renderFeedEntry(
     return <ThreadThinkingRow rowSizing={props.workRowSizing} iconSubtleColor={iconSubtleColor} />;
   }
 
+  if (entry.type === "aperture-embed") {
+    const { reference } = entry;
+    const timeLabel =
+      reference.mode === "live"
+        ? "live"
+        : `pinned ${formatMessageTime(reference.asOf) || reference.asOf}`;
+    const webUrl = reference.webUrl;
+    return (
+      <View className="min-h-11 flex-row items-center gap-2 border-b border-border-subtle px-2">
+        <Text className="min-w-0 flex-1 text-sm text-foreground-muted" numberOfLines={1}>
+          {`Aperture ${reference.kind} · ${reference.title} · ${timeLabel}`}
+        </Text>
+        {webUrl !== undefined ? (
+          <Pressable
+            accessibilityRole="link"
+            accessibilityLabel="Open in Aperture"
+            accessibilityHint="Opens this render in Aperture"
+            hitSlop={4}
+            className="shrink-0 rounded-md px-2 py-1 active:opacity-70"
+            onPress={() => void tryOpenExternalUrl(webUrl, "aperture-embed")}
+          >
+            <Text className="font-t3-medium text-xs text-foreground">Open in Aperture</Text>
+          </Pressable>
+        ) : null}
+      </View>
+    );
+  }
+
   if (entry.type === "html-render") {
     return (
       <ThreadHtmlRender

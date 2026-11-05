@@ -38,6 +38,8 @@ export interface AperturePreviewInput {
   readonly asOf: string;
   readonly width: number;
   readonly appearance: "light" | "dark";
+  /** An Aperture theme id to render with instead of the appearance default. */
+  readonly vizTheme?: string;
 }
 
 export interface AperturePreviewResult {
@@ -355,6 +357,7 @@ const previewHostDocument = (input: {
   readonly asOf: string;
   readonly width: number;
   readonly appearance: AperturePreviewInput["appearance"];
+  readonly vizTheme?: string;
 }) => {
   const serialized = JSON.stringify(input);
   if (serialized === undefined)
@@ -412,7 +415,7 @@ window.addEventListener("message",event=>{
   if(message.type==="embed/ready"){
     if(message.protocol!==1){state.embedErrors.push({code:"protocol",message:"Unsupported Aperture embed protocol."});maybeReady();return}
     const init={v:1,type:"embed/init",kind:config.kind,entity:config.entity,project:config.project,
-      theme:{appearance:config.appearance,vizTheme:config.appearance==="dark"?"mint-terminal":"github-light",tokens:{}},
+      theme:{appearance:config.appearance,vizTheme:config.vizTheme??(config.appearance==="dark"?"mint-terminal":"github-light"),tokens:{}},
       mode:{kind:"pinned",asOf:config.asOf},size:{width:config.width,maxHeight:2000}};
     if(config.spec!==undefined)init.spec=config.spec;
     if(config.widget!==undefined)init.widget=config.widget;
@@ -492,6 +495,7 @@ const make = Effect.gen(function* () {
         asOf: input.asOf,
         width,
         appearance: input.appearance,
+        ...(input.vizTheme === undefined ? {} : { vizTheme: input.vizTheme }),
       });
     } catch {
       return yield* Effect.fail(

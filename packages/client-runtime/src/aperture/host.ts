@@ -52,7 +52,6 @@ export interface ApertureEmbedHostOptions {
     readonly message: string;
     readonly detail?: string;
   }) => void;
-  readonly onOpenLink: (href: string) => void;
   /** Number of bridged requests currently open, after every change (P5.5 evidence + live cap). */
   readonly onOpenRequestsChange?: (open: number) => void;
 }
@@ -244,9 +243,6 @@ export function makeApertureEmbedHost(options: ApertureEmbedHostOptions): Apertu
             message: data.message,
             ...(data.detail === undefined ? {} : { detail: data.detail }),
           });
-          return;
-        case "embed/open-link":
-          options.onOpenLink(data.href);
           return;
       }
     },

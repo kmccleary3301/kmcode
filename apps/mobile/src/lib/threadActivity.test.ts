@@ -22,6 +22,8 @@ import {
 import { resolveUserMessagePresentation } from "@t3tools/client-runtime/user-message";
 import { summarizeToolGroup } from "@t3tools/client-runtime/work-log/presentation";
 import * as DateTime from "effect/DateTime";
+import type { ApertureEmbedReference } from "@t3tools/shared/apertureEmbed";
+
 import { describe, expect, it } from "vite-plus/test";
 
 import {
@@ -2571,5 +2573,62 @@ describe("MCP apps", () => {
 
   it("keeps a running app call an ordinary work row", () => {
     expect(feed("running").some((candidate) => candidate.type === "mcp-app")).toBe(false);
+  });
+});
+
+describe("Aperture embeds", () => {
+  const makeReference = (webUrl?: string): ApertureEmbedReference => ({
+    refId: "aperture-ref",
+    kind: "figure",
+    entity: "admin",
+    project: "demo",
+    title: "Loss trend",
+    height: 320,
+    mode: "pinned",
+    asOf: "2026-11-04T12:00:00.000Z",
+    runtime: { version: "runtime-1" },
+    ...(webUrl === undefined ? {} : { webUrl }),
+    embedToken: "signed-token",
+  });
+  const renderCall = (
+    status: "completed" | "running",
+    reference: ApertureEmbedReference,
+  ): OrchestrationV2TurnItem => ({
+    ...base("item-aperture", "2026-11-04T12:00:01.000Z", 1),
+    status,
+    completedAt: status === "completed" ? DateTime.makeUnsafe("2026-11-04T12:00:01.000Z") : null,
+    type: "dynamic_tool",
+    toolName: "mcp__t3-code__aperture_figure_render",
+    input: { entity: "admin", project: "demo" },
+    output: { apertureEmbed: reference },
+  });
+
+  it("projects completed renders once in place of their work row", () => {
+    const reference = makeReference("https://aperture.example/r/aperture-ref");
+    const entries = buildThreadFeed([projected(renderCall("completed", reference), 0)]);
+
+    expect(entries).toHaveLength(1);
+    expect(entries).toMatchObject([{ type: "aperture-embed", reference }]);
+  });
+
+  it("keeps a running render as an ordinary work row", () => {
+    const reference = makeReference("https://aperture.example/r/aperture-ref");
+    const entries = buildThreadFeed([projected(renderCall("running", reference), 0)]);
+
+    expect(entries).toHaveLength(1);
+    expect(entries.map((entry) => entry.type)).toEqual(["activity-group"]);
+  });
+
+  it("keeps URL-less references without a link target", () => {
+    const reference = makeReference();
+    const entries = buildThreadFeed([projected(renderCall("completed", reference), 0)]);
+    const entry = entries[0];
+
+    expect(entries).toHaveLength(1);
+    expect(entry).toMatchObject({ type: "aperture-embed", reference });
+    if (entry?.type !== "aperture-embed") return;
+    expect(entry.reference).not.toHaveProperty("webUrl");
+    expect(entry).not.toHaveProperty("webUrl");
+    expect(entry).not.toHaveProperty("url");
   });
 });

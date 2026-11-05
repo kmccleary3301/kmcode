@@ -164,7 +164,7 @@ const make = Effect.gen(function* () {
       return yield* httpClient.execute(upstreamRequest).pipe(
         Effect.timeout(REQUEST_TIMEOUT),
         Effect.mapError(() =>
-          connectionError("unreachable", "Aperture could not be reached in time."),
+          connectionError("unreachable", "Aperture is unreachable or did not respond in time."),
         ),
         Effect.flatMap((response) => {
           if (response.status === 401) {

@@ -1335,6 +1335,51 @@ describe("HTML renders in the timeline", () => {
     ]);
   });
 
+  it("shows a rendered Aperture figure in place, bridged as the thread that rendered it", () => {
+    const apertureEmbed = {
+      refId: "ref-loss",
+      kind: "figure",
+      spec: { metricKey: "train/loss" },
+      entity: "admin",
+      project: "demo",
+      title: "Loss",
+      height: 448,
+      mode: "pinned",
+      asOf: "2026-11-04T12:00:00.000Z",
+      runtime: { version: "runtime-1" },
+      embedToken: "signed-token",
+    };
+    const call = renderCall("completed", { apertureEmbed });
+    const items = [
+      call.type === "dynamic_tool"
+        ? { ...call, toolName: "mcp__t3-code__aperture_figure_render" }
+        : call,
+    ];
+    // A fork shows its source's render; the source's token is what the bridge accepts.
+    const entries = deriveTimelineEntriesFromVisibleTurnItems({
+      visibleTurnItems: items.map((item) => ({
+        ...visible(item),
+        sourceThreadId: ThreadId.make("source-thread"),
+      })),
+      optimisticMessages: [],
+    });
+    expect(entries).toMatchObject([
+      {
+        id: "render",
+        kind: "aperture-embed",
+        runId,
+        sourceThreadId: "source-thread",
+        apertureEmbed,
+      },
+    ]);
+    expect(rowsFor(turn(items[0]!), false)).toEqual([
+      "message",
+      "turn-fold",
+      "aperture-embed",
+      "message",
+    ]);
+  });
+
   it("hosts a captured MCP app in place, from any provider's tool", () => {
     const mcpApp = {
       attachmentId: "render-thread-app-html",

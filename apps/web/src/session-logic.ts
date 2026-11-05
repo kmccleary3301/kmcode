@@ -23,9 +23,14 @@ import {
   formatSearchToolLabel,
 } from "@t3tools/shared/toolActivity";
 import type { HtmlRenderReference } from "@t3tools/shared/htmlRender";
+import type { ApertureEmbedReference } from "@t3tools/shared/apertureEmbed";
 import { turnItemDetailRevision } from "@t3tools/client-runtime/work-log/item-detail";
 import type { McpAppReference } from "@t3tools/shared/mcpApp";
-import { htmlRenderFromToolItem, mcpAppFromToolItem } from "@t3tools/shared/toolOutput";
+import {
+  apertureEmbedFromToolItem,
+  htmlRenderFromToolItem,
+  mcpAppFromToolItem,
+} from "@t3tools/shared/toolOutput";
 import {
   contextCompactionLabel,
   workEntryIndicatesToolFailure,
@@ -153,6 +158,16 @@ export type TimelineEntry = (
       readonly createdAt: string;
       readonly runId: RunId | null;
       readonly htmlRender: HtmlRenderReference;
+    }
+  | {
+      /** An Aperture figure or widget a completed render call produced, shown where the call happened. */
+      readonly id: string;
+      readonly kind: "aperture-embed";
+      readonly createdAt: string;
+      readonly runId: RunId | null;
+      /** The thread the reference's token is bound to; a fork's inherited embed is its source's. */
+      readonly sourceThreadId: ThreadId;
+      readonly apertureEmbed: ApertureEmbedReference;
     }
   | {
       /** An MCP App a completed tool call captured, hosted where the call happened. */
@@ -754,6 +769,23 @@ export function deriveTimelineEntriesFromVisibleTurnItems(
         createdAt,
         runId: item.runId,
         htmlRender,
+        ...attemptMetadata,
+      });
+      continue;
+    }
+
+    const apertureEmbed =
+      item.type === "dynamic_tool" && item.status === "completed"
+        ? apertureEmbedFromToolItem(item)
+        : undefined;
+    if (apertureEmbed !== undefined) {
+      entries.push({
+        id: item.id,
+        kind: "aperture-embed",
+        createdAt,
+        runId: item.runId,
+        sourceThreadId: row.sourceThreadId,
+        apertureEmbed,
         ...attemptMetadata,
       });
       continue;

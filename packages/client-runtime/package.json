@@ -423,6 +423,14 @@
       "types": "./src/device/duoControl.ts",
       "default": "./src/device/duoControl.ts"
     },
+    "./aperture/host": {
+      "types": "./src/aperture/host.ts",
+      "default": "./src/aperture/host.ts"
+    },
+    "./state/aperture": {
+      "types": "./src/state/aperture.ts",
+      "default": "./src/state/aperture.ts"
+    },
     "./mcp-apps": {
       "types": "./src/mcpApps/host.ts",
       "default": "./src/mcpApps/host.ts"

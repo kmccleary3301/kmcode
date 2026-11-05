@@ -192,6 +192,7 @@ import {
 } from "./SnapShotAttachmentDetails";
 import { ProposedPlanCard } from "./ProposedPlanCard";
 import { HtmlRenderFrame } from "./HtmlRenderFrame";
+import { ApertureEmbedFrame, apertureAsOfLabel } from "./ApertureEmbedFrame";
 import { McpAppFrame } from "./McpAppFrame";
 import { useFileContextMenuHandler } from "../../fileContextMenu";
 import { useProject, useThreadShell } from "../../state/entities";
@@ -2522,6 +2523,7 @@ const TimelineRowContent = memo(function TimelineRowContent({ row }: { row: Time
               row.kind === "worktree-setup" ||
               row.kind === "attempt-fold" ||
               row.kind === "html-render" ||
+              row.kind === "aperture-embed" ||
               row.kind === "mcp-app"
             ? "close"
             : undefined
@@ -2566,6 +2568,7 @@ const TimelineRowContent = memo(function TimelineRowContent({ row }: { row: Time
       {row.kind === "assistant-meta" ? <AssistantMetaTimelineRow row={row} /> : null}
       {row.kind === "proposed-plan" ? <ProposedPlanTimelineRow row={row} /> : null}
       {row.kind === "html-render" ? <HtmlRenderTimelineRow row={row} /> : null}
+      {row.kind === "aperture-embed" ? <ApertureEmbedTimelineRow row={row} /> : null}
       {row.kind === "mcp-app" ? <McpAppTimelineRow row={row} /> : null}
       {row.kind === "working" ? <WorkingTimelineRow row={row} /> : null}
       {row.kind === "worktree-setup" ? <WorktreeSetupTimelineRow row={row} /> : null}
@@ -3771,6 +3774,47 @@ function HtmlRenderTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "htm
         environmentId={ctx.activeThreadEnvironmentId}
         htmlRender={row.htmlRender}
         onFullscreenChange={onFullscreenChange}
+      />
+    </div>
+  );
+}
+
+function ApertureEmbedTimelineRow({
+  row,
+}: {
+  row: Extract<TimelineRow, { kind: "aperture-embed" }>;
+}) {
+  const ctx = use(TimelineRowCtx);
+  const reference = row.apertureEmbed;
+  // The terminal look keeps every step to a line; the figure stays one click away.
+  if (use(TranscriptStyleCtx) === "terminal") {
+    return (
+      <div className="min-w-0 truncate px-1 font-mono text-muted-foreground text-xs">
+        Aperture {reference.kind} · {reference.title} · pinned {apertureAsOfLabel(reference.asOf)}
+        {reference.webUrl === undefined ? null : (
+          <>
+            {" · "}
+            <a
+              href={reference.webUrl}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="underline underline-offset-2 hover:text-foreground"
+            >
+              open in Aperture
+            </a>
+          </>
+        )}
+      </div>
+    );
+  }
+  return (
+    <div className="min-w-0 px-1">
+      <ApertureEmbedFrame
+        // A recycled row must not keep another embed's runtime and streams.
+        key={reference.refId}
+        environmentId={ctx.activeThreadEnvironmentId}
+        threadId={row.sourceThreadId}
+        reference={reference}
       />
     </div>
   );

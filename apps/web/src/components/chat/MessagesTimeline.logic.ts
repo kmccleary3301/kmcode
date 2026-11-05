@@ -87,6 +87,7 @@ import {
   type T3McpToolPresentation,
 } from "@t3tools/shared/t3McpToolPresentation";
 import { compactDynamicToolOutput } from "@t3tools/shared/toolOutput";
+import type { ApertureEmbedReference } from "@t3tools/shared/apertureEmbed";
 import { htmlRenderReferencesEqual, type HtmlRenderReference } from "@t3tools/shared/htmlRender";
 import { mcpAppReferencesEqual, type McpAppReference } from "@t3tools/shared/mcpApp";
 import { dynamicToolTitle } from "@t3tools/shared/toolActivity";
@@ -105,7 +106,9 @@ function timelineEntryRunId(entry: TimelineEntry): RunId | null {
   if (entry.kind === "proposed-plan") {
     return entry.proposedPlan.runId;
   }
-  if (entry.kind === "html-render" || entry.kind === "mcp-app") return entry.runId;
+  if (entry.kind === "html-render" || entry.kind === "aperture-embed" || entry.kind === "mcp-app") {
+    return entry.runId;
+  }
   return entry.kind === "work" ? (entry.entry.runId ?? null) : null;
 }
 
@@ -771,6 +774,13 @@ type MessagesTimelineRowContent =
       htmlRender: HtmlRenderReference;
     }
   | {
+      kind: "aperture-embed";
+      id: string;
+      createdAt: string;
+      sourceThreadId: ThreadId;
+      apertureEmbed: ApertureEmbedReference;
+    }
+  | {
       kind: "mcp-app";
       id: string;
       createdAt: string;
@@ -928,6 +938,7 @@ function deriveSupersededAttemptFolds(
       (entry.kind === "message" && entry.message.role === "user") ||
       // A published page stays visible, as it does when its turn folds.
       entry.kind === "html-render" ||
+      entry.kind === "aperture-embed" ||
       entry.kind === "mcp-app" ||
       timelineEntryIsPersistentResourceCard(entry) ||
       // A steer supersedes the attempt but leaves its children running.
@@ -2560,6 +2571,17 @@ export function deriveMessagesTimelineRows(input: {
       continue;
     }
 
+    if (timelineEntry.kind === "aperture-embed") {
+      nextRows.push({
+        kind: "aperture-embed",
+        id: timelineEntry.id,
+        createdAt: timelineEntry.createdAt,
+        sourceThreadId: timelineEntry.sourceThreadId,
+        apertureEmbed: timelineEntry.apertureEmbed,
+      });
+      continue;
+    }
+
     if (timelineEntry.kind === "mcp-app") {
       nextRows.push({
         kind: "mcp-app",
@@ -3001,6 +3023,16 @@ function isRowUnchanged(a: MessagesTimelineRow, b: MessagesTimelineRow): boolean
       // Entries rebuild on any tool update; an equal page must keep its mounted frame.
       const bh = b as typeof a;
       return a.createdAt === bh.createdAt && htmlRenderReferencesEqual(a.htmlRender, bh.htmlRender);
+    }
+
+    case "aperture-embed": {
+      // The server issues a fresh refId per render, so equal ids keep the frame and its live stream.
+      const ba = b as typeof a;
+      return (
+        a.createdAt === ba.createdAt &&
+        a.sourceThreadId === ba.sourceThreadId &&
+        a.apertureEmbed.refId === ba.apertureEmbed.refId
+      );
     }
 
     case "mcp-app": {

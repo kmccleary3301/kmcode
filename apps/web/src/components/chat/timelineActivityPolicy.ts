@@ -249,7 +249,7 @@ export function isWorkflowAdvancement(entry: TimelineEntry): boolean {
     return (entry.proposedPlan.planMarkdown ?? "").trim().length > 0;
   }
 
-  if (entry.kind === "html-render" || entry.kind === "mcp-app") {
+  if (entry.kind === "html-render" || entry.kind === "aperture-embed" || entry.kind === "mcp-app") {
     return true;
   }
 

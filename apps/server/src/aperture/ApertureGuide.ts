@@ -14,7 +14,7 @@ Aperture stores experiment runs and their metric history. These tools put its ch
 
 ## Workflow
 1. aperture_status: connection, default entity and project, widgetIdPrefix.
-2. aperture_query: runs, keys, then history. Keep its asOf and pass it to the render tool.
+2. aperture_query: runs, keys, then history. Keep its asOf and pass it to the render tool. When a result says truncated: true, the list is incomplete: raise limit (at most 100), narrow with prefix or runIds, and query again. Do not stop to ask the user for a list you can page yourself.
 3. Build the figure or widget and preview it. Read the screenshot, dataStatus, embedErrors, consoleMessages and failedRequests before rendering.
 4. Render once. The reader gets a pinned view at asOf and can switch it to Live. Pass mode "live" only when the user asked for a live chart.
 5. Reply in one or two sentences. Do not announce or repeat the rendered chart.
@@ -47,16 +47,17 @@ export default defineWidget({
 - Ids are PREFIX followed by a lowercase kebab-case slug, at most 63 characters in total. PREFIX is the widgetIdPrefix from aperture_status. Other prefixes are rejected.
 - Pushing the same id again makes a new version. Renders you already made keep the version they were rendered with. aperture_widget_list shows this thread's widgets and aperture_widget_delete removes one; delete widgets you are done iterating on.
 
-## Imports (anything else fails to compile)
-- "react"
-- "@aperture/vis-renderers/widget-sdk": defineWidget, useLiveHistory, useStream, the Plot kit, helpers.
-- "@aperture/vis-core" and "@aperture/react": types and low-level exports. Prefer the widget-sdk re-exports.
+## Imports (anything else fails to compile, and the diagnostic names the missing export)
+- "react": createElement, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState.
+- "@aperture/vis-renderers/widget-sdk": defineWidget, useLiveHistory, useStream, Plot, Track, AxisMark, LineMark, LinesMark, BandMark, RuleMark, DotMark, RasterMark, Tex, NumberText, and the helpers quantile, rollingQuantile, trailing.
+- "@aperture/react": useLiveHistory, useStream. "@aperture/vis-core": types only.
+- Elements you can write: div, span, p, section, article, aside, header, footer, main, h1 to h6, ul, ol, li, dl, dt, dd, table, caption, thead, tbody, tfoot, tr, th, td, pre, code, strong, em, b, i, small, br, hr, plus the Plot kit components above. Attributes: style, className, key, role, aria-*, data-*, colSpan, rowSpan. There are no event handlers, links, buttons, forms, images or refs.
 
 ## Data: useLiveHistory
 \`useLiveHistory({ project: "ENTITY/PROJECT", runs: ["RUN_ID"], keys: ["METRIC_KEY"], samples: 300 })\`
 - project is "entity/project" from aperture_status. runs are run ids from aperture_query; keys are metric keys or globs.
-- Optional: x ("_step" default, "_runtime", "_timestamp"), samples (points per series, default 500), sampling ("lttb" default, or "raw" to keep every point; needed for rolling statistics), maxPoints.
-- Returns { data, status, error, live, refetch }. data is null until the first response, then { series }. Each series is { run, key, step, x, y }, where step, x and y are Float64Array columns in step order.
+- Optional: x ("_step" default, "_runtime", "_timestamp"), samples (points per series, default 500, at most 10,000), sampling ("lttb" default, which keeps a bounded thinned history), maxPoints. sampling "raw" keeps every logged point and the widget stops with a widget_runtime error once a series passes 10,000 points, so use raw only for short runs and prefer lttb with samples up to 2000 for rolling statistics.
+- Returns { data, status, error, updatedAt, live }. data is undefined until the first response, then { series }. Each series is { run, key, step, x, y }, where step, x and y are Float64Array columns in step order. There is no refetch.
 - In a pinned render the widget reads history up to the asOf and no stream opens. In Live the same hook appends points as they are logged. Write the widget once; it must be correct in both.
 - Handle the empty case: data null, series missing, or zero points. Show a short status line instead of an empty chart.
 
@@ -95,7 +96,7 @@ export default defineWidget({
 3. aperture_widget_render with id, version, title, height, and the asOf from aperture_query.
 
 ## Sandbox
-The widget runs in a sandboxed frame with no network, no storage and no access to this page. A fetch fails by design. Data arrives only through useLiveHistory and useStream.`;
+The widget's code runs in an isolated interpreter inside a sandboxed frame. It has no window, document, network, storage, timers or navigation, and it cannot reach this page. Data arrives only through useLiveHistory and useStream; the host draws what the widget returns. A widget that loops for more than half a second per render or allocates more than 64 MiB is stopped with a widget_runtime error.`;
 
 const FIGURES = `# Figure specs
 
@@ -206,7 +207,7 @@ export default defineWidget({
   workspaces: "*",
   minHeight: 260,
   Component({ theme }) {
-    const history = useLiveHistory({ project: "ENTITY/PROJECT", runs: [RUN], keys: [KEY], samples: 400, sampling: "raw" })
+    const history = useLiveHistory({ project: "ENTITY/PROJECT", runs: [RUN], keys: [KEY], samples: 2000 })
     const series = history.data?.series[0]
     if (!series || series.x.length === 0) return <p role="status" style={{ color: "var(--plot-text-2)" }}>Waiting for data…</p>
     const lower = rollingQuantile(series.y, WINDOW, 0.25)

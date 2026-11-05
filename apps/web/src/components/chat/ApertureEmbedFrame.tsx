@@ -509,7 +509,7 @@ function ApertureEmbedDocument(props: {
       src={props.src}
       title={props.title}
       // Never allow-same-origin: the opaque origin keeps agent code out of the app's session.
-      sandbox="allow-scripts allow-forms"
+      sandbox="allow-scripts"
       onLoad={() => setLoaded(true)}
       className={cn(
         "absolute inset-0 block size-full border-0 scheme-light transition-opacity duration-150",

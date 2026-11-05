@@ -63,9 +63,9 @@ const HTML_CONTENT_SECURITY_POLICY = "sandbox allow-scripts allow-forms allow-po
 // the host bridge. The header repeats the runtime's own meta policy so network access stays
 // closed, and its sandbox also drops the forms and popups that a meta policy cannot restrict.
 export const APERTURE_RUNTIME_CONTENT_SECURITY_POLICY =
-  "default-src 'none'; script-src 'unsafe-inline' blob:; style-src 'unsafe-inline'; " +
+  "default-src 'none'; script-src 'unsafe-inline' 'wasm-unsafe-eval'; style-src 'unsafe-inline'; " +
   "img-src data: blob:; font-src data: blob:; connect-src 'none'; worker-src blob:; " +
-  "form-action 'none'; sandbox allow-scripts";
+  "base-uri 'none'; form-action 'none'; sandbox allow-scripts";
 const APERTURE_WIDGET_CONTENT_SECURITY_POLICY = "default-src 'none'; sandbox";
 
 // Types a browser may render as a document if a proxy strips the disposition

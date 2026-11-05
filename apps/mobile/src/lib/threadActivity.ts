@@ -61,9 +61,11 @@ import {
   formatSearchToolLabel,
 } from "@t3tools/shared/toolActivity";
 import { formatDuration } from "@t3tools/shared/orchestrationTiming";
+import type { ApertureEmbedReference } from "@t3tools/shared/apertureEmbed";
 import type { HtmlRenderReference } from "@t3tools/shared/htmlRender";
 import type { McpAppReference } from "@t3tools/shared/mcpApp";
 import {
+  apertureEmbedFromToolItem,
   compactDynamicToolOutput,
   htmlRenderFromToolItem,
   mcpAppFromToolItem,
@@ -185,12 +187,20 @@ type RawThreadFeedEntry =
       readonly itemId: TurnItemId;
       readonly revision: string;
       readonly app: McpAppReference;
+    }
+  | {
+      /** A completed Aperture figure or widget shown as a link-only feed row. */
+      readonly type: "aperture-embed";
+      readonly id: string;
+      readonly createdAt: string;
+      readonly runId: RunId | null;
+      readonly reference: ApertureEmbedReference;
     };
 
 export type ThreadFeedEntry = ThreadFeedEntryContent & { readonly continuesWorkLog?: boolean };
 
 type ThreadFeedEntryContent =
-  | Extract<RawThreadFeedEntry, { type: "message" | "html-render" | "mcp-app" }>
+  | Extract<RawThreadFeedEntry, { type: "message" | "html-render" | "mcp-app" | "aperture-embed" }>
   | {
       readonly type: "activity-group";
       readonly id: string;
@@ -1073,7 +1083,8 @@ function deriveThreadFeedRunFolds(
         ? (entry.message.runId ?? runlessKey)
         : entry.type === "activity-group" ||
             entry.type === "html-render" ||
-            entry.type === "mcp-app"
+            entry.type === "mcp-app" ||
+            entry.type === "aperture-embed"
           ? (entry.runId ?? runlessKey)
           : null;
     if (!runId) continue;
@@ -1127,6 +1138,7 @@ function deriveThreadFeedRunFolds(
             entry.id !== terminalAssistantId &&
             entry.type !== "html-render" &&
             entry.type !== "mcp-app" &&
+            entry.type !== "aperture-embed" &&
             !(
               entry.type === "activity-group" &&
               entry.activities.some(
@@ -1799,6 +1811,22 @@ export function buildThreadFeed(
         itemId: row.sourceItemId,
         revision: turnItemDetailRevision(item),
         app,
+      };
+      projectedEntriesCache.set(row, { attemptId, entry });
+      entries.push(entry);
+      continue;
+    }
+    const apertureEmbed =
+      item.type === "dynamic_tool" && item.status === "completed"
+        ? apertureEmbedFromToolItem(item)
+        : undefined;
+    if (apertureEmbed) {
+      const entry: RawThreadFeedEntry = {
+        type: "aperture-embed",
+        id: `aperture-embed:${row.visibility}:${row.sourceThreadId}:${row.sourceItemId}`,
+        createdAt,
+        runId: item.runId,
+        reference: apertureEmbed,
       };
       projectedEntriesCache.set(row, { attemptId, entry });
       entries.push(entry);

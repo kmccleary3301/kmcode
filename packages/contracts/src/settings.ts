@@ -1155,6 +1155,21 @@ export const BitbucketSettings = Schema.Struct({
 export type BitbucketSettings = typeof BitbucketSettings.Type;
 
 /**
+ * Server connection settings for Aperture. The API key is a write-only
+ * settings field: ServerSettingsService stores it separately in its secret
+ * store and returns only the redaction marker to clients.
+ */
+export const ApertureSettings = Schema.Struct({
+  enabled: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
+  apiUrl: TrimmedString.pipe(Schema.withDecodingDefault(Effect.succeed(""))),
+  webUrl: TrimmedString.pipe(Schema.withDecodingDefault(Effect.succeed(""))),
+  defaultEntity: TrimmedString.pipe(Schema.withDecodingDefault(Effect.succeed(""))),
+  defaultProject: TrimmedString.pipe(Schema.withDecodingDefault(Effect.succeed(""))),
+  apiKey: TrimmedString.pipe(Schema.withDecodingDefault(Effect.succeed(""))),
+});
+export type ApertureSettings = typeof ApertureSettings.Type;
+
+/**
  * Per-host choices for the GitHub CLI's logins. `account` pins one of the logins
  * `gh` holds for the host instead of its active one; a disabled host gets no
  * credential at all. A token saved here wins over `GH_TOKEN` and friends, which win over `gh`.
@@ -1622,6 +1637,7 @@ export const ServerSettings = Schema.Struct({
   observability: ObservabilitySettings.pipe(Schema.withDecodingDefault(Effect.succeed({}))),
   bitbucket: BitbucketSettings.pipe(Schema.withDecodingDefault(Effect.succeed({}))),
   github: GitHubSettings.pipe(Schema.withDecodingDefault(Effect.succeed({}))),
+  aperture: ApertureSettings.pipe(Schema.withDecodingDefault(Effect.succeed({}))),
   // Keyed by a user-chosen id so a source keeps its rows across edits. Entries
   // this build cannot decode round-trip untouched, as provider instances do.
   usageLimitSources: Schema.Record(UsageLimitSourceId, UsageLimitSourceConfig).pipe(
@@ -1940,6 +1956,16 @@ export const ServerSettingsPatch = Schema.Struct({
     Schema.Struct({
       hosts: Schema.optionalKey(Schema.Record(GitHubHost, GitHubHostSettings)),
       tokens: Schema.optionalKey(Schema.Record(GitHubHost, TrimmedString)),
+    }),
+  ),
+  aperture: Schema.optionalKey(
+    Schema.Struct({
+      enabled: Schema.optionalKey(Schema.Boolean),
+      apiUrl: Schema.optionalKey(TrimmedString),
+      webUrl: Schema.optionalKey(TrimmedString),
+      defaultEntity: Schema.optionalKey(TrimmedString),
+      defaultProject: Schema.optionalKey(TrimmedString),
+      apiKey: Schema.optionalKey(TrimmedString),
     }),
   ),
   providers: Schema.optionalKey(

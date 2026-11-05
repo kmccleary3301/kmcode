@@ -87,6 +87,10 @@ import {
   type FilesystemBrowseFailure,
   FilesystemBrowseError,
   AssetWorkspaceContextNotFoundError,
+  type ApertureConnectionError,
+  type ApertureFetchError as ApertureFetchErrorType,
+  type ApertureFetchInput,
+  type ApertureTestConnectionInput,
   AssetWorkspaceContextResolutionError,
   ChatAttachmentId,
   PersistChatAttachmentsError,
@@ -180,6 +184,8 @@ import * as NpmRelease from "./cloud/npmRelease.ts";
 import * as ServerLifecycleEvents from "./serverLifecycleEvents.ts";
 import * as ServerRuntimeStartup from "./serverRuntimeStartup.ts";
 import * as ServerSettings from "./serverSettings.ts";
+import * as ApertureConnection from "./aperture/ApertureConnection.ts";
+import * as ApertureEmbedBridge from "./aperture/ApertureEmbedBridge.ts";
 import * as TerminalManager from "./terminal/Manager.ts";
 import { terminalOutputStream, withTerminalOutputWindow } from "./terminal/OutputProtocol.ts";
 import * as PreviewAutomationBroker from "./mcp/PreviewAutomationBroker.ts";
@@ -549,6 +555,10 @@ const PROVIDER_STATUS_DEBOUNCE_MS = 200;
 
 // Middleware added later wraps middleware added earlier, so instrumentation wraps authorization.
 const ServerWsRpcGroup = WsRpcGroup.middleware(RpcInstrumentation);
+const ServerWsCoreRpcGroup = ServerWsRpcGroup.omit(
+  WS_METHODS.apertureTestConnection,
+  WS_METHODS.apertureFetch,
+);
 // When a resuming client's cursor is more than this many events behind the
 // current head, skip the per-event catch-up replay and send a fresh shell
 // snapshot instead. Replaying each intervening event costs a shell refetch;
@@ -1204,7 +1214,7 @@ const layerWsRpc = (
   serverBrowser: ServerBrowser.ServerBrowser["Service"],
   hostHealth: HostHealth.HostHealthService["Service"],
 ) =>
-  ServerWsRpcGroup.toLayer(
+  ServerWsCoreRpcGroup.toLayer(
     Effect.gen(function* () {
       const currentSessionId = currentSession.sessionId;
       const sql = yield* SqlClient.SqlClient;
@@ -1846,7 +1856,7 @@ const layerWsRpc = (
           }),
         );
 
-      const handlers = ServerWsRpcGroup.of({
+      const handlers = ServerWsCoreRpcGroup.of({
         [ORCHESTRATION_V2_WS_METHODS.dispatchCommand]: (command) =>
           Effect.annotateCurrentSpan({
             "orchestration_v2.command_id": command.commandId,
@@ -2779,6 +2789,8 @@ const layerWsRpc = (
               input.resource._tag === "attachment" ||
               input.resource._tag === "native-app-icon" ||
               input.resource._tag === "tool-output-image" ||
+              // Versioned runtime documents are served from the configured Aperture cache.
+              input.resource._tag === "aperture-runtime" ||
               // GitHub media names the repository it authenticates through itself.
               input.resource._tag === "github-media" ||
               (input.resource._tag === "media-file" && path.isAbsolute(input.resource.path))
@@ -3190,6 +3202,61 @@ const layerWsRpc = (
     }),
   );
 
+// The Aperture handlers are provided per handler. Adding them to the group-wide handler object
+// crosses the effect-tsgo requirements-inference limit for the WebSocket server layer.
+const layerApertureRpc = Layer.mergeAll(
+  ServerWsRpcGroup.toLayerHandler(
+    WS_METHODS.apertureTestConnection,
+    Effect.gen(function* () {
+      const serverSettings = yield* ServerSettings.ServerSettingsService;
+      const apertureConnection = yield* ApertureConnection.ApertureConnection;
+      const testConnection = Effect.gen(function* () {
+        const settings = yield* serverSettings.getSettings.pipe(
+          Effect.mapError((): ApertureConnectionError => ({
+            _tag: "ApertureConnectionError",
+            code: "bad_response",
+            message: "Aperture settings could not be loaded.",
+          })),
+        );
+        const viewer = yield* apertureConnection.viewer;
+        const configuredEntity = settings.aperture.defaultEntity.trim();
+        const entity = configuredEntity || viewer.memberships[0]?.entity.name;
+        const projects = entity === undefined ? [] : yield* apertureConnection.projects(entity);
+        return {
+          viewer: {
+            id: viewer.user.id,
+            ...(viewer.user.email ? { email: viewer.user.email } : {}),
+            name: viewer.user.display_name || viewer.user.username,
+          },
+          projects: projects.map((project) => ({
+            name: project.name,
+            ...(project.display_name ? { displayName: project.display_name } : {}),
+          })),
+        };
+      });
+      return (_input: ApertureTestConnectionInput) => testConnection;
+    }),
+  ),
+  ServerWsRpcGroup.toLayerHandler(
+    WS_METHODS.apertureFetch,
+    Effect.gen(function* () {
+      const threadManagement = yield* ThreadManagementService.ThreadManagementService;
+      const apertureEmbedBridge = yield* ApertureEmbedBridge.ApertureEmbedBridge;
+      return (input: ApertureFetchInput) =>
+        Stream.unwrap(
+          threadManagement.getThreadRecords(input.threadId, []).pipe(
+            Effect.mapError((): ApertureFetchErrorType => ({
+              _tag: "ApertureFetchError",
+              code: "invalid_ref",
+              message: "Aperture reference is not available in this thread.",
+            })),
+            Effect.as(apertureEmbedBridge.fetch(input)),
+          ),
+        );
+    }),
+  ),
+);
+
 // A defect in a handler's effect fails only its own request. RpcServer's default
 // sends a socket-level Defect frame instead, and the client ends every pending
 // request on the socket with it. DefectReporter logs these defects.
@@ -3254,13 +3321,16 @@ export const layer = Layer.unwrap(
           return httpEffect;
         }).pipe(
           Effect.provide(
-            layerWsRpc(
-              session,
-              clientOrigin,
-              clientAnalyticsProps,
-              previewAutomationBroker,
-              serverBrowser,
-              hostHealth,
+            Layer.merge(
+              layerWsRpc(
+                session,
+                clientOrigin,
+                clientAnalyticsProps,
+                previewAutomationBroker,
+                serverBrowser,
+                hostHealth,
+              ),
+              layerApertureRpc,
             ).pipe(
               Layer.provideMerge(RpcSerialization.layerJson),
               // Request fibers run in the handlers' context, so this reporter sees

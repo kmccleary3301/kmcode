@@ -95,6 +95,14 @@ import {
   AttachmentUploadSigningKeyError,
 } from "./assets.ts";
 import {
+  ApertureConnectionError,
+  ApertureFetchError,
+  ApertureFetchInput,
+  ApertureFetchStreamEvent,
+  ApertureTestConnectionInput,
+  ApertureTestConnectionResult,
+} from "./aperture.ts";
+import {
   PersistChatAttachmentsError,
   PersistChatAttachmentsInput,
   PersistChatAttachmentsResult,
@@ -412,6 +420,10 @@ export const WS_METHODS = {
   mcpAppsToolInfo: "mcpApps.toolInfo",
   mcpAppsReadResource: "mcpApps.readResource",
   mcpAppsUpdateModelContext: "mcpApps.updateModelContext",
+
+  // Aperture embed bridge
+  apertureTestConnection: "aperture.testConnection",
+  apertureFetch: "aperture.fetch",
 
   // Provider methods
   providerUploadFeedback: "provider.uploadFeedback",
@@ -1365,6 +1377,19 @@ const WsMcpAppsReadResourceRpc = Rpc.make(WS_METHODS.mcpAppsReadResource, {
   error: Schema.Union([McpAppRequestError, EnvironmentAuthorizationError]),
 });
 
+const WsApertureTestConnectionRpc = Rpc.make(WS_METHODS.apertureTestConnection, {
+  payload: ApertureTestConnectionInput,
+  success: ApertureTestConnectionResult,
+  error: Schema.Union([ApertureConnectionError, EnvironmentAuthorizationError]),
+});
+
+const WsApertureFetchRpc = Rpc.make(WS_METHODS.apertureFetch, {
+  payload: ApertureFetchInput,
+  success: ApertureFetchStreamEvent,
+  error: Schema.Union([ApertureFetchError, EnvironmentAuthorizationError]),
+  stream: true,
+});
+
 const WsProviderUploadFeedbackRpc = Rpc.make(WS_METHODS.providerUploadFeedback, {
   payload: ProviderUploadFeedbackInput,
   success: ProviderUploadFeedbackResult,
@@ -2058,6 +2083,8 @@ export const WsRpcGroup = RpcGroup.make(
   WsMcpAppsToolInfoRpc,
   WsMcpAppsReadResourceRpc,
   WsMcpAppsUpdateModelContextRpc,
+  WsApertureTestConnectionRpc,
+  WsApertureFetchRpc,
   WsProviderUploadFeedbackRpc,
   WsSubscribeVcsStatusRpc,
   WsSubscribeWorktreeSetupRpc,

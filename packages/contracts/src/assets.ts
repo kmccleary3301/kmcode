@@ -64,6 +64,10 @@ export const AssetResource = Schema.Union([
     cwd: TrimmedNonEmptyString.check(Schema.isMaxLength(ASSET_PATH_MAX_LENGTH)),
     url: TrimmedNonEmptyString.check(Schema.isMaxLength(2048)),
   }),
+  // A version-pinned Aperture embed document served only from the server cache.
+  Schema.TaggedStruct("aperture-runtime", {
+    version: TrimmedNonEmptyString.check(Schema.isMaxLength(128)),
+  }),
 ]);
 export type AssetResource = typeof AssetResource.Type;
 

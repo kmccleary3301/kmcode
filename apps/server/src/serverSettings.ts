@@ -183,6 +183,7 @@ const BITBUCKET_SECRET_NAMES = {
   apiToken: "bitbucket-api-token",
 } as const;
 const BITBUCKET_SECRET_FIELDS = ["accessToken", "apiToken"] as const;
+const APERTURE_API_KEY_SECRET_NAME = "aperture-api-key";
 
 /** Hosts are case-insensitive; a patch can arrive before decoding lowercased its keys. */
 function gitHubTokenSecretName(host: string): string {
@@ -366,7 +367,19 @@ export function redactServerSettingsForClient(settings: ServerSettings): ServerS
       Object.entries(settings.github.tokens).map(([host, token]) => [host, redactSecret(token)]),
     ),
   };
-  return { ...settings, providers, providerInstances, usageLimitSources, bitbucket, github };
+  const aperture = {
+    ...settings.aperture,
+    apiKey: redactSecret(settings.aperture.apiKey),
+  };
+  return {
+    ...settings,
+    providers,
+    providerInstances,
+    usageLimitSources,
+    bitbucket,
+    github,
+    aperture,
+  };
 }
 
 export function applyProviderInstanceMutation(
@@ -850,9 +863,9 @@ const make = Effect.gen(function* () {
   );
 
   /**
-   * Moves Bitbucket tokens hand-edited into settings.json into the secret store as they load,
-   * so plaintext does not stay on disk. If the store is unavailable, the token keeps working
-   * from the file and the move is retried on the next load.
+   * Moves inline Bitbucket, GitHub, or Aperture credentials into the secret store
+   * as they load, so plaintext does not stay on disk. If the store is unavailable,
+   * each credential keeps working from the file and the move is retried on load.
    */
   const moveInlineBitbucketTokens = (settings: ServerSettings) =>
     Effect.gen(function* () {
@@ -892,7 +905,26 @@ const make = Effect.gen(function* () {
         tokens[host] = SECRET_REDACTED;
         moved = true;
       }
-      return moved ? { ...settings, bitbucket, github: { ...settings.github, tokens } } : settings;
+      const aperture = { ...settings.aperture };
+      if (aperture.apiKey.length > 0 && aperture.apiKey !== SECRET_REDACTED) {
+        const stored = yield* secretStore
+          .set(APERTURE_API_KEY_SECRET_NAME, textEncoder.encode(aperture.apiKey))
+          .pipe(
+            Effect.as(true),
+            Effect.catch(() =>
+              Effect.logWarning("failed to move the Aperture API key into the secret store").pipe(
+                Effect.as(false),
+              ),
+            ),
+          );
+        if (stored) {
+          aperture.apiKey = SECRET_REDACTED;
+          moved = true;
+        }
+      }
+      return moved
+        ? { ...settings, bitbucket, github: { ...settings.github, tokens }, aperture }
+        : settings;
     });
 
   const loadSettingsFromDisk = Effect.gen(function* () {
@@ -984,7 +1016,22 @@ const make = Effect.gen(function* () {
     if (migrated !== loaded) {
       yield* writeSettingsAtomically(migrated);
     }
-    return migrated;
+    let aperture = migrated.aperture;
+    if (aperture.apiKey.length === 0) {
+      const storedKey = yield* secretStore
+        .get(APERTURE_API_KEY_SECRET_NAME)
+        .pipe(
+          Effect.catch((cause) =>
+            Effect.logWarning("failed to inspect the Aperture API key secret", { cause }).pipe(
+              Effect.as(Option.none<Uint8Array>()),
+            ),
+          ),
+        );
+      if (Option.isSome(storedKey)) {
+        aperture = { ...aperture, apiKey: SECRET_REDACTED };
+      }
+    }
+    return aperture === migrated.aperture ? migrated : { ...migrated, aperture };
   });
 
   // A failed read is not kept: the next read retries instead of replaying the failure.
@@ -1067,6 +1114,17 @@ const make = Effect.gen(function* () {
           );
         bitbucket[field] = Option.isSome(secret) ? textDecoder.decode(secret.value) : "";
       }
+      const aperture = { ...settings.aperture };
+      if (aperture.apiKey === SECRET_REDACTED) {
+        const secret = yield* secretStore
+          .get(APERTURE_API_KEY_SECRET_NAME)
+          .pipe(
+            Effect.mapError(
+              (cause) => new ServerSettingsError({ settingsPath, operation: "read-secret", cause }),
+            ),
+          );
+        aperture.apiKey = Option.isSome(secret) ? textDecoder.decode(secret.value) : "";
+      }
       const tokens: Record<string, string> = {};
       for (const [host, value] of Object.entries(settings.github.tokens)) {
         if (value !== SECRET_REDACTED) {
@@ -1088,6 +1146,7 @@ const make = Effect.gen(function* () {
         usageLimitSources: usageLimitSources as ServerSettings["usageLimitSources"],
         bitbucket,
         github: { ...settings.github, tokens },
+        aperture,
       };
     });
   // Background sweeps often read settings only to find a few scheduling options.
@@ -1309,6 +1368,31 @@ const make = Effect.gen(function* () {
           operation: "remove-stale-secret",
         });
       }
+      const aperture = { ...next.aperture };
+      if (aperture.apiKey === SECRET_REDACTED) {
+        const currentKey = current.aperture.apiKey;
+        if (currentKey.length > 0 && currentKey !== SECRET_REDACTED) {
+          changes.push({
+            kind: "write",
+            secretName: APERTURE_API_KEY_SECRET_NAME,
+            value: textEncoder.encode(currentKey),
+          });
+        }
+        aperture.apiKey = SECRET_REDACTED;
+      } else if (aperture.apiKey.length > 0) {
+        changes.push({
+          kind: "write",
+          secretName: APERTURE_API_KEY_SECRET_NAME,
+          value: textEncoder.encode(aperture.apiKey),
+        });
+        aperture.apiKey = SECRET_REDACTED;
+      } else if (current.aperture.apiKey.length > 0) {
+        changes.push({
+          kind: "remove",
+          secretName: APERTURE_API_KEY_SECRET_NAME,
+          operation: "remove-secret",
+        });
+      }
 
       return {
         settings: {
@@ -1317,6 +1401,7 @@ const make = Effect.gen(function* () {
           usageLimitSources: usageLimitSources as ServerSettings["usageLimitSources"],
           bitbucket,
           github: { ...next.github, tokens },
+          aperture,
         },
         changes,
       };

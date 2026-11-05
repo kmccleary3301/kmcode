@@ -1864,6 +1864,40 @@ it.layer(NodeServices.layer)("server settings", (it) => {
       }).pipe(Effect.provide(layerServerSettingsWithSecrets())),
   );
 
+  it.effect(
+    "keeps the Aperture API key in the secret store and tells clients only that one is set",
+    () =>
+      Effect.gen(function* () {
+        const serverSettings = yield* ServerSettingsModule.ServerSettingsService;
+        const secrets = yield* ServerSecretStore.ServerSecretStore;
+        const serverConfig = yield* ServerConfig.ServerConfig;
+        const fileSystem = yield* FileSystem.FileSystem;
+
+        const saved = yield* serverSettings.updateSettings({
+          aperture: { enabled: true, apiUrl: "https://aperture.test", apiKey: "ak_secret_key" },
+        });
+        assert.equal(saved.aperture.apiKey, "ak_secret_key");
+        assert.notInclude(
+          yield* fileSystem.readFileString(serverConfig.settingsPath),
+          "ak_secret_key",
+        );
+        const forClient = ServerSettingsModule.redactServerSettingsForClient(saved).aperture;
+        assert.notInclude(forClient.apiKey, "ak_secret_key");
+        assert.isAbove(forClient.apiKey.length, 0);
+
+        // Echoing the redacted value back and editing other fields keeps the stored key.
+        yield* serverSettings.updateSettings({
+          aperture: { ...forClient, defaultProject: "demo" },
+        });
+        assert.equal((yield* serverSettings.getSettings).aperture.apiKey, "ak_secret_key");
+
+        // An empty key removes the stored secret.
+        yield* serverSettings.updateSettings({ aperture: { apiKey: "" } });
+        assert.equal((yield* serverSettings.getSettings).aperture.apiKey, "");
+        assert.isTrue(Option.isNone(yield* secrets.get("aperture-api-key")));
+      }).pipe(Effect.provide(layerServerSettingsWithSecrets())),
+  );
+
   it.effect("removes a Bitbucket secret once its token is cleared by hand in settings.json", () =>
     Effect.gen(function* () {
       const serverConfig = yield* ServerConfig.ServerConfig;

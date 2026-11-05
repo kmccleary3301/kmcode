@@ -430,6 +430,10 @@
     "./mcpApp": {
       "types": "./src/mcpApp.ts",
       "import": "./src/mcpApp.ts"
+    },
+    "./apertureEmbed": {
+      "types": "./src/apertureEmbed.ts",
+      "import": "./src/apertureEmbed.ts"
     }
   },
   "scripts": {

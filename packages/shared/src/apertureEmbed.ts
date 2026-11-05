@@ -183,19 +183,12 @@ export type ApertureEmbedErrorMessage = {
   readonly detail?: string;
 };
 
-export type ApertureEmbedOpenLinkMessage = {
-  readonly v: typeof APERTURE_EMBED_PROTOCOL;
-  readonly type: "embed/open-link";
-  readonly href: string;
-};
-
 export type ApertureEmbedFrameMessage =
   | ApertureEmbedReadyMessage
   | ApertureEmbedFetchMessage
   | ApertureEmbedFetchAbortMessage
   | ApertureEmbedSizeMessage
-  | ApertureEmbedErrorMessage
-  | ApertureEmbedOpenLinkMessage;
+  | ApertureEmbedErrorMessage;
 
 export type ApertureEmbedMessage = ApertureEmbedHostMessage | ApertureEmbedFrameMessage;
 
@@ -385,8 +378,6 @@ export function isApertureEmbedFrameMessage(value: unknown): value is ApertureEm
         typeof value.message === "string" &&
         (value.detail === undefined || typeof value.detail === "string")
       );
-    case "embed/open-link":
-      return typeof value.href === "string";
     default:
       return false;
   }

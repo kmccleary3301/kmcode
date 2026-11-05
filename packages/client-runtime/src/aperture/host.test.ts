@@ -2,6 +2,7 @@ import { describe, expect, it } from "vite-plus/test";
 import type { ApertureFetchStreamEvent } from "@t3tools/contracts";
 import {
   APERTURE_EMBED_PROTOCOL,
+  isApertureEmbedFrameMessage,
   type ApertureEmbedErrorMessage,
   type ApertureEmbedHostMessage,
   type ApertureEmbedMode,
@@ -51,7 +52,6 @@ interface ApertureHostHarness {
   readonly mismatchedProtocols: unknown[];
   readonly sizes: number[];
   readonly errors: CapturedEmbedError[];
-  readonly links: string[];
   readonly openCounts: number[];
   readonly timeline: string[];
 }
@@ -67,7 +67,6 @@ function makeHarness(input?: {
   const mismatchedProtocols: unknown[] = [];
   const sizes: number[] = [];
   const errors: CapturedEmbedError[] = [];
-  const links: string[] = [];
   const openCounts: number[] = [];
   const timeline: string[] = [];
   const host = makeApertureEmbedHost({
@@ -97,7 +96,6 @@ function makeHarness(input?: {
     onProtocolMismatch: (protocol) => mismatchedProtocols.push(protocol),
     onSize: (height) => sizes.push(height),
     onError: (error) => errors.push(error),
-    onOpenLink: (href) => links.push(href),
     onOpenRequestsChange: (open) => openCounts.push(open),
   });
   return {
@@ -108,7 +106,6 @@ function makeHarness(input?: {
     mismatchedProtocols,
     sizes,
     errors,
-    links,
     openCounts,
     timeline,
   };
@@ -434,7 +431,7 @@ describe("Aperture embed host", () => {
     expect(harness.sizes).toEqual([]);
   });
 
-  it("clamps finite heights and forwards frame errors and link requests", () => {
+  it("clamps finite heights and forwards frame errors", () => {
     const harness = makeHarness();
     ready(harness.host);
     harness.host.receive({ v: APERTURE_EMBED_PROTOCOL, type: "embed/size", height: Number.NaN });
@@ -453,16 +450,26 @@ describe("Aperture embed host", () => {
       message: "Failed to draw.",
       detail: "runtime stack",
     });
-    harness.host.receive({
-      v: APERTURE_EMBED_PROTOCOL,
-      type: "embed/open-link",
-      href: "https://example.test",
-    });
     expect(harness.sizes).toEqual([80, 100, 320]);
     expect(harness.errors).toEqual([
       { code: "widget_runtime", message: "Failed to draw.", detail: "runtime stack" },
     ]);
-    expect(harness.links).toEqual(["https://example.test"]);
+  });
+
+  it("rejects widget-controlled navigation requests", () => {
+    const message = {
+      v: APERTURE_EMBED_PROTOCOL,
+      type: "embed/open-link",
+      href: "https://attacker.example/collect?data=project",
+    };
+    expect(isApertureEmbedFrameMessage(message)).toBe(false);
+
+    const harness = makeHarness();
+    ready(harness.host);
+    const postsBefore = harness.posts.length;
+    harness.host.receive(message);
+    expect(harness.posts).toHaveLength(postsBefore);
+    expect(harness.fetches).toHaveLength(0);
   });
 
   it("rejects a duplicate in-flight id without disturbing its original request", () => {

@@ -480,20 +480,6 @@ function ApertureEmbedDocument(props: {
       onProtocolMismatch: () => latest.current.onProtocolMismatch(),
       onSize: (height) => latest.current.onSize(height),
       onError: (error) => latest.current.onError(error),
-      onOpenLink: (href) => {
-        const frame = frameRef.current;
-        // As for HTML renders: only while the frame has focus and the reader just used it.
-        if (
-          frame === null ||
-          document.activeElement !== frame ||
-          navigator.userActivation?.isActive === false
-        ) {
-          return;
-        }
-        const url = URL.canParse(href) ? new URL(href) : null;
-        if (url === null || (url.protocol !== "https:" && url.protocol !== "http:")) return;
-        window.open(url.href, "_blank", "noopener,noreferrer");
-      },
     });
     hostRef.current = host;
     const receive = (event: MessageEvent) => {

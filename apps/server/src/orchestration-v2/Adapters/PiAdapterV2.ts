@@ -784,7 +784,10 @@ export function makePiAdapterV2(
         mcpSession,
         extensionPath,
         runtimeMode: input.runtimePolicy.runtimeMode,
-        runtimeInstructions: buildRuntimeInstructions({ harness: driver === "omp" ? "OMP" : "Pi" }),
+        runtimeInstructions: buildRuntimeInstructions({
+          harness: driver === "omp" ? "OMP" : "Pi",
+          aperture: mcpSession?.capabilities?.has("aperture") === true,
+        }),
       });
       const spawnConnection = Effect.suspend(() =>
         makePiRpcConnection({

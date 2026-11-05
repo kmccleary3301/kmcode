@@ -17,6 +17,7 @@ import * as ApertureEmbedPolicy from "../../../aperture/ApertureEmbedPolicy.ts";
 import * as ApertureEmbedToken from "../../../aperture/ApertureEmbedToken.ts";
 import * as AperturePreview from "../../../aperture/AperturePreview.ts";
 import * as ApertureRuntime from "../../../aperture/ApertureRuntime.ts";
+import { APERTURE_GUIDE_TOPICS, apertureGuideText } from "../../../aperture/ApertureGuide.ts";
 import * as ApertureWidgetStore from "../../../aperture/ApertureWidgetStore.ts";
 import * as ServerSettings from "../../../serverSettings.ts";
 import * as McpInvocationContext from "../../McpInvocationContext.ts";
@@ -54,6 +55,13 @@ interface RenderOptions extends ScopeOptions {
 const RENDER_MEASURE_WIDTH = 728;
 const RENDER_MESSAGE =
   "Shown to the reader above your reply. Don't mention or describe it; reply with only what it doesn't already say.";
+
+const WIDGET_SLUG_PATTERN = /^[a-z0-9]+(?:-[a-z0-9]+)*$/u;
+const INVALID_WIDGET_ID_MESSAGE =
+  "Widget id must use this thread's widgetIdPrefix and a lowercase kebab-case slug.";
+const widgetIdPrefixForThread = (threadId: string) => `km-${threadId.slice(0, 8)}-`;
+const isThreadWidgetId = (id: string, prefix: string) =>
+  id.length <= 63 && id.startsWith(prefix) && WIDGET_SLUG_PATTERN.test(id.slice(prefix.length));
 
 const failure = (message: string, code: FailureCode = "orchestration_error") =>
   new OrchestratorMcpFailure({ code, message });
@@ -257,7 +265,13 @@ const preview = (
 ) =>
   Effect.gen(function* () {
     const apertureSettings = yield* readEnabledApertureSettings;
-    yield* callerThreadId(toolName);
+    const threadId = yield* callerThreadId(toolName);
+    if (
+      target.widget !== undefined &&
+      !isThreadWidgetId(target.widget.id, widgetIdPrefixForThread(threadId))
+    ) {
+      return yield* failure(INVALID_WIDGET_ID_MESSAGE, "invalid_request");
+    }
     const scope = yield* resolveScope(apertureSettings, options);
     const asOf = yield* resolveAsOf(options.asOf);
     const previewService = yield* AperturePreview.AperturePreview;
@@ -276,6 +290,7 @@ const preview = (
       contentHeight: result.contentHeight,
       capturedHeight: result.capturedHeight,
       runtimeVersion: result.runtimeVersion,
+      dataStatus: result.dataStatus,
       consoleMessages: result.consoleMessages,
       embedErrors: result.embedErrors,
       failedRequests: result.failedRequests,
@@ -299,6 +314,12 @@ const render = (toolName: string, options: RenderOptions) =>
       ...(options.spec === undefined ? {} : { spec: options.spec }),
       ...(options.widget === undefined ? {} : { widget: options.widget }),
     };
+    if (
+      options.widget !== undefined &&
+      !isThreadWidgetId(options.widget.id, widgetIdPrefixForThread(threadId))
+    ) {
+      return yield* failure(INVALID_WIDGET_ID_MESSAGE, "invalid_request");
+    }
     if (options.widget !== undefined) {
       const widgetStore = yield* ApertureWidgetStore.ApertureWidgetStore;
       yield* widgetStore.module(options.widget).pipe(Effect.mapError(widgetFailure));
@@ -356,6 +377,8 @@ const render = (toolName: string, options: RenderOptions) =>
 const handlers = {
   aperture_status: McpToolAccess.readsAsCaller(() =>
     Effect.gen(function* () {
+      const threadId = yield* callerThreadId("aperture_status");
+      const widgetIdPrefix = widgetIdPrefixForThread(threadId);
       const { aperture } = yield* readSettings;
       const asOf = yield* nowIso;
       const defaults = {
@@ -366,6 +389,7 @@ const handlers = {
         return {
           enabled: false,
           asOf,
+          widgetIdPrefix,
           connection: { status: "disabled" as const, message: "Aperture is disabled." },
           projects: [],
           ...defaults,
@@ -377,6 +401,7 @@ const handlers = {
         return {
           enabled: true,
           asOf,
+          widgetIdPrefix,
           connection: {
             status: "unavailable" as const,
             code: viewer.failure.code,
@@ -399,6 +424,7 @@ const handlers = {
       return {
         enabled: true,
         asOf,
+        widgetIdPrefix,
         connection: Result.isFailure(projects)
           ? {
               status: "unavailable" as const,
@@ -419,6 +445,16 @@ const handlers = {
             })),
         ...defaults,
         ...(Option.isNone(runtimeVersion) ? {} : { runtimeVersion: runtimeVersion.value }),
+      };
+    }),
+  ),
+  aperture_guide: McpToolAccess.readsAsCaller(({ topic = "overview" }) =>
+    Effect.gen(function* () {
+      const threadId = yield* callerThreadId("aperture_guide");
+      return {
+        topic,
+        topics: APERTURE_GUIDE_TOPICS,
+        text: apertureGuideText(topic, widgetIdPrefixForThread(threadId)),
       };
     }),
   ),
@@ -530,11 +566,52 @@ const handlers = {
   aperture_widget_push: McpToolAccess.actsAsCaller((input) =>
     Effect.gen(function* () {
       yield* readEnabledApertureSettings;
-      yield* callerThreadId("aperture_widget_push");
+      const threadId = yield* callerThreadId("aperture_widget_push");
+      if (!isThreadWidgetId(input.id, widgetIdPrefixForThread(threadId))) {
+        return yield* failure(INVALID_WIDGET_ID_MESSAGE, "invalid_request");
+      }
       const widgetStore = yield* ApertureWidgetStore.ApertureWidgetStore;
-      return yield* widgetStore
+      const pushed = yield* widgetStore
         .push({ id: input.id, source: input.source })
         .pipe(Effect.mapError(widgetFailure));
+      const sourceLines = pushed.diagnostics.some((diagnostic) => diagnostic.lineText === undefined)
+        ? input.source.split(/\r\n|\n|\r/u)
+        : [];
+      return {
+        ...pushed,
+        diagnostics: pushed.diagnostics.map((diagnostic) => {
+          const lineText = diagnostic.lineText ?? sourceLines[diagnostic.line - 1];
+          return {
+            ...diagnostic,
+            ...(lineText === undefined ? {} : { lineText }),
+            formatted: `${diagnostic.file}:${diagnostic.line}:${diagnostic.column}: ${diagnostic.severity}: ${diagnostic.text}`,
+          };
+        }),
+      };
+    }),
+  ),
+  aperture_widget_list: McpToolAccess.readsAsCaller(() =>
+    Effect.gen(function* () {
+      yield* readEnabledApertureSettings;
+      const threadId = yield* callerThreadId("aperture_widget_list");
+      const widgetIdPrefix = widgetIdPrefixForThread(threadId);
+      const widgetStore = yield* ApertureWidgetStore.ApertureWidgetStore;
+      const widgets = yield* widgetStore
+        .list({ prefix: widgetIdPrefix })
+        .pipe(Effect.mapError(widgetFailure));
+      return { widgetIdPrefix, widgets };
+    }),
+  ),
+  aperture_widget_delete: McpToolAccess.actsAsCaller((input) =>
+    Effect.gen(function* () {
+      yield* readEnabledApertureSettings;
+      const threadId = yield* callerThreadId("aperture_widget_delete");
+      if (!isThreadWidgetId(input.id, widgetIdPrefixForThread(threadId))) {
+        return yield* failure(INVALID_WIDGET_ID_MESSAGE, "invalid_request");
+      }
+      const widgetStore = yield* ApertureWidgetStore.ApertureWidgetStore;
+      yield* widgetStore.delete({ id: input.id }).pipe(Effect.mapError(widgetFailure));
+      return { id: input.id, deleted: true };
     }),
   ),
   aperture_widget_preview: McpToolAccess.readsAsCaller(({ id, version, ...options }) =>
@@ -547,9 +624,12 @@ const handlers = {
 
 export const layerStandard = McpToolAccess.toLayer(ApertureStandardToolkit, {
   aperture_status: handlers.aperture_status,
+  aperture_guide: handlers.aperture_guide,
   aperture_query: handlers.aperture_query,
   aperture_figure_render: handlers.aperture_figure_render,
   aperture_widget_push: handlers.aperture_widget_push,
+  aperture_widget_list: handlers.aperture_widget_list,
+  aperture_widget_delete: handlers.aperture_widget_delete,
   aperture_widget_render: handlers.aperture_widget_render,
 });
 

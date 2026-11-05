@@ -28,6 +28,13 @@ export interface ApertureWidgetDiagnostic {
   readonly column: number;
   readonly severity: "error" | "warning";
   readonly text: string;
+  readonly lineText?: string;
+}
+
+export interface ApertureWidgetRecord {
+  readonly id: string;
+  readonly version: string;
+  readonly updatedAt: string;
 }
 
 export interface ApertureWidgetPushResult {
@@ -50,6 +57,7 @@ const WidgetDiagnosticSchema = Schema.Struct({
   column: Schema.Int,
   severity: Schema.Literals(["error", "warning"]),
   text: Schema.String,
+  lineText: Schema.optionalKey(Schema.String),
 });
 const PushWidgetResponseSchema = Schema.Struct({
   widget: Schema.Struct({ id: Schema.String, version: Schema.String }),
@@ -58,6 +66,16 @@ const PushWidgetResponseSchema = Schema.Struct({
 const PushWidgetDiagnosticsSchema = Schema.Struct({
   diagnostics: Schema.Array(WidgetDiagnosticSchema),
 });
+const ListWidgetResponseJson = Schema.fromJsonString(
+  Schema.Array(
+    Schema.Struct({
+      id: Schema.String,
+      version: Schema.String,
+      updatedAt: Schema.String,
+    }),
+  ),
+);
+const DeleteWidgetResponseJson = Schema.fromJsonString(Schema.Struct({ deleted: Schema.String }));
 const PushWidgetRequestJson = Schema.fromJsonString(
   Schema.Struct({ id: Schema.String, source: Schema.String }),
 );
@@ -84,6 +102,10 @@ export class ApertureWidgetStore extends Context.Service<
       readonly id: string;
       readonly version: string;
     }) => Effect.Effect<string, ApertureWidgetError>;
+    readonly list: (input: {
+      readonly prefix: string;
+    }) => Effect.Effect<ReadonlyArray<ApertureWidgetRecord>, ApertureWidgetError>;
+    readonly delete: (input: { readonly id: string }) => Effect.Effect<void, ApertureWidgetError>;
   }
 >()("t3/aperture/ApertureWidgetStore") {}
 
@@ -198,6 +220,88 @@ export const make = Effect.gen(function* () {
       ),
       Effect.provideService(FetchHttpClient.RequestInit, { redirect: "manual" }),
     );
+  const list = Effect.fn("ApertureWidgetStore.list")(function* (input: {
+    readonly prefix: string;
+  }) {
+    return yield* Effect.scoped(
+      Effect.gen(function* () {
+        const baseUrl = yield* webBaseUrl;
+        const response = yield* fetchWidgetResponse(
+          HttpClientRequest.get(new URL("/api/dev/widgets", baseUrl).toString()),
+        );
+        if (response.status === 404) {
+          return yield* Effect.fail(
+            widgetError("not_found", "Aperture widget route was not found."),
+          );
+        }
+        if (response.status < 200 || response.status >= 300) {
+          return yield* Effect.fail(
+            widgetError("unavailable", `Aperture widget list returned HTTP ${response.status}.`),
+          );
+        }
+        const responseText = yield* response.text.pipe(
+          Effect.mapError(() =>
+            widgetError("unreachable", "Aperture widget list response could not be read."),
+          ),
+        );
+        const result = Schema.decodeUnknownOption(ListWidgetResponseJson)(responseText);
+        if (Option.isNone(result)) {
+          return yield* Effect.fail(
+            widgetError("invalid", "Aperture returned an invalid widget list."),
+          );
+        }
+        return result.value.filter(
+          (widget) =>
+            WIDGET_ID_PATTERN.test(widget.id) &&
+            WIDGET_VERSION_PATTERN.test(widget.version) &&
+            widget.id.startsWith(input.prefix),
+        );
+      }),
+    );
+  });
+
+  const deleteWidget = Effect.fn("ApertureWidgetStore.delete")(function* (input: {
+    readonly id: string;
+  }) {
+    return yield* Effect.scoped(
+      Effect.gen(function* () {
+        if (!WIDGET_ID_PATTERN.test(input.id)) {
+          return yield* Effect.fail(
+            widgetError(
+              "invalid",
+              "Widget id must contain lowercase letters, numbers, hyphens, or underscores.",
+            ),
+          );
+        }
+        const baseUrl = yield* webBaseUrl;
+        const url = new URL("/api/dev/widgets", baseUrl);
+        url.searchParams.set("id", input.id);
+        const response = yield* fetchWidgetResponse(HttpClientRequest.delete(url.toString()));
+        if (response.status === 404) {
+          return yield* Effect.fail(widgetError("not_found", "Aperture widget was not found."));
+        }
+        if (response.status < 200 || response.status >= 300) {
+          return yield* Effect.fail(
+            widgetError(
+              "unavailable",
+              `Aperture widget deletion returned HTTP ${response.status}.`,
+            ),
+          );
+        }
+        const responseText = yield* response.text.pipe(
+          Effect.mapError(() =>
+            widgetError("unreachable", "Aperture widget deletion response could not be read."),
+          ),
+        );
+        const result = Schema.decodeUnknownOption(DeleteWidgetResponseJson)(responseText);
+        if (Option.isNone(result) || result.value.deleted !== input.id) {
+          return yield* Effect.fail(
+            widgetError("invalid", "Aperture returned an invalid widget deletion response."),
+          );
+        }
+      }),
+    );
+  });
 
   const push = Effect.fn("ApertureWidgetStore.push")(function* (input: {
     readonly id: string;
@@ -378,7 +482,7 @@ export const make = Effect.gen(function* () {
     );
   });
 
-  return ApertureWidgetStore.of({ push, module });
+  return ApertureWidgetStore.of({ push, module, list, delete: deleteWidget });
 });
 
 export const layer = Layer.effect(ApertureWidgetStore, make);

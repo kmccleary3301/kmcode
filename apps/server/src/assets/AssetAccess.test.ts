@@ -127,6 +127,8 @@ const apertureWidgetStoreTestService: ApertureWidgetStore.ApertureWidgetStore["S
     id === "demo-widget" && version === apertureWidgetVersion
       ? Effect.succeed(apertureWidgetModule)
       : Effect.fail(apertureWidgetNotFound),
+  list: () => Effect.succeed([]),
+  delete: () => Effect.void,
 };
 
 const layerTest = Layer.mergeAll(

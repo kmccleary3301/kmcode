@@ -14,6 +14,7 @@ For iOS Simulators and Android Emulators here, call \`device_list\`, then \`devi
 export interface T3CodeToolAvailability {
   readonly browser: boolean;
   readonly device: boolean;
+  readonly aperture?: boolean | undefined;
 }
 
 const normalizeAvailability = (
@@ -218,7 +219,11 @@ export function buildCodexAdditionalContext(
     t3_code_orchestration: { kind: "application", value: T3_CODE_ORCHESTRATION_INSTRUCTIONS },
     t3_code_runtime: {
       kind: "application",
-      value: buildRuntimeInstructions({ harness: "Codex", ...runtime }),
+      value: buildRuntimeInstructions({
+        harness: "Codex",
+        ...runtime,
+        aperture: typeof toolsAvailable === "object" && toolsAvailable.aperture === true,
+      }),
     },
     ...(tools ? { t3_code_tools: { kind: "application", value: tools } } : {}),
   };

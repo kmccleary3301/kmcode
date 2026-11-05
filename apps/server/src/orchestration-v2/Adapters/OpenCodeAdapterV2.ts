@@ -3271,6 +3271,10 @@ export function makeOpenCodeAdapterV2(
                 buildRuntimeInstructions({
                   harness: "OpenCode",
                   model: turnInput.modelSelection.model,
+                  aperture:
+                    McpProviderSession.readMcpProviderSession(
+                      turnInput.threadId,
+                    )?.capabilities?.has("aperture") === true,
                 }),
               ]
                 .filter(Boolean)

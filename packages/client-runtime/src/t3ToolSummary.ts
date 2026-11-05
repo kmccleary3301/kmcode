@@ -484,6 +484,15 @@ export function summarizeT3ToolCalls(
     case "aperture-widget-render":
       label = phrase("Rendered", "render", quantity(selected.length, "Aperture widget"));
       break;
+    case "aperture-widget-list":
+      label = phrase("Listed", "list", `Aperture widgets ${times}`);
+      break;
+    case "aperture-widget-delete":
+      label = phrase("Deleted", "delete", quantity(selected.length, "Aperture widget"));
+      break;
+    case "aperture-guide":
+      label = phrase("Read", "read", `the Aperture guide ${times}`);
+      break;
     case "capabilities":
       label = phrase("Checked", "check", `orchestration capabilities ${times}`);
       break;

@@ -70,7 +70,10 @@ export type T3McpToolSummaryAction =
   | "aperture-figure-render"
   | "aperture-widget-push"
   | "aperture-widget-preview"
-  | "aperture-widget-render";
+  | "aperture-widget-render"
+  | "aperture-widget-list"
+  | "aperture-widget-delete"
+  | "aperture-guide";
 
 export interface T3McpToolDefinition {
   readonly displayName: string;
@@ -357,6 +360,15 @@ const T3_MCP_TOOLS: Readonly<Record<string, T3McpToolDefinition>> = {
     ["Render", "Rendering", "Rendered", "an Aperture widget"],
     "aperture-widget-render",
   ),
+  aperture_widget_list: tool(
+    ["List", "Listing", "Listed", "Aperture widgets"],
+    "aperture-widget-list",
+  ),
+  aperture_widget_delete: tool(
+    ["Delete", "Deleting", "Deleted", "an Aperture widget"],
+    "aperture-widget-delete",
+  ),
+  aperture_guide: tool(["Read", "Reading", "Read", "the Aperture guide"], "aperture-guide"),
 };
 
 /**

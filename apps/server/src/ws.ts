@@ -2789,8 +2789,9 @@ const layerWsRpc = (
               input.resource._tag === "attachment" ||
               input.resource._tag === "native-app-icon" ||
               input.resource._tag === "tool-output-image" ||
-              // Versioned runtime documents are served from the configured Aperture cache.
+              // Versioned runtime documents and widget modules are served from the Aperture caches.
               input.resource._tag === "aperture-runtime" ||
+              input.resource._tag === "aperture-widget" ||
               // GitHub media names the repository it authenticates through itself.
               input.resource._tag === "github-media" ||
               (input.resource._tag === "media-file" && path.isAbsolute(input.resource.path))

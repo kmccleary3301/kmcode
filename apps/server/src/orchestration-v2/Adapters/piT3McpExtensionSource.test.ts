@@ -146,3 +146,48 @@ describe("Pi system prompt", () => {
     assert.deepEqual(prompts, [`BASE\n\nRUNTIME\n\n${T3_CODE_ORCHESTRATION_INSTRUCTIONS.trim()}`]);
   });
 });
+
+describe("Pi MCP tool results", () => {
+  it("hands a preview screenshot to the Pi model as image content alongside its JSON", async () => {
+    const metadata = { contentHeight: 358, embedErrors: [] };
+    const screenshot = { type: "image", data: "iVBORw0KGgo=", mimeType: "image/png" };
+    const results: Record<string, unknown> = {
+      initialize: { protocolVersion: "2025-06-18", capabilities: {}, serverInfo: { name: "t3" } },
+      "tools/list": {
+        tools: [{ name: "aperture_figure_preview", inputSchema: { type: "object" } }],
+      },
+      "tools/call": {
+        structuredContent: metadata,
+        content: [{ type: "text", text: JSON.stringify(metadata) }, screenshot],
+      },
+    };
+    const tools: Array<{
+      name: string;
+      execute: (id: string, params: unknown) => Promise<{ content: unknown }>;
+    }> = [];
+    await NodeVM.runInNewContext(`${RUNNABLE_SOURCE}\nt3McpExtension(pi)`, {
+      process: {
+        env: { [T3_MCP_URL_ENV]: "http://127.0.0.1:1/mcp", [T3_MCP_BEARER_ENV]: "token" },
+        argv: [],
+      },
+      AbortSignal,
+      Type: { Unsafe: (schema: unknown) => schema },
+      fetch: async (_url: string, init: { body: string }) => {
+        const message: { id?: number; method: string } = JSON.parse(init.body);
+        const body =
+          message.id === undefined
+            ? ""
+            : JSON.stringify({ jsonrpc: "2.0", id: message.id, result: results[message.method] });
+        return new Response(body, { headers: { "content-type": "application/json" } });
+      },
+      pi: { on: () => undefined, registerTool: (tool: (typeof tools)[number]) => tools.push(tool) },
+    });
+    const preview = tools.find((tool) => tool.name === "mcp__t3-code__aperture_figure_preview");
+    assert.isDefined(preview);
+    const result = await preview!.execute("call-1", {});
+    assert.deepEqual(JSON.parse(JSON.stringify(result.content)), [
+      { type: "text", text: JSON.stringify(metadata) },
+      screenshot,
+    ]);
+  });
+});

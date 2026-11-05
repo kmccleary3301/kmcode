@@ -59,6 +59,7 @@ import * as ProjectFaviconResolver from "../project/ProjectFaviconResolver.ts";
 import * as WorkspacePaths from "../workspace/WorkspacePaths.ts";
 import * as NativeAppIconResolver from "./NativeAppIconResolver.ts";
 import * as ApertureRuntime from "../aperture/ApertureRuntime.ts";
+import * as ApertureWidgetStore from "../aperture/ApertureWidgetStore.ts";
 import { openMediaFile, readMediaFileHeader, type OpenMediaFile } from "./MediaFile.ts";
 
 export const ASSET_ROUTE_PREFIX = "/api/assets";
@@ -162,6 +163,13 @@ const AssetClaimsSchema = Schema.Union([
   }),
   Schema.Struct({
     version: Schema.Literal(1),
+    kind: Schema.Literal("aperture-widget"),
+    widgetId: Schema.String,
+    widgetVersion: Schema.String,
+    expiresAt: Schema.Number,
+  }),
+  Schema.Struct({
+    version: Schema.Literal(1),
     kind: Schema.Literal("aperture-runtime"),
     runtimeVersion: Schema.String,
     expiresAt: Schema.Number,
@@ -197,6 +205,12 @@ export type ResolvedAsset =
     }
   | {
       readonly kind: "aperture-runtime";
+      readonly version: string;
+      readonly bytes: Uint8Array;
+    }
+  | {
+      readonly kind: "aperture-widget";
+      readonly id: string;
       readonly version: string;
       readonly bytes: Uint8Array;
     };
@@ -776,6 +790,17 @@ export const issueAssetUrl = Effect.fn("AssetAccess.issueAssetUrl")(function* (i
       fileName = githubMediaFileName(fetchUrl);
       break;
     }
+    case "aperture-widget": {
+      claims = {
+        version: 1,
+        kind: "aperture-widget",
+        widgetId: input.resource.id,
+        widgetVersion: input.resource.version,
+        expiresAt,
+      };
+      fileName = `${input.resource.id}.${input.resource.version}.txt`;
+      break;
+    }
     case "aperture-runtime": {
       claims = {
         version: 1,
@@ -787,7 +812,6 @@ export const issueAssetUrl = Effect.fn("AssetAccess.issueAssetUrl")(function* (i
       break;
     }
   }
-
   const secretStore = yield* ServerSecretStore.ServerSecretStore;
   const signingSecret = yield* secretStore.getOrCreateRandom(SIGNING_SECRET_NAME, 32).pipe(
     Effect.mapError(
@@ -895,6 +919,20 @@ export const resolveAsset = Effect.fn("AssetAccess.resolveAsset")(function* (
       cwd: claims.cwd,
       expiresAt: claims.expiresAt,
     } satisfies ResolvedAsset;
+  }
+  if (claims.kind === "aperture-widget") {
+    const widgetStore = yield* ApertureWidgetStore.ApertureWidgetStore;
+    const source = yield* widgetStore
+      .module({ id: claims.widgetId, version: claims.widgetVersion })
+      .pipe(Effect.option);
+    return Option.isSome(source)
+      ? ({
+          kind: "aperture-widget",
+          id: claims.widgetId,
+          version: claims.widgetVersion,
+          bytes: new TextEncoder().encode(source.value),
+        } satisfies ResolvedAsset)
+      : null;
   }
   if (claims.kind === "aperture-runtime") {
     const runtime = yield* ApertureRuntime.ApertureRuntime;

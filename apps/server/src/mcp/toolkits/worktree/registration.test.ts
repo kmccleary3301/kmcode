@@ -28,6 +28,9 @@ import * as McpHttpServer from "../../McpHttpServer.ts";
 import * as McpSessionRegistry from "../../McpSessionRegistry.ts";
 import * as PreviewAutomationBroker from "../../PreviewAutomationBroker.ts";
 import * as PreviewBrowser from "../../../preview/PreviewBrowser.ts";
+import * as ApertureConnection from "../../../aperture/ApertureConnection.ts";
+import * as ApertureRuntime from "../../../aperture/ApertureRuntime.ts";
+import * as ApertureWidgetStore from "../../../aperture/ApertureWidgetStore.ts";
 
 const layerStubServices = Layer.mergeAll(
   Layer.mock(Orchestrator.OrchestratorV2)({}),
@@ -45,6 +48,9 @@ const layerStubServices = Layer.mergeAll(
   Layer.mock(GitWorkflowService.GitWorkflowService)({}),
   Layer.mock(ProjectSetupScriptRunner.ProjectSetupScriptRunner)({}),
   Layer.mock(VcsStatusBroadcaster.VcsStatusBroadcaster)({}),
+  Layer.mock(ApertureConnection.ApertureConnection)({}),
+  Layer.mock(ApertureRuntime.ApertureRuntime)({}),
+  Layer.mock(ApertureWidgetStore.ApertureWidgetStore)({}),
 );
 
 const ToolsListPayload = Schema.fromJsonString(

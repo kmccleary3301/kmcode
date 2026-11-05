@@ -62,10 +62,11 @@ const HTML_CONTENT_SECURITY_POLICY = "sandbox allow-scripts allow-forms allow-po
 // The Aperture runtime runs agent-written widgets, and every Aperture byte must reach it through
 // the host bridge. The header repeats the runtime's own meta policy so network access stays
 // closed, and its sandbox also drops the forms and popups that a meta policy cannot restrict.
-const APERTURE_RUNTIME_CONTENT_SECURITY_POLICY =
+export const APERTURE_RUNTIME_CONTENT_SECURITY_POLICY =
   "default-src 'none'; script-src 'unsafe-inline' blob:; style-src 'unsafe-inline'; " +
   "img-src data: blob:; font-src data: blob:; connect-src 'none'; worker-src blob:; " +
   "form-action 'none'; sandbox allow-scripts";
+const APERTURE_WIDGET_CONTENT_SECURITY_POLICY = "default-src 'none'; sandbox";
 
 // Types a browser may render as a document if a proxy strips the disposition
 // header. Downloads of these fall back to octet-stream.
@@ -425,6 +426,16 @@ export const layerAssetRoute = HttpRouter.add(
     );
     if (!asset) {
       return HttpServerResponse.text("Not Found", { status: 404 });
+    }
+    if (asset.kind === "aperture-widget") {
+      return HttpServerResponse.uint8Array(asset.bytes, {
+        contentType: "text/plain; charset=utf-8",
+        headers: {
+          "Cache-Control": "private, max-age=3600",
+          "Content-Security-Policy": APERTURE_WIDGET_CONTENT_SECURITY_POLICY,
+          "X-Content-Type-Options": "nosniff",
+        },
+      });
     }
     if (asset.kind === "aperture-runtime") {
       return HttpServerResponse.uint8Array(asset.bytes, {

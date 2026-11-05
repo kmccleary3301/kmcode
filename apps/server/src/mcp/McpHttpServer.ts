@@ -7,6 +7,7 @@ import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Path from "effect/Path";
+import * as MutableRef from "effect/MutableRef";
 import * as Schema from "effect/Schema";
 import * as Sink from "effect/Sink";
 import * as Stream from "effect/Stream";
@@ -22,6 +23,8 @@ import {
 import packageJson from "../../package.json" with { type: "json" };
 import * as ServerConfig from "../config.ts";
 import * as DeviceService from "../device/DeviceService.ts";
+import * as AperturePreview from "../aperture/AperturePreview.ts";
+import * as ServerSettings from "../serverSettings.ts";
 import * as HtmlRender from "../htmlRender/HtmlRender.ts";
 import * as ThreadManagementService from "../orchestration-v2/ThreadManagementService.ts";
 import * as McpInvocationContext from "./McpInvocationContext.ts";
@@ -61,6 +64,8 @@ import {
 } from "./toolkits/device/tools.ts";
 import * as HtmlHandlers from "./toolkits/html/handlers.ts";
 import { HtmlPreviewTool, HtmlPreviewToolkit, HtmlRenderToolkit } from "./toolkits/html/tools.ts";
+import { apertureToolkitsWhen, type ApertureToolkitSet } from "./toolkits/aperture/tools.ts";
+import * as ApertureHandlers from "./toolkits/aperture/handlers.ts";
 
 /** Where an MCP client discovers how to sign in (RFC 9728), at this request's own origin. */
 const mcpResourceMetadataUrl = (request: HttpServerRequest.HttpServerRequest) =>
@@ -787,6 +792,86 @@ export const layerHtmlToolkit = Layer.mergeAll(
   imageToolRegistration(registerHtmlPreview(), HtmlHandlers.layerPreview),
 ).pipe(Layer.provide(HtmlRender.layer));
 
+const registerApertureFigurePreview = (toolkit: ApertureToolkitSet["figurePreview"]) =>
+  Effect.gen(function* () {
+    const preview = yield* AperturePreview.AperturePreview;
+    const threads = yield* ThreadManagementService.ThreadManagementService;
+    const settings = yield* ServerSettings.ServerSettingsService;
+    const built = yield* toolkit;
+    yield* registerImageTool(
+      toolkit.tools.aperture_figure_preview,
+      (payload) =>
+        built
+          .handle("aperture_figure_preview", payload)
+          .pipe(Stream.unwrap, Stream.run(Sink.last()), Effect.flatMap(Effect.fromOption)),
+      (effect) =>
+        effect.pipe(
+          Effect.provideService(AperturePreview.AperturePreview, preview),
+          Effect.provideService(ThreadManagementService.ThreadManagementService, threads),
+          Effect.provideService(ServerSettings.ServerSettingsService, settings),
+        ),
+      "preview",
+      (error) =>
+        isOrchestratorMcpFailure(error) || AiError.isAiError(error)
+          ? error.message
+          : "Aperture figure preview failed.",
+    );
+  });
+
+const registerApertureWidgetPreview = (toolkit: ApertureToolkitSet["widgetPreview"]) =>
+  Effect.gen(function* () {
+    const preview = yield* AperturePreview.AperturePreview;
+    const threads = yield* ThreadManagementService.ThreadManagementService;
+    const settings = yield* ServerSettings.ServerSettingsService;
+    const built = yield* toolkit;
+    yield* registerImageTool(
+      toolkit.tools.aperture_widget_preview,
+      (payload) =>
+        built
+          .handle("aperture_widget_preview", payload)
+          .pipe(Stream.unwrap, Stream.run(Sink.last()), Effect.flatMap(Effect.fromOption)),
+      (effect) =>
+        effect.pipe(
+          Effect.provideService(AperturePreview.AperturePreview, preview),
+          Effect.provideService(ThreadManagementService.ThreadManagementService, threads),
+          Effect.provideService(ServerSettings.ServerSettingsService, settings),
+        ),
+      "preview",
+      (error) =>
+        isOrchestratorMcpFailure(error) || AiError.isAiError(error)
+          ? error.message
+          : "Aperture widget preview failed.",
+    );
+  });
+
+const apertureToolkitLayer = Effect.gen(function* () {
+  const settings = yield* ServerSettings.ServerSettingsService;
+  const changes = yield* settings.subscribeChanges;
+  const initial = yield* settings.getSettings;
+  const enabled = MutableRef.make(initial.aperture.enabled);
+  const server = yield* McpServer.McpServer;
+  yield* Stream.runForEach(changes, (next) => {
+    if (enabled.current === next.aperture.enabled) return Effect.void;
+    enabled.current = next.aperture.enabled;
+    return server.notifications["notifications/tools/list_changed"]({});
+  }).pipe(Effect.forkScoped);
+
+  const toolkits = apertureToolkitsWhen(() => enabled.current);
+  return Layer.mergeAll(
+    toolkitRegistration(toolkits.standard, ApertureHandlers.layerStandard),
+    imageToolRegistration(
+      registerApertureFigurePreview(toolkits.figurePreview),
+      ApertureHandlers.layerFigurePreview,
+    ),
+    imageToolRegistration(
+      registerApertureWidgetPreview(toolkits.widgetPreview),
+      ApertureHandlers.layerWidgetPreview,
+    ),
+  ).pipe(Layer.provide(AperturePreview.layer));
+});
+
+export const layerApertureToolkit = Layer.unwrap(apertureToolkitLayer);
+
 const layerPreviewStandardToolkitRegistration = toolkitRegistration(
   PreviewStandardToolkit,
   PreviewHandlers.layerStandard,
@@ -870,4 +955,5 @@ export const layer = Layer.mergeAll(
   layerPullRequestsToolkit,
   layerDeviceToolkit,
   layerHtmlToolkit,
+  layerApertureToolkit,
 ).pipe(Layer.provideMerge(layerMcpTransport));

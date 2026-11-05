@@ -463,6 +463,27 @@ export function summarizeT3ToolCalls(
     case "html-render":
       label = phrase("Rendered", "render", quantity(selected.length, "HTML page"));
       break;
+    case "aperture-status":
+      label = phrase("Checked", "check", `Aperture status ${times}`);
+      break;
+    case "aperture-query":
+      label = phrase("Queried", "query", `Aperture ${times}`);
+      break;
+    case "aperture-figure-preview":
+      label = phrase("Previewed", "preview", quantity(selected.length, "Aperture figure"));
+      break;
+    case "aperture-figure-render":
+      label = phrase("Rendered", "render", quantity(selected.length, "Aperture figure"));
+      break;
+    case "aperture-widget-push":
+      label = phrase("Published", "publish", quantity(selected.length, "Aperture widget"));
+      break;
+    case "aperture-widget-preview":
+      label = phrase("Previewed", "preview", quantity(selected.length, "Aperture widget"));
+      break;
+    case "aperture-widget-render":
+      label = phrase("Rendered", "render", quantity(selected.length, "Aperture widget"));
+      break;
     case "capabilities":
       label = phrase("Checked", "check", `orchestration capabilities ${times}`);
       break;

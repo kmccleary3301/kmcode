@@ -120,6 +120,20 @@ function formatMcpContent(result: unknown): string {
   return JSON.stringify(result);
 }
 
+// Previews return their screenshot as an MCP image block; Pi tool results carry the same shape.
+function mcpImageContent(
+  result: unknown,
+): Array<{ type: "image"; data: string; mimeType: string }> {
+  const content =
+    typeof result === "object" && result !== null && "content" in result ? result.content : undefined;
+  if (!Array.isArray(content)) return [];
+  return content.flatMap((part) =>
+    part?.type === "image" && typeof part.data === "string" && typeof part.mimeType === "string"
+      ? [{ type: "image" as const, data: part.data, mimeType: part.mimeType }]
+      : [],
+  );
+}
+
 function isMcpToolError(result: unknown): boolean {
   return (
     typeof result === "object" &&
@@ -326,7 +340,7 @@ export default async function t3McpExtension(pi: ExtensionAPI) {
             );
             const text = formatMcpContent(result);
             return {
-              content: [{ type: "text", text }],
+              content: [{ type: "text", text }, ...mcpImageContent(result)],
               details: { server: "t3-code", tool: name },
               ...(isMcpToolError(result) ? { isError: true } : {}),
             };

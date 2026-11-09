@@ -38,6 +38,7 @@ import {
   squashAtomCommandFailure,
   type AtomCommandResult,
 } from "@t3tools/client-runtime/state/runtime";
+import { modelSelectionsEqual } from "@t3tools/shared/model";
 import { videoMimeType } from "@t3tools/shared/video";
 import {
   appendCodexArtifactTemplateUsePrompt,
@@ -52,7 +53,12 @@ import {
   type Thread,
   type TurnDiffSummary,
 } from "../types";
-import { type ComposerImageAttachment, type DraftThreadState } from "../composerDraftStore";
+import {
+  type ComposerImageAttachment,
+  type ComposerModelSelectionOverrideDispatch,
+  type ComposerThreadDraftState,
+  type DraftThreadState,
+} from "../composerDraftStore";
 import * as Schema from "effect/Schema";
 import { appAtomRegistry } from "../rpc/atomRegistry";
 import { environmentThreadShells, environmentThreadDetails } from "../state/threads";
@@ -1273,6 +1279,42 @@ export function deriveCommittedServerUserMessageIds(
       row.item.type === "user_message" ? [row.item.messageId] : [],
     ),
   );
+}
+export function shouldAcknowledgeComposerModelSelectionOverride(input: {
+  dispatch: ComposerModelSelectionOverrideDispatch | null;
+  runs: ReadonlyArray<{
+    userMessageId: MessageId;
+    modelSelection: ModelSelection;
+  }>;
+}): boolean {
+  const dispatch = input.dispatch;
+  if (dispatch === null) return false;
+  const acknowledgedRun = input.runs.find((run) => run.userMessageId === dispatch.messageId);
+  return (
+    acknowledgedRun !== undefined &&
+    modelSelectionsEqual(acknowledgedRun.modelSelection, dispatch.selection)
+  );
+}
+export function snapshotPendingComposerModelSelectionOverride(input: {
+  draft: Pick<
+    ComposerThreadDraftState,
+    "modelSelectionByProvider" | "modelSelectionOverridePending" | "modelSelectionOverrideRevision"
+  > | null;
+  selectedModelSelection: ModelSelection;
+}): Pick<ComposerModelSelectionOverrideDispatch, "revision" | "selection"> | null {
+  if (!input.draft?.modelSelectionOverridePending) return null;
+  const currentSelection =
+    input.draft.modelSelectionByProvider[input.selectedModelSelection.instanceId];
+  if (
+    currentSelection === undefined ||
+    !modelSelectionsEqual(currentSelection, input.selectedModelSelection)
+  ) {
+    return null;
+  }
+  return {
+    revision: input.draft.modelSelectionOverrideRevision,
+    selection: input.selectedModelSelection,
+  };
 }
 
 export function hasServerAcknowledgedLocalDispatch(input: {

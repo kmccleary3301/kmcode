@@ -17,7 +17,9 @@ import {
   type ModelSelection,
   type PreviewAnnotationPayload,
   type ProviderOptionSelection,
+  type ServerProvider,
 } from "@t3tools/contracts";
+import { DEFAULT_UNIFIED_SETTINGS } from "@t3tools/contracts/settings";
 import { createModelSelection } from "@t3tools/shared/model";
 import {
   collectAssistantCitations,
@@ -34,6 +36,8 @@ const CURSOR_INSTANCE = ProviderInstanceId.make("cursor");
 const CODEX_DRIVER = ProviderDriverKind.make("codex");
 const CLAUDE_AGENT_DRIVER = ProviderDriverKind.make("claudeAgent");
 const CURSOR_DRIVER = ProviderDriverKind.make("cursor");
+const OMP_INSTANCE = ProviderInstanceId.make("omp");
+const OMP_DRIVER = ProviderDriverKind.make("omp");
 
 type ProviderOptionSelectionBag = ReadonlyArray<ProviderOptionSelection>;
 type ProviderOptionSelectionsByProvider = Partial<Record<string, ProviderOptionSelectionBag>>;
@@ -68,6 +72,7 @@ import {
   COMPOSER_DRAFT_STORAGE_KEY,
   clearComposerDraftsEnvironment,
   composerDraftHasUserContent,
+  deriveEffectiveComposerModelState,
   beginBackgroundDraftSubmissionByRef,
   clearBackgroundDraftSubmissionByRef,
   finalizePromotedDraftThreadByRef,
@@ -80,6 +85,7 @@ import {
   useComposerDraftStore,
   DraftId,
 } from "./composerDraftStore";
+import { shouldAcknowledgeComposerModelSelectionOverride } from "./components/ChatView.logic";
 import { removeLocalStorageItem, setLocalStorageItem } from "./hooks/useLocalStorage";
 import { insertInlineContextReference } from "./lib/composerContextReferences";
 import { terminalContextReference, threadContextRecord } from "./lib/composerContextRecords";
@@ -167,6 +173,31 @@ function modelSelection(
   options?: Record<string, string | boolean | undefined>,
 ): ModelSelection {
   return createModelSelection(defaultInstanceIdForDriver(provider), model, toSelections(options));
+}
+
+function providerWithModels(
+  models: ReadonlyArray<string>,
+  instanceId: ProviderInstanceId = CODEX_INSTANCE,
+  driver: ProviderDriverKind = CODEX_DRIVER,
+): ServerProvider {
+  return {
+    instanceId,
+    driver,
+    enabled: true,
+    installed: true,
+    version: null,
+    status: "ready",
+    auth: { status: "authenticated" },
+    checkedAt: "2026-01-01T00:00:00.000Z",
+    models: models.map((slug) => ({
+      slug,
+      name: slug,
+      isCustom: false,
+      capabilities: {},
+    })),
+    slashCommands: [],
+    skills: [],
+  };
 }
 
 function providerModelOptions(
@@ -2301,6 +2332,297 @@ describe("composerDraftStore modelSelection", () => {
     expect(
       useComposerDraftStore.getState().stickyModelSelectionByProvider[CLAUDE_AGENT_INSTANCE],
     ).toEqual(modelSelection(CLAUDE_AGENT_DRIVER, "claude-opus-4-6", { effort: "max" }));
+  });
+});
+describe("composerDraftStore pending model selection overrides", () => {
+  beforeEach(async () => {
+    resetComposerDraftStore();
+    await useComposerDraftStore.persist.clearStorage();
+    vi.useFakeTimers();
+  });
+
+  afterEach(async () => {
+    await useComposerDraftStore.persist.clearStorage();
+    vi.useRealTimers();
+    resetComposerDraftStore();
+  });
+
+  it("migrates blank v9 explicit selections to passive state and retains nonempty intent", async () => {
+    const blankThreadId = ThreadId.make("thread-v9-blank-model-override");
+    const nonemptyThreadId = ThreadId.make("thread-v9-nonempty-model-override");
+    const blankThreadRef = scopeThreadRef(TEST_ENVIRONMENT_ID, blankThreadId);
+    const nonemptyThreadRef = scopeThreadRef(TEST_ENVIRONMENT_ID, nonemptyThreadId);
+    const staleSelection = createModelSelection(OMP_INSTANCE, "anthropic/claude-opus-5-5", [
+      { id: "thinking", value: "high" },
+    ]);
+    const liveSelection = createModelSelection(OMP_INSTANCE, "gpt-6.1-sol");
+    const rawHistoricalState = {
+      version: 9,
+      state: {
+        draftsByThreadKey: {
+          [scopedThreadKey(blankThreadRef)]: {
+            prompt: "",
+            attachments: [],
+            modelSelectionByProvider: { [OMP_INSTANCE]: staleSelection },
+            activeProvider: OMP_INSTANCE,
+            modelSelectionExplicit: true,
+          },
+          [scopedThreadKey(nonemptyThreadRef)]: {
+            prompt: "use this model on the next turn",
+            attachments: [],
+            modelSelectionByProvider: { [OMP_INSTANCE]: staleSelection },
+            activeProvider: OMP_INSTANCE,
+            modelSelectionExplicit: true,
+          },
+        },
+        draftThreadsByThreadKey: {},
+        logicalProjectDraftThreadKeyByLogicalProjectKey: {},
+        stickyModelSelectionByProvider: {},
+        stickyActiveProvider: null,
+      },
+    };
+    await useComposerDraftStore.persist
+      .getOptions()
+      .storage?.setItem(COMPOSER_DRAFT_STORAGE_KEY, rawHistoricalState);
+    await vi.advanceTimersByTimeAsync(300);
+    await useComposerDraftStore.persist.rehydrate();
+
+    const blankDraft = draftFor(blankThreadId, TEST_ENVIRONMENT_ID)!;
+    const nonemptyDraft = draftFor(nonemptyThreadId, TEST_ENVIRONMENT_ID)!;
+    expect(blankDraft).toMatchObject({
+      modelSelectionByProvider: { [OMP_INSTANCE]: staleSelection },
+      modelSelectionExplicit: true,
+      modelSelectionOverridePending: false,
+      modelSelectionOverrideRevision: 0,
+      modelSelectionOverrideDispatch: null,
+    });
+    expect(nonemptyDraft).toMatchObject({
+      prompt: "use this model on the next turn",
+      modelSelectionByProvider: { [OMP_INSTANCE]: staleSelection },
+      modelSelectionExplicit: true,
+      modelSelectionOverridePending: true,
+      modelSelectionOverrideRevision: 1,
+      modelSelectionOverrideDispatch: null,
+    });
+
+    const providers = [
+      providerWithModels([staleSelection.model, liveSelection.model], OMP_INSTANCE, OMP_DRIVER),
+    ];
+    const blankState = deriveEffectiveComposerModelState({
+      draft: blankDraft,
+      providers,
+      selectedProvider: OMP_DRIVER,
+      selectedInstanceId: OMP_INSTANCE,
+      threadModelSelection: staleSelection,
+      reportedModelSelection: liveSelection,
+      projectModelSelection: null,
+      settings: DEFAULT_UNIFIED_SETTINGS,
+    });
+    const nonemptyState = deriveEffectiveComposerModelState({
+      draft: nonemptyDraft,
+      providers,
+      selectedProvider: OMP_DRIVER,
+      selectedInstanceId: OMP_INSTANCE,
+      threadModelSelection: staleSelection,
+      reportedModelSelection: liveSelection,
+      projectModelSelection: null,
+      settings: DEFAULT_UNIFIED_SETTINGS,
+    });
+
+    expect(blankState.selectedModel).toBe("gpt-6.1-sol");
+    expect(nonemptyState.selectedModel).toBe("anthropic/claude-opus-5-5");
+  });
+
+  it("persists a blank manual override across reload and a live runtime update", async () => {
+    const threadId = ThreadId.make("thread-persisted-blank-model-override");
+    const threadRef = scopeThreadRef(TEST_ENVIRONMENT_ID, threadId);
+    const manualSelection = createModelSelection(OMP_INSTANCE, "anthropic/claude-opus-5-5", [
+      { id: "thinking", value: "high" },
+    ]);
+    const runtimeSelection = createModelSelection(OMP_INSTANCE, "gpt-6.1-sol");
+
+    useComposerDraftStore.getState().setModelSelection(threadRef, manualSelection, {
+      explicit: true,
+    });
+    await vi.advanceTimersByTimeAsync(300);
+
+    resetComposerDraftStore();
+    await useComposerDraftStore.persist.rehydrate();
+
+    const restoredDraft = draftFor(threadId, TEST_ENVIRONMENT_ID)!;
+    expect(restoredDraft).toMatchObject({
+      prompt: "",
+      modelSelectionByProvider: { [OMP_INSTANCE]: manualSelection },
+      modelSelectionOverridePending: true,
+      modelSelectionOverrideRevision: 1,
+      modelSelectionOverrideDispatch: null,
+    });
+    const effectiveState = deriveEffectiveComposerModelState({
+      draft: restoredDraft,
+      providers: [
+        providerWithModels(
+          [manualSelection.model, runtimeSelection.model],
+          OMP_INSTANCE,
+          OMP_DRIVER,
+        ),
+      ],
+      selectedProvider: OMP_DRIVER,
+      selectedInstanceId: OMP_INSTANCE,
+      threadModelSelection: runtimeSelection,
+      reportedModelSelection: runtimeSelection,
+      projectModelSelection: null,
+      settings: DEFAULT_UNIFIED_SETTINGS,
+    });
+
+    expect(effectiveState.selectedModel).toBe("anthropic/claude-opus-5-5");
+  });
+
+  it("retains an exact dispatch receipt through content clearing and reload", async () => {
+    const threadId = ThreadId.make("thread-model-override-receipt");
+    const threadRef = scopeThreadRef(TEST_ENVIRONMENT_ID, threadId);
+    const selection = modelSelection(CODEX_DRIVER, "anthropic/claude-opus-5-5", {
+      thinking: "high",
+    });
+    const messageId = MessageId.make("message-model-override-receipt");
+    const store = useComposerDraftStore.getState();
+    store.setPrompt(threadRef, "send this turn");
+    store.setModelSelection(threadRef, selection, { explicit: true });
+    const pendingDraft = draftFor(threadId, TEST_ENVIRONMENT_ID)!;
+    const receipt = {
+      revision: pendingDraft.modelSelectionOverrideRevision,
+      messageId,
+      selection,
+    };
+    store.recordPendingModelSelectionOverrideDispatch(threadRef, receipt);
+    store.clearComposerContent(threadRef);
+
+    expect(draftFor(threadId, TEST_ENVIRONMENT_ID)).toMatchObject({
+      prompt: "",
+      modelSelectionOverridePending: true,
+      modelSelectionOverrideRevision: receipt.revision,
+      modelSelectionOverrideDispatch: receipt,
+    });
+    await vi.advanceTimersByTimeAsync(300);
+
+    resetComposerDraftStore();
+    await useComposerDraftStore.persist.rehydrate();
+
+    expect(draftFor(threadId, TEST_ENVIRONMENT_ID)).toMatchObject({
+      prompt: "",
+      modelSelectionByProvider: { [CODEX_INSTANCE]: selection },
+      modelSelectionOverridePending: true,
+      modelSelectionOverrideRevision: receipt.revision,
+      modelSelectionOverrideDispatch: receipt,
+    });
+    const restoredDraft = draftFor(threadId, TEST_ENVIRONMENT_ID)!;
+    expect(
+      shouldAcknowledgeComposerModelSelectionOverride({
+        dispatch: restoredDraft.modelSelectionOverrideDispatch,
+        runs: [{ userMessageId: messageId, modelSelection: selection }],
+      }),
+    ).toBe(true);
+  });
+
+  it("isolates pending acknowledgements by environment and thread", () => {
+    const sharedThreadId = ThreadId.make("thread-model-override-scope");
+    const otherThreadId = ThreadId.make("thread-model-override-scope-other");
+    const targets = [
+      {
+        threadId: sharedThreadId,
+        environmentId: TEST_ENVIRONMENT_ID,
+        threadRef: scopeThreadRef(TEST_ENVIRONMENT_ID, sharedThreadId),
+        messageId: MessageId.make("message-model-override-local"),
+      },
+      {
+        threadId: sharedThreadId,
+        environmentId: OTHER_TEST_ENVIRONMENT_ID,
+        threadRef: scopeThreadRef(OTHER_TEST_ENVIRONMENT_ID, sharedThreadId),
+        messageId: MessageId.make("message-model-override-remote"),
+      },
+      {
+        threadId: otherThreadId,
+        environmentId: TEST_ENVIRONMENT_ID,
+        threadRef: scopeThreadRef(TEST_ENVIRONMENT_ID, otherThreadId),
+        messageId: MessageId.make("message-model-override-other-thread"),
+      },
+    ];
+    const selection = modelSelection(CODEX_DRIVER, "gpt-5.4", {
+      reasoningEffort: "high",
+    });
+    const store = useComposerDraftStore.getState();
+
+    for (const target of targets) {
+      store.setModelSelection(target.threadRef, selection, { explicit: true });
+      const draft = draftFor(target.threadId, target.environmentId)!;
+      store.recordPendingModelSelectionOverrideDispatch(target.threadRef, {
+        revision: draft.modelSelectionOverrideRevision,
+        messageId: target.messageId,
+        selection,
+      });
+    }
+
+    const localDraft = draftFor(sharedThreadId, TEST_ENVIRONMENT_ID)!;
+    store.clearPendingModelSelectionOverride(
+      targets[0]!.threadRef,
+      localDraft.modelSelectionOverrideRevision,
+      selection,
+    );
+
+    expect(draftFor(sharedThreadId, TEST_ENVIRONMENT_ID)).toMatchObject({
+      modelSelectionOverridePending: false,
+      modelSelectionOverrideDispatch: null,
+    });
+    expect(draftFor(sharedThreadId, OTHER_TEST_ENVIRONMENT_ID)).toMatchObject({
+      modelSelectionOverridePending: true,
+      modelSelectionOverrideDispatch: {
+        messageId: targets[1]!.messageId,
+        selection,
+      },
+    });
+    expect(draftFor(otherThreadId, TEST_ENVIRONMENT_ID)).toMatchObject({
+      modelSelectionOverridePending: true,
+      modelSelectionOverrideDispatch: {
+        messageId: targets[2]!.messageId,
+        selection,
+      },
+    });
+  });
+
+  it("does not let an older A receipt consume a newer A to B to A choice", () => {
+    const threadId = ThreadId.make("thread-model-override-revision");
+    const threadRef = scopeThreadRef(TEST_ENVIRONMENT_ID, threadId);
+    const selectionA = modelSelection(CODEX_DRIVER, "gpt-5.4", {
+      reasoningEffort: "high",
+    });
+    const selectionB = modelSelection(CODEX_DRIVER, "gpt-6.1-sol");
+    const store = useComposerDraftStore.getState();
+    store.setModelSelection(threadRef, selectionA, { explicit: true });
+    const firstDraft = draftFor(threadId, TEST_ENVIRONMENT_ID)!;
+    const oldReceipt = {
+      revision: firstDraft.modelSelectionOverrideRevision,
+      messageId: MessageId.make("message-model-override-old"),
+      selection: selectionA,
+    };
+    store.recordPendingModelSelectionOverrideDispatch(threadRef, oldReceipt);
+
+    store.setModelSelection(threadRef, selectionB, { explicit: true });
+    store.setModelSelection(threadRef, selectionA, { explicit: true });
+    expect(
+      shouldAcknowledgeComposerModelSelectionOverride({
+        dispatch: oldReceipt,
+        runs: [{ userMessageId: oldReceipt.messageId, modelSelection: selectionA }],
+      }),
+    ).toBe(true);
+    store.clearPendingModelSelectionOverride(threadRef, oldReceipt.revision, oldReceipt.selection);
+
+    expect(draftFor(threadId, TEST_ENVIRONMENT_ID)).toMatchObject({
+      modelSelectionByProvider: { [CODEX_INSTANCE]: selectionA },
+      modelSelectionOverridePending: true,
+      modelSelectionOverrideDispatch: null,
+    });
+    expect(draftFor(threadId, TEST_ENVIRONMENT_ID)!.modelSelectionOverrideRevision).toBeGreaterThan(
+      oldReceipt.revision,
+    );
   });
 });
 

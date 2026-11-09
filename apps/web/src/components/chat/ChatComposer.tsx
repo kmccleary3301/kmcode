@@ -2144,7 +2144,10 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
       ),
     [providerStatuses, settings, activeProjectId],
   );
-  const selectedProviderByThreadId = composerDraft.activeProvider ?? null;
+  const selectedProviderByThreadId =
+    composerDraft.modelSelectionOverridePending || routeKind === "draft"
+      ? composerDraft.activeProvider
+      : null;
   const {
     selectedProviderEntry,
     requestedDriverKind,
@@ -2157,6 +2160,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
         candidateInstanceIds: [
           selectedProviderByThreadId,
           activeThread?.runtime?.providerInstanceId,
+          reportedModelSelection?.instanceId,
           activeThreadModelSelection?.instanceId,
           activeProjectDefaultModelSelection?.instanceId,
         ],
@@ -2168,6 +2172,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
       activeProjectDefaultModelSelection?.instanceId,
       activeThread?.runtime?.providerInstanceId,
       activeThreadModelSelection?.instanceId,
+      reportedModelSelection?.instanceId,
       selectedProviderByThreadId,
       lockedProvider,
       providerInstanceEntries,
@@ -2216,7 +2221,9 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     selectedProvider,
     selectedInstanceId,
     threadModelSelection: activeThreadModelSelection,
+    reportedModelSelection,
     projectModelSelection: activeProjectDefaultModelSelection,
+    preferDraftSelection: routeKind === "draft",
     settings,
   });
   const providerSendBlockReason = getAntigravitySendBlockReason(
@@ -6538,13 +6545,25 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
         });
         if (!change) return;
         if (change.modelOptions) {
+          const modelOptionsForDispatch = getComposerProviderState({
+            provider: selectedProvider,
+            model: selectedModel,
+            models: selectedProviderModels,
+            modelOptions: change.modelOptions,
+            planModeEnabled: settings.planModeEnabled,
+          }).modelOptionsForDispatch;
           useComposerDraftStore
             .getState()
-            .setProviderModelOptions(composerDraftTarget, selectedProvider, change.modelOptions, {
-              instanceId: selectedInstanceId,
-              model: selectedModel,
-              persistSticky: true,
-            });
+            .setProviderModelOptions(
+              composerDraftTarget,
+              selectedProvider,
+              modelOptionsForDispatch,
+              {
+                instanceId: selectedInstanceId,
+                model: selectedModel,
+                persistSticky: true,
+              },
+            );
         }
         if (change.prompt !== promptRef.current) {
           applyPromptReplacement(0, promptRef.current.length, change.prompt, {

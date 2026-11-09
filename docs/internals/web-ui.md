@@ -42,3 +42,20 @@ The composer banners are the reference.
 Build new UI the same way. Compose or extend a component instead of copying its markup and classes.
 When a call site repeats a treatment another one already uses, make it a variant or a slot on the
 shared component. A new composer banner or notice uses the `ComposerBanner` slots.
+
+## Composer model selection
+
+For existing threads, the composer follows the reported runtime model selection, falling back to
+the canonical thread selection. A fresh human picker or trait change overrides it for the next send;
+seeded and sticky preferences do not override live thread state. New-thread drafts retain their
+seeded selection. Store version 10 migrates blank v9 explicit selections to passive preferences,
+while preserving explicit intent in nonempty drafts.
+
+Pending intent is scoped to environment and thread. Before clearing composer content, persist the
+send's message ID, full requested selection, and intent revision. Acknowledge it only when a projected
+run has that user-message ID and requested selection; a newer choice must survive an older receipt.
+The runtime model need not equal the requested model: provider fallback must not leave the old
+override pinned. Reloading, clearing content, or observing an unrelated run is not acknowledgement.
+
+For a browser smoke check, migrate a blank v9 draft holding Opus while its live thread reports Sol:
+the composer must show Sol without clearing storage or changing the agent's model.

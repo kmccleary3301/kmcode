@@ -522,6 +522,7 @@ describe("instance-scoped model selection", () => {
             { id: "effort", value: "max" },
           ]),
         },
+        modelSelectionOverridePending: false,
       },
       providers,
       selectedProvider: driver,
@@ -542,6 +543,117 @@ describe("instance-scoped model selection", () => {
     expect(dispatch.modelOptionsForDispatch).toBeUndefined();
   });
 
+  it("uses the live model over a legacy v9 blank explicit choice", () => {
+    const instanceId = ProviderInstanceId.make("omp");
+    const driver = ProviderDriverKind.make("omp");
+    const savedSelection = createModelSelection(instanceId, "anthropic/claude-opus-5-5", [
+      { id: "thinking", value: "high" },
+    ]);
+    const reportedSelection = createModelSelection(instanceId, "gpt-6.1-sol", [
+      { id: "thinking", value: "medium" },
+    ]);
+    const providers = [
+      provider({
+        provider: driver,
+        instanceId,
+        models: ["anthropic/claude-opus-5-5", "gpt-6.1-sol"],
+      }),
+    ];
+
+    const state = deriveEffectiveComposerModelState({
+      draft: {
+        activeProvider: instanceId,
+        modelSelectionByProvider: { [instanceId]: savedSelection },
+        // v9 blank explicit records migrate without a pending manual choice.
+        modelSelectionOverridePending: false,
+      },
+      providers,
+      selectedProvider: driver,
+      selectedInstanceId: instanceId,
+      threadModelSelection: savedSelection,
+      reportedModelSelection: reportedSelection,
+      projectModelSelection: null,
+      settings: settingsWithProviderInstances(),
+    });
+
+    expect(state.selectedModel).toBe("gpt-6.1-sol");
+    expect(state.modelOptions).toEqual({
+      [instanceId]: reportedSelection.options,
+    });
+  });
+
+  it("keeps a fresh next-turn override ahead of live runtime selection", () => {
+    const instanceId = ProviderInstanceId.make("omp");
+    const driver = ProviderDriverKind.make("omp");
+    const nextTurnSelection = createModelSelection(instanceId, "anthropic/claude-opus-5-5", [
+      { id: "thinking", value: "high" },
+    ]);
+    const reportedSelection = createModelSelection(instanceId, "gpt-6.1-sol");
+    const providers = [
+      provider({
+        provider: driver,
+        instanceId,
+        models: ["anthropic/claude-opus-5-5", "gpt-6.1-sol"],
+      }),
+    ];
+
+    const state = deriveEffectiveComposerModelState({
+      draft: {
+        activeProvider: instanceId,
+        modelSelectionByProvider: { [instanceId]: nextTurnSelection },
+        modelSelectionOverridePending: true,
+      },
+      providers,
+      selectedProvider: driver,
+      selectedInstanceId: instanceId,
+      threadModelSelection: createModelSelection(instanceId, "gpt-5.6-sol"),
+      reportedModelSelection: reportedSelection,
+      projectModelSelection: null,
+      settings: settingsWithProviderInstances(),
+    });
+
+    expect(state.selectedModel).toBe("anthropic/claude-opus-5-5");
+    expect(state.modelOptions).toEqual({
+      [instanceId]: nextTurnSelection.options,
+    });
+  });
+
+  it("keeps new-thread draft defaults ahead of a runtime selection", () => {
+    const instanceId = ProviderInstanceId.make("codex");
+    const driver = ProviderDriverKind.make("codex");
+    const draftDefault = createModelSelection(instanceId, "gpt-5.4", [
+      { id: "reasoningEffort", value: "high" },
+    ]);
+    const liveSelection = createModelSelection(instanceId, "gpt-6.1-sol");
+    const providers = [
+      provider({
+        provider: driver,
+        instanceId,
+        models: ["gpt-5.4", "gpt-6.1-sol"],
+      }),
+    ];
+
+    const state = deriveEffectiveComposerModelState({
+      draft: {
+        activeProvider: instanceId,
+        modelSelectionByProvider: { [instanceId]: draftDefault },
+        modelSelectionOverridePending: false,
+      },
+      providers,
+      selectedProvider: driver,
+      selectedInstanceId: instanceId,
+      threadModelSelection: liveSelection,
+      projectModelSelection: null,
+      preferDraftSelection: true,
+      settings: settingsWithProviderInstances(),
+    });
+
+    expect(state.selectedModel).toBe("gpt-5.4");
+    expect(state.modelOptions).toEqual({
+      [instanceId]: draftDefault.options,
+    });
+  });
+
   it("preserves an explicit draft OpenCode selection while the catalog is empty", () => {
     const instanceId = ProviderInstanceId.make("opencode_work");
     const driver = ProviderDriverKind.make("opencode");
@@ -554,6 +666,7 @@ describe("instance-scoped model selection", () => {
       draft: {
         activeProvider: instanceId,
         modelSelectionByProvider: { [instanceId]: draftSelection },
+        modelSelectionOverridePending: false,
       },
       providers,
       selectedProvider: driver,
@@ -580,7 +693,11 @@ describe("instance-scoped model selection", () => {
     ];
     for (const draft of [
       null,
-      { activeProvider: instanceId, modelSelectionByProvider: { [instanceId]: saved } },
+      {
+        activeProvider: instanceId,
+        modelSelectionByProvider: { [instanceId]: saved },
+        modelSelectionOverridePending: false,
+      },
     ]) {
       const state = deriveEffectiveComposerModelState({
         draft,
@@ -612,6 +729,7 @@ describe("instance-scoped model selection", () => {
         modelSelectionByProvider: {
           [otherAccountId]: createModelSelection(otherAccountId, "gemini-other-account"),
         },
+        modelSelectionOverridePending: false,
       },
     ]) {
       const state = deriveEffectiveComposerModelState({
@@ -767,6 +885,7 @@ describe("instance-scoped model selection", () => {
       draft: {
         activeProvider: instanceId,
         modelSelectionByProvider: { [instanceId]: draftSelection },
+        modelSelectionOverridePending: true,
       },
       providers,
       selectedProvider: driver,

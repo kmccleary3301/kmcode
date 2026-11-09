@@ -4,11 +4,13 @@ import {
   rememberCheckoutIsRepo,
   threadShellHasStarted,
 } from "./ChatView.logic";
+import { scopedThreadKey, scopeThreadRef } from "@t3tools/client-runtime/environment";
 import {
   ANTIGRAVITY_DEFAULT_MODEL,
   ProviderDriverKind,
   type ServerProvider,
 } from "@t3tools/contracts";
+import { DEFAULT_UNIFIED_SETTINGS } from "@t3tools/contracts/settings";
 import { deriveProviderInstanceEntries, NO_PROVIDER_MODEL_SELECTION } from "../providerInstances";
 import type { RightPanelSurface } from "../rightPanelStore";
 import {
@@ -25,7 +27,13 @@ import {
   type OrchestrationV2ProjectedTurnItem,
   type WorktreeSetupSnapshot,
 } from "@t3tools/contracts";
+import { createModelSelection } from "@t3tools/shared/model";
 import type { CodexArtifactTemplate } from "@t3tools/client-runtime/codex-artifact-templates";
+import {
+  clearComposerDraftsEnvironment,
+  deriveEffectiveComposerModelState,
+  useComposerDraftStore,
+} from "../composerDraftStore";
 import * as DateTime from "effect/DateTime";
 import * as Option from "effect/Option";
 import { afterEach, describe, expect, it, vi } from "vite-plus/test";
@@ -42,6 +50,8 @@ import {
   resolveBackgroundDraftWorkspaceOptions,
   resolveComposerInteractionMode,
   restorePlanFollowUpComposer,
+  shouldAcknowledgeComposerModelSelectionOverride,
+  snapshotPendingComposerModelSelectionOverride,
   resolveComposerProviderSelection,
   resolveProactiveTurnDiffAction,
   resolveDraftHeroState,
@@ -2402,5 +2412,169 @@ describe("waitForRevertedMessage", () => {
     await vi.advanceTimersByTimeAsync(50);
     await settled;
     vi.useRealTimers();
+  });
+});
+describe("composer model selection override receipts", () => {
+  const instanceId = ProviderInstanceId.make("omp");
+  const driver = ProviderDriverKind.make("omp");
+  const requestedOpus = createModelSelection(instanceId, "anthropic/claude-opus-5-5", [
+    { id: "thinking", value: "high" },
+  ]);
+  const sameModelDifferentOptions = createModelSelection(instanceId, "anthropic/claude-opus-5-5", [
+    { id: "thinking", value: "low" },
+  ]);
+  const sameSelectionDifferentInstance = createModelSelection(
+    ProviderInstanceId.make("omp_other"),
+    "anthropic/claude-opus-5-5",
+    [{ id: "thinking", value: "high" }],
+  );
+  const messageId = MessageId.make("message-model-selection-receipt");
+  const dispatch = { revision: 4, messageId, selection: requestedOpus };
+
+  it("rejects non-pending or mismatched selections", () => {
+    const pendingDraft = {
+      activeProvider: instanceId,
+      modelSelectionByProvider: { [instanceId]: requestedOpus },
+      modelSelectionOverridePending: true,
+      modelSelectionOverrideRevision: dispatch.revision,
+    };
+    expect(
+      snapshotPendingComposerModelSelectionOverride({
+        draft: { ...pendingDraft, modelSelectionOverridePending: false },
+        selectedModelSelection: requestedOpus,
+      }),
+    ).toBeNull();
+    expect(
+      snapshotPendingComposerModelSelectionOverride({
+        draft: {
+          ...pendingDraft,
+          modelSelectionByProvider: { [instanceId]: sameModelDifferentOptions },
+        },
+        selectedModelSelection: requestedOpus,
+      }),
+    ).toBeNull();
+    expect(
+      snapshotPendingComposerModelSelectionOverride({
+        draft: {
+          ...pendingDraft,
+          modelSelectionByProvider: { [instanceId]: requestedOpus },
+        },
+        selectedModelSelection: sameSelectionDifferentInstance,
+      }),
+    ).toBeNull();
+  });
+
+  it("requires both the exact user message and full requested model selection", () => {
+    expect(
+      shouldAcknowledgeComposerModelSelectionOverride({
+        dispatch,
+        runs: [
+          {
+            userMessageId: MessageId.make("unrelated-same-model-message"),
+            modelSelection: requestedOpus,
+          },
+        ],
+      }),
+    ).toBe(false);
+    expect(
+      shouldAcknowledgeComposerModelSelectionOverride({
+        dispatch,
+        runs: [{ userMessageId: messageId, modelSelection: sameModelDifferentOptions }],
+      }),
+    ).toBe(false);
+    expect(
+      shouldAcknowledgeComposerModelSelectionOverride({
+        dispatch,
+        runs: [{ userMessageId: messageId, modelSelection: sameSelectionDifferentInstance }],
+      }),
+    ).toBe(false);
+    expect(
+      shouldAcknowledgeComposerModelSelectionOverride({
+        dispatch: null,
+        runs: [{ userMessageId: messageId, modelSelection: requestedOpus }],
+      }),
+    ).toBe(false);
+    expect(
+      shouldAcknowledgeComposerModelSelectionOverride({
+        dispatch,
+        runs: [{ userMessageId: messageId, modelSelection: requestedOpus }],
+      }),
+    ).toBe(true);
+  });
+
+  it("accepts the requested Opus run while displaying the projected Sol fallback", async () => {
+    vi.useFakeTimers();
+    const environmentId = EnvironmentId.make("environment-model-override-receipt");
+    const threadRef = scopeThreadRef(
+      environmentId,
+      ThreadId.make("thread-model-override-fallback"),
+    );
+    const threadKey = scopedThreadKey(threadRef);
+    const actualFallback = createModelSelection(instanceId, "gpt-6.1-sol");
+    const provider: ServerProvider = {
+      instanceId,
+      driver,
+      enabled: true,
+      installed: true,
+      version: null,
+      status: "ready",
+      auth: { status: "authenticated" },
+      checkedAt: now,
+      models: [requestedOpus.model, actualFallback.model].map((slug) => ({
+        slug,
+        name: slug,
+        isCustom: false,
+        capabilities: {},
+      })),
+      slashCommands: [],
+      skills: [],
+    };
+    const messageId = MessageId.make("message-model-selection-receipt-fallback");
+
+    try {
+      const store = useComposerDraftStore.getState();
+      store.setModelSelection(threadRef, requestedOpus, { explicit: true });
+      const pendingDraft = useComposerDraftStore.getState().draftsByThreadKey[threadKey]!;
+      const receipt = {
+        revision: pendingDraft.modelSelectionOverrideRevision,
+        messageId,
+        selection: requestedOpus,
+      };
+      store.recordPendingModelSelectionOverrideDispatch(threadRef, receipt);
+      const storedReceipt =
+        useComposerDraftStore.getState().draftsByThreadKey[threadKey]!
+          .modelSelectionOverrideDispatch;
+      const accepted = shouldAcknowledgeComposerModelSelectionOverride({
+        dispatch: storedReceipt,
+        runs: [{ userMessageId: messageId, modelSelection: requestedOpus }],
+      });
+
+      expect(accepted).toBe(true);
+      if (accepted) {
+        store.clearPendingModelSelectionOverride(threadRef, receipt.revision, receipt.selection);
+      }
+      const passiveDraft = useComposerDraftStore.getState().draftsByThreadKey[threadKey]!;
+      expect(passiveDraft).toMatchObject({
+        modelSelectionOverridePending: false,
+        modelSelectionOverrideDispatch: null,
+      });
+
+      const effectiveState = deriveEffectiveComposerModelState({
+        draft: passiveDraft,
+        providers: [provider],
+        selectedProvider: driver,
+        selectedInstanceId: instanceId,
+        threadModelSelection: requestedOpus,
+        reportedModelSelection: actualFallback,
+        projectModelSelection: null,
+        settings: DEFAULT_UNIFIED_SETTINGS,
+      });
+
+      expect(effectiveState.selectedModel).toBe("gpt-6.1-sol");
+    } finally {
+      clearComposerDraftsEnvironment(environmentId);
+      vi.clearAllTimers();
+      vi.useRealTimers();
+    }
   });
 });

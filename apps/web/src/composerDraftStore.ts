@@ -6,6 +6,7 @@ import {
   DEFAULT_MODEL_BY_PROVIDER,
   defaultInstanceIdForDriver,
   EnvironmentId,
+  MessageId,
   ModelSelection,
   ProjectId,
   ProviderInstanceId,
@@ -37,7 +38,11 @@ import * as Schema from "effect/Schema";
 import * as Equal from "effect/Equal";
 import * as Effect from "effect/Effect";
 import { DeepMutable } from "effect/Types";
-import { createModelSelection, normalizeModelSlug } from "@t3tools/shared/model";
+import {
+  createModelSelection,
+  modelSelectionsEqual,
+  normalizeModelSlug,
+} from "@t3tools/shared/model";
 import { useMemo } from "react";
 import { getLocalStorageItem } from "./hooks/useLocalStorage";
 import { resolveAppModelSelection, resolveAppModelSelectionForInstance } from "./modelSelection";
@@ -87,7 +92,7 @@ const isSnapShotSource = Schema.is(SnapShotSource);
 const isPreviewAnnotationPayload = Schema.is(PreviewAnnotationPayloadSchema);
 
 export const COMPOSER_DRAFT_STORAGE_KEY = "t3code:composer-drafts:v1";
-const COMPOSER_DRAFT_STORAGE_VERSION = 9;
+const COMPOSER_DRAFT_STORAGE_VERSION = 10;
 const DraftThreadEnvModeSchema = Schema.Literals(["local", "worktree"]);
 export type DraftThreadEnvMode = typeof DraftThreadEnvModeSchema.Type;
 
@@ -231,6 +236,18 @@ const PersistedTerminalContextDraft = Schema.Struct({
 });
 type PersistedTerminalContextDraft = typeof PersistedTerminalContextDraft.Type;
 
+export interface ComposerModelSelectionOverrideDispatch {
+  revision: number;
+  messageId: MessageId;
+  selection: ModelSelection;
+}
+
+const PersistedComposerModelSelectionOverrideDispatch = Schema.Struct({
+  revision: Schema.Number,
+  messageId: MessageId,
+  selection: ModelSelection,
+});
+
 const PersistedComposerThreadDraftState = Schema.Struct({
   prompt: Schema.String,
   attachments: Schema.Array(PersistedComposerImageAttachment),
@@ -256,6 +273,11 @@ const PersistedComposerThreadDraftState = Schema.Struct({
   // selections (project default / sticky) leave it unset so later seeds can
   // replace them; legacy entries predate the flag and read as seeded too.
   modelSelectionExplicit: Schema.optionalKey(Schema.Boolean),
+  modelSelectionOverridePending: Schema.optionalKey(Schema.Boolean),
+  modelSelectionOverrideRevision: Schema.optionalKey(Schema.Number),
+  modelSelectionOverrideDispatch: Schema.optionalKey(
+    PersistedComposerModelSelectionOverrideDispatch,
+  ),
   runtimeMode: Schema.optionalKey(RuntimeMode),
   interactionMode: Schema.optionalKey(ProviderInteractionMode),
 });
@@ -411,6 +433,12 @@ export interface ComposerThreadDraftState {
    * may replace it. Legacy entries predate the flag and read as seeded.
    */
   modelSelectionExplicit?: boolean;
+  /** A fresh user choice that has not yet been acknowledged by a dispatched run. */
+  modelSelectionOverridePending: boolean;
+  /** Monotonic within this draft; protects a later edit from an older send acknowledgement. */
+  modelSelectionOverrideRevision: number;
+  /** Request correlation retained across reload until the accepted run is projected. */
+  modelSelectionOverrideDispatch: ComposerModelSelectionOverrideDispatch | null;
   runtimeMode: RuntimeMode | null;
   interactionMode: ProviderInteractionMode | null;
 }
@@ -605,6 +633,15 @@ interface ComposerDraftStoreState {
       replaceOptions?: boolean;
     },
   ) => void;
+  recordPendingModelSelectionOverrideDispatch: (
+    threadRef: ComposerThreadTarget,
+    dispatch: ComposerModelSelectionOverrideDispatch,
+  ) => void;
+  clearPendingModelSelectionOverride: (
+    threadRef: ComposerThreadTarget,
+    revision: number,
+    expectedSelection: ModelSelection,
+  ) => void;
   /** Replace the model options for one or more providers in the draft. */
   setModelOptions: (
     threadRef: ComposerThreadTarget,
@@ -737,6 +774,7 @@ export interface EffectiveComposerModelState {
 interface ComposerDraftModelState {
   activeProvider: ProviderInstanceId | null;
   modelSelectionByProvider: Partial<Record<ProviderInstanceId, ModelSelection>>;
+  modelSelectionOverridePending: boolean;
 }
 
 function providerSelectionsFromModelSelection(
@@ -849,6 +887,7 @@ const EMPTY_MODEL_SELECTION_BY_PROVIDER: Partial<Record<ProviderDriverKind, Mode
 const EMPTY_COMPOSER_DRAFT_MODEL_STATE = Object.freeze<ComposerDraftModelState>({
   activeProvider: null,
   modelSelectionByProvider: EMPTY_MODEL_SELECTION_BY_PROVIDER,
+  modelSelectionOverridePending: false,
 });
 
 const EMPTY_THREAD_DRAFT = Object.freeze<ComposerThreadDraftState>({
@@ -863,6 +902,9 @@ const EMPTY_THREAD_DRAFT = Object.freeze<ComposerThreadDraftState>({
   threadContexts: EMPTY_THREAD_CONTEXTS,
   modelSelectionByProvider: EMPTY_MODEL_SELECTION_BY_PROVIDER,
   activeProvider: null,
+  modelSelectionOverridePending: false,
+  modelSelectionOverrideRevision: 0,
+  modelSelectionOverrideDispatch: null,
   runtimeMode: null,
   interactionMode: null,
 });
@@ -886,6 +928,9 @@ function createEmptyThreadDraft(): ComposerThreadDraftState {
     threadContexts: [],
     modelSelectionByProvider: {},
     activeProvider: null,
+    modelSelectionOverridePending: false,
+    modelSelectionOverrideRevision: 0,
+    modelSelectionOverrideDispatch: null,
     runtimeMode: null,
     interactionMode: null,
   };
@@ -1247,7 +1292,10 @@ function legacyToModelSelectionByProvider(
 
 export function deriveEffectiveComposerModelState(input: {
   draft:
-    | Pick<ComposerThreadDraftState, "modelSelectionByProvider" | "activeProvider">
+    | Pick<
+        ComposerThreadDraftState,
+        "modelSelectionByProvider" | "activeProvider" | "modelSelectionOverridePending"
+      >
     | null
     | undefined;
   providers: ReadonlyArray<ServerProvider>;
@@ -1261,15 +1309,31 @@ export function deriveEffectiveComposerModelState(input: {
    */
   selectedInstanceId?: ProviderInstanceId | null | undefined;
   threadModelSelection: ModelSelection | null | undefined;
+  reportedModelSelection?: ModelSelection | null | undefined;
   projectModelSelection: ModelSelection | null | undefined;
+  /** New-thread drafts keep their seeded/sticky selection until a thread exists. */
+  preferDraftSelection?: boolean;
   settings: UnifiedSettings;
 }): EffectiveComposerModelState {
+  const matchesSelectedInstance = (selection: ModelSelection | null | undefined) =>
+    selection !== null &&
+    selection !== undefined &&
+    (input.selectedInstanceId === null ||
+      input.selectedInstanceId === undefined ||
+      selection.instanceId === input.selectedInstanceId);
+  const reportedSelection = matchesSelectedInstance(input.reportedModelSelection)
+    ? input.reportedModelSelection
+    : null;
+  const threadSelection = matchesSelectedInstance(input.threadModelSelection)
+    ? input.threadModelSelection
+    : null;
+  const liveSelection = reportedSelection ?? threadSelection;
+  const preferDraftSelection =
+    input.preferDraftSelection === true || input.draft?.modelSelectionOverridePending === true;
   const baseModelCandidate =
-    input.threadModelSelection?.model ?? input.projectModelSelection?.model ?? null;
-  const preserveThreadModel =
-    input.selectedInstanceId !== null &&
-    input.selectedInstanceId !== undefined &&
-    input.threadModelSelection?.instanceId === input.selectedInstanceId;
+    (!preferDraftSelection ? liveSelection?.model : null) ??
+    input.projectModelSelection?.model ??
+    null;
   const baseModel =
     (input.selectedInstanceId
       ? resolveAppModelSelectionForInstance(
@@ -1277,7 +1341,7 @@ export function deriveEffectiveComposerModelState(input: {
           input.settings,
           input.providers,
           baseModelCandidate,
-          { preserveUnavailableSelection: preserveThreadModel },
+          { preserveUnavailableSelection: liveSelection !== null && !preferDraftSelection },
         )
       : null) ??
     // Antigravity has no static model or cross-account catalog fallback.
@@ -1303,13 +1367,13 @@ export function deriveEffectiveComposerModelState(input: {
     input.selectedInstanceId !== defaultInstanceIdForDriver(input.selectedProvider)
       ? undefined
       : input.draft?.modelSelectionByProvider?.[ProviderInstanceId.make(input.selectedProvider)];
-  const activeSelection = instanceSelection ?? legacySelection;
-  const activeSelectionInstanceId = instanceSelection
-    ? (input.selectedInstanceId ?? ProviderInstanceId.make(input.selectedProvider))
-    : ProviderInstanceId.make(input.selectedProvider);
-  const selectedModel = activeSelection?.model
+  const draftSelection = instanceSelection ?? legacySelection;
+  const activeSelection = preferDraftSelection
+    ? (draftSelection ?? liveSelection)
+    : (liveSelection ?? draftSelection);
+  const selectedModel = activeSelection
     ? (resolveAppModelSelectionForInstance(
-        activeSelectionInstanceId,
+        activeSelection.instanceId,
         input.settings,
         input.providers,
         activeSelection.model,
@@ -1321,11 +1385,22 @@ export function deriveEffectiveComposerModelState(input: {
         input.settings,
         input.providers,
         activeSelection.model,
-      ))
+      ) ??
+      baseModel)
     : baseModel;
-  const modelOptions =
-    modelSelectionByProviderToOptions(input.draft?.modelSelectionByProvider) ??
-    providerSelectionsFromModelSelection(input.threadModelSelection) ??
+  const draftOptions = modelSelectionByProviderToOptions(input.draft?.modelSelectionByProvider);
+  let modelOptions = draftOptions;
+  if (!preferDraftSelection && liveSelection) {
+    const nextOptions = { ...(draftOptions ?? {}) };
+    if (liveSelection.options && liveSelection.options.length > 0) {
+      nextOptions[liveSelection.instanceId] = liveSelection.options;
+    } else {
+      delete nextOptions[liveSelection.instanceId];
+    }
+    modelOptions = Object.keys(nextOptions).length > 0 ? nextOptions : null;
+  }
+  modelOptions ??=
+    providerSelectionsFromModelSelection(liveSelection) ??
     providerSelectionsFromModelSelection(input.projectModelSelection) ??
     null;
 
@@ -1922,8 +1997,7 @@ function normalizePersistedDraftsByThreadId(
     );
   }
 
-  const nextDraftsByThreadKey: DeepMutable<PersistedComposerDraftStoreState["draftsByThreadKey"]> =
-    {};
+  const nextDraftsByThreadKey: Record<string, PersistedComposerThreadDraftState> = {};
   for (const [threadKeyOrId, draftValue] of Object.entries(
     rawDraftMap as Record<string, unknown>,
   )) {
@@ -2025,7 +2099,6 @@ function normalizePersistedDraftsByThreadId(
     let modelSelectionByProvider: Partial<Record<ProviderInstanceId, ModelSelection>> = {};
     let activeProvider: ProviderInstanceId | null = null;
     let modelSelectionExplicit: true | undefined = undefined;
-
     if (
       draftCandidate.modelSelectionByProvider &&
       typeof draftCandidate.modelSelectionByProvider === "object"
@@ -2070,6 +2143,37 @@ function normalizePersistedDraftsByThreadId(
 
     const hasModelData =
       Object.keys(modelSelectionByProvider).length > 0 || activeProvider !== null;
+    const hasComposerContent =
+      promptCandidate.trim().length > 0 ||
+      attachments.length > 0 ||
+      files.length > 0 ||
+      terminalContexts.length > 0 ||
+      previewAnnotations.length > 0 ||
+      reviewComments.length > 0 ||
+      threadContexts.length > 0;
+    const modelSelectionOverridePending =
+      draftCandidate.modelSelectionOverridePending === undefined
+        ? hasModelData && modelSelectionExplicit === true && hasComposerContent
+        : draftCandidate.modelSelectionOverridePending === true;
+    const modelSelectionOverrideRevision =
+      typeof draftCandidate.modelSelectionOverrideRevision === "number" &&
+      Number.isSafeInteger(draftCandidate.modelSelectionOverrideRevision) &&
+      draftCandidate.modelSelectionOverrideRevision >= 0
+        ? draftCandidate.modelSelectionOverrideRevision
+        : modelSelectionOverridePending
+          ? 1
+          : 0;
+    const currentModelSelection =
+      activeProvider === null ? null : (modelSelectionByProvider[activeProvider] ?? null);
+    const dispatchCandidate = draftCandidate.modelSelectionOverrideDispatch;
+    const modelSelectionOverrideDispatch =
+      modelSelectionOverridePending &&
+      Schema.is(PersistedComposerModelSelectionOverrideDispatch)(dispatchCandidate) &&
+      dispatchCandidate.revision === modelSelectionOverrideRevision &&
+      currentModelSelection !== null &&
+      modelSelectionsEqual(dispatchCandidate.selection, currentModelSelection)
+        ? dispatchCandidate
+        : undefined;
     if (
       promptCandidate.length === 0 &&
       attachments.length === 0 &&
@@ -2109,6 +2213,9 @@ function normalizePersistedDraftsByThreadId(
             modelSelectionByProvider: compactModelSelectionByProvider(modelSelectionByProvider),
             activeProvider,
             ...(modelSelectionExplicit ? { modelSelectionExplicit: true } : {}),
+            modelSelectionOverridePending,
+            modelSelectionOverrideRevision,
+            ...(modelSelectionOverrideDispatch ? { modelSelectionOverrideDispatch } : {}),
           }
         : {}),
       ...(runtimeMode ? { runtimeMode } : {}),
@@ -2191,9 +2298,7 @@ export function partializeComposerDraftStoreState(
       )
       .map(([threadKey]) => threadKey),
   );
-  const persistedDraftsByThreadKey: DeepMutable<
-    PersistedComposerDraftStoreState["draftsByThreadKey"]
-  > = {};
+  const persistedDraftsByThreadKey: Record<string, PersistedComposerThreadDraftState> = {};
   for (const [threadKey, draft] of Object.entries(state.draftsByThreadKey)) {
     if (typeof threadKey !== "string" || threadKey.length === 0) {
       continue;
@@ -2219,7 +2324,7 @@ export function partializeComposerDraftStoreState(
     ) {
       continue;
     }
-    const persistedDraft: DeepMutable<PersistedComposerThreadDraftState> = {
+    const persistedDraft: PersistedComposerThreadDraftState = {
       prompt: draft.prompt,
       attachments: draft.persistedAttachments,
       ...(draft.files.length > 0
@@ -2278,6 +2383,11 @@ export function partializeComposerDraftStoreState(
             ),
             activeProvider: draft.activeProvider,
             ...(draft.modelSelectionExplicit ? { modelSelectionExplicit: true } : {}),
+            modelSelectionOverridePending: draft.modelSelectionOverridePending,
+            modelSelectionOverrideRevision: draft.modelSelectionOverrideRevision,
+            ...(draft.modelSelectionOverrideDispatch
+              ? { modelSelectionOverrideDispatch: draft.modelSelectionOverrideDispatch }
+              : {}),
           }
         : {}),
       ...(draft.runtimeMode ? { runtimeMode: draft.runtimeMode } : {}),
@@ -2555,6 +2665,11 @@ function toHydratedThreadDraft(
     modelSelectionByProvider,
     activeProvider,
     ...(persistedDraft.modelSelectionExplicit ? { modelSelectionExplicit: true } : {}),
+    modelSelectionOverridePending: persistedDraft.modelSelectionOverridePending === true,
+    modelSelectionOverrideRevision:
+      persistedDraft.modelSelectionOverrideRevision ??
+      (persistedDraft.modelSelectionOverridePending === true ? 1 : 0),
+    modelSelectionOverrideDispatch: persistedDraft.modelSelectionOverrideDispatch ?? null,
     runtimeMode: persistedDraft.runtimeMode ?? null,
     interactionMode: persistedDraft.interactionMode ?? null,
   };
@@ -3057,7 +3172,9 @@ const composerDraftStore = create<ComposerDraftStoreState>()(
             if (
               Equal.equals(base.modelSelectionByProvider, nextMap) &&
               base.activeProvider === stickyActiveProvider &&
-              base.modelSelectionExplicit === undefined
+              base.modelSelectionExplicit === undefined &&
+              !base.modelSelectionOverridePending &&
+              base.modelSelectionOverrideDispatch === null
             ) {
               return state;
             }
@@ -3066,6 +3183,10 @@ const composerDraftStore = create<ComposerDraftStoreState>()(
               ...retained,
               modelSelectionByProvider: nextMap,
               activeProvider: stickyActiveProvider,
+              modelSelectionOverridePending: false,
+              modelSelectionOverrideRevision:
+                base.modelSelectionOverrideRevision + (base.modelSelectionOverridePending ? 1 : 0),
+              modelSelectionOverrideDispatch: null,
             };
             const nextDraftsByThreadKey = { ...state.draftsByThreadKey };
             if (shouldRemoveDraft(nextDraft)) {
@@ -3161,22 +3282,31 @@ const composerDraftStore = create<ComposerDraftStoreState>()(
               }
             }
             const nextActiveProvider = normalized?.instanceId ?? base.activeProvider;
-            if (
+            const isExplicitSelection = opts?.explicit === true && normalized !== null;
+            const hasSameSelection =
               Equal.equals(base.modelSelectionByProvider, nextMap) &&
-              base.activeProvider === nextActiveProvider &&
-              (base.modelSelectionExplicit ?? false) === (opts?.explicit === true)
+              base.activeProvider === nextActiveProvider;
+            if (
+              !isExplicitSelection &&
+              hasSameSelection &&
+              base.modelSelectionExplicit === undefined &&
+              !base.modelSelectionOverridePending &&
+              base.modelSelectionOverrideDispatch === null
             ) {
               return state;
             }
-            // Last writer defines intent: picker writes mark the selection
-            // explicit; seeding writes leave it unset so future seeds can
-            // replace it.
+            // Passive seeds are not user intent. Picker events always advance
+            // the revision, even for the same value, so an older send cannot
+            // consume a later A → B → A choice.
             const { modelSelectionExplicit: _previousExplicit, ...restBase } = base;
             const nextDraft: ComposerThreadDraftState = {
               ...restBase,
               modelSelectionByProvider: nextMap,
               activeProvider: nextActiveProvider,
-              ...(opts?.explicit === true ? { modelSelectionExplicit: true as const } : {}),
+              modelSelectionOverridePending: isExplicitSelection,
+              modelSelectionOverrideRevision: base.modelSelectionOverrideRevision + 1,
+              modelSelectionOverrideDispatch: null,
+              ...(isExplicitSelection ? { modelSelectionExplicit: true as const } : {}),
             };
             const nextDraftsByThreadKey = { ...state.draftsByThreadKey };
             if (shouldRemoveDraft(nextDraft)) {
@@ -3185,6 +3315,66 @@ const composerDraftStore = create<ComposerDraftStoreState>()(
               nextDraftsByThreadKey[threadKey] = nextDraft;
             }
             return { draftsByThreadKey: nextDraftsByThreadKey };
+          });
+        },
+        recordPendingModelSelectionOverrideDispatch: (threadRef, dispatch) => {
+          const threadKey = resolveComposerDraftKey(get(), threadRef) ?? "";
+          if (threadKey.length === 0) return;
+          let recorded = false;
+          set((state) => {
+            const draft = state.draftsByThreadKey[threadKey];
+            const currentSelection = draft?.activeProvider
+              ? (draft.modelSelectionByProvider[draft.activeProvider] ?? null)
+              : null;
+            if (
+              !draft ||
+              !draft.modelSelectionOverridePending ||
+              draft.modelSelectionOverrideRevision !== dispatch.revision ||
+              currentSelection === null ||
+              !modelSelectionsEqual(currentSelection, dispatch.selection)
+            ) {
+              return state;
+            }
+            recorded = true;
+            return {
+              draftsByThreadKey: {
+                ...state.draftsByThreadKey,
+                [threadKey]: {
+                  ...draft,
+                  modelSelectionOverrideDispatch: dispatch,
+                },
+              },
+            };
+          });
+          if (recorded) composerDebouncedStorage.flush();
+        },
+        clearPendingModelSelectionOverride: (threadRef, revision, expectedSelection) => {
+          const threadKey = resolveComposerDraftKey(get(), threadRef) ?? "";
+          if (threadKey.length === 0) return;
+          set((state) => {
+            const draft = state.draftsByThreadKey[threadKey];
+            const currentSelection = draft?.activeProvider
+              ? (draft.modelSelectionByProvider[draft.activeProvider] ?? null)
+              : null;
+            if (
+              !draft ||
+              !draft.modelSelectionOverridePending ||
+              draft.modelSelectionOverrideRevision !== revision ||
+              currentSelection === null ||
+              !modelSelectionsEqual(currentSelection, expectedSelection)
+            ) {
+              return state;
+            }
+            return {
+              draftsByThreadKey: {
+                ...state.draftsByThreadKey,
+                [threadKey]: {
+                  ...draft,
+                  modelSelectionOverridePending: false,
+                  modelSelectionOverrideDispatch: null,
+                },
+              },
+            };
           });
         },
         setModelOptions: (threadRef, modelOptions) => {
@@ -3266,6 +3456,7 @@ const composerDraftStore = create<ComposerDraftStoreState>()(
               const { options: _, ...rest } = currentForProvider;
               nextMap[instanceKey] = rest as ModelSelection;
             }
+            if (nextMap[instanceKey] === undefined) return state;
 
             // Handle sticky persistence
             let nextStickyMap = state.stickyModelSelectionByProvider;
@@ -3314,23 +3505,18 @@ const composerDraftStore = create<ComposerDraftStoreState>()(
                 : (base.activeProvider ?? instanceKey);
             }
 
-            if (
-              Equal.equals(base.modelSelectionByProvider, nextMap) &&
-              Equal.equals(state.stickyModelSelectionByProvider, nextStickyMap) &&
-              Equal.equals(state.stickyOptionsByModelByProvider, nextOptionsByModel) &&
-              state.stickyActiveProvider === nextStickyActiveProvider
-            ) {
-              return state;
-            }
-
-            // Trait edits are user-driven intent: mark the selection explicit
-            // so later seeds cannot silently replace the chosen options.
+            // TraitsPicker changes are explicit user intent. Advance even
+            // when the selected option value is unchanged to invalidate an
+            // older in-flight send acknowledgement.
             const { modelSelectionExplicit: _previousExplicit, ...restBase } = base;
             const nextDraft: ComposerThreadDraftState = {
               ...restBase,
               ...(options?.instanceId ? { activeProvider: instanceKey } : {}),
               modelSelectionByProvider: nextMap,
               modelSelectionExplicit: true,
+              modelSelectionOverridePending: true,
+              modelSelectionOverrideRevision: base.modelSelectionOverrideRevision + 1,
+              modelSelectionOverrideDispatch: null,
             };
             const nextDraftsByThreadKey = { ...state.draftsByThreadKey };
             if (shouldRemoveDraft(nextDraft)) {
@@ -4506,6 +4692,7 @@ function useComposerDraftModelState(threadRef: ComposerThreadTarget): ComposerDr
         ? {
             activeProvider: draft.activeProvider,
             modelSelectionByProvider: draft.modelSelectionByProvider,
+            modelSelectionOverridePending: draft.modelSelectionOverridePending,
           }
         : EMPTY_COMPOSER_DRAFT_MODEL_STATE;
     }),
@@ -4524,7 +4711,9 @@ export function useEffectiveComposerModelState(input: {
    */
   selectedInstanceId?: ProviderInstanceId | null | undefined;
   threadModelSelection: ModelSelection | null | undefined;
+  reportedModelSelection?: ModelSelection | null | undefined;
   projectModelSelection: ModelSelection | null | undefined;
+  preferDraftSelection?: boolean;
   settings: UnifiedSettings;
 }): EffectiveComposerModelState {
   const draft = useComposerDraftModelState(input.threadRef ?? input.draftId ?? DraftId.make(""));
@@ -4537,7 +4726,9 @@ export function useEffectiveComposerModelState(input: {
         selectedProvider: input.selectedProvider,
         selectedInstanceId: input.selectedInstanceId,
         threadModelSelection: input.threadModelSelection,
+        reportedModelSelection: input.reportedModelSelection,
         projectModelSelection: input.projectModelSelection,
+        preferDraftSelection: input.preferDraftSelection ?? false,
         settings: input.settings,
       }),
     [
@@ -4548,6 +4739,8 @@ export function useEffectiveComposerModelState(input: {
       input.selectedInstanceId,
       input.selectedProvider,
       input.threadModelSelection,
+      input.reportedModelSelection,
+      input.preferDraftSelection,
     ],
   );
 }

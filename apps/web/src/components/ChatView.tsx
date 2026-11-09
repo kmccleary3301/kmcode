@@ -68,6 +68,7 @@ import {
   type EnvironmentId,
   type MessageId,
   type ModelSelection,
+  type OrchestrationMessageContext,
   type ProjectScript,
   type ProjectId,
   type ProviderApprovalDecision,
@@ -139,6 +140,7 @@ import {
   applyClaudePromptEffortPrefix,
   createModelSelection,
   formatModelSlugName,
+  modelSelectionsEqual,
   resolvePromptInjectedEffort,
   resolveSelectableModel,
 } from "@t3tools/shared/model";
@@ -541,6 +543,8 @@ import {
   collectUserMessageBlobPreviewUrls,
   createLocalDispatchSnapshot,
   deriveCommittedServerUserMessageIds,
+  shouldAcknowledgeComposerModelSelectionOverride,
+  snapshotPendingComposerModelSelectionOverride,
   deriveComposerSendState,
   dismissBranchMismatchForSession,
   hasEnvironmentReconnectWarningGraceElapsed,
@@ -1887,15 +1891,32 @@ export default function ChatView(props: ChatViewProps) {
   const composerInteractionMode = useComposerDraftStore(
     (store) => store.getComposerDraft(composerDraftTarget)?.interactionMode ?? null,
   );
-  const composerActiveProvider = useComposerDraftStore(
-    (store) => store.getComposerDraft(composerDraftTarget)?.activeProvider ?? null,
+  const composerModelSelectionState = useComposerDraftStore(
+    useShallow((store) => {
+      const draft = store.getComposerDraft(composerDraftTarget);
+      const draftSelection = draft?.activeProvider
+        ? (draft.modelSelectionByProvider[draft.activeProvider] ?? null)
+        : null;
+      const liveSelection =
+        reportedModelSelection ??
+        serverProjection?.thread.modelSelection ??
+        serverThread?.modelSelection ??
+        null;
+      const preferDraftSelection =
+        draft?.modelSelectionOverridePending === true || routeKind === "draft";
+      const selectedModelSelection = preferDraftSelection
+        ? (draftSelection ?? liveSelection)
+        : (liveSelection ?? draftSelection);
+      return {
+        activeProvider: selectedModelSelection?.instanceId ?? draft?.activeProvider ?? null,
+        selectedModelSelection,
+        pendingDispatch: draft?.modelSelectionOverrideDispatch ?? null,
+      };
+    }),
   );
-  const composerSelectedModelSelection = useComposerDraftStore((store) => {
-    const draft = store.getComposerDraft(composerDraftTarget);
-    return draft?.activeProvider
-      ? (draft.modelSelectionByProvider[draft.activeProvider] ?? null)
-      : null;
-  });
+  const composerActiveProvider = composerModelSelectionState.activeProvider;
+  const composerSelectedModelSelection = composerModelSelectionState.selectedModelSelection;
+  const pendingModelSelectionOverrideDispatch = composerModelSelectionState.pendingDispatch;
   const composerHasAttachments = useComposerDraftStore((store) => {
     const draft = store.getComposerDraft(composerDraftTarget);
     return (draft?.images.length ?? 0) > 0 || (draft?.files.length ?? 0) > 0;
@@ -2210,6 +2231,25 @@ export default function ChatView(props: ChatViewProps) {
     () => (serverProjection === null ? null : deriveLatestThreadRun(serverProjection)),
     [serverProjection],
   );
+  useEffect(() => {
+    if (
+      serverProjection === null ||
+      !shouldAcknowledgeComposerModelSelectionOverride({
+        dispatch: pendingModelSelectionOverrideDispatch,
+        runs: serverProjection.runs,
+      }) ||
+      pendingModelSelectionOverrideDispatch === null
+    ) {
+      return;
+    }
+    useComposerDraftStore
+      .getState()
+      .clearPendingModelSelectionOverride(
+        composerDraftTarget,
+        pendingModelSelectionOverrideDispatch.revision,
+        pendingModelSelectionOverrideDispatch.selection,
+      );
+  }, [composerDraftTarget, pendingModelSelectionOverrideDispatch, serverProjection]);
   const serverActivityRun = useMemo(
     () => (serverProjection === null ? null : deriveThreadActivityRun(serverProjection)),
     [serverProjection],
@@ -9060,6 +9100,47 @@ export default function ChatView(props: ChatViewProps) {
       });
     }
   };
+  const recordPendingModelSelectionOverrideForMessage = (
+    messageId: MessageId,
+    selection: ModelSelection,
+  ) => {
+    const draftStore = useComposerDraftStore.getState();
+    let draft = draftStore.getComposerDraft(composerDraftTarget) ?? null;
+    const draftSelection =
+      draft?.activeProvider === selection.instanceId
+        ? draft.modelSelectionByProvider[selection.instanceId]
+        : undefined;
+    // Legacy pending choices may predate options synthesized for dispatch.
+    // Add only those derived options, preserving every option already chosen.
+    if (
+      draft?.modelSelectionOverridePending &&
+      draftSelection !== undefined &&
+      draftSelection.instanceId === selection.instanceId &&
+      draftSelection.model === selection.model &&
+      !modelSelectionsEqual(draftSelection, selection) &&
+      (draftSelection.options ?? []).every((option) =>
+        selection.options?.some(
+          (requestedOption) =>
+            requestedOption.id === option.id && requestedOption.value === option.value,
+        ),
+      )
+    ) {
+      draftStore.setModelSelection(composerDraftTarget, selection, {
+        explicit: true,
+        replaceOptions: true,
+      });
+      draft = draftStore.getComposerDraft(composerDraftTarget) ?? null;
+    }
+    const pendingOverride = snapshotPendingComposerModelSelectionOverride({
+      draft,
+      selectedModelSelection: selection,
+    });
+    if (!pendingOverride) return;
+    draftStore.recordPendingModelSelectionOverrideDispatch(composerDraftTarget, {
+      ...pendingOverride,
+      messageId,
+    });
+  };
 
   const onSend = async (
     e?: { preventDefault: () => void },
@@ -9462,6 +9543,8 @@ export default function ChatView(props: ChatViewProps) {
       const followUpReviewComments = [...composerReviewComments];
       const followUpPreviewAnnotations = [...composerPreviewAnnotations];
       const followUpThreadContexts = [...composerThreadContexts];
+      const followUpMessageId = newMessageId();
+      recordPendingModelSelectionOverrideForMessage(followUpMessageId, ctxSelectedModelSelection);
       promptRef.current = "";
       clearComposerDraftContent(composerDraftTarget);
       composerRef.current?.resetCursorState();
@@ -9474,6 +9557,8 @@ export default function ChatView(props: ChatViewProps) {
           threadContexts: composerThreadContexts,
         }),
         interactionMode: followUp.interactionMode,
+        messageIdForSend: followUpMessageId,
+        modelSelectionForSend: ctxSelectedModelSelection,
       });
       if (!followUpSent) {
         promptRef.current = followUpPromptSnapshot;
@@ -10246,6 +10331,7 @@ export default function ChatView(props: ChatViewProps) {
         }),
       );
     }
+    recordPendingModelSelectionOverrideForMessage(messageIdForSend, ctxSelectedModelSelection);
     promptRef.current = "";
     clearComposerDraftContent(composerDraftTarget);
     composerRef.current?.resetCursorState();
@@ -10794,10 +10880,14 @@ export default function ChatView(props: ChatViewProps) {
     text,
     context,
     interactionMode: nextInteractionMode,
+    messageIdForSend,
+    modelSelectionForSend,
   }: {
     text: string;
-    context?: ReturnType<typeof buildMessageContext>;
+    context?: OrchestrationMessageContext | undefined;
     interactionMode: "default" | "plan";
+    messageIdForSend: MessageId;
+    modelSelectionForSend: ModelSelection;
   }) {
     if (
       !readEnvironmentScope(environmentId, AuthOrchestrationOperateScope) ||
@@ -10824,11 +10914,9 @@ export default function ChatView(props: ChatViewProps) {
       selectedModel: ctxSelectedModel,
       selectedProviderModels: ctxSelectedProviderModels,
       selectedPromptEffort: ctxSelectedPromptEffort,
-      selectedModelSelection: ctxSelectedModelSelection,
     } = sendCtx;
 
     const threadIdForSend = activeThread.id;
-    const messageIdForSend = newMessageId();
     const messageCreatedAt = new Date().toISOString();
     const outgoingMessageText = formatOutgoingPrompt({
       provider: ctxSelectedProvider,
@@ -10899,7 +10987,7 @@ export default function ChatView(props: ChatViewProps) {
             ...(context ? { context } : {}),
             attachments: [],
           },
-          modelSelection: ctxSelectedModelSelection,
+          modelSelection: modelSelectionForSend,
           titleSeed: activeThread.title,
           runtimeMode,
           interactionMode: nextInteractionMode,
@@ -11189,9 +11277,22 @@ export default function ChatView(props: ChatViewProps) {
         if (options?.focusComposer !== false) scheduleComposerFocus();
         return;
       }
+      const pendingModelSelection = createModelSelection(
+        instanceId,
+        resolvedModel,
+        entry
+          ? getComposerProviderState({
+              provider: entry.driver,
+              model: resolvedModel,
+              models: entry.models,
+              modelOptions: rememberedOptions,
+              planModeEnabled: settings.planModeEnabled,
+            }).modelOptionsForDispatch
+          : nextModelSelection.options,
+      );
       setComposerDraftModelSelection(
         scopeThreadRef(activeThread.environmentId, activeThread.id),
-        nextModelSelection,
+        pendingModelSelection,
         // A complete snapshot: an absent options field means "start from the
         // model default", not "keep the previous model's options".
         { explicit: true, replaceOptions: true },

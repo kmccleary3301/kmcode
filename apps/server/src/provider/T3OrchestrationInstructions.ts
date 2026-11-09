@@ -13,7 +13,7 @@ Ordinary coding tasks need no KM tools.
 - If you are a subagent or child, do the work yourself. Start no subagents unless asked.
 - \`t3_thread_launch\` and \`create_threads\` make top-level threads only when the user asks for a new thread. "Subagent", "delegate", and "parallel" never mean one. For a separate checkout, set \`workspaceStrategy\`; a shell worktree does not bind it. No strategy means the project root, not your worktree.
 - Given a thread id, call \`t3_thread_read\` before answering about it. Mention a thread with its \`link\` verbatim; if absent, use \`[title](t3-thread://v1/<exact id>)\`.
-- For thread messages, use \`t3_thread_send\` for one target and \`t3_thread_broadcast\` for several. \`auto\` starts an idle thread or delivers at the next tool boundary when supported; \`queue\` waits for the entire current run and may take hours.
+- For thread messages, prefer \`auto\`: it starts an idle thread or delivers at the target's next tool boundary when active steering is supported. For an agent caller with a sender thread, \`queue\` remains accepted for cached schemas and behaves like \`auto\`: idle targets start immediately, running steerable targets are steered, and other active targets queue after active work. \`steer\` updates a running turn; \`restart\` interrupts it. Use \`t3_thread_broadcast\` for several threads.
 - A secret: call \`request_secret\` yourself. Pass its \`secretRef\` to a tool. When asked only to schedule, use \`schedule_task\` without running its prompt.
 - T3 tools may load late. Try the name once before calling it absent.
 

@@ -444,7 +444,10 @@ export const OrchestratorMcpThreadReadResult = Schema.Struct({
 export type OrchestratorMcpThreadReadResult = typeof OrchestratorMcpThreadReadResult.Type;
 
 const ORCHESTRATOR_MCP_THREAD_BROADCAST_MAX_THREADS = 32;
-const OrchestratorMcpThreadSendMode = Schema.Literals(["auto", "queue", "steer", "restart"]);
+const OrchestratorMcpThreadSendMode = Schema.Literals(["auto", "queue", "steer", "restart"]).annotate({
+  description:
+    "`auto` is recommended. Keep `queue` accepted for cached schemas. For an agent caller with a sender thread, it behaves like `auto`: it starts an idle target immediately, steers a running target when its provider turn is running and active steering is supported, and otherwise queues after active work. Other `queue` calls keep queue-after-active behavior. `steer` updates a running turn; `restart` interrupts it.",
+});
 
 export const OrchestratorMcpFailureCode = Schema.Literals([
   "capability_denied",

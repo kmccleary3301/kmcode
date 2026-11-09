@@ -223,7 +223,7 @@ export const ThreadUpdateTool = Tool.make("t3_thread_update", {
 
 const ThreadSendTool = Tool.make("t3_thread_send", {
   description:
-    "Send within your mode limits. `auto` (default) starts an idle thread or delivers at the target's next tool boundary; it queues only if the provider cannot inject mid-turn. `queue` waits for the target's entire current run to finish (possibly hours); use it only to start a separate task afterwards. `steer` updates a running turn; `restart` interrupts it. A send to a finished child thread starts a fresh task and returns its `taskId`. In your reply, name it as its `link` verbatim.",
+    "Send within your mode limits. Prefer `auto` (default): it starts an idle thread or delivers into a running steerable turn. For an agent caller with a sender thread, `queue` remains accepted for cached schemas and behaves like `auto`: idle targets start immediately, running steerable targets are steered, and other active targets queue after active work. Callers without a sender thread keep queue-after-active behavior. `steer` updates a running turn; `restart` interrupts it. A send to a finished child thread starts a fresh task and returns its `taskId`. In your reply, name it as its `link` verbatim.",
   parameters: OrchestratorMcpThreadSendInput,
   success: OrchestratorMcpThreadSendResult,
   failure: OrchestratorMcpFailure,
@@ -236,7 +236,7 @@ const ThreadSendTool = Tool.make("t3_thread_send", {
 
 const ThreadBroadcastTool = Tool.make("t3_thread_broadcast", {
   description:
-    "Send one message to 1–32 unique threads. Per-target failures are returned alongside successful message IDs. Uses the same modes and caller limits as `t3_thread_send`; retry with the same `clientRequestId`.",
+    "Send one message to 1–32 unique threads. Prefer `auto` (default). For agent callers with a sender thread, `queue` behaves like `auto`: it starts idle targets, steers running steerable targets, and otherwise queues after active work; other callers keep queue-after-active behavior. Per-target failures are returned alongside successful message IDs. Uses the same modes and caller limits as `t3_thread_send`; retry with the same `clientRequestId`.",
   parameters: OrchestratorMcpThreadBroadcastInput,
   success: OrchestratorMcpThreadBroadcastResult,
   failure: OrchestratorMcpFailure,

@@ -733,8 +733,13 @@ const make = Effect.gen(function* () {
       }
 
       const steerableRun = latestSteerableRun(target);
-      const canAutoSteer = yield* Effect.gen(function* () {
-        if (input.mode !== "auto" || steerableRun === undefined) return false;
+      const canSteerActiveRun = yield* Effect.gen(function* () {
+        const maySteer =
+          input.mode === "auto" ||
+          (input.mode === "queue" && input.senderThreadId !== undefined);
+        // The dispatch policy requires a matching running provider turn, and Pi requires its
+        // matching turn to remain active. Pi's idle-race behavior only applies after selection.
+        if (!maySteer || steerableRun === undefined) return false;
         const providerThread = target.providerThreads.find(
           (candidate) => candidate.id === steerableRun.providerThreadId,
         );
@@ -762,15 +767,14 @@ const make = Effect.gen(function* () {
           type: input.mode === "steer" ? "steer_active" : "restart_active",
           targetRunId: steerableRun.id,
         };
-      } else if (canAutoSteer && steerableRun !== undefined) {
+      } else if (canSteerActiveRun && steerableRun !== undefined) {
         dispatchMode = { type: "steer_active", targetRunId: steerableRun.id };
       } else {
+        const shouldQueueAfterActive =
+          latestActiveRun(target) !== undefined ||
+          (input.mode === "queue" && input.senderThreadId === undefined);
         dispatchMode = {
-          type:
-            input.mode === "queue" ||
-            (input.mode === "auto" && latestActiveRun(target) !== undefined)
-              ? "queue_after_active"
-              : "start_immediately",
+          type: shouldQueueAfterActive ? "queue_after_active" : "start_immediately",
         };
       }
 

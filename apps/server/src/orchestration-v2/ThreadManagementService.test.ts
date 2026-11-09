@@ -61,9 +61,70 @@ const layerManagementDependencies = (
     }),
   );
 
-it.effect.each([true, false])(
-  "routes auto sends according to the active provider's steering capability",
-  (supportsActiveSteering) =>
+const sendModeScenarios: ReadonlyArray<{
+  readonly mode: ThreadManagementService.ThreadManagementSendMode;
+  readonly hasSenderThread: boolean;
+  readonly runStatus: "running" | "waiting" | "completed";
+  readonly providerTurnStatus: "running" | "completed";
+  readonly supportsActiveSteering: boolean;
+  readonly expectedDispatchMode:
+    | "steer_active"
+    | "queue_after_active"
+    | "start_immediately";
+}> = [
+  {
+    mode: "auto",
+    hasSenderThread: true,
+    runStatus: "running",
+    providerTurnStatus: "running",
+    supportsActiveSteering: true,
+    expectedDispatchMode: "steer_active",
+  },
+  {
+    mode: "queue",
+    hasSenderThread: true,
+    runStatus: "running",
+    providerTurnStatus: "running",
+    supportsActiveSteering: true,
+    expectedDispatchMode: "steer_active",
+  },
+  {
+    mode: "queue",
+    hasSenderThread: false,
+    runStatus: "running",
+    providerTurnStatus: "running",
+    supportsActiveSteering: true,
+    expectedDispatchMode: "queue_after_active",
+  },
+  {
+    mode: "queue",
+    hasSenderThread: true,
+    runStatus: "completed",
+    providerTurnStatus: "completed",
+    supportsActiveSteering: true,
+    expectedDispatchMode: "start_immediately",
+  },
+  {
+    mode: "auto",
+    hasSenderThread: true,
+    runStatus: "waiting",
+    providerTurnStatus: "completed",
+    supportsActiveSteering: true,
+    expectedDispatchMode: "queue_after_active",
+  },
+  {
+    mode: "auto",
+    hasSenderThread: true,
+    runStatus: "running",
+    providerTurnStatus: "running",
+    supportsActiveSteering: false,
+    expectedDispatchMode: "queue_after_active",
+  },
+];
+
+it.effect.each(sendModeScenarios)(
+  "routes thread messages according to sender and provider steering state",
+  (scenario) =>
     Effect.gen(function* () {
       const projectId = ProjectId.make("project:thread-management:auto-steer");
       const threadId = ThreadId.make("thread:thread-management:auto-steer");
@@ -79,7 +140,7 @@ it.effect.each([true, false])(
         ...CodexProviderCapabilitiesV2,
         turns: {
           ...CodexProviderCapabilitiesV2.turns,
-          supportsActiveSteering,
+          supportsActiveSteering: scenario.supportsActiveSteering,
         },
       };
       const session: ProviderAdapterV2SessionRuntime = {
@@ -132,12 +193,14 @@ it.effect.each([true, false])(
           {
             id: runId,
             ordinal: 1,
-            status: "running",
+            status: scenario.runStatus,
             activeAttemptId: attemptId,
             providerThreadId,
           },
         ],
-        providerTurns: [{ runAttemptId: attemptId, status: "running" }],
+        providerTurns: [
+          { runAttemptId: attemptId, status: scenario.providerTurnStatus },
+        ],
         providerThreads: [providerThread],
         messages: [
           {
@@ -194,16 +257,17 @@ it.effect.each([true, false])(
         commandId: CommandId.make("command:thread-management:auto-steer"),
         threadId,
         messageId,
+        ...(scenario.hasSenderThread
+          ? { senderThreadId: ThreadId.make("thread:agent-sender") }
+          : {}),
         text: "follow up",
         attachments: [],
-        mode: "auto",
-        createdBy: "agent",
-        creationSource: "mcp",
+        mode: scenario.mode,
+        createdBy: scenario.hasSenderThread ? "agent" : "user",
+        creationSource: scenario.hasSenderThread ? "mcp" : "web",
       });
 
-      expect((yield* Ref.get(dispatchModes))[0]).toBe(
-        supportsActiveSteering ? "steer_active" : "queue_after_active",
-      );
+      expect((yield* Ref.get(dispatchModes))[0]).toBe(scenario.expectedDispatchMode);
     }),
 );
 

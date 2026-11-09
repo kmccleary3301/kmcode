@@ -40,7 +40,7 @@ handoff is also a good choice when the old conversation contains conflicting ins
 
 T3 Code does not currently have a whole-thread export command. Before a major server update, stop
 the server and copy its `userdata` directory to a safe location. The default is
-`~/.t3/userdata`; a server started with `--home-dir <path>` uses `<path>/userdata`.
+`~/.t3/userdata`; a server started with `--base-dir <path>` uses `<path>/userdata`.
 
 If a migrated transcript is missing from the app, keep that copy unchanged. You can inspect the
 old transcript without starting a server against it:
@@ -72,3 +72,26 @@ ORDER BY created_at, message_id;
 Open only the copied database. Do not edit it or point a newer or older server at your recovery
 copy. If the affected environment is remote, make and inspect the copy on the machine that runs
 that environment.
+
+## Reclaiming database space
+
+Background compaction removes superseded internal snapshots while keeping conversation history
+and replay state. Freed pages are reused, but the database file does not shrink while the server
+is running.
+
+To return that space to disk, stop the server and close any desktop app using the same data
+directory. Leave enough free space for a database backup and SQLite's temporary vacuum files,
+then run:
+
+```sh
+t3 database compact --base-dir /path/to/t3-home --offline-maintenance
+```
+
+For the KM Code Pi/OMP package, use `t3-pi-omp` instead of `t3`. Run the command on the machine
+that owns the database, not on a client connected to it.
+
+The command holds the server's state-directory lock, creates a recovery backup beside
+`userdata/statev2.sqlite`, and checks database integrity and thread projections before and after
+compaction. Its result includes the backup path and before/after sizes. Keep that backup until
+you have reopened the app and checked your history. If maintenance fails, keep the server
+stopped and inspect the error before restoring the preserved backup.

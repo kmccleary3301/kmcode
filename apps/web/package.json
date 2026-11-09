@@ -1,6 +1,6 @@
 {
   "name": "@t3tools/web",
-  "version": "0.0.53-local.20261109c",
+  "version": "0.0.53-local.20261109.statedb",
   "private": true,
   "type": "module",
   "scripts": {

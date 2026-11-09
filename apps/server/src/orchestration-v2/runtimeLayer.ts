@@ -1,6 +1,9 @@
 import * as UsageLimitRecoveryWorker from "./UsageLimitRecoveryWorker.ts";
 import * as Scheduler from "../scheduling/Scheduler.ts";
+import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
+import * as NodeSqliteClient from "@t3tools/shared/nodeSqliteClient";
+import * as ServerConfig from "../config.ts";
 import * as OrchestrationCommandReceipts from "../persistence/OrchestrationCommandReceipts.ts";
 import * as OrchestrationEventStore from "../persistence/OrchestrationEventStore.ts";
 import * as McpAppModelContext from "../mcpApps/McpAppModelContext.ts";
@@ -86,6 +89,27 @@ const layerEventSinkProvided = layerEventSink;
 const layerProjectionMaintenanceProvided = ProjectionMaintenance.layer.pipe(
   Layer.provide(layerStores),
 );
+const layerProjectionMaintenanceCompactionWorker = Layer.unwrap(
+  Effect.gen(function* () {
+    const { dbPath } = yield* ServerConfig.ServerConfig;
+    const layerCompactionDatabase = NodeSqliteClient.layer({
+      filename: dbPath,
+      workerConnection: true,
+    });
+    const layerCompactionDependencies = Layer.mergeAll(
+      layerCompactionDatabase,
+      EventStore.layer.pipe(Layer.provide(layerCompactionDatabase)),
+      ProjectionStore.layer.pipe(Layer.provide(layerCompactionDatabase)),
+    );
+    const layerCompactionMaintenance = Layer.fresh(
+      ProjectionMaintenance.layer.pipe(Layer.provide(layerCompactionDependencies)),
+    );
+    return ProjectionMaintenance.layerCompactionWorker.pipe(
+      Layer.provide(layerCompactionMaintenance),
+    );
+  }),
+);
+
 const layerLegacyV1ThreadImporterProvided = LegacyV1ThreadImporter.layer.pipe(
   Layer.provide(layerEventSinkProvided),
 );
@@ -370,6 +394,7 @@ export const layerProduction = Layer.mergeAll(
   layerThreadLaunchProvided,
   layerThreadLifecycleProvided,
   layerScheduledTaskProvided,
+  layerProjectionMaintenanceCompactionWorker,
   layerSecretRequestsProvided,
   UsageLimitRecoveryWorker.layer.pipe(
     Layer.provide(

@@ -2,6 +2,7 @@
 
 import * as NodeRuntime from "@effect/platform-node/NodeRuntime";
 import * as NodeServices from "@effect/platform-node/NodeServices";
+import * as NodeCrypto from "node:crypto";
 import * as NodeOS from "node:os";
 import { fromJsonStringPretty } from "@t3tools/shared/schemaJson";
 import * as Console from "effect/Console";
@@ -16,9 +17,13 @@ import { Argument, Command, Flag } from "effect/cli";
 
 import * as NodeSqliteClient from "@t3tools/shared/nodeSqliteClient";
 
+import {
+  compactStateDatabase,
+  SqliteStateDatabaseMissingError,
+} from "../src/cli/sqliteStateMaintenance.ts";
 import * as StateDirectoryLock from "../src/persistence/StateDirectoryLock.ts";
 
-export const SqliteStateOperation = Schema.Literals(["query", "exec"]);
+export const SqliteStateOperation = Schema.Literals(["query", "exec", "compact"]);
 export type SqliteStateOperation = typeof SqliteStateOperation.Type;
 
 export class SqliteStateMultipleSqlSourcesError extends Schema.TaggedError<SqliteStateMultipleSqlSourcesError>()(
@@ -48,16 +53,6 @@ export class SqliteStateEmptySqlError extends Schema.TaggedError<SqliteStateEmpt
   }
 }
 
-export class SqliteStateDatabaseMissingError extends Schema.TaggedError<SqliteStateDatabaseMissingError>()(
-  "SqliteStateDatabaseMissingError",
-  {
-    databasePath: Schema.String,
-  },
-) {
-  override get message(): string {
-    return `Database does not exist at '${this.databasePath}'. Start T3 once to run migrations.`;
-  }
-}
 
 export class SqliteStateSharedHomeMutationError extends Schema.TaggedError<SqliteStateSharedHomeMutationError>()(
   "SqliteStateSharedHomeMutationError",
@@ -65,6 +60,16 @@ export class SqliteStateSharedHomeMutationError extends Schema.TaggedError<Sqlit
 ) {
   override get message(): string {
     return "Refusing to mutate the shared ~/.t3 database. Use an isolated --base-dir.";
+  }
+}
+
+
+export class SqliteStateMaintenanceSqlSourceError extends Schema.TaggedError<SqliteStateMaintenanceSqlSourceError>()(
+  "SqliteStateMaintenanceSqlSourceError",
+  {},
+) {
+  override get message(): string {
+    return "Database compaction does not accept --sql or --file.";
   }
 }
 
@@ -110,8 +115,24 @@ const SqliteStateExecResult = Schema.Struct({
   database: Schema.String,
   backup: Schema.String,
 });
-const SqliteStateResult = Schema.Union([SqliteStateQueryResult, SqliteStateExecResult]);
+const SqliteStateCompactResult = Schema.Struct({
+  operation: Schema.Literal("compact"),
+  database: Schema.String,
+  backup: Schema.String,
+  scannedEventCount: Schema.Number,
+  deletedEventCount: Schema.Number,
+  deletedReceiptCount: Schema.Number,
+  reclaimableBytes: Schema.Number,
+  bytesBefore: Schema.Number,
+  bytesAfter: Schema.Number,
+});
+const SqliteStateResult = Schema.Union([
+  SqliteStateQueryResult,
+  SqliteStateExecResult,
+  SqliteStateCompactResult,
+]);
 const encodeSqliteStateResult = Schema.encodeEffect(fromJsonStringPretty(SqliteStateResult));
+
 
 export type SqliteStateResult = typeof SqliteStateResult.Type;
 
@@ -123,6 +144,7 @@ export interface RunSqliteStateInput {
   readonly baseDir: string;
   readonly sql?: string | undefined;
   readonly file?: string | undefined;
+  readonly offlineMaintenance?: boolean | undefined;
 }
 
 export interface RunSqliteStateOptions {
@@ -185,8 +207,18 @@ export const runSqliteState = Effect.fn("runSqliteState")(function* (
   const baseDir = path.resolve(input.baseDir);
   const sharedHome = path.resolve(options.sharedHome ?? path.join(NodeOS.homedir(), ".t3"));
   const databasePath = path.join(baseDir, "userdata", "statev2.sqlite");
-  const source = yield* resolveSqlSource(input.sql, input.file);
 
+  if (input.operation === "compact") {
+    if (input.sql !== undefined || input.file !== undefined) {
+      return yield* new SqliteStateMaintenanceSqlSourceError();
+    }
+    return yield* compactStateDatabase({
+      baseDir,
+      offlineMaintenance: input.offlineMaintenance === true,
+    });
+  }
+
+  const source = yield* resolveSqlSource(input.sql, input.file);
   if (!(yield* fs.exists(databasePath))) {
     return yield* new SqliteStateDatabaseMissingError({ databasePath });
   }
@@ -217,7 +249,7 @@ export const runSqliteState = Effect.fn("runSqliteState")(function* (
     }
 
     const timestamp = DateTime.formatIso(yield* DateTime.now).replaceAll(":", "-");
-    const backupPath = `${databasePath}.backup-${timestamp}`;
+    const backupPath = `${databasePath}.backup-${timestamp}-${NodeCrypto.randomUUID()}`;
     yield* sql`VACUUM INTO ${backupPath}`;
     yield* fs.chmod(backupPath, 0o600);
     yield* sql.withTransaction(sql.unsafe(source).unprepared);
@@ -254,7 +286,9 @@ const t3SqliteStateCommand = Command.make(
   "t3-sqlite-state",
   {
     operation: Argument.Literals("operation", SqliteStateOperation.literals).pipe(
-      Argument.withDescription("Run a read-only query or a backed-up fixture mutation."),
+      Argument.withDescription(
+        "Run a read-only query, a backed-up fixture mutation, or offline compaction.",
+      ),
     ),
     baseDir: Flag.String("base-dir").pipe(
       Flag.withDescription("Explicit T3 base directory containing userdata/statev2.sqlite."),
@@ -267,13 +301,18 @@ const t3SqliteStateCommand = Command.make(
       Flag.optional,
       Flag.withDescription("Path to a SQL source file."),
     ),
+    offlineMaintenance: Flag.Boolean("offline-maintenance").pipe(
+      Flag.withDescription("Required opt-in for offline database compaction."),
+      Flag.withDefault(false),
+    ),
   },
-  ({ operation, baseDir, sql, file }) =>
+  ({ operation, baseDir, sql, file, offlineMaintenance }) =>
     runSqliteState({
       operation,
       baseDir,
       sql: Option.getOrUndefined(sql),
       file: Option.getOrUndefined(file),
+      offlineMaintenance,
     }).pipe(Effect.flatMap(encodeSqliteStateResult), Effect.flatMap(Console.log)),
 ).pipe(
   Command.withDescription(

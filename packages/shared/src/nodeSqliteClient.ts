@@ -57,6 +57,11 @@ export interface SqliteClientConfig {
    * File databases only.
    */
   readonly readerConnection?: boolean | undefined;
+  /**
+   * Run all SQLite work asynchronously on one worker-owned connection.
+   * File databases only; incompatible with the read-only reader pool and checkpoint worker.
+   */
+  readonly workerConnection?: boolean | undefined;
 }
 
 export class UnsupportedNodeSqliteVersionError extends Schema.TaggedError<UnsupportedNodeSqliteVersionError>()(
@@ -162,19 +167,21 @@ const hasLargeBinding = (params: ReadonlyArray<unknown>): boolean => {
 };
 const READER_POOL_SIZE = 4;
 
-const readerWorkerSource = `
+const sqliteWorkerSource = `
 const { parentPort, workerData } = require("node:worker_threads");
 const { DatabaseSync } = require("node:sqlite");
 let db;
 try {
   const next = new DatabaseSync(workerData.filename, {
-    readOnly: true,
-    allowExtension: false,
+    readOnly: workerData.readOnly,
+    allowExtension: workerData.allowExtension,
   });
   next.exec("PRAGMA busy_timeout = 5000;");
-  next.exec("PRAGMA cache_size = -262144;");
-  const mode = String(next.prepare("PRAGMA journal_mode").get().journal_mode).toLowerCase();
-  if (mode !== "wal") throw new Error("database uses journal_mode " + mode + ", not wal");
+  if (workerData.requireWal) {
+    next.exec("PRAGMA cache_size = -262144;");
+    const mode = String(next.prepare("PRAGMA journal_mode").get().journal_mode).toLowerCase();
+    if (mode !== "wal") throw new Error("database uses journal_mode " + mode + ", not wal");
+  }
   db = next;
   parentPort.postMessage({ type: "ready" });
 } catch (error) {
@@ -186,36 +193,70 @@ try {
 const statements = new Map();
 const prepare = (sql, cached) => {
   if (!cached) return db.prepare(sql);
-  let statement = statements.get(sql);
-  if (statement === undefined) {
-    statement = db.prepare(sql);
+  let entry = statements.get(sql);
+  const now = Date.now();
+  if (
+    entry !== undefined &&
+    workerData.prepareCacheTtlMs !== undefined &&
+    now - entry.lastUsed >= workerData.prepareCacheTtlMs
+  ) {
+    statements.delete(sql);
+    entry = undefined;
+  }
+  if (entry === undefined) {
+    const statement = db.prepare(sql);
     if (statements.size >= workerData.prepareCacheSize) {
-      statements.delete(statements.keys().next().value);
+      const oldest = statements.keys().next().value;
+      if (oldest !== undefined) statements.delete(oldest);
     }
+    entry = { statement, lastUsed: now };
   } else {
     statements.delete(sql);
+    entry.lastUsed = now;
   }
-  statements.set(sql, statement);
-  return statement;
+  statements.set(sql, entry);
+  return entry.statement;
 };
-parentPort.on("message", ({ id, sql, params, cached, values, raw, safeIntegers }) => {
+parentPort.on("message", (message) => {
+  if (message.type === "close") {
+    try {
+      if (db !== undefined && db.isTransaction) db.exec("ROLLBACK");
+      parentPort.postMessage({ type: "closed" });
+    } catch (error) {
+      parentPort.postMessage({
+        type: "closeError",
+        message: String(error && error.message ? error.message : error),
+      });
+    }
+    return;
+  }
+  const { id, sql, params, cached, values, raw, safeIntegers } = message;
   let operation = "open";
   try {
-    if (db === undefined) throw new Error("database reader is unavailable");
+    if (db === undefined) throw new Error("database worker is unavailable");
     operation = "prepare";
     const statement = prepare(sql, cached);
     operation = "execute";
     statement.setReadBigInts(safeIntegers);
     if (statement.columns().length > 0) {
       statement.setReturnArrays(values);
-      parentPort.postMessage({ id, rows: statement.all(...params) });
+      parentPort.postMessage({
+        id,
+        type: values ? "values" : "rows",
+        rows: statement.all(...params),
+      });
     } else {
       const result = statement.run(...params);
-      parentPort.postMessage({ id, rows: raw ? result : [] });
+      parentPort.postMessage(
+        raw
+          ? { id, type: "raw", result }
+          : { id, type: values ? "values" : "rows", rows: [] },
+      );
     }
   } catch (error) {
     parentPort.postMessage({
       id,
+      type: "error",
       error: {
         operation,
         message: String(error && error.message ? error.message : error),
@@ -228,7 +269,7 @@ parentPort.on("message", ({ id, sql, params, cached, values, raw, safeIntegers }
 });
 `;
 
-interface ReaderRequest {
+interface SqliteWorkerRequest {
   readonly sql: string;
   readonly params: ReadonlyArray<unknown>;
   readonly cached: boolean;
@@ -236,28 +277,72 @@ interface ReaderRequest {
   readonly raw: boolean;
 }
 
-type ReaderStartup =
+type SqliteWorkerStartup =
   | { readonly type: "ready" }
   | { readonly type: "unavailable"; readonly message: string };
+type SqliteWorkerControlReply =
+  | { readonly type: "closed" }
+  | { readonly type: "closeError"; readonly message: string };
 
-type ReaderReply =
-  | { readonly id: number; readonly rows: ReadonlyArray<any> }
-  | {
-      readonly id: number;
-      readonly error: {
-        readonly operation: "open" | "prepare" | "execute";
-        readonly message: string;
-        readonly code?: unknown;
-        readonly errcode?: unknown;
-        readonly errstr?: unknown;
-      };
-    };
+type SqliteWorkerError = {
+  readonly operation: "open" | "prepare" | "execute";
+  readonly message: string;
+  readonly code?: unknown;
+  readonly errcode?: unknown;
+  readonly errstr?: unknown;
+};
 
-const readerFailureMessages = {
+type SqliteWorkerResult =
+  | { readonly type: "rows"; readonly rows: ReadonlyArray<object> }
+  | { readonly type: "values"; readonly rows: ReadonlyArray<ReadonlyArray<unknown>> }
+  | { readonly type: "raw"; readonly result: unknown };
+
+type SqliteWorkerReply =
+  | (SqliteWorkerResult & { readonly id: number })
+  | { readonly id: number; readonly type: "error"; readonly error: SqliteWorkerError };
+
+const workerFailureMessages = {
   open: "Failed to open database",
   prepare: "Failed to prepare statement",
   execute: "Failed to execute statement",
 } as const;
+
+const workerSqlError = (error: SqliteWorkerError) => {
+  const { operation, message, ...codes } = error;
+  return new SqlError({
+    reason: classifyError(
+      Object.assign(new Error(message), codes),
+      workerFailureMessages[operation],
+      operation,
+    ),
+  });
+};
+
+const unexpectedWorkerResult = () =>
+  new SqlError({
+    reason: classifyError(
+      new Error("SQLite worker returned an unexpected result mode"),
+      workerFailureMessages.execute,
+      "execute",
+    ),
+  });
+
+const rowsFromWorker = (
+  reply: SqliteWorkerResult,
+): Effect.Effect<ReadonlyArray<object>, SqlError> =>
+  reply.type === "rows" ? Effect.succeed(reply.rows) : Effect.fail(unexpectedWorkerResult());
+
+const valuesFromWorker = (
+  reply: SqliteWorkerResult,
+): Effect.Effect<ReadonlyArray<ReadonlyArray<unknown>>, SqlError> =>
+  reply.type === "values" ? Effect.succeed(reply.rows) : Effect.fail(unexpectedWorkerResult());
+
+const rawFromWorker = (reply: SqliteWorkerResult): Effect.Effect<unknown, SqlError> =>
+  reply.type === "raw"
+    ? Effect.succeed(reply.result)
+    : reply.type === "rows"
+      ? Effect.succeed(reply.rows)
+      : Effect.fail(unexpectedWorkerResult());
 
 const makeReader = Effect.fnUntraced(function* (
   options: SqliteClientConfig,
@@ -267,36 +352,40 @@ const makeReader = Effect.fnUntraced(function* (
     | {
         readonly worker: NodeWorkerThreads.Worker;
         readonly connection: Connection;
-        readonly started: Promise<ReaderStartup>;
+        readonly started: Promise<SqliteWorkerStartup>;
       }
     | undefined;
   let nextRequestId = 0;
 
   const start = () => {
-    const worker = new NodeWorkerThreads.Worker(readerWorkerSource, {
+    const worker = new NodeWorkerThreads.Worker(sqliteWorkerSource, {
       eval: true,
       workerData: {
         filename: options.filename,
         prepareCacheSize: options.prepareCacheSize ?? 200,
+        prepareCacheTtlMs: undefined,
+        readOnly: true,
+        allowExtension: false,
+        requireWal: true,
       },
     });
-    let announce: (startup: ReaderStartup) => void = () => {};
-    const started = new Promise<ReaderStartup>((resolve) => {
+    let announce: (startup: SqliteWorkerStartup) => void = () => {};
+    const started = new Promise<SqliteWorkerStartup>((resolve) => {
       announce = resolve;
     });
     let stoppedMessage: string | undefined;
-    const pending = new Map<number, { readonly resume: (reply: ReaderReply) => void }>();
+    const pending = new Map<number, { readonly resume: (reply: SqliteWorkerReply) => void }>();
     const stop = (message: string) => {
       stoppedMessage = message;
       announce({ type: "unavailable", message });
       if (current?.worker === worker) current = undefined;
       for (const [id, request] of pending) {
-        request.resume({ id, error: { operation: "execute", message } });
+        request.resume({ id, type: "error", error: { operation: "execute", message } });
       }
       pending.clear();
     };
-    worker.on("message", (reply: ReaderReply | ReaderStartup) => {
-      if ("type" in reply) {
+    worker.on("message", (reply: SqliteWorkerReply | SqliteWorkerStartup) => {
+      if (!("id" in reply)) {
         announce(reply);
         if (pending.size === 0) worker.unref();
         return;
@@ -310,62 +399,73 @@ const makeReader = Effect.fnUntraced(function* (
     worker.on("error", (cause) => stop(`Database reader failed: ${cause.message}`));
     worker.on("exit", (code) => stop(`Database reader exited with code ${code}`));
 
-    const request = (input: ReaderRequest) =>
-      Effect.withFiber<ReadonlyArray<any>, SqlError>((fiber) => {
+    const request = (input: SqliteWorkerRequest) =>
+      Effect.withFiber<SqliteWorkerResult, SqlError>((fiber) => {
         if (stoppedMessage !== undefined) {
           return Effect.fail(
-            new SqlError({
-              reason: classifyError(
-                new Error(stoppedMessage),
-                readerFailureMessages.execute,
-                "execute",
-              ),
+            workerSqlError({
+              operation: "execute",
+              message: stoppedMessage,
             }),
           );
         }
         const safeIntegers = Boolean(Context.get(fiber.context, Client.SafeIntegers));
-        return Effect.callback<ReadonlyArray<any>, SqlError>((resume) => {
+        return Effect.callback<SqliteWorkerResult, SqlError>((resume) => {
           const id = nextRequestId++;
           pending.set(id, {
             resume: (reply) => {
-              if ("rows" in reply) {
-                resume(Effect.succeed(reply.rows));
-                return;
+              if (reply.type === "error") {
+                resume(Effect.fail(workerSqlError(reply.error)));
+              } else {
+                resume(Effect.succeed(reply));
               }
-              const { operation, message, ...codes } = reply.error;
-              resume(
-                Effect.fail(
-                  new SqlError({
-                    reason: classifyError(
-                      Object.assign(new Error(message), codes),
-                      readerFailureMessages[operation],
-                      operation,
-                    ),
-                  }),
-                ),
-              );
             },
           });
           if (pending.size === 1) worker.ref();
           const cached = input.cached && !hasLargeBinding(input.params);
-          // oxlint-disable-next-line unicorn/require-post-message-target-origin -- Node workers do not accept a target origin.
-          worker.postMessage({ id, safeIntegers, ...input, cached });
+          try {
+            // oxlint-disable-next-line unicorn/require-post-message-target-origin -- Node workers do not accept a target origin.
+            worker.postMessage({ id, safeIntegers, ...input, cached });
+          } catch (cause) {
+            pending.delete(id);
+            if (pending.size === 0) worker.unref();
+            resume(
+              Effect.fail(
+                workerSqlError({
+                  operation: "execute",
+                  message: String(cause),
+                }),
+              ),
+            );
+          }
         });
       });
 
     const connection = identity<Connection>({
       execute(sql, params, rowTransform) {
-        const effect = request({ sql, params, cached: true, values: false, raw: false });
+        const effect = request({ sql, params, cached: true, values: false, raw: false }).pipe(
+          Effect.flatMap(rowsFromWorker),
+        );
         return rowTransform ? Effect.map(effect, rowTransform) : effect;
       },
       executeRaw(sql, params) {
-        return request({ sql, params, cached: true, values: false, raw: true });
+        return request({ sql, params, cached: true, values: false, raw: true }).pipe(
+          Effect.flatMap(rawFromWorker),
+        );
       },
       executeValues(sql, params) {
-        return request({ sql, params, cached: true, values: true, raw: false });
+        return request({ sql, params, cached: true, values: true, raw: false }).pipe(
+          Effect.flatMap(valuesFromWorker),
+        );
       },
       executeValuesUnprepared(sql, params) {
-        return request({ sql, params: params ?? [], cached: false, values: true, raw: false });
+        return request({
+          sql,
+          params: params ?? [],
+          cached: false,
+          values: true,
+          raw: false,
+        }).pipe(Effect.flatMap(valuesFromWorker));
       },
       executeUnprepared(sql, params, rowTransform) {
         const effect = request({
@@ -374,7 +474,7 @@ const makeReader = Effect.fnUntraced(function* (
           cached: false,
           values: false,
           raw: false,
-        });
+        }).pipe(Effect.flatMap(rowsFromWorker));
         return rowTransform ? Effect.map(effect, rowTransform) : effect;
       },
       executeStream(_sql, _params) {
@@ -431,6 +531,240 @@ const makeReader = Effect.fnUntraced(function* (
               ),
     );
   });
+});
+
+const makeWorkerConnection = Effect.fnUntraced(function* (options: SqliteClientConfig) {
+  const invalidConfiguration =
+    options.filename === ":memory:" || options.filename === ""
+      ? "workerConnection requires a file-backed database"
+      : options.readonly === true
+        ? "workerConnection cannot open a read-only database"
+        : options.readerConnection === true
+          ? "workerConnection cannot be combined with readerConnection"
+          : options.checkpointWorker === true
+            ? "workerConnection cannot be combined with checkpointWorker"
+            : undefined;
+  if (invalidConfiguration !== undefined) {
+    return yield* Effect.fail(
+      workerSqlError({ operation: "open", message: invalidConfiguration }),
+    );
+  }
+
+  const worker = yield* Effect.try({
+    try: () =>
+      new NodeWorkerThreads.Worker(sqliteWorkerSource, {
+        eval: true,
+        workerData: {
+          filename: options.filename,
+          prepareCacheSize: options.prepareCacheSize ?? 200,
+          prepareCacheTtlMs: Duration.toMillis(
+            options.prepareCacheTTL ?? Duration.minutes(10),
+          ),
+          readOnly: false,
+          allowExtension: options.allowExtension ?? false,
+          requireWal: false,
+        },
+      }),
+    catch: (cause) => workerSqlError({ operation: "open", message: String(cause) }),
+  });
+
+  let announce: (startup: SqliteWorkerStartup) => void = () => {};
+  const started = new Promise<SqliteWorkerStartup>((resolve) => {
+    announce = resolve;
+  });
+  let stoppedMessage: string | undefined;
+  let closing = false;
+  let nextRequestId = 0;
+  let resolveWhenIdle: (() => void) | undefined;
+  let resolveClose: (() => void) | undefined;
+  const pending = new Map<number, { readonly complete: (reply: SqliteWorkerReply) => void }>();
+  const stop = (message: string) => {
+    if (stoppedMessage !== undefined) return;
+    stoppedMessage = message;
+    announce({ type: "unavailable", message });
+    for (const [id, request] of pending) {
+      request.complete({ id, type: "error", error: { operation: "execute", message } });
+    }
+  };
+  worker.on(
+    "message",
+    (reply: SqliteWorkerReply | SqliteWorkerStartup | SqliteWorkerControlReply) => {
+      if (reply.type === "closed" || reply.type === "closeError") {
+        resolveClose?.();
+        resolveClose = undefined;
+        return;
+      }
+      if (!("id" in reply)) {
+        announce(reply);
+        if (reply.type === "unavailable") stoppedMessage = reply.message;
+        if (pending.size === 0) worker.unref();
+        return;
+      }
+      pending.get(reply.id)?.complete(reply);
+    },
+  );
+  worker.on("error", (cause) => {
+    if (closing && pending.size === 0) {
+      resolveClose?.();
+    } else {
+      stop(`Database worker connection failed: ${cause.message}`);
+    }
+  });
+  worker.on("exit", (code) => {
+    if (closing && pending.size === 0) {
+      resolveClose?.();
+    } else {
+      stop(`Database worker connection exited with code ${code}`);
+    }
+  });
+
+  yield* Effect.addFinalizer(() =>
+    Effect.gen(function* () {
+      closing = true;
+      if (pending.size > 0) {
+        yield* Effect.promise(
+          () =>
+            new Promise<void>((resolve) => {
+              resolveWhenIdle = resolve;
+            }),
+        );
+      }
+      if (stoppedMessage === undefined && worker.threadId !== -1) {
+        const closeAcknowledged = new Promise<void>((resolve) => {
+          resolveClose = resolve;
+        });
+        worker.ref();
+        yield* Effect.sync(() => {
+          // oxlint-disable-next-line unicorn/require-post-message-target-origin -- Node workers do not accept a target origin.
+          worker.postMessage({ type: "close" });
+        });
+        yield* Effect.timeoutOption(
+          Effect.promise(() => closeAcknowledged),
+          Duration.seconds(10),
+        );
+        resolveClose = undefined;
+      }
+    }).pipe(
+      Effect.ensuring(
+        Effect.promise(async () => {
+          await worker.terminate();
+        }),
+      ),
+    ),
+  );
+
+  const startupTimeout = Duration.seconds(10);
+  const startup = yield* Effect.timeoutOption(Effect.promise(() => started), startupTimeout);
+  if (Option.isNone(startup)) {
+    return yield* Effect.fail(
+      workerSqlError({
+        operation: "open",
+        message: `worker did not open the database within ${Duration.toMillis(startupTimeout)} ms`,
+      }),
+    );
+  }
+  if (startup.value.type === "unavailable") {
+    return yield* Effect.fail(
+      workerSqlError({ operation: "open", message: startup.value.message }),
+    );
+  }
+
+  const request = (input: SqliteWorkerRequest) =>
+    Effect.withFiber<SqliteWorkerResult, SqlError>((fiber) => {
+      if (closing) {
+        return Effect.fail(
+          workerSqlError({
+            operation: "execute",
+            message: "Database worker connection is closed",
+          }),
+        );
+      }
+      if (stoppedMessage !== undefined) {
+        return Effect.fail(workerSqlError({ operation: "execute", message: stoppedMessage }));
+      }
+      const safeIntegers = Boolean(Context.get(fiber.context, Client.SafeIntegers));
+      return Effect.callback<SqliteWorkerResult, SqlError>((resume) => {
+        const id = nextRequestId++;
+        let resolveFinished: () => void = () => {};
+        const finished = new Promise<void>((resolve) => {
+          resolveFinished = resolve;
+        });
+        const complete = (reply: SqliteWorkerReply) => {
+          if (!pending.delete(id)) return;
+          if (pending.size === 0) {
+            worker.unref();
+            resolveWhenIdle?.();
+            resolveWhenIdle = undefined;
+          }
+          resolveFinished();
+          if (reply.type === "error") {
+            resume(Effect.fail(workerSqlError(reply.error)));
+          } else {
+            resume(Effect.succeed(reply));
+          }
+        };
+        pending.set(id, { complete });
+        if (pending.size === 1) worker.ref();
+        const cached = input.cached && !hasLargeBinding(input.params);
+        try {
+          // oxlint-disable-next-line unicorn/require-post-message-target-origin -- Node workers do not accept a target origin.
+          worker.postMessage({ id, safeIntegers, ...input, cached });
+        } catch (cause) {
+          complete({
+            id,
+            type: "error",
+            error: { operation: "execute", message: String(cause) },
+          });
+        }
+        return Effect.promise(() => finished);
+      });
+    });
+
+  const connection = identity<Connection>({
+    execute(sql, params, rowTransform) {
+      const effect = request({ sql, params, cached: true, values: false, raw: false }).pipe(
+        Effect.flatMap(rowsFromWorker),
+      );
+      return rowTransform ? Effect.map(effect, rowTransform) : effect;
+    },
+    executeRaw(sql, params) {
+      return request({ sql, params, cached: true, values: false, raw: true }).pipe(
+        Effect.flatMap(rawFromWorker),
+      );
+    },
+    executeValues(sql, params) {
+      return request({ sql, params, cached: true, values: true, raw: false }).pipe(
+        Effect.flatMap(valuesFromWorker),
+      );
+    },
+    executeValuesUnprepared(sql, params) {
+      return request({
+        sql,
+        params: params ?? [],
+        cached: false,
+        values: true,
+        raw: false,
+      }).pipe(Effect.flatMap(valuesFromWorker));
+    },
+    executeUnprepared(sql, params, rowTransform) {
+      const effect = request({
+        sql,
+        params: params ?? [],
+        cached: false,
+        values: false,
+        raw: false,
+      }).pipe(Effect.flatMap(rowsFromWorker));
+      return rowTransform ? Effect.map(effect, rowTransform) : effect;
+    },
+    executeStream(_sql, _params) {
+      return Stream.die(new UnsupportedNodeSqliteOperationError());
+    },
+  });
+
+  return {
+    connection,
+    checkpoint: undefined,
+  };
 });
 
 const make = Effect.fn("makeWithDatabase")(function* (
@@ -696,7 +1030,12 @@ const make = Effect.fn("makeWithDatabase")(function* (
     });
 
   const semaphore = yield* Semaphore.make(1);
-  const { connection, checkpoint, isPlainRead } = yield* makeConnection();
+  const connectionSetup = options.workerConnection
+    ? yield* makeWorkerConnection(options)
+    : yield* makeConnection();
+  const { connection, checkpoint } = connectionSetup;
+  const isPlainRead =
+    "isPlainRead" in connectionSetup ? connectionSetup.isPlainRead : undefined;
   const readerPool = { unavailable: false };
   const readers =
     options.readerConnection && isFileDatabase && options.readonly !== true
@@ -749,7 +1088,7 @@ const make = Effect.fn("makeWithDatabase")(function* (
     ) => Effect.Effect<A, SqlError>,
     onWrite: (writer: Connection) => Effect.Effect<A, SqlError>,
   ): Effect.Effect<A, SqlError> =>
-    readers.length === 0 || readerPool.unavailable
+    readers.length === 0 || isPlainRead === undefined || readerPool.unavailable
       ? writerBorrower(onWrite)
       : Effect.flatMap(isPlainRead(sql), (plain) => {
           if (!plain) return writerBorrower(onWrite);

@@ -1,6 +1,6 @@
 {
   "name": "@t3tools/contracts",
-  "version": "0.0.53-local.20261109c",
+  "version": "0.0.53-local.20261109.statedb",
   "private": true,
   "files": [
     "dist"

@@ -121,4 +121,47 @@ it.layer(NodeServices.layer)("t3-sqlite-state", (it) => {
         assert.equal(aliasError._tag, "SqliteStateSharedHomeMutationError");
       }),
   );
+
+  it.effect("requires offline opt-in and preserves a backup on validation failure", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const baseDir = yield* fs.makeTempDirectoryScoped({ prefix: "t3-sqlite-state-compact-" });
+      const databasePath = path.join(baseDir, "userdata", "statev2.sqlite");
+      yield* createFixtureDatabase(baseDir);
+
+      const missingOptIn = yield* runSqliteState({
+        operation: "compact",
+        baseDir,
+      }).pipe(Effect.flip);
+      assert.equal(missingOptIn._tag, "SqliteStateOfflineMaintenanceRequiredError");
+
+      const failure = yield* runSqliteState({
+        operation: "compact",
+        baseDir,
+        offlineMaintenance: true,
+      }).pipe(Effect.flip);
+      assert.equal(failure._tag, "SqliteStateMaintenanceError");
+      if (failure._tag === "SqliteStateMaintenanceError") {
+        assert.equal(failure.databasePath, databasePath);
+        const backupExists = yield* fs.exists(failure.backupPath);
+        assert.isTrue(backupExists);
+        const platform = yield* HostProcessPlatform;
+        if (platform !== "win32") {
+          const backupStat = yield* fs.stat(failure.backupPath);
+          assert.equal(backupStat.mode & 0o777, 0o600);
+        }
+      }
+
+      const originalRows = yield* Effect.gen(function* () {
+        const sql = yield* SqlClient.SqlClient;
+        return yield* sql<{ readonly id: number; readonly label: string }>`
+          SELECT id, label FROM fixtures ORDER BY id
+        `;
+      }).pipe(
+        Effect.provide(NodeSqliteClient.layer({ filename: databasePath, readonly: true })),
+      );
+      assert.deepStrictEqual(originalRows, [{ id: 1, label: "existing" }]);
+    }),
+  );
 });

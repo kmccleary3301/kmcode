@@ -10,8 +10,9 @@ import type { Block, InlineNode } from "@stream-mdx/core";
 import type { InlineExtension } from "@stream-mdx/core";
 import type { EngineExtensions } from "@stream-mdx/worker/engine";
 import type { DocumentPlugin } from "@stream-mdx/plugins";
+import { InlineContext } from "@lezer/markdown";
 
-export const KM_MARKDOWN_EXTENSION_ID = "km-markdown-stream-mdx-1.1-v3";
+export const KM_MARKDOWN_EXTENSION_ID = "km-markdown-stream-mdx-1.1-v4";
 
 interface ParsedDirectiveAttributes {
   readonly attributes: Readonly<Record<string, string | null>>;
@@ -55,7 +56,7 @@ function parseAttributeBlock(source: string, start: number): ParsedDirectiveAttr
     index += 1;
     while (/[\p{White_Space}]/u.test(source[index] ?? "")) index += 1;
     const quote = source[index];
-    if (quote === "\"" || quote === "'") {
+    if (quote === '"' || quote === "'") {
       index += 1;
       let value = "";
       let closed = false;
@@ -144,7 +145,9 @@ function citationNode(source: string, parsed: ParsedDirectiveAttributes): Inline
       href: citation.href,
       label: citation.label,
       copy: codexFileCitationMarkdown(citation),
-      ...(citation.lineRangeStart === undefined ? {} : { lineRangeStart: String(citation.lineRangeStart) }),
+      ...(citation.lineRangeStart === undefined
+        ? {}
+        : { lineRangeStart: String(citation.lineRangeStart) }),
     },
     raw: source,
   };
@@ -172,7 +175,8 @@ function createFileCitationExtension(): InlineExtension {
             }
             const parsed = parseTextCitation(context.text, localPosition);
             if (parsed === null) return -1;
-            if (citationNode(context.text.slice(localPosition, parsed.end), parsed) === null) return -1;
+            if (citationNode(context.text.slice(localPosition, parsed.end), parsed) === null)
+              return -1;
             return context.addElement(context.elt(nodeName, position, context.offset + parsed.end));
           },
         },
@@ -306,7 +310,90 @@ function createDotlessHostUrlExtension(): InlineExtension {
   };
 }
 
-function templatePresentationAttrs(template: CodexArtifactTemplate): Readonly<Record<string, string>> {
+// Agents link local files as `[name](/path/with spaces.md:7)`. CommonMark ends a
+// bare destination at the first space, so the whole link stays raw text. A
+// destination that starts like a path and holds a space is read up to the `)`
+// that closes it, the same way its `<…>` form would be.
+const PATH_DESTINATION_START = /^(?:\/|~\/|\.{1,2}\/|[A-Za-z]:[\\/]|file:\/\/)/u;
+
+/** The index of the `)` closing a spaced path destination at `start`, or -1. */
+function spacedPathDestinationEnd(source: string, start: number): number {
+  if (!PATH_DESTINATION_START.test(source.slice(start, start + 8))) return -1;
+  let depth = 0;
+  let sawSpace = false;
+  for (let index = start; index < source.length; index += 1) {
+    const character = source[index];
+    if (character === "\\") {
+      index += 1;
+    } else if (character === "\n" || character === "\r" || character === "<" || character === ">") {
+      return -1;
+    } else if (character === " " || character === "\t") {
+      // A quote after a space starts a link title, which CommonMark handles.
+      const following = source[index + 1];
+      if (following === '"' || following === "'") return -1;
+      sawSpace = true;
+    } else if (character === "(") {
+      depth += 1;
+    } else if (character === ")") {
+      if (depth > 0) {
+        depth -= 1;
+      } else {
+        const previous = source[index - 1];
+        return sawSpace && previous !== " " && previous !== "\t" ? index : -1;
+      }
+    }
+  }
+  return -1;
+}
+
+function createSpacedPathLinkExtension(): InlineExtension {
+  return {
+    name: "spaced-path-link",
+    lezer: {
+      parseInline: [
+        {
+          name: "SpacedPathLink",
+          before: "LinkEnd",
+          parse(context, next, position) {
+            const localPosition = position - context.offset;
+            if (next !== 93 || localPosition < 0 || context.text[localPosition + 1] !== "(") {
+              return -1;
+            }
+            const destinationStart = localPosition + 2;
+            const close = spacedPathDestinationEnd(context.text, destinationStart);
+            if (close < 0) return -1;
+            const index = Math.max(
+              context.findOpeningDelimiter(InlineContext.linkStart) ?? -1,
+              context.findOpeningDelimiter(InlineContext.imageStart) ?? -1,
+            );
+            const opener = index < 0 ? null : context.getDelimiterAt(index);
+            if (opener === null) return -1;
+            // Build the stock Link/Image node, so conversion and rendering stay
+            // exactly those of a CommonMark link.
+            const content = context.takeContent(index);
+            const end = context.offset + close + 1;
+            const type = opener.type === InlineContext.imageStart ? "Image" : "Link";
+            return context.addElement(
+              context.elt(type, opener.from, end, [
+                context.elt("LinkMark", opener.from, opener.to),
+                ...content,
+                context.elt("LinkMark", position, position + 1),
+                context.elt("LinkMark", position + 1, position + 2),
+                context.elt("URL", context.offset + destinationStart, context.offset + close),
+                context.elt("LinkMark", end - 1, end),
+              ]),
+            );
+          },
+        },
+      ],
+    },
+    toInline: () => null,
+  };
+}
+
+function templatePresentationAttrs(
+  template: CodexArtifactTemplate,
+): Readonly<Record<string, string>> {
   return {
     artifact_kind: template.artifactKind,
     display_name: template.displayName,
@@ -318,13 +405,16 @@ function templatePresentationAttrs(template: CodexArtifactTemplate): Readonly<Re
 function containsFileCitationNode(nodes: readonly InlineNode[]): boolean {
   for (const node of nodes) {
     if (node.kind === "plugin" && node.name === "file-citation") return true;
-    if ("children" in node && node.children !== undefined && containsFileCitationNode(node.children)) {
+    if (
+      "children" in node &&
+      node.children !== undefined &&
+      containsFileCitationNode(node.children)
+    ) {
       return true;
     }
   }
   return false;
 }
-
 
 function templateFromBlock(block: Block): CodexArtifactTemplate | null {
   if (block.type !== "paragraph") return null;
@@ -376,6 +466,7 @@ export function createKmMarkdownExtensions(): EngineExtensions {
       createFileCitationExtension(),
       createPullRequestReferenceExtension(),
       createDotlessHostUrlExtension(),
+      createSpacedPathLinkExtension(),
     ],
     documentPlugins: [createArtifactTemplatePlugin()],
   };

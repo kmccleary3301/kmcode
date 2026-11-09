@@ -100,6 +100,175 @@ function isNonterminalNodeStatus(status: string): boolean {
   return status === "pending" || status === "running" || status === "waiting";
 }
 
+type ProviderNativeSubagentTurnItem = Extract<
+  OrchestrationV2ThreadProjection["turnItems"][number],
+  { readonly type: "subagent" }
+>;
+type DynamicToolTurnItem = Extract<
+  OrchestrationV2ThreadProjection["turnItems"][number],
+  { readonly type: "dynamic_tool" }
+>;
+type RecoveredSubagentStatus = Extract<
+  OrchestrationV2Subagent["status"],
+  "completed" | "failed" | "interrupted"
+>;
+type RecoveredProviderNativeSubagent = {
+  readonly subagent: OrchestrationV2Subagent;
+  readonly status: RecoveredSubagentStatus;
+  readonly completedAt: DateTime.Utc;
+};
+
+function isEndedRunStatus(status: string): boolean {
+  return (
+    status === "completed" ||
+    status === "failed" ||
+    status === "interrupted" ||
+    status === "cancelled"
+  );
+}
+
+function isTerminalTurnItemStatus(status: string): boolean {
+  return (
+    status === "completed" ||
+    status === "failed" ||
+    status === "interrupted" ||
+    status === "cancelled"
+  );
+}
+
+function unknownRecordField(value: unknown, key: string): unknown {
+  return typeof value === "object" && value !== null ? Reflect.get(value, key) : undefined;
+}
+function parentReportsActiveTask(
+  item: ProviderNativeSubagentTurnItem,
+  parentItem: DynamicToolTurnItem,
+  subagent: OrchestrationV2Subagent,
+): boolean {
+  const jobs =
+    unknownRecordField(parentItem.details, "jobs") ?? unknownRecordField(parentItem, "jobs");
+  if (!Array.isArray(jobs)) return false;
+  const nativeTaskIds = [
+    String(subagent.id),
+    subagent.nativeAgentId,
+    subagent.nativeTaskRef?.nativeId,
+    item.nativeItemRef?.nativeId,
+  ];
+  return jobs.some((job: unknown) => {
+    if (job === null || typeof job !== "object") return false;
+    const type = unknownRecordField(job, "type");
+    if (type !== undefined && type !== "task") return false;
+    const status = unknownRecordField(job, "status") ?? unknownRecordField(job, "state");
+    if (status !== "running" && status !== "pending" && status !== "queued") return false;
+    const jobId = unknownRecordField(job, "id") ?? unknownRecordField(job, "jobId");
+    const jobAgentId = unknownRecordField(job, "agentId");
+    return nativeTaskIds.some(
+      (nativeTaskId) =>
+        nativeTaskId !== undefined && (jobId === nativeTaskId || jobAgentId === nativeTaskId),
+    );
+  });
+}
+
+function hasLaterRunningSubagentEvidence(
+  item: ProviderNativeSubagentTurnItem,
+  parentItem: DynamicToolTurnItem,
+  subagent: OrchestrationV2Subagent,
+  projection: ProjectionStore.ProjectionRuntimeRecoveryState,
+): boolean {
+  const parentUpdatedAt = DateTime.toEpochMillis(parentItem.updatedAt);
+  if (
+    DateTime.toEpochMillis(item.updatedAt) > parentUpdatedAt ||
+    DateTime.toEpochMillis(subagent.updatedAt) > parentUpdatedAt
+  ) {
+    return true;
+  }
+  const providerThread = projection.providerThreads.find(
+    (candidate) => candidate.id === subagent.providerThreadId,
+  );
+  if (
+    providerThread === undefined ||
+    DateTime.toEpochMillis(providerThread.updatedAt) <= parentUpdatedAt
+  ) {
+    return false;
+  }
+  const subagentId = String(subagent.id);
+  const nativeAgentId = subagent.nativeAgentId;
+  const nativeTaskId = subagent.nativeTaskRef?.nativeId;
+  return (
+    providerThread.pendingBackgroundTasks?.some(
+      (task) =>
+        task.taskId === subagentId ||
+        (nativeAgentId !== undefined && task.taskId === nativeAgentId) ||
+        (nativeTaskId !== undefined && task.taskId === nativeTaskId),
+    ) === true
+  );
+}
+
+function settleableProviderNativeSubagent(
+  item: OrchestrationV2ThreadProjection["turnItems"][number],
+  projection: ProjectionStore.ProjectionRuntimeRecoveryState,
+  now: DateTime.Utc,
+): RecoveredProviderNativeSubagent | null {
+  if (
+    item.type !== "subagent" ||
+    item.origin !== "provider_native" ||
+    !isNonterminalTurnItemStatus(item.status) ||
+    item.runId === null ||
+    item.parentItemId === null
+  ) {
+    return null;
+  }
+  const run = projection.runs.find((candidate) => candidate.id === item.runId);
+  if (run === undefined || !isEndedRunStatus(run.status)) return null;
+  const parentItem = projection.turnItems.find((candidate) => candidate.id === item.parentItemId);
+  if (
+    parentItem?.type !== "dynamic_tool" ||
+    parentItem.runId !== run.id ||
+    !isTerminalTurnItemStatus(parentItem.status)
+  ) {
+    return null;
+  }
+  const subagent = projection.subagents.find((candidate) => candidate.id === item.subagentId);
+  if (
+    subagent === undefined ||
+    subagent.origin !== "provider_native" ||
+    subagent.runId !== run.id ||
+    !isNonterminalSubagentStatus(subagent.status)
+  ) {
+    return null;
+  }
+  const asyncState = unknownRecordField(unknownRecordField(parentItem.details, "async"), "state");
+
+  const hasRecordedAsyncState = typeof asyncState === "string" && asyncState.length > 0;
+  if (asyncState === "running") return null;
+  if (
+    !hasRecordedAsyncState &&
+    hasLaterRunningSubagentEvidence(item, parentItem, subagent, projection)
+  ) {
+    return null;
+  }
+  if (parentReportsActiveTask(item, parentItem, subagent)) return null;
+  let status: RecoveredSubagentStatus;
+  if (
+    run.status === "interrupted" ||
+    run.status === "cancelled" ||
+    parentItem.status === "interrupted" ||
+    parentItem.status === "cancelled"
+  ) {
+    status = "interrupted";
+  } else if (parentItem.status === "completed") {
+    status = "completed";
+  } else if (parentItem.status === "failed" || run.status === "failed") {
+    status = "failed";
+  } else {
+    status = "interrupted";
+  }
+  return {
+    subagent,
+    status,
+    completedAt: parentItem.completedAt ?? run.completedAt ?? now,
+  };
+}
+
 /**
  * A delegate_task child. Its own thread is reconciled and continued on its own
  * and reports back through the app, so it is not provider background work.
@@ -524,7 +693,7 @@ export const make = Effect.gen(function* () {
       // cancelled above for recovered nonterminal runs to avoid duplicate
       // cancellation events.
       const recoveredNonterminalRunIds = new Set(runs.map((run) => run.id));
-      const cancelledStaleNodeIds = new Set<string>();
+      const updatedStaleNodeIds = new Set<string>();
       for (const item of projection.turnItems ?? []) {
         if (item.runId !== null && recoveredNonterminalRunIds.has(item.runId)) {
           continue;
@@ -534,6 +703,69 @@ export const make = Effect.gen(function* () {
         }
         if (!isNonterminalTurnItemStatus(item.status) || isAppOwnedDelegationItem(item)) {
           continue;
+        }
+        if (item.type === "subagent") {
+          const settlement = settleableProviderNativeSubagent(item, projection, now);
+          if (settlement !== null) {
+            const providerInstanceId = resolveStaleBackgroundItemProviderInstanceId(
+              item,
+              projection,
+            );
+            events.push({
+              id: yield* allocateEventId(),
+              type: "turn-item.updated",
+              threadId: projection.thread.id,
+              ...(item.runId === null ? {} : { runId: item.runId }),
+              ...(item.nodeId === null || item.nodeId === undefined ? {} : { nodeId: item.nodeId }),
+              providerInstanceId,
+              occurredAt: now,
+              payload: {
+                ...item,
+                status: settlement.status,
+                completedAt: settlement.completedAt,
+                updatedAt: now,
+              },
+            });
+            events.push({
+              id: yield* allocateEventId(),
+              type: "subagent.updated",
+              threadId: projection.thread.id,
+              ...(item.runId === null ? {} : { runId: item.runId }),
+              nodeId: settlement.subagent.id,
+              driver: settlement.subagent.driver,
+              providerInstanceId: settlement.subagent.providerInstanceId,
+              occurredAt: now,
+              payload: {
+                ...settlement.subagent,
+                status: settlement.status,
+                completedAt: settlement.completedAt,
+                updatedAt: now,
+              },
+            });
+            const subagentNode = projection.nodes.find(
+              (candidate) =>
+                candidate.id === settlement.subagent.id &&
+                isNonterminalNodeStatus(candidate.status),
+            );
+            if (subagentNode !== undefined && !updatedStaleNodeIds.has(subagentNode.id)) {
+              updatedStaleNodeIds.add(subagentNode.id);
+              events.push({
+                id: yield* allocateEventId(),
+                type: "node.updated",
+                threadId: projection.thread.id,
+                ...(item.runId === null ? {} : { runId: item.runId }),
+                nodeId: subagentNode.id,
+                providerInstanceId: settlement.subagent.providerInstanceId,
+                occurredAt: now,
+                payload: {
+                  ...subagentNode,
+                  status: settlement.status,
+                  completedAt: settlement.completedAt,
+                },
+              });
+            }
+            continue;
+          }
         }
         const providerInstanceId = resolveStaleBackgroundItemProviderInstanceId(item, projection);
         recordCancelledBackgroundItem(item);
@@ -552,8 +784,8 @@ export const make = Effect.gen(function* () {
             (candidate) =>
               candidate.id === item.nodeId && isNonterminalNodeStatus(candidate.status),
           );
-          if (staleItemNode !== undefined && !cancelledStaleNodeIds.has(staleItemNode.id)) {
-            cancelledStaleNodeIds.add(staleItemNode.id);
+          if (staleItemNode !== undefined && !updatedStaleNodeIds.has(staleItemNode.id)) {
+            updatedStaleNodeIds.add(staleItemNode.id);
             events.push({
               id: yield* allocateEventId(),
               type: "node.updated",
@@ -594,8 +826,8 @@ export const make = Effect.gen(function* () {
           (candidate) =>
             candidate.id === item.subagentId && isNonterminalNodeStatus(candidate.status),
         );
-        if (staleSubagentNode !== undefined && !cancelledStaleNodeIds.has(staleSubagentNode.id)) {
-          cancelledStaleNodeIds.add(staleSubagentNode.id);
+        if (staleSubagentNode !== undefined && !updatedStaleNodeIds.has(staleSubagentNode.id)) {
+          updatedStaleNodeIds.add(staleSubagentNode.id);
           events.push({
             id: yield* allocateEventId(),
             type: "node.updated",
@@ -620,11 +852,11 @@ export const make = Effect.gen(function* () {
           node.kind !== "root_turn" ||
           node.runId !== null ||
           !isNonterminalNodeStatus(node.status) ||
-          cancelledStaleNodeIds.has(node.id)
+          updatedStaleNodeIds.has(node.id)
         ) {
           continue;
         }
-        cancelledStaleNodeIds.add(node.id);
+        updatedStaleNodeIds.add(node.id);
         events.push({
           id: yield* allocateEventId(),
           type: "node.updated",

@@ -69,3 +69,30 @@ describe("bare URL autolinks", () => {
     ]);
   });
 });
+
+describe("file links with spaces in the path", () => {
+  it("links path destinations with spaces as their angle-bracket form would", async () => {
+    const dir = "/Users/k/infiller";
+    const links = await linksIn(
+      `See [Amortized Infilling.md:7](${dir}/Amortized Infilling.md:7) and [Traces (1).md](${dir}/Distillation with Traces (1).md).`,
+    );
+    expect(links).toEqual(
+      await linksIn(
+        `See [Amortized Infilling.md:7](<${dir}/Amortized Infilling.md:7>) and [Traces (1).md](<${dir}/Distillation with Traces (1).md>).`,
+      ),
+    );
+    expect(links.map((link) => link.text)).toEqual(["Amortized Infilling.md:7", "Traces (1).md"]);
+  });
+
+  it("keeps formatting in the label and links relative and home paths", async () => {
+    expect(
+      await linksIn("[**the** `plan`](./docs/my plan.md) or [notes](~/My Notes/today.md)"),
+    ).toEqual(
+      await linksIn("[**the** `plan`](<./docs/my plan.md>) or [notes](<~/My Notes/today.md>)"),
+    );
+  });
+
+  it("leaves destinations that are not paths, or that carry a title, to CommonMark", async () => {
+    expect(await linksIn('[a](not a path) [b](/x y "title") [c](/x y')).toEqual([]);
+  });
+});

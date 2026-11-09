@@ -355,33 +355,33 @@
 @media (prefers-reduced-motion: reduce) {
   .motion-swap,
   .motion-swap-text {
-    animation: motion-fade var(--motion-duration) ease-out !important;
+    animation: none !important;
   }
   .motion-enter,
   [data-motion-enter] {
-    animation: motion-fade var(--motion-duration) ease-out !important;
+    animation: none !important;
   }
   .glyph-swap-in {
-    animation: motion-fade var(--motion-duration) ease-out !important;
+    animation: none !important;
   }
   .glyph-swap-out {
-    animation: glyph-fade-out 160ms ease-out forwards !important;
+    display: none;
   }
   .motion-row {
-    transition: opacity var(--motion-duration) ease-out !important;
+    transition: none !important;
   }
   .messages-timeline-row-frame[data-exiting] {
-    transition: opacity var(--motion-duration) ease-out !important;
+    transition: none !important;
   }
   .motion-tint {
-    transition: color var(--motion-duration) ease !important;
+    transition: none !important;
   }
   .motion-clock-hand,
   .spinning-globe-meridian {
     animation: none !important;
   }
   .bottom-stick-jump {
-    transition: opacity var(--motion-duration) ease-out !important;
+    transition: none !important;
     transform: none !important;
   }
 }

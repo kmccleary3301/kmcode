@@ -1,0 +1,86 @@
+/* PROTOTYPE: throwaway work-log tree demo. Not production code. */
+
+/* Collapsible glides its own height on KM's transcript spring (WorkTree.tsx)
+   and owns that height inline: a CSS height for the closed state would
+   collapse a closing box at commit, before the glide can hold it. CSS clips
+   the box while it moves and fades the content with it on easing.standard,
+   exits at about two thirds of the entry. Keys and the transport land
+   everything (data-wl-land, motion.ts). */
+.wl-collapsible:not([data-open]),
+.wl-collapsible[data-gliding],
+.wl-grow {
+  overflow-x: visible;
+  overflow-y: clip;
+}
+.wl-collapsible-content {
+  transition: opacity 200ms cubic-bezier(0.23, 1, 0.32, 1);
+}
+.wl-collapsible:not([data-open]) > .wl-collapsible-content {
+  opacity: 0;
+  transition-duration: 140ms;
+}
+.wl-collapsible[data-arriving] > .wl-collapsible-content {
+  opacity: 0;
+  transition: none;
+}
+
+/* Chevrons turn with the panel they open. */
+.wl-chevron {
+  transition: transform 200ms cubic-bezier(0.23, 1, 0.32, 1);
+}
+
+[data-wl-land] .wl-chevron,
+[data-wl-land] .wl-collapsible-content {
+  transition: none;
+}
+
+/* Work rows hide their scrollbars, like the transcript's tool rows. */
+.wl-tree * {
+  scrollbar-width: none;
+}
+.wl-tree *::-webkit-scrollbar {
+  display: none;
+}
+
+@keyframes wl-caret {
+  50% {
+    opacity: 0;
+  }
+}
+.wl-caret {
+  display: inline-block;
+  width: 0.5ch;
+  height: 1.05em;
+  margin-inline-start: 1px;
+  vertical-align: text-bottom;
+  background: currentColor;
+  animation: wl-caret 1s steps(1) infinite;
+}
+
+/* The range input only provides the thumb; the track is drawn beneath it. */
+.wl-scrubber::-webkit-slider-runnable-track {
+  background: transparent;
+}
+.wl-scrubber::-webkit-slider-thumb {
+  appearance: none;
+  width: 12px;
+  height: 12px;
+  border-radius: 9999px;
+  background: var(--foreground);
+  border: 2px solid var(--background);
+  box-shadow: 0 0 0 1px var(--border);
+}
+.wl-scrubber::-moz-range-thumb {
+  width: 12px;
+  height: 12px;
+  border-radius: 9999px;
+  background: var(--foreground);
+  border: 2px solid var(--background);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .wl-chevron,
+  .wl-collapsible-content {
+    transition: none;
+  }
+}

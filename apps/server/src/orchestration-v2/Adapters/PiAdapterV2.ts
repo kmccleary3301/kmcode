@@ -233,6 +233,8 @@ const PI_SUBAGENT_FINISHED_STATUSES: Record<string, true> = {
 const PI_TASK_RESULT_PATTERN =
   /<task-result id="([^"]+)"[^>]*?\sstatus="([^"]+)"[^>]*>([\s\S]*?)<\/task-result>/g;
 const PI_TASK_RESULT_OUTPUT_PATTERN = /<output>([\s\S]*?)<\/output>/;
+const PI_WORKPOOL_BATCH_RESULT_PATTERN =
+  /^## ([^\r\n]+?) · agent `[^`\r\n]+` · (completed|failed|cancelled)\s*$/gm;
 const PI_REQUEST_TIMEOUT_MS = 15_000;
 // Session lifecycle hooks reload extensions, MCP servers and language servers.
 const PI_SESSION_TIMEOUT_MS = 60_000;
@@ -1599,6 +1601,9 @@ export function makePiAdapterV2(
         ) {
           yield* emitSubagentTasks(turn, toolCallId, resultRecord, completed, args);
         }
+        if (completed) {
+          yield* settleToolCallSubagents(turn, toolCallId, resultRecord, isError, emittedAt);
+        }
       });
 
       const emitToolResultMessages = Effect.fnUntraced(function* (
@@ -2317,6 +2322,63 @@ export function makePiAdapterV2(
           )
         ) {
           yield* scheduleSettleProbe(turn, true);
+        }
+      });
+      const settleToolCallSubagents = Effect.fnUntraced(function* (
+        turn: ActivePiTurn,
+        toolCallId: string,
+        resultRecord: unknown,
+        isError: boolean,
+        completedAt: DateTime.Utc,
+      ) {
+        // Awaited OMP workpool batches consume their async-job results in-process.
+        // Keep children explicitly reported as active in the parent result running.
+        const details = recordField(resultRecord, "details");
+        const asyncJob = recordField(details, "async");
+        if (recordString(asyncJob, "state") === "running") return;
+        const jobsValue = recordField(details, "jobs") ?? recordField(resultRecord, "jobs");
+        const jobs: ReadonlyArray<unknown> = Array.isArray(jobsValue) ? jobsValue : [];
+        const nativeTaskPrefix = `${toolCallId}:subagent:`;
+        const parentItemId = idAllocator.derive.turnItemFromProviderItem({
+          driver,
+          nativeItemId: toolCallId,
+        });
+        for (const [nativeTaskId, item] of Object.entries(turn.subagentItems)) {
+          if (!isOrchestrationV2WorkActive(item.status)) continue;
+          if (item.parentItemId !== parentItemId && !nativeTaskId.startsWith(nativeTaskPrefix)) {
+            continue;
+          }
+          const nativeAgentId =
+            item.nativeAgentId ??
+            (nativeTaskId.startsWith(nativeTaskPrefix)
+              ? nativeTaskId.slice(nativeTaskPrefix.length)
+              : undefined);
+          if (nativeAgentId === undefined) continue;
+          const activeJobMatchesChild = jobs.some((job) => {
+            if (job === null || typeof job !== "object") return false;
+            const jobType = recordString(job, "type");
+            if (jobType !== undefined && jobType !== "task") return false;
+            const status = recordString(job, "status") ?? recordString(job, "state");
+            if (status !== "running" && status !== "pending" && status !== "queued") {
+              return false;
+            }
+            const jobId = recordString(job, "id") ?? recordString(job, "jobId");
+            const jobAgentId = recordString(job, "agentId");
+            return (
+              jobId === nativeAgentId || jobId === nativeTaskId || jobAgentId === nativeAgentId
+            );
+          });
+          if (activeJobMatchesChild) continue;
+          yield* emitSubagentRecord(
+            turn,
+            toolCallId,
+            {
+              id: nativeAgentId,
+              parentToolCallId: toolCallId,
+              status: turn.interrupted ? "interrupted" : isError ? "failed" : "completed",
+            },
+            completedAt,
+          );
         }
       });
 
@@ -3753,6 +3815,47 @@ export function makePiAdapterV2(
                   owningTurn.settleWhenIdle &&
                   !Object.values(owningTurn.subagentItems).some((it) =>
                     isOrchestrationV2WorkActive(it.status),
+                  )
+                ) {
+                  yield* scheduleSettleProbe(owningTurn, true);
+                }
+                pruneFinishedTurnIfIdle(state, owningTurn);
+              }
+              for (const [, jobId = "", nativeStatus = ""] of delivered.matchAll(
+                PI_WORKPOOL_BATCH_RESULT_PATTERN,
+              )) {
+                if (structuredJobIds.has(jobId)) continue;
+                const owningTurn = findOwningTurn(state, { jobId });
+                if (owningTurn === null) continue;
+                const nativeTaskId = owningTurn.subagentLive[jobId]?.nativeTaskId;
+                const item =
+                  nativeTaskId === undefined ? undefined : owningTurn.subagentItems[nativeTaskId];
+                if (
+                  nativeTaskId === undefined ||
+                  item === undefined ||
+                  !isOrchestrationV2WorkActive(item.status)
+                ) {
+                  continue;
+                }
+                const status =
+                  nativeStatus === "failed"
+                    ? "failed"
+                    : nativeStatus === "cancelled"
+                      ? "interrupted"
+                      : "completed";
+                const parentToolCallId = nativeTaskId.includes(":subagent:")
+                  ? nativeTaskId.slice(0, nativeTaskId.lastIndexOf(":subagent:"))
+                  : "";
+                yield* emitSubagentRecord(
+                  owningTurn,
+                  parentToolCallId,
+                  { id: jobId, status },
+                  emittedAt,
+                );
+                if (
+                  owningTurn.settleWhenIdle &&
+                  !Object.values(owningTurn.subagentItems).some((activeItem) =>
+                    isOrchestrationV2WorkActive(activeItem.status),
                   )
                 ) {
                   yield* scheduleSettleProbe(owningTurn, true);

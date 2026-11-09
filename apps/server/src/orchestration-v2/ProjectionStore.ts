@@ -4256,35 +4256,61 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
               ORDER BY message.created_at ASC, message.message_id ASC
             `,
           sql<PayloadRow>`
-              SELECT item.payload_json FROM orchestration_v2_projection_turn_items AS item
-              WHERE item.thread_id = ${threadId}
-                AND item.status IN ('pending', 'running', 'waiting')
-                AND (
-                  item.run_id IN (
+              SELECT recovery_item.payload_json FROM (
+                SELECT item.payload_json, item.ordinal, item.turn_item_id
+                FROM orchestration_v2_projection_turn_items AS item
+                WHERE item.thread_id = ${threadId}
+                  AND item.status IN ('pending', 'running', 'waiting')
+                  AND (
+                    item.run_id IN (
+                      SELECT run_id FROM orchestration_v2_projection_runs
+                      WHERE thread_id = ${threadId}
+                        AND status IN ('queued', 'preparing', 'starting', 'running', 'waiting')
+                    )
+                    OR item.type IN ('command_execution', 'dynamic_tool', 'subagent')
+                    OR (
+                      item.type = 'user_input_request'
+                      AND json_extract(item.payload_json, '$.requestId') IN (
+                        SELECT runtime_request_id FROM orchestration_v2_projection_runtime_requests
+                        WHERE thread_id = ${threadId} AND status = 'pending' AND kind = 'user_input'
+                      )
+                    )
+                    OR (
+                      item.run_id IS NULL
+                      AND item.node_id IN (
+                        SELECT node_id FROM orchestration_v2_projection_nodes
+                        WHERE thread_id = ${threadId}
+                          AND run_id IS NULL
+                          AND kind = 'root_turn'
+                          AND status IN ('pending', 'running', 'waiting')
+                      )
+                    )
+                  )
+                UNION ALL
+                -- Keep terminal parent details for native children whose
+                -- status recovery needs to compare with the parent call.
+                SELECT parent.payload_json, parent.ordinal, parent.turn_item_id
+                FROM orchestration_v2_projection_turn_items AS parent
+                WHERE parent.thread_id = ${threadId}
+                  AND parent.run_id IN (
                     SELECT run_id FROM orchestration_v2_projection_runs
                     WHERE thread_id = ${threadId}
-                      AND status IN ('queued', 'preparing', 'starting', 'running', 'waiting')
+                      AND status IN ('completed', 'failed', 'interrupted', 'cancelled')
                   )
-                  OR item.type IN ('command_execution', 'dynamic_tool', 'subagent')
-                  OR (
-                    item.type = 'user_input_request'
-                    AND json_extract(item.payload_json, '$.requestId') IN (
-                      SELECT runtime_request_id FROM orchestration_v2_projection_runtime_requests
-                      WHERE thread_id = ${threadId} AND status = 'pending' AND kind = 'user_input'
-                    )
+                  AND parent.type = 'dynamic_tool'
+                  AND parent.status IN ('completed', 'failed', 'interrupted', 'cancelled')
+                  AND parent.turn_item_id IN (
+                    SELECT child.parent_item_id
+                    FROM orchestration_v2_projection_turn_items AS child
+                    WHERE child.thread_id = ${threadId}
+                      AND child.run_id = parent.run_id
+                      AND child.type = 'subagent'
+                      AND child.status IN ('pending', 'running', 'waiting')
+                      AND json_extract(child.payload_json, '$.origin') = 'provider_native'
+                      AND child.parent_item_id IS NOT NULL
                   )
-                  OR (
-                    item.run_id IS NULL
-                    AND item.node_id IN (
-                      SELECT node_id FROM orchestration_v2_projection_nodes
-                      WHERE thread_id = ${threadId}
-                        AND run_id IS NULL
-                        AND kind = 'root_turn'
-                        AND status IN ('pending', 'running', 'waiting')
-                    )
-                  )
-                )
-              ORDER BY item.ordinal ASC, item.turn_item_id ASC
+              ) AS recovery_item
+              ORDER BY recovery_item.ordinal ASC, recovery_item.turn_item_id ASC
             `,
         ]);
         const [

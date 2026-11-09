@@ -17,6 +17,8 @@ export interface SpringChase {
   readonly value: number;
   /** Chase `target`; an idle chase starts from `from`, already moving. */
   readonly to: (from: number, target: number) => void;
+  /** Move a running chase's position and target together, keeping its velocity. */
+  readonly shift: (by: number) => void;
   readonly stop: () => void;
 }
 
@@ -71,6 +73,10 @@ export function createSpringChase(
       velocity = SPRING_OMEGA * (nextTarget - from);
       last = performance.now();
       frame = requestAnimationFrame(step);
+    },
+    shift(by) {
+      value += by;
+      target += by;
     },
     stop() {
       if (frame !== null) cancelAnimationFrame(frame);

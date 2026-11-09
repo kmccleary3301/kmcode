@@ -7,10 +7,10 @@
  * excerpts and subagent progress. Diff counts keep their colour. Motion is the
  * second block below. */
 .km-transcript:is(
-    [data-transcript-style="minimal"],
-    [data-transcript-style="minimal-plus"],
-    [data-transcript-style="km"]
-  ) {
+  [data-transcript-style="minimal"],
+  [data-transcript-style="minimal-plus"],
+  [data-transcript-style="km"]
+) {
   /* The prompt spans the column in a quiet outlined box, not a bubble. */
   [data-message-role="user"] .group > * {
     width: 100%;
@@ -379,7 +379,9 @@
     font-size: 0.8125rem;
     line-height: 1.35;
   }
-  .minimal-agent-details-has-provider .activity-disclosure-content > .minimal-agent-details-content {
+  .minimal-agent-details-has-provider
+    .activity-disclosure-content
+    > .minimal-agent-details-content {
     padding-left: 3.625rem;
   }
   .minimal-agent-details-content .subagent-details-task {
@@ -391,15 +393,22 @@
     -webkit-mask-image: linear-gradient(to bottom, #000 0%, #000 70%, transparent 100%);
     mask-image: linear-gradient(to bottom, #000 0%, #000 70%, transparent 100%);
   }
-  .minimal-agent-details-content :is(.subagent-details-task, .subagent-details-live, [data-subagent-result]) {
+  .minimal-agent-details-content
+    :is(.subagent-details-task, .subagent-details-live, [data-subagent-result]) {
     min-width: 0;
     font-size: 0.8125rem;
     line-height: 1.35;
   }
-  .minimal-agent-details-content :is(.subagent-details-task, .subagent-details-live, [data-subagent-result]) .markdown-renderer > :first-child {
+  .minimal-agent-details-content
+    :is(.subagent-details-task, .subagent-details-live, [data-subagent-result])
+    .markdown-renderer
+    > :first-child {
     margin-top: 0;
   }
-  .minimal-agent-details-content :is(.subagent-details-task, .subagent-details-live, [data-subagent-result]) .markdown-renderer > :last-child {
+  .minimal-agent-details-content
+    :is(.subagent-details-task, .subagent-details-live, [data-subagent-result])
+    .markdown-renderer
+    > :last-child {
     margin-bottom: 0;
   }
   .minimal-agent-details-content .subagent-details-step {
@@ -469,10 +478,10 @@
 }
 
 .km-transcript:is(
-    [data-transcript-style="minimal"],
-    [data-transcript-style="minimal-plus"],
-    [data-transcript-style="km"]
-  ) {
+  [data-transcript-style="minimal"],
+  [data-transcript-style="minimal-plus"],
+  [data-transcript-style="km"]
+) {
   [data-user-message-folded-header] {
     display: flex;
     align-items: center;
@@ -532,42 +541,35 @@
   }
 }
 
-/* Motion, measured frame by frame from the reference recording and fit to its
- * curves (nearly all of them --ease-disclosure at different lengths). Things
- * arrive out of a blur, changed words roll (RollingText: the old word leaves
- * up fast, the new one rises in slower, both clipped to the line), changed
- * digits spin, the live line carries a dark band that sweeps back and forth,
- * and a running step shows the pixel loader. Reduced motion keeps the fades only. */
+/* Quiet row changes use short, low-travel motion; streamed size changes are
+ * chased by the shared spring, and reduced motion lands on the end state. */
 .km-transcript:is(
-    [data-transcript-style="minimal"],
-    [data-transcript-style="minimal-plus"],
-    [data-transcript-style="km"]
-  ) {
-  .messages-timeline-row-frame:is([data-arriving], [data-sent]) > .chat-content-lane,
+  [data-transcript-style="minimal"],
+  [data-transcript-style="minimal-plus"],
+  [data-transcript-style="km"]
+) {
+  .messages-timeline-row-frame[data-arriving] > .chat-content-lane,
   .tool-io-pane.step-row-enter,
   :is(.motion-enter, [data-motion-enter]) {
-    animation: minimal-enter 335ms var(--ease-disclosure);
+    animation: minimal-enter 210ms cubic-bezier(0.65, 0, 0.35, 1);
+  }
+  .messages-timeline-row-frame[data-sent] > .chat-content-lane {
+    animation: minimal-enter 210ms var(--ease-disclosure);
   }
   /* An arriving row eases in once; rows inside it do not repeat the fade. */
   .messages-timeline-row-frame:is([data-arriving], [data-sent])
     :is(.tool-io-pane.step-row-enter, .motion-enter, [data-motion-enter]) {
     animation: none;
   }
-  /* A glyph or line that changed (ring to check, an agent's next action)
-     crossfades out of a blur in place, as the recording's subtask lines do. */
+  /* Status and line changes resolve in place, without shifting nearby content. */
   :is(.motion-swap, .motion-swap-text) {
-    animation: minimal-swap 300ms var(--ease-disclosure);
+    animation: minimal-swap 250ms cubic-bezier(0.65, 0, 0.35, 1);
   }
-  /* A block that leaves blurs out fast in place (about 120ms in the
-     recording) while its height closes on the usual curve. */
   .messages-timeline-row-frame[data-exiting] {
-    filter: blur(4px);
-    transition:
-      opacity 130ms var(--ease-disclosure),
-      filter 130ms var(--ease-disclosure);
+    transition: opacity 130ms cubic-bezier(0.65, 0, 0.35, 1);
   }
   [data-streaming] .stream-word {
-    animation: minimal-word-in 280ms cubic-bezier(0.33, 1, 0.68, 1);
+    animation: minimal-word-in 250ms cubic-bezier(0.65, 0, 0.35, 1);
   }
 
   /* Status glyphs crossfade out of a blur: the loader blurs away in place as
@@ -639,13 +641,13 @@
 /* RollingText's parts, in the transcript and in surfaces outside it that
    roll their live lines the same way (the composer's agent list). */
 :is(
-    .km-transcript:is(
-        [data-transcript-style="minimal"],
-        [data-transcript-style="minimal-plus"],
-        [data-transcript-style="km"]
-      ),
-    [data-rolling-text]
-  ) {
+  .km-transcript:is(
+    [data-transcript-style="minimal"],
+    [data-transcript-style="minimal-plus"],
+    [data-transcript-style="km"]
+  ),
+  [data-rolling-text]
+) {
   .roll-slot {
     position: relative;
     display: inline-block;
@@ -702,10 +704,12 @@
    (ShimmerLayers). The label rests at 55% and a 4rem band lifts it to full:
    the copy adds its remaining 45% (plus-lighter, inside the label's own group)
    under a soft-edged window, which sums to the 55%-to-100% mask it replaces.
-   It steps once per frame at the shimmer frame rate (Settings > Appearance,
-   30 fps by default): each frame of a sweep costs a compositor frame, and the
-   soft band still reads as smooth motion. visibleAnimation keeps every sweep
-   in phase so their steps land on the same frames. */
+   The band crosses left to right in 1.56s, entering and leaving fully outside
+   the label whatever its width, then rests out of sight for 1.04s before the
+   next pass. It steps once per frame at the shimmer frame rate (Settings >
+   Appearance, 30 fps by default): each frame of a sweep costs a compositor
+   frame, and the soft band still reads as smooth motion. visibleAnimation
+   keeps every sweep in phase so their steps land on the same frames. */
 @media (prefers-reduced-motion: no-preference) and (forced-colors: none) {
   .minimal-text-shimmer,
   .km-transcript:is(
@@ -742,9 +746,9 @@
       opacity: 0.45;
       mix-blend-mode: plus-lighter;
       animation-name: minimal-shine-window;
-      animation-duration: 1.83s;
-      animation-timing-function: steps(calc(var(--shimmer-fps, 30) * 1.83));
-      animation-direction: alternate;
+      animation-duration: 2.6s;
+      /* Per keyframe segment: the 1.56s crossing steps at the frame rate. */
+      animation-timing-function: steps(calc(var(--shimmer-fps, 30) * 1.56));
     }
     /* The copy takes the label's colour, whatever its own layout classes set. */
     & > .shimmer-clip .shimmer-copy {
@@ -753,9 +757,8 @@
       color: inherit;
       -webkit-text-fill-color: currentColor;
       animation-name: minimal-shine-copy;
-      animation-duration: 1.83s;
-      animation-timing-function: steps(calc(var(--shimmer-fps, 30) * 1.83));
-      animation-direction: alternate;
+      animation-duration: 2.6s;
+      animation-timing-function: steps(calc(var(--shimmer-fps, 30) * 1.56));
     }
   }
   .km-transcript:is(
@@ -770,20 +773,17 @@
 @keyframes minimal-enter {
   from {
     opacity: 0;
-    filter: blur(4px);
     transform: translateY(2px);
   }
 }
 @keyframes minimal-swap {
   from {
     opacity: 0;
-    filter: blur(3px);
   }
 }
 @keyframes minimal-word-in {
   from {
     opacity: 0;
-    filter: blur(2px);
   }
 }
 @keyframes minimal-roll-in {
@@ -862,53 +862,66 @@
     opacity: 0;
   }
 }
+/* The window spans the label, so (50% + 2rem) parks the band's centre 2rem
+   past an edge: fully outside. Labels up to 28rem travel 32rem, so short ones
+   cross at about 20rem/s rather than crawl; longer ones travel their width.
+   60% of 2.6s crosses; the rest holds out of sight. */
 @keyframes minimal-shine-window {
   from {
-    transform: translateX(-20rem);
+    transform: translateX(calc(-1 * max(50% + 2rem, 16rem)));
   }
+  60%,
   to {
-    transform: translateX(20rem);
+    transform: translateX(max(50% + 2rem, 16rem));
   }
 }
 @keyframes minimal-shine-copy {
   from {
-    transform: translateX(20rem);
+    transform: translateX(max(50% + 2rem, 16rem));
   }
+  60%,
   to {
-    transform: translateX(-20rem);
+    transform: translateX(calc(-1 * max(50% + 2rem, 16rem)));
   }
 }
 @media (prefers-reduced-motion: reduce) {
   .km-transcript:is(
-      [data-transcript-style="minimal"],
-      [data-transcript-style="minimal-plus"],
-      [data-transcript-style="km"]
-    ) {
+    [data-transcript-style="minimal"],
+    [data-transcript-style="minimal-plus"],
+    [data-transcript-style="km"]
+  ) {
     .messages-timeline-row-frame:is([data-arriving], [data-sent]) > .chat-content-lane,
     .tool-io-pane.step-row-enter,
-    :is(.motion-enter, [data-motion-enter], .motion-swap, .motion-swap-text),
-    .minimal-agent-roll-in,
-    .minimal-agent-glyph-in,
-    [data-streaming] .stream-word {
-      animation: motion-fade var(--motion-duration) ease-out !important;
+    :is(
+      .motion-enter,
+      [data-motion-enter],
+      .motion-swap,
+      .motion-swap-text,
+      .minimal-agent-roll-in,
+      .minimal-agent-glyph-in,
+      [data-streaming] .stream-word
+    ) {
+      animation: none !important;
     }
     .minimal-agent-leaving {
       display: none;
     }
     :is(.messages-timeline-row-frame[data-exiting], .minimal-agents-card) {
       filter: none !important;
+      transition: none !important;
+      animation: none !important;
     }
   }
   :is(
-      .km-transcript:is(
-          [data-transcript-style="minimal"],
-          [data-transcript-style="minimal-plus"],
-          [data-transcript-style="km"]
-        ),
-      [data-rolling-text]
-    ) {
+    .km-transcript:is(
+      [data-transcript-style="minimal"],
+      [data-transcript-style="minimal-plus"],
+      [data-transcript-style="km"]
+    ),
+    [data-rolling-text]
+  ) {
     .roll-in {
-      animation: motion-fade var(--motion-duration) ease-out !important;
+      animation: none !important;
     }
     .roll-out {
       display: none;

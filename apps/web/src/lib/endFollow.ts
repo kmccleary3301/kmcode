@@ -15,7 +15,8 @@ const END_SLACK_MAX_SHARE = 0.5;
 const READER_INTENT_MS = 1000;
 /**
  * Growth up to this share of the viewport glides up instead of jumping; a
- * larger move (a load, a thread switch) lands at once.
+ * larger move (a load, a thread switch) lands at once. While the turn runs,
+ * any growth glides: a tall excerpt opening is still the end moving.
  */
 const END_GLIDE_MAX_SHARE = 0.5;
 
@@ -42,6 +43,13 @@ const END_GLIDE_MAX_SHARE = 0.5;
  * shrink. It sits on LegendList's footer box as a margin, which no
  * observer sees, and it measures rows only, so a composer inset change
  * moves the end instead of being absorbed.
+ *
+ * Above the view: a row above the top of the viewport changing size (an
+ * excerpt folding away, a measurement correcting) moves everything on screen
+ * by the same amount. That is not the end moving, so it is neither slack nor
+ * glide: the offset moves with it in the same frame and nothing on screen
+ * does. The row at the top of the viewport is the reference; its offset in
+ * the content shifts only when rows above it resize.
  *
  * Glide: while attached, growth at the end scrolls up on a spring chase
  * instead of in one frame, so arriving lines slide in from under the composer.
@@ -83,6 +91,16 @@ export function useEndFollow({
     let rowsEnd: number | undefined;
     let releaseTimer: number | undefined;
     let queued = false;
+    let anchor: { readonly row: Element; readonly offset: number } | undefined;
+    const contentOffset = (row: Element) =>
+      row.getBoundingClientRect().top - content.getBoundingClientRect().top;
+    const markAnchor = () => {
+      const box = scroller.getBoundingClientRect();
+      let row = scroller.ownerDocument.elementFromPoint(box.left + box.width / 2, box.top + 1);
+      // LegendList positions each row as a child of the box inside `content`.
+      while (row !== null && row.parentElement?.parentElement !== content) row = row.parentElement;
+      anchor = row === null ? undefined : { row, offset: contentOffset(row) };
+    };
     const following = () => attachedRef.current && followsRef.current;
     const chase = createSpringChase(
       (value) => {
@@ -102,7 +120,8 @@ export function useEndFollow({
       if (
         grew &&
         (chase.running ||
-          (end - from <= scroller.clientHeight * END_GLIDE_MAX_SHARE && !prefersReducedMotion()))
+          ((liveRef.current || end - from <= scroller.clientHeight * END_GLIDE_MAX_SHARE) &&
+            !prefersReducedMotion()))
       ) {
         chase.to(from, end);
         return;
@@ -135,23 +154,38 @@ export function useEndFollow({
         }
         return;
       }
-      if (Math.abs(delta) < 0.5 || !following()) return;
-      const next = Math.min(
-        Math.max(0, slack - delta),
-        scroller.clientHeight * END_SLACK_MAX_SHARE,
-      );
-      setSlack(next, false);
-      window.clearTimeout(releaseTimer);
-      if (next > 0) {
-        releaseTimer = window.setTimeout(
-          () => setSlack(0, !prefersReducedMotion()),
-          END_SLACK_HOLD_MS,
+      if (!following()) return;
+      const above =
+        anchor !== undefined && anchor.row.isConnected
+          ? contentOffset(anchor.row) - anchor.offset
+          : 0;
+      const endDelta = delta - above;
+      if (Math.abs(endDelta) >= 0.5) {
+        const next = Math.min(
+          Math.max(0, slack - endDelta),
+          scroller.clientHeight * END_SLACK_MAX_SHARE,
         );
+        setSlack(next, false);
+        window.clearTimeout(releaseTimer);
+        if (next > 0) {
+          releaseTimer = window.setTimeout(
+            () => setSlack(0, !prefersReducedMotion()),
+            END_SLACK_HOLD_MS,
+          );
+        }
+      }
+      if (Math.abs(above) >= 0.5) {
+        // `previousTop` is the offset before this commit; a shrink above may
+        // already have clamped the live one.
+        if (chase.running) chase.shift(above);
+        scroller.scrollTop = previousTop + above;
+        previousTop = scroller.scrollTop;
       }
     };
     const settle = () => {
       absorb();
       pin();
+      markAnchor();
     };
     const schedule = () => {
       if (queued) return;
@@ -197,6 +231,7 @@ export function useEndFollow({
         pin();
       }
       previousTop = scroller.scrollTop;
+      markAnchor();
     };
     // The viewport and the footer (composer inset, status line) resize
     // outside LegendList's measurement; neither is written to here.

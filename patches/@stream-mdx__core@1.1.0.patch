@@ -1,5 +1,5 @@
 diff --git a/dist/index.cjs b/dist/index.cjs
-index a75d1f370f8e2e9b55a06a63df32275d4d539f14..d529c60af5a6ba348d72a5b7f4dd428637d28d8b 100644
+index a75d1f370f8e2e9b55a06a63df32275d4d539f14..e150fe8b95db0e78c0c71c02bc04e2c2bcf5939a 100644
 --- a/dist/index.cjs
 +++ b/dist/index.cjs
 @@ -3651,7 +3651,7 @@ function createMathExtension(singleDollar = "permissive") {
@@ -11,8 +11,50 @@ index a75d1f370f8e2e9b55a06a63df32275d4d539f14..d529c60af5a6ba348d72a5b7f4dd4286
            }
            let nodeName = isDisplay ? "DisplayMath" : "InlineMath";
            return cx.addElement(cx.elt(nodeName, pos, end));
+@@ -4556,7 +4556,22 @@ function scanInlineTokens(content, enableMath, maxScanChars) {
+     stack[stack.length - 1] === token ? stack.pop() : (stack.push(token), maxDepth = Math.max(maxDepth, stack.length));
+   }, shouldOpenInlineMath = (index) => {
+     let next = index + 1 < scanEnd ? content[index + 1] ?? "" : "";
+-    return !/\d/.test(next);
++    if (!/\d/.test(next))
++      return !0;
++    for (let j = index + 1; j < scanEnd; j += 1) {
++      let ch = content.charCodeAt(j);
++      if (ch === 10 || ch === 13)
++        return !1;
++      if (ch === 92) {
++        j += 1;
++        continue;
++      }
++      if (ch === 36) {
++        let before = content.charCodeAt(j - 1), after = content.charCodeAt(j + 1);
++        return before !== 32 && before !== 9 && before !== 44 && !(after >= 48 && after <= 57);
++      }
++    }
++    return !1;
+   };
+   for (let i = 0; i < scanEnd; i += 1) {
+     let code = content.charCodeAt(i);
+@@ -4564,6 +4579,17 @@ function scanInlineTokens(content, enableMath, maxScanChars) {
+       mathDisplayOpen && (mathDisplayCrossedNewline = !0);
+       continue;
+     }
++    let open = stack[stack.length - 1];
++    if (open === "code" && code !== 96)
++      continue;
++    if (enableMath && (open === "math-inline" || open === "math-display")) {
++      if (code === 92) {
++        i += 1;
++        continue;
++      }
++      if (code !== 36 || open === "math-display" && content.charCodeAt(i + 1) !== 36)
++        continue;
++    }
+     if (code === 96) {
+       toggleToken("code");
+       continue;
 diff --git a/dist/index.mjs b/dist/index.mjs
-index 0f4dc14cc15361547a2e258707b5e483d9e00815..29692779cc87ecb0ff657297676e08e7bd3c1279 100644
+index 0f4dc14cc15361547a2e258707b5e483d9e00815..dd3676aa1615de168e22cb19997dcf6e9e69c4dd 100644
 --- a/dist/index.mjs
 +++ b/dist/index.mjs
 @@ -3510,7 +3510,7 @@ function createMathExtension(singleDollar = "permissive") {
@@ -24,6 +66,48 @@ index 0f4dc14cc15361547a2e258707b5e483d9e00815..29692779cc87ecb0ff657297676e08e7
            }
            let nodeName = isDisplay ? "DisplayMath" : "InlineMath";
            return cx.addElement(cx.elt(nodeName, pos, end));
+@@ -4415,7 +4415,22 @@ function scanInlineTokens(content, enableMath, maxScanChars) {
+     stack[stack.length - 1] === token ? stack.pop() : (stack.push(token), maxDepth = Math.max(maxDepth, stack.length));
+   }, shouldOpenInlineMath = (index) => {
+     let next = index + 1 < scanEnd ? content[index + 1] ?? "" : "";
+-    return !/\d/.test(next);
++    if (!/\d/.test(next))
++      return !0;
++    for (let j = index + 1; j < scanEnd; j += 1) {
++      let ch = content.charCodeAt(j);
++      if (ch === 10 || ch === 13)
++        return !1;
++      if (ch === 92) {
++        j += 1;
++        continue;
++      }
++      if (ch === 36) {
++        let before = content.charCodeAt(j - 1), after = content.charCodeAt(j + 1);
++        return before !== 32 && before !== 9 && before !== 44 && !(after >= 48 && after <= 57);
++      }
++    }
++    return !1;
+   };
+   for (let i = 0; i < scanEnd; i += 1) {
+     let code = content.charCodeAt(i);
+@@ -4423,6 +4438,17 @@ function scanInlineTokens(content, enableMath, maxScanChars) {
+       mathDisplayOpen && (mathDisplayCrossedNewline = !0);
+       continue;
+     }
++    let open = stack[stack.length - 1];
++    if (open === "code" && code !== 96)
++      continue;
++    if (enableMath && (open === "math-inline" || open === "math-display")) {
++      if (code === 92) {
++        i += 1;
++        continue;
++      }
++      if (code !== 36 || open === "math-display" && content.charCodeAt(i + 1) !== 36)
++        continue;
++    }
+     if (code === 96) {
+       toggleToken("code");
+       continue;
 diff --git a/dist/inline-parser.cjs b/dist/inline-parser.cjs
 index 44df4d31633c9dc97c9cb76fc8252b39a2b1530d..7e28b09f92deb88ad3f07c3e23e221c1a0f03e92 100644
 --- a/dist/inline-parser.cjs
@@ -50,3 +134,95 @@ index ba5d8fd4bec1615e6dcba63ffa4a62cd50f43128..7aafa68aa32f7cfb209c658d1badd1bf
            }
            let nodeName = isDisplay ? "DisplayMath" : "InlineMath";
            return cx.addElement(cx.elt(nodeName, pos, end));
+diff --git a/dist/streaming/inline-streaming.cjs b/dist/streaming/inline-streaming.cjs
+index ccc9ccc82b1941bfded7596b0411c0394b9bdcd1..60c501749fea421402f4032088d033b1cc0559b9 100644
+--- a/dist/streaming/inline-streaming.cjs
++++ b/dist/streaming/inline-streaming.cjs
+@@ -396,7 +396,22 @@ function scanInlineTokens(content, enableMath, maxScanChars) {
+     stack[stack.length - 1] === token ? stack.pop() : (stack.push(token), maxDepth = Math.max(maxDepth, stack.length));
+   }, shouldOpenInlineMath = (index) => {
+     let next = index + 1 < scanEnd ? content[index + 1] ?? "" : "";
+-    return !/\d/.test(next);
++    if (!/\d/.test(next))
++      return !0;
++    for (let j = index + 1; j < scanEnd; j += 1) {
++      let ch = content.charCodeAt(j);
++      if (ch === 10 || ch === 13)
++        return !1;
++      if (ch === 92) {
++        j += 1;
++        continue;
++      }
++      if (ch === 36) {
++        let before = content.charCodeAt(j - 1), after = content.charCodeAt(j + 1);
++        return before !== 32 && before !== 9 && before !== 44 && !(after >= 48 && after <= 57);
++      }
++    }
++    return !1;
+   };
+   for (let i = 0; i < scanEnd; i += 1) {
+     let code = content.charCodeAt(i);
+@@ -404,6 +419,17 @@ function scanInlineTokens(content, enableMath, maxScanChars) {
+       mathDisplayOpen && (mathDisplayCrossedNewline = !0);
+       continue;
+     }
++    let open = stack[stack.length - 1];
++    if (open === "code" && code !== 96)
++      continue;
++    if (enableMath && (open === "math-inline" || open === "math-display")) {
++      if (code === 92) {
++        i += 1;
++        continue;
++      }
++      if (code !== 36 || open === "math-display" && content.charCodeAt(i + 1) !== 36)
++        continue;
++    }
+     if (code === 96) {
+       toggleToken("code");
+       continue;
+diff --git a/dist/streaming/inline-streaming.mjs b/dist/streaming/inline-streaming.mjs
+index a335ef099113caa3c3aeb8c131196cd6e47448b0..2fcd63719e6c24238d43772f49f50ed9c798d354 100644
+--- a/dist/streaming/inline-streaming.mjs
++++ b/dist/streaming/inline-streaming.mjs
+@@ -367,7 +367,22 @@ function scanInlineTokens(content, enableMath, maxScanChars) {
+     stack[stack.length - 1] === token ? stack.pop() : (stack.push(token), maxDepth = Math.max(maxDepth, stack.length));
+   }, shouldOpenInlineMath = (index) => {
+     let next = index + 1 < scanEnd ? content[index + 1] ?? "" : "";
+-    return !/\d/.test(next);
++    if (!/\d/.test(next))
++      return !0;
++    for (let j = index + 1; j < scanEnd; j += 1) {
++      let ch = content.charCodeAt(j);
++      if (ch === 10 || ch === 13)
++        return !1;
++      if (ch === 92) {
++        j += 1;
++        continue;
++      }
++      if (ch === 36) {
++        let before = content.charCodeAt(j - 1), after = content.charCodeAt(j + 1);
++        return before !== 32 && before !== 9 && before !== 44 && !(after >= 48 && after <= 57);
++      }
++    }
++    return !1;
+   };
+   for (let i = 0; i < scanEnd; i += 1) {
+     let code = content.charCodeAt(i);
+@@ -375,6 +390,17 @@ function scanInlineTokens(content, enableMath, maxScanChars) {
+       mathDisplayOpen && (mathDisplayCrossedNewline = !0);
+       continue;
+     }
++    let open = stack[stack.length - 1];
++    if (open === "code" && code !== 96)
++      continue;
++    if (enableMath && (open === "math-inline" || open === "math-display")) {
++      if (code === 92) {
++        i += 1;
++        continue;
++      }
++      if (code !== 36 || open === "math-display" && content.charCodeAt(i + 1) !== 36)
++        continue;
++    }
+     if (code === 96) {
+       toggleToken("code");
+       continue;

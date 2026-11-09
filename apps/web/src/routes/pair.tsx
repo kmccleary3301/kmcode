@@ -18,6 +18,10 @@ export const Route = createFileRoute("/pair")({
     if (authGateState.status === "authenticated" || authGateState.status === "hosted-static") {
       throw redirect({ to: "/", replace: true });
     }
+    // The worklog demo server has no paired session: its home is the demo.
+    if (import.meta.env.DEV && import.meta.env.VITE_KM_PROTOTYPE_DEMO === "1") {
+      throw redirect({ to: "/prototype/worklog", replace: true });
+    }
     return {
       authGateState,
     };

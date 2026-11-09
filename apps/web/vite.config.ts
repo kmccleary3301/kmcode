@@ -4,6 +4,10 @@ import react, { reactCompilerPreset } from "@vitejs/plugin-react";
 import babel from "@rolldown/plugin-babel";
 import { tanstackRouter } from "@tanstack/router-plugin/vite";
 import compression from "compression";
+import * as NodeServices from "@effect/platform-node/NodeServices";
+import * as Effect from "effect/Effect";
+import * as FileSystem from "effect/FileSystem";
+import * as Path from "effect/Path";
 import { defineProject, type TestProjectInlineConfiguration } from "vite-plus/test/config";
 import "vite-plus/test/config";
 import { defineConfig, type Connect, type Plugin } from "vite-plus";
@@ -150,6 +154,77 @@ function devCompressionPlugin(): Plugin {
   };
 }
 
+const devWorklogFixtureFiles: Readonly<Record<string, URL>> = {
+  "/__prototype/worklog/native-sessions.json": new URL(
+    "./.dev-fixtures/worklog/native-sessions.json",
+    import.meta.url,
+  ),
+  "/__prototype/worklog/php-advisory.json": new URL(
+    "./.dev-fixtures/worklog/php-advisory.json",
+    import.meta.url,
+  ),
+};
+
+// Keep the real demo traces out of Vite's production public copy.
+function devWorklogFixturesPlugin(): Plugin {
+  return {
+    name: "t3code:dev-worklog-fixtures",
+    apply: "serve",
+    configureServer(server) {
+      server.middlewares.use((req, res, next) => {
+        const pathname = req.url?.split("?", 1)[0] ?? "/";
+        if (pathname !== "/__prototype/worklog" && !pathname.startsWith("/__prototype/worklog/")) {
+          return next();
+        }
+
+        const fixture = devWorklogFixtureFiles[pathname];
+        if (process.env.VITE_KM_PROTOTYPE_DEMO !== "1" || !fixture) {
+          res.statusCode = 404;
+          res.end("Not found");
+          return;
+        }
+        if (req.method !== "GET" && req.method !== "HEAD") {
+          res.statusCode = 405;
+          res.setHeader("Allow", "GET, HEAD");
+          res.end();
+          return;
+        }
+
+        void Effect.runPromise(
+          Effect.gen(function* () {
+            const fs = yield* FileSystem.FileSystem;
+            const path = yield* Path.Path;
+            const filePath = yield* path.fromFileUrl(fixture);
+            return yield* fs.readFile(filePath).pipe(
+              Effect.catchTags({
+                PlatformError: (error) =>
+                  error.reason._tag === "NotFound" ? Effect.succeed(null) : Effect.fail(error),
+              }),
+            );
+          }).pipe(Effect.provide(NodeServices.layer)),
+        ).then(
+          (contents) => {
+            if (contents === null) {
+              res.statusCode = 404;
+              res.end("Not found");
+              return;
+            }
+            res.statusCode = 200;
+            res.setHeader("Content-Type", "application/json; charset=utf-8");
+            res.setHeader("Cache-Control", "no-store");
+            res.setHeader("Content-Length", contents.byteLength);
+            res.end(req.method === "HEAD" ? undefined : contents);
+          },
+          (error: unknown) =>
+            next(
+              error instanceof Error ? error : new Error("Could not read local worklog fixture"),
+            ),
+        );
+      });
+    },
+  };
+}
+
 // Vite rejects requests whose Host header isn't localhost, which blocks sharing
 // a dev server over Tailscale/LAN. Tailnet names are safe to allow wholesale:
 // the DNS is controlled by tailscale, so they can't be rebound by an attacker.
@@ -165,6 +240,7 @@ export default defineConfig(() => {
     assetsInclude: ["**/*.wasm"],
     plugins: [
       devCompressionPlugin(),
+      devWorklogFixturesPlugin(),
       thirdPartyLicensesPlugin({
         bundleName: "web",
         configFile: new URL("../../third-party-licenses.config.json", import.meta.url),

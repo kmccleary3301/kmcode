@@ -242,6 +242,10 @@ export const Route = createFileRoute("/_chat")({
       context.authGateState.status !== "authenticated" &&
       context.authGateState.status !== "hosted-static"
     ) {
+      // The worklog demo server has no paired session: its home is the demo.
+      if (import.meta.env.DEV && import.meta.env.VITE_KM_PROTOTYPE_DEMO === "1") {
+        throw redirect({ to: "/prototype/worklog", replace: true });
+      }
       throw redirect({ to: "/pair", replace: true });
     }
   },

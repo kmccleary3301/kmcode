@@ -2396,9 +2396,11 @@ type TimelineWorkEntry = Extract<MessagesTimelineRow, { kind: "work" }>["grouped
 type TimelineRow = MessagesTimelineRow;
 
 /**
- * One virtualized slot. While the reader follows live work, non-live arrivals,
- * settling activities, and exits glide through their structural changes.
- * Growing live content keeps native height so streamed lines cannot be clipped.
+ * One virtualized slot. While the reader follows live work, every size change
+ * glides: arrivals, exits, an excerpt folding or opening, a group reshaping.
+ * A jump at rest would move every row below it in one frame. The live row
+ * streaming its latest lines keeps native height, so those lines are never
+ * clipped; the end follow glides the view after it.
  */
 const TimelineRowFrame = memo(function TimelineRowFrame({ row }: { row: TimelineRow }) {
   const { live, seenRowKeys, exitingRowKeys } = use(TimelineRowMotionCtx);
@@ -2413,20 +2415,8 @@ const TimelineRowFrame = memo(function TimelineRowFrame({ row }: { row: Timeline
     () => live && scrollAnchor && seenRowKeys.size > 0 && !seenRowKeys.has(rowKey),
   );
   const exiting = exitingRowKeys.has(rowKey);
-  const [shownKind, setShownKind] = useState(row.kind);
-  const [reshaping, setReshaping] = useState(arrived);
-  if (shownKind !== row.kind) {
-    setShownKind(row.kind);
-    setReshaping(live && row.kind !== "work-live");
-  }
-  useEffect(() => {
-    if (!reshaping) return;
-    const timer = setTimeout(() => setReshaping(false), MOTION_MS * 2);
-    return () => clearTimeout(timer);
-  }, [reshaping]);
-  // Live content grows naturally; retain the smooth-height path for exits.
   const { outerRef, contentRef } = useSmoothHeight<HTMLDivElement, HTMLDivElement>(
-    !live || scrollAnchor || (row.kind === "work-live" && !exiting) || !(reshaping || exiting),
+    !live || scrollAnchor || (row.kind === "work-live" && !exiting),
     { collapsed: exiting },
   );
 

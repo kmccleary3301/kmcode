@@ -28,6 +28,8 @@ const layerSetup = Layer.effectDiscard(
     // Keep statement journals and sort spills off the main thread's disk path.
     // Large statements and open savepoints can increase peak memory use.
     yield* sql`PRAGMA temp_store = MEMORY;`;
+    // Retain the VPS tuning: this is a lazy 1 GiB page-cache ceiling, not a reservation.
+    yield* sql`PRAGMA cache_size = -1048576;`;
     // PASSIVE checkpoints never shrink the -wal file, so it otherwise keeps its
     // largest size until the last connection closes.
     yield* sql.unsafe(`PRAGMA journal_size_limit = ${WAL_SIZE_LIMIT_BYTES};`);

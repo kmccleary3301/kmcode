@@ -91,6 +91,14 @@ function measureText(element: Element): { readonly left: number; readonly width:
   return { left: box.left, width: right - box.left };
 }
 
+/** Where the line is cut off: its own box's right edge, or its nearest clipping ancestor's. */
+function clipRight(element: Element): number {
+  for (let node: Element | null = element; node; node = node.parentElement) {
+    if (getComputedStyle(node).overflowX !== "visible") return node.getBoundingClientRect().right;
+  }
+  return Number.POSITIVE_INFINITY;
+}
+
 interface RollState {
   readonly text: string;
   readonly split: RollSplit | null;
@@ -106,7 +114,8 @@ interface RollState {
  * out of a blur, the new one rises in through one), a changed number spins its
  * changed digits, and whatever follows glides over by the width difference.
  * Measured from the reference recording; the curves live in
- * transcript-minimal.css. Terminal, and the first render, show plain text.
+ * transcript-minimal.css. Terminal, the first render, and a change to a line
+ * too long for its row show plain text.
  */
 export function RollingText({
   text,
@@ -138,8 +147,18 @@ export function RollingText({
 
   useLayoutEffect(() => {
     const root = rootRef.current;
-    if (roll.split === null || root === null || prefersReducedMotion()) return;
+    if (roll.split === null || root === null) return;
     const after = measureText(root);
+    // A rolled word is one block, which the ellipsis cannot cut: on a line too
+    // long for its row it would draw past the ellipsis (and its blur with it).
+    // Such a line shows the change as plain text before it paints.
+    if (after.left + after.width > clipRight(root) + 0.5) {
+      setRoll((current) =>
+        current.version === roll.version ? { ...current, split: null } : current,
+      );
+      return;
+    }
+    if (prefersReducedMotion()) return;
     const widthDelta = roll.fromWidth - after.width;
     if (Math.abs(widthDelta) >= 0.5) {
       if (suffixRef.current) glide(suffixRef.current, widthDelta);
@@ -169,7 +188,10 @@ export function RollingText({
       onAnimationEnd={(event) => {
         const target = event.target;
         if (!(target instanceof Element)) return;
-        if (!target.classList.contains("roll-in") && !target.classList.contains("digit-roll-column"))
+        if (
+          !target.classList.contains("roll-in") &&
+          !target.classList.contains("digit-roll-column")
+        )
           return;
         setRoll((current) =>
           current.version === roll.version ? { ...current, split: null } : current,

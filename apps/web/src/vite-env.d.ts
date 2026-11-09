@@ -13,6 +13,8 @@ interface ImportMetaEnv {
   readonly VITE_RELAY_OTLP_TRACES_URL: string;
   readonly VITE_RELAY_OTLP_TRACES_DATASET: string;
   readonly VITE_RELAY_OTLP_TRACES_TOKEN: string;
+  /** Dev only: the worklog demo server sends unpaired visitors to the demo, not /pair. */
+  readonly VITE_KM_PROTOTYPE_DEMO?: string;
   readonly T3CODE_DESKTOP_UPDATE_REPOSITORY: string;
   readonly APP_VERSION: string;
 }

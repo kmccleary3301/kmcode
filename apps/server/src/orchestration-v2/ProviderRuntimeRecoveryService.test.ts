@@ -1729,6 +1729,218 @@ describe("ProviderRuntimeRecoveryService safe native settlement inspection", () 
     };
   }
 
+  it.effect.each([
+    { runStatus: "completed", expectedChildStatus: "completed" },
+    { runStatus: "interrupted", expectedChildStatus: "interrupted" },
+    { runStatus: "cancelled", expectedChildStatus: "interrupted" },
+  ] satisfies ReadonlyArray<{
+    readonly runStatus: OrchestrationV2Run["status"];
+    readonly expectedChildStatus: "completed" | "interrupted";
+  }>)(
+    "settles a stale provider-native subagent conservatively when its parent run is $runStatus",
+    ({ runStatus, expectedChildStatus }) => {
+      const fixture = makeRecoveryFixture();
+      const parentItem = fixture.projection.turnItems[0];
+      const subagent = fixture.projection.subagents[0];
+      if (parentItem?.type !== "dynamic_tool" || subagent === undefined) {
+        return Effect.die("Expected the recovery fixture's parent tool and native subagent");
+      }
+      const settledAt = DateTime.makeUnsafe("2026-10-12T08:29:19.696Z");
+      const laterUpdateAt = DateTime.makeUnsafe("2026-10-12T08:29:20.000Z");
+      const endedRun: OrchestrationV2ThreadProjection["runs"][number] = {
+        ...fixture.projection.runs[0]!,
+        status: runStatus,
+        activeAttemptId: null,
+        completedAt: settledAt,
+      };
+      const endedRootNode: OrchestrationV2ThreadProjection["nodes"][number] = {
+        ...fixture.projection.nodes[0]!,
+        status: runStatus,
+        completedAt: settledAt,
+      };
+      const completedParentItem: typeof parentItem = {
+        ...parentItem,
+        status: "completed",
+        completedAt: settledAt,
+        updatedAt: settledAt,
+      };
+      const laterSubagent: typeof subagent = {
+        ...subagent,
+        id: NodeId.make("subagent_later_workpool_child"),
+        updatedAt: laterUpdateAt,
+      };
+      const asyncSubagent: typeof subagent = {
+        ...subagent,
+        id: NodeId.make("subagent_async_workpool_child"),
+      };
+      const asyncParentItem: typeof parentItem = {
+        ...completedParentItem,
+        id: TurnItemId.make("turn_item_async_workpool_parent"),
+        ordinal: 3,
+        details: { async: { state: "running" } },
+      };
+      const activeJobSubagent: typeof subagent = {
+        ...subagent,
+        id: NodeId.make("subagent_active_wait_child"),
+        nativeAgentId: "workpool-agent",
+      };
+      const activeJobParentItem: typeof parentItem = {
+        ...completedParentItem,
+        id: TurnItemId.make("turn_item_active_wait_parent"),
+        ordinal: 6,
+        details: {
+          jobs: [
+            {
+              id: "workpool-batch-b1",
+              type: "task",
+              status: "running",
+              agentId: "workpool-agent",
+            },
+          ],
+        },
+      };
+      const makeChildItem = (input: {
+        readonly id: string;
+        readonly subagent: typeof subagent;
+        readonly parentItemId: TurnItemId;
+        readonly ordinal: number;
+        readonly updatedAt: DateTime.Utc;
+      }): OrchestrationV2ThreadProjection["turnItems"][number] => ({
+        id: TurnItemId.make(input.id),
+        type: "subagent",
+        threadId: fixture.threadId,
+        runId: fixture.runId,
+        nodeId: fixture.rootNodeId,
+        providerThreadId: fixture.providerThreadId,
+        providerTurnId: fixture.providerTurnId,
+        nativeItemRef: null,
+        parentItemId: input.parentItemId,
+        ordinal: input.ordinal,
+        status: "running",
+        title: input.subagent.title,
+        startedAt: fixture.now,
+        completedAt: null,
+        updatedAt: input.updatedAt,
+        subagentId: input.subagent.id,
+        origin: "provider_native",
+        driver: input.subagent.driver,
+        providerInstanceId: input.subagent.providerInstanceId,
+        childThreadId: null,
+        prompt: input.subagent.prompt,
+        result: null,
+      });
+      const staleChildItem = makeChildItem({
+        id: "turn_item_stale_workpool_child",
+        subagent,
+        parentItemId: parentItem.id,
+        ordinal: 2,
+        updatedAt: settledAt,
+      });
+      const laterChildItem = makeChildItem({
+        id: "turn_item_later_workpool_child",
+        subagent: laterSubagent,
+        parentItemId: parentItem.id,
+        ordinal: 4,
+        updatedAt: laterUpdateAt,
+      });
+      const asyncChildItem = makeChildItem({
+        id: "turn_item_async_workpool_child",
+        subagent: asyncSubagent,
+        parentItemId: asyncParentItem.id,
+        ordinal: 5,
+        updatedAt: settledAt,
+      });
+      const activeJobChildItem = makeChildItem({
+        id: "turn_item_active_wait_child",
+        subagent: activeJobSubagent,
+        parentItemId: activeJobParentItem.id,
+        ordinal: 7,
+        updatedAt: settledAt,
+      });
+      const projection: OrchestrationV2ThreadProjection = {
+        ...fixture.projection,
+        runs: [endedRun],
+        nodes: [endedRootNode],
+        subagents: [subagent, laterSubagent, asyncSubagent, activeJobSubagent],
+        turnItems: [
+          completedParentItem,
+          staleChildItem,
+          laterChildItem,
+          asyncParentItem,
+          asyncChildItem,
+          activeJobParentItem,
+          activeJobChildItem,
+        ],
+      };
+      let committedInput: Parameters<EventSink.EventSinkV2["Service"]["commitCommand"]>[0] | null =
+        null;
+      const layer = ProviderRuntimeRecovery.layer.pipe(
+        Layer.provide(ServerSettings.layerTest()),
+        Layer.provide(
+          Layer.mergeAll(
+            Layer.mock(ProjectionStore.ProjectionStoreV2)({
+              getRecoveryThreadIds: () => Effect.succeed([fixture.threadId]),
+              getRuntimeRecoveryProjection: () => Effect.succeed(projection),
+            }),
+            Layer.mock(EventSink.EventSinkV2)({
+              commitCommand: (input) => {
+                committedInput = input;
+                return Effect.succeed({
+                  receipt: {
+                    commandId: input.commandId,
+                    threadId: input.threadId,
+                    commandType: input.commandType,
+                    acceptedAt: input.acceptedAt,
+                    resultSequence: 0,
+                    status: "accepted",
+                    error: null,
+                  },
+                  storedEvents: [],
+                  committed: true,
+                  cancelledEffectCount: 0,
+                });
+              },
+            }),
+            IdAllocator.layer,
+            Layer.mock(EffectWorker.OrchestrationEffectWorkerV2)({
+              runRecoveryOnce: Effect.succeed(false),
+            }),
+            Layer.mock(EffectOutbox.EffectOutboxV2)({
+              reconcileAfterProcessLoss: Effect.succeed({ requeued: 0, cancelled: 0 }),
+              cancelUnsettled: () => Effect.succeed([]),
+              signalCancellations: () => Effect.void,
+            }),
+          ),
+        ),
+      );
+
+      return Effect.gen(function* () {
+        yield* (yield* ProviderRuntimeRecovery.ProviderRuntimeRecoveryService).recover;
+        const events = committedInput?.events ?? [];
+        const statusForTurnItem = (id: TurnItemId) => {
+          const event = events.find(
+            (candidate) => candidate.type === "turn-item.updated" && candidate.payload.id === id,
+          );
+          return event?.type === "turn-item.updated" ? event.payload.status : null;
+        };
+        const statusForSubagent = (id: NodeId) => {
+          const event = events.find(
+            (candidate) => candidate.type === "subagent.updated" && candidate.payload.id === id,
+          );
+          return event?.type === "subagent.updated" ? event.payload.status : null;
+        };
+        assert.equal(statusForTurnItem(staleChildItem.id), expectedChildStatus);
+        assert.equal(statusForSubagent(subagent.id), expectedChildStatus);
+        assert.equal(statusForTurnItem(laterChildItem.id), "cancelled");
+        assert.equal(statusForSubagent(laterSubagent.id), "cancelled");
+        assert.equal(statusForTurnItem(asyncChildItem.id), "cancelled");
+        assert.equal(statusForSubagent(asyncSubagent.id), "cancelled");
+        assert.equal(statusForTurnItem(activeJobChildItem.id), "cancelled");
+        assert.equal(statusForSubagent(activeJobSubagent.id), "cancelled");
+      }).pipe(Effect.provide(layer));
+    },
+  );
+
   it.effect(
     "native confirmed settlement on shutdown settles run, attempt, node, and providerTurn as completed without LLM continuation, and conservatively cancels incomplete children",
     () =>
@@ -2062,6 +2274,46 @@ describe("ProviderRuntimeRecoveryService safe native settlement inspection", () 
       Effect.gen(function* () {
         const fixture = makeRecoveryFixture();
         const nativeSettledAt = DateTime.makeUnsafe("2026-10-12T08:29:19.696Z");
+        const parentItem = fixture.projection.turnItems[0];
+        const subagent = fixture.projection.subagents[0];
+        if (parentItem?.type !== "dynamic_tool" || subagent === undefined) {
+          return yield* Effect.die("Expected the recovery fixture's active parent and subagent");
+        }
+        const asyncParentItem: typeof parentItem = {
+          ...parentItem,
+          status: "completed",
+          completedAt: nativeSettledAt,
+          updatedAt: nativeSettledAt,
+          details: { async: { state: "running" } },
+        };
+        const childItem: OrchestrationV2ThreadProjection["turnItems"][number] = {
+          id: TurnItemId.make("turn_item_current_async_subagent"),
+          type: "subagent",
+          threadId: fixture.threadId,
+          runId: fixture.runId,
+          nodeId: fixture.rootNodeId,
+          providerThreadId: fixture.providerThreadId,
+          providerTurnId: fixture.providerTurnId,
+          nativeItemRef: null,
+          parentItemId: parentItem.id,
+          ordinal: 2,
+          status: "running",
+          title: "still running",
+          startedAt: fixture.now,
+          completedAt: null,
+          updatedAt: nativeSettledAt,
+          subagentId: subagent.id,
+          origin: "provider_native",
+          driver: subagent.driver,
+          providerInstanceId: subagent.providerInstanceId,
+          childThreadId: null,
+          prompt: subagent.prompt,
+          result: null,
+        };
+        const projection: OrchestrationV2ThreadProjection = {
+          ...fixture.projection,
+          turnItems: [asyncParentItem, childItem],
+        };
         let committedInput:
           | Parameters<EventSink.EventSinkV2["Service"]["commitCommand"]>[0]
           | null = null;
@@ -2073,7 +2325,7 @@ describe("ProviderRuntimeRecoveryService safe native settlement inspection", () 
             Layer.mergeAll(
               Layer.mock(ProjectionStore.ProjectionStoreV2)({
                 getRecoveryThreadIds: () => Effect.succeed([fixture.threadId]),
-                getRuntimeRecoveryProjection: () => Effect.succeed(fixture.projection),
+                getRuntimeRecoveryProjection: () => Effect.succeed(projection),
               }),
               Layer.mock(EventSink.EventSinkV2)({
                 commitCommand: (input) => {
@@ -2113,6 +2365,21 @@ describe("ProviderRuntimeRecoveryService safe native settlement inspection", () 
           assert.isFalse(inspectCalled);
           const runEvent = committedInput!.events.find((e) => e.type === "run.updated");
           assert.equal(runEvent?.payload.status, "cancelled");
+          const events = committedInput!.events;
+          const childItemEvent = events.find(
+            (event) => event.type === "turn-item.updated" && event.payload.id === childItem.id,
+          );
+          const subagentEvent = events.find(
+            (event) => event.type === "subagent.updated" && event.payload.id === subagent.id,
+          );
+          assert.equal(
+            childItemEvent?.type === "turn-item.updated" ? childItemEvent.payload.status : null,
+            "cancelled",
+          );
+          assert.equal(
+            subagentEvent?.type === "subagent.updated" ? subagentEvent.payload.status : null,
+            "cancelled",
+          );
         }).pipe(Effect.provide(layer));
       }),
   );

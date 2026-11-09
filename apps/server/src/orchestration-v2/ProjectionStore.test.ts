@@ -409,6 +409,162 @@ it.layer(layerTest)("ProjectionStoreV2", (it) => {
       assert.deepEqual(recovery?.restartCancelledBackgroundWork, work);
     }),
   );
+  it.effect(
+    "loads a completed parent tool for recovery of an active provider-native subagent",
+    () =>
+      Effect.gen(function* () {
+        const store = yield* ProjectionStore.ProjectionStoreV2;
+        const now = yield* DateTime.now;
+        const threadId = ThreadId.make("thread:recovery-parent-tool");
+        const runId = RunId.make("run:recovery-parent-tool");
+        const rootNodeId = NodeId.make("node:recovery-parent-tool");
+        const childNodeId = NodeId.make("node:recovery-parent-tool:child");
+        const parentItemId = TurnItemId.make("item:recovery-parent-tool");
+        const childItemId = TurnItemId.make("item:recovery-parent-tool:child");
+        const run = {
+          id: runId,
+          threadId,
+          ordinal: 1,
+          providerInstanceId,
+          modelSelection,
+          providerThreadId: null,
+          userMessageId: MessageId.make("message:recovery-parent-tool"),
+          rootNodeId,
+          activeAttemptId: null,
+          status: "running" as const,
+          requestedAt: now,
+          startedAt: now,
+          completedAt: null,
+          checkpointId: null,
+          contextHandoffId: null,
+        };
+
+        yield* store.apply({
+          id: EventId.make("event:recovery-parent-tool:thread"),
+          type: "thread.created",
+          threadId,
+          occurredAt: now,
+          payload: {
+            createdBy: "user",
+            creationSource: "web",
+            id: threadId,
+            projectId: ProjectId.make("project:recovery-parent-tool"),
+            title: "Recovery parent tool",
+            providerInstanceId,
+            modelSelection,
+            runtimeMode: "full-access",
+            interactionMode: "default",
+            branch: null,
+            worktreePath: null,
+            activeProviderThreadId: null,
+            lineage: {
+              parentThreadId: null,
+              relationshipToParent: null,
+              rootThreadId: threadId,
+            },
+            forkedFrom: null,
+            createdAt: now,
+            updatedAt: now,
+            archivedAt: null,
+            settledOverride: null,
+            settledAt: null,
+            lastVisitedAt: null,
+            deletedAt: null,
+          },
+        });
+        yield* store.apply({
+          id: EventId.make("event:recovery-parent-tool:run"),
+          type: "run.created",
+          threadId,
+          runId,
+          nodeId: rootNodeId,
+          driver,
+          providerInstanceId,
+          occurredAt: now,
+          payload: run,
+        });
+        yield* store.apply({
+          id: EventId.make("event:recovery-parent-tool:parent"),
+          type: "turn-item.updated",
+          threadId,
+          runId,
+          nodeId: rootNodeId,
+          driver,
+          providerInstanceId,
+          occurredAt: now,
+          payload: {
+            id: parentItemId,
+            type: "dynamic_tool",
+            threadId,
+            runId,
+            nodeId: rootNodeId,
+            providerThreadId: null,
+            providerTurnId: null,
+            nativeItemRef: null,
+            parentItemId: null,
+            ordinal: 1,
+            status: "completed",
+            title: "eval",
+            startedAt: now,
+            completedAt: now,
+            updatedAt: now,
+            toolName: "eval",
+            input: "await workpool",
+          },
+        });
+        yield* store.apply({
+          id: EventId.make("event:recovery-parent-tool:child"),
+          type: "turn-item.updated",
+          threadId,
+          runId,
+          nodeId: childNodeId,
+          driver,
+          providerInstanceId,
+          occurredAt: now,
+          payload: {
+            id: childItemId,
+            type: "subagent",
+            threadId,
+            runId,
+            nodeId: childNodeId,
+            providerThreadId: null,
+            providerTurnId: null,
+            nativeItemRef: null,
+            parentItemId,
+            ordinal: 2,
+            status: "running",
+            title: "workpool child",
+            startedAt: now,
+            completedAt: null,
+            updatedAt: now,
+            subagentId: childNodeId,
+            origin: "provider_native",
+            driver,
+            providerInstanceId,
+            childThreadId: null,
+            prompt: "Complete the assigned work.",
+            result: null,
+          },
+        });
+        yield* store.apply({
+          id: EventId.make("event:recovery-parent-tool:run-completed"),
+          type: "run.updated",
+          threadId,
+          runId,
+          nodeId: rootNodeId,
+          driver,
+          providerInstanceId,
+          occurredAt: now,
+          payload: { ...run, status: "completed", completedAt: now },
+        });
+
+        const projection = yield* store.getRuntimeRecoveryProjection(threadId);
+        assert.deepEqual(
+          projection.turnItems.map((item) => item.id),
+          [parentItemId, childItemId],
+        );
+      }),
+  );
   it.effect("limits turn-start history to the requested runs, including an empty selection", () =>
     Effect.gen(function* () {
       const store = yield* ProjectionStore.ProjectionStoreV2;

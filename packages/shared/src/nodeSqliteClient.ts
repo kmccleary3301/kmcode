@@ -172,6 +172,7 @@ try {
     allowExtension: false,
   });
   next.exec("PRAGMA busy_timeout = 5000;");
+  next.exec("PRAGMA cache_size = -262144;");
   const mode = String(next.prepare("PRAGMA journal_mode").get().journal_mode).toLowerCase();
   if (mode !== "wal") throw new Error("database uses journal_mode " + mode + ", not wal");
   db = next;

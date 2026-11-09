@@ -2518,6 +2518,231 @@ describe("PiAdapterV2", () => {
       assert.equal(DateTime.toEpochMillis(completionNotice!.startedAt!), 1_800_000_000_000);
     }).pipe(Effect.scoped, Effect.provide(layerTest)),
   );
+  it.effect("settles workpool subagents when their parent tool ends without an async job", () =>
+    Effect.gen(function* () {
+      const fake = yield* makeFakePi;
+      yield* fake.emit({
+        type: "ready",
+        protocolVersion: 1,
+        supportedProtocolVersions: [1, 2],
+      });
+      const { runtime, takeEvent, emitted } = yield* openRuntime(
+        fake,
+        "default",
+        THREAD_ID,
+        SESSION_ID,
+        undefined,
+        OMP_DIALECT,
+      );
+      const providerThread = yield* runtime.ensureThread({
+        threadId: THREAD_ID,
+        modelSelection: modelSelection("default"),
+        runtimePolicy,
+      });
+      yield* startTurn(runtime, providerThread);
+      yield* fake.takeRequest("prompt");
+      yield* fake.emit({ type: "agent_start" });
+
+      const subagentItem = (event: ProviderAdapterV2Event) =>
+        event.type === "turn_item.updated" && event.turnItem.type === "subagent"
+          ? event.turnItem
+          : undefined;
+      yield* fake.emit({
+        type: "tool_execution_start",
+        toolCallId: "call_workpool",
+        toolName: "eval",
+        args: { code: "await pool.wait()" },
+      });
+      yield* fake.emit({
+        type: "subagent_progress",
+        payload: {
+          index: 0,
+          agent: "task",
+          agentSource: "extension",
+          task: "collect evidence",
+          parentToolCallId: "call_workpool",
+          progress: {
+            id: "researcher-b1",
+            agent: "task",
+            status: "running",
+            task: "collect evidence",
+          },
+        },
+      });
+      const running = subagentItem(
+        yield* takeEvent((event) => subagentItem(event)?.nativeAgentId === "researcher-b1"),
+      );
+      assert.equal(running?.status, "running");
+
+      yield* fake.emit({
+        type: "tool_execution_end",
+        toolCallId: "call_workpool",
+        toolName: "eval",
+        isError: false,
+        result: {
+          content: [{ type: "text", text: "Pool `research` drained: 1 item(s), 1 batch(es)." }],
+        },
+      });
+      yield* takeEvent(
+        (event) =>
+          event.type === "turn_item.updated" &&
+          event.turnItem.type === "dynamic_tool" &&
+          event.turnItem.id.includes("call_workpool") &&
+          event.turnItem.status === "completed",
+      );
+      const followupEvents: ProviderAdapterV2Event[] = [];
+      let next = yield* Queue.poll(emitted);
+      while (Option.isSome(next)) {
+        followupEvents.push(next.value);
+        next = yield* Queue.poll(emitted);
+      }
+      assert.isTrue(
+        followupEvents.some(
+          (event) =>
+            event.type === "turn_item.updated" &&
+            event.turnItem.type === "subagent" &&
+            event.turnItem.id === running?.id &&
+            event.turnItem.status === "completed",
+        ),
+        "the completed eval call must settle its owned workpool subagent",
+      );
+      assert.isTrue(
+        followupEvents.some(
+          (event) =>
+            event.type === "subagent.updated" &&
+            event.subagent.id === running?.subagentId &&
+            event.subagent.status === "completed",
+        ),
+        "the completed eval call must settle the lineage subagent",
+      );
+    }).pipe(Effect.scoped, Effect.provide(layerTest)),
+  );
+  it.effect(
+    "settles each workpool batch from its aggregate result without ending a still-running wait child",
+    () =>
+      Effect.gen(function* () {
+        const fake = yield* makeFakePi;
+        yield* fake.emit({
+          type: "ready",
+          protocolVersion: 1,
+          supportedProtocolVersions: [1, 2],
+        });
+        const { runtime, takeEvent, emitted } = yield* openRuntime(
+          fake,
+          "default",
+          THREAD_ID,
+          SESSION_ID,
+          undefined,
+          OMP_DIALECT,
+        );
+        const providerThread = yield* runtime.ensureThread({
+          threadId: THREAD_ID,
+          modelSelection: modelSelection("default"),
+          runtimePolicy,
+        });
+        yield* startTurn(runtime, providerThread);
+        yield* fake.takeRequest("prompt");
+        yield* fake.emit({ type: "agent_start" });
+
+        const subagentItem = (event: ProviderAdapterV2Event) =>
+          event.type === "turn_item.updated" && event.turnItem.type === "subagent"
+            ? event.turnItem
+            : undefined;
+        yield* fake.emit({
+          type: "tool_execution_start",
+          toolCallId: "call_pool_wait",
+          toolName: "wait",
+          args: {},
+        });
+        yield* fake.emit({
+          type: "tool_execution_end",
+          toolCallId: "call_pool_wait",
+          toolName: "wait",
+          isError: false,
+          result: {
+            content: [{ type: "text", text: "Completed (1); still running researcher-b1" }],
+            details: {
+              op: "wait",
+              jobs: [
+                {
+                  id: "researcher-b1",
+                  type: "task",
+                  status: "running",
+                  agentId: "researcher",
+                  label: "researcher-b1",
+                },
+              ],
+            },
+          },
+        });
+        yield* takeEvent(
+          (event) =>
+            event.type === "turn_item.updated" &&
+            event.turnItem.type === "dynamic_tool" &&
+            event.turnItem.toolName === "wait" &&
+            event.turnItem.status === "completed",
+        );
+        const parentEndEvents: ProviderAdapterV2Event[] = [];
+        let pending = yield* Queue.poll(emitted);
+        while (Option.isSome(pending)) {
+          parentEndEvents.push(pending.value);
+          pending = yield* Queue.poll(emitted);
+        }
+        const running = parentEndEvents
+          .map(subagentItem)
+          .find((item) => item?.nativeAgentId === "researcher-b1");
+        assert.equal(running?.status, "running");
+        assert.isFalse(
+          parentEndEvents.some(
+            (event) =>
+              subagentItem(event)?.nativeAgentId === "researcher-b1" &&
+              subagentItem(event)?.status === "completed",
+          ),
+          "a wait snapshot that still lists the batch as running must not settle it",
+        );
+
+        yield* fake.emit({ type: "agent_start" });
+        const asyncMessage = {
+          id: "native-pool-result",
+          role: "custom",
+          customType: "async-result",
+          content:
+            "<system-notice>\nBackground job research has completed.\nPool `research` completed (1 item(s), 1 batch(es)).\n\n## researcher-b1 · agent `researcher` · completed\n- [evidence] completed — collected evidence\n</system-notice>",
+          timestamp: 1_800_000_000_000,
+          details: {
+            jobs: [
+              {
+                jobId: "research",
+                type: "task",
+                status: "completed",
+                agentId: "native-pool",
+                label: "research",
+              },
+            ],
+          },
+        };
+        yield* fake.emit({ type: "message_end", message: asyncMessage });
+        yield* fake.emit({ type: "custom_message", message: asyncMessage });
+        yield* fake.emit({
+          type: "notice",
+          timestamp: 1_800_000_000_001,
+          message: "after-aggregate-sentinel",
+        });
+        const resultOrSentinel = yield* takeEvent(
+          (event) =>
+            (subagentItem(event)?.nativeAgentId === "researcher-b1" &&
+              subagentItem(event)?.status === "completed") ||
+            (event.type === "turn_item.updated" &&
+              event.turnItem.type === "system_notice" &&
+              event.turnItem.message === "after-aggregate-sentinel"),
+        );
+        assert.equal(
+          subagentItem(resultOrSentinel)?.status,
+          "completed",
+          "the aggregate OMP workpool result must settle its completed batch",
+        );
+      }).pipe(Effect.scoped, Effect.provide(layerTest)),
+  );
 
   it.effect(
     "does not reuse prior activation timing for a new native task activation without timing metadata",

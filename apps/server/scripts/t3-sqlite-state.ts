@@ -2,10 +2,10 @@
 
 import * as NodeRuntime from "@effect/platform-node/NodeRuntime";
 import * as NodeServices from "@effect/platform-node/NodeServices";
-import * as NodeCrypto from "node:crypto";
 import * as NodeOS from "node:os";
 import { fromJsonStringPretty } from "@t3tools/shared/schemaJson";
 import * as Console from "effect/Console";
+import * as Crypto from "effect/Crypto";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
@@ -249,7 +249,9 @@ export const runSqliteState = Effect.fn("runSqliteState")(function* (
     }
 
     const timestamp = DateTime.formatIso(yield* DateTime.now).replaceAll(":", "-");
-    const backupPath = `${databasePath}.backup-${timestamp}-${NodeCrypto.randomUUID()}`;
+    const crypto = yield* Crypto.Crypto;
+    const backupId = yield* crypto.randomUUIDv4;
+    const backupPath = `${databasePath}.backup-${timestamp}-${backupId}`;
     yield* sql`VACUUM INTO ${backupPath}`;
     yield* fs.chmod(backupPath, 0o600);
     yield* sql.withTransaction(sql.unsafe(source).unprepared);

@@ -1,6 +1,6 @@
 {
   "name": "@t3tools/desktop",
-  "version": "0.0.53-local.20261109a",
+  "version": "0.0.53-local.20261109b",
   "private": true,
   "type": "module",
   "main": "dist-electron/boot.cjs",

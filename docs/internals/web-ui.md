@@ -21,6 +21,11 @@ Style with Tailwind classes in the component that renders the element.
   runtime are fine.
 - Theme-only rules use `@variant dark` and `@variant light`, not `.dark` selectors.
 
+Transcript prompt-width rules must target the outer user-message wrapper, not every descendant
+`.group`. Inline context chips also use `.group`; full-width children collapse file labels and
+paint size text over neighboring Markdown. Verify chip bounds and prompt width in a real browser;
+jsdom does not lay out inline flex content.
+
 ## Composition
 
 The composer banners are the reference.

@@ -12,7 +12,7 @@
   [data-transcript-style="km"]
 ) {
   /* The prompt spans the column in a quiet outlined box, not a bubble. */
-  [data-message-role="user"] .group > * {
+  [data-message-role="user"] > .group > * {
     width: 100%;
     max-width: 100%;
   }

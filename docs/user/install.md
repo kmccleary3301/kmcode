@@ -145,7 +145,9 @@ the web build version.
 Local macOS builds are ad-hoc signed so their application bundles have valid signatures.
 They are not Developer ID signed or notarized. Trusted distribution still requires
 fork-owned signing credentials and `--signed`.
-An update may require macOS Keychain approval before saved credentials can be read.
+Each ad-hoc signed update may ask for macOS Keychain approval before saved credentials can be
+read. The app stays responsive and can quit while the prompt waits; saved connections load
+once it is approved.
 
 The private Pi + OMP
 [`fork-v0.0.47`](https://github.com/kmccleary3301/kmcode/releases/tag/fork-v0.0.47)

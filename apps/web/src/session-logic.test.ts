@@ -18,7 +18,10 @@ import {
   type OrchestrationV2TurnItem,
 } from "@t3tools/contracts";
 import { presentThreadShell, type ThreadRuntimeSummary } from "@t3tools/client-runtime/state/shell";
-import { deriveMessagesTimelineRows } from "./components/chat/MessagesTimeline.logic";
+import {
+  deriveMessagesTimelineActivityStatus,
+  deriveMessagesTimelineRows,
+} from "./components/chat/MessagesTimeline.logic";
 import * as DateTime from "effect/DateTime";
 import { describe, expect, it } from "vite-plus/test";
 
@@ -30,6 +33,7 @@ import {
   deriveRevertTurnCountByUserMessageId,
   derivePhase,
   findLatestProposedPlan,
+  hasUnsettledLatestRun,
   isLatestRunSettled,
   selectHandoffImageResources,
   selectMessageImageResources,
@@ -90,6 +94,28 @@ describe("V2 session presentation", () => {
     };
     expect(isLatestRunSettled(endedRun, runtime)).toBe(true);
     expect(derivePhase(runtime, endedRun)).toBe("ready");
+  });
+
+  it("shows no activity row for a draft that has no run yet", () => {
+    const draftStatus = deriveMessagesTimelineActivityStatus({
+      isWorking: false,
+      hasUnsettledRun: hasUnsettledLatestRun(null, null),
+      runlessWorkActive: false,
+      awaitingUser: false,
+      retrying: false,
+      workCompletedAt: null,
+      waitingForAgents: false,
+      waitingOnBackgroundJob: false,
+    });
+    expect(draftStatus).toBeNull();
+
+    const runId = RunId.make("run-queued");
+    expect(
+      hasUnsettledLatestRun(
+        { runId, status: "queued", startedAt: null, completedAt: null },
+        { status: "running", activeRunId: RunId.make("run-active") },
+      ),
+    ).toBe(true);
   });
 
   it("offers Stop while a run is preparing/starting, not just once it's running (#13392)", () => {

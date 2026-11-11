@@ -212,6 +212,7 @@ import {
   deriveCanInterruptRunningThread,
   findLatestProposedPlan,
   hasActionableProposedPlan,
+  hasUnsettledLatestRun,
   isLatestRunSettled,
 } from "../session-logic";
 import { nativeTerminalLaunchPlan } from "../nativeTerminalFallback";
@@ -3846,7 +3847,7 @@ export default function ChatView(props: ChatViewProps) {
     });
   const timelineActivityStatus = deriveMessagesTimelineActivityStatus({
     isWorking,
-    hasUnsettledRun: !latestRunSettled,
+    hasUnsettledRun: hasUnsettledLatestRun(activeLatestRun, activeRuntime),
     runlessWorkActive,
     awaitingUser: awaitingTimelineInput,
     retrying: retryingTimelineRun,

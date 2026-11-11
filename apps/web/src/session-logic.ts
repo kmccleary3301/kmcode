@@ -262,6 +262,14 @@ export function isLatestRunSettled(
   return runtime?.activeRunId !== latestRun.runId;
 }
 
+/** A thread with no run yet (a fresh draft) has nothing to settle. */
+export function hasUnsettledLatestRun(
+  latestRun: Parameters<typeof isLatestRunSettled>[0],
+  runtime: Parameters<typeof isLatestRunSettled>[1],
+): boolean {
+  return latestRun !== null && !isLatestRunSettled(latestRun, runtime);
+}
+
 export function deriveActiveWorkStartedAt(
   latestRun: Pick<
     ThreadRunSummary,

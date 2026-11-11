@@ -151,6 +151,7 @@ export interface RememberedTimelinePosition {
     readonly runs: ReadonlySet<RunId>;
     readonly workGroups: ReadonlySet<string>;
     readonly attempts: ReadonlySet<RunAttemptId>;
+    readonly activityGroups?: ReadonlySet<string>;
     readonly workGroupState: {
       scrollPositions: Map<string, { readonly entryId: string; readonly offset: number }>;
       expandedEntries: Set<string>;

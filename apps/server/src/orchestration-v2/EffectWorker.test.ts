@@ -2,6 +2,7 @@ import { assert, it } from "@effect/vitest";
 import {
   CommandId,
   MessageId,
+  OrchestrationV2Run,
   type OrchestrationV2ServerCommand,
   ProviderSessionId,
   ProviderThreadId,
@@ -20,6 +21,7 @@ import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Queue from "effect/Queue";
 import * as Ref from "effect/Ref";
+import * as Schema from "effect/Schema";
 import * as TestClock from "effect/testing/TestClock";
 
 import * as CheckpointRollbackService from "./CheckpointRollbackService.ts";
@@ -278,22 +280,29 @@ it.effect("restores a promoted queue item when the provider rejects steering", (
     });
     const executor = yield* EffectWorker.OrchestrationEffectExecutorV2.pipe(Effect.provide(layer));
 
-    yield* executor.execute({
-      ...restartEffect(now, { type: "detach" }),
-      request: {
-        type: "provider-turn.steer",
-        providerSessionId: oldSessionId,
-        providerThreadId,
-        providerTurnId,
-        messageId,
-        queuedMessagePromotion: {
-          queuedRunId,
-          targetRunId,
-          queuePosition,
-          queueHeld: true,
+    const exit = yield* executor
+      .execute({
+        ...restartEffect(now, { type: "detach" }),
+        request: {
+          type: "provider-turn.steer",
+          providerSessionId: oldSessionId,
+          providerThreadId,
+          providerTurnId,
+          messageId,
+          queuedMessagePromotion: {
+            queuedRunId,
+            targetRunId,
+            queuePosition,
+            queueHeld: true,
+          },
         },
-      },
-    });
+      })
+      .pipe(Effect.exit);
+    if (Exit.isFailure(exit)) {
+      assert.include(Cause.pretty(exit.cause), "provider rejected the message");
+    } else {
+      assert.fail("final steer attempt should surface the provider rejection");
+    }
 
     assert.deepEqual(yield* Ref.get(dispatched), [
       {
@@ -309,6 +318,170 @@ it.effect("restores a promoted queue item when the provider rejects steering", (
     ]);
   }),
 );
+
+const promotedStartQueuedRunId = RunId.make("run:effect-worker-start-queued");
+const promotedStartTargetRunId = RunId.make("run:effect-worker-start-target");
+const promotedStartMessageId = MessageId.make("message:effect-worker-start");
+const promotedStartEffectId = "effect:start-promoted";
+const promotedStartPreviousTarget = Schema.decodeUnknownSync(OrchestrationV2Run)({
+  id: promotedStartTargetRunId,
+  threadId,
+  ordinal: 1,
+  providerInstanceId: "codex",
+  modelSelection: { instanceId: "codex", model: "test-model" },
+  providerThreadId: null,
+  userMessageId: "message:effect-worker-target",
+  rootNodeId: null,
+  activeAttemptId: null,
+  status: "interrupted",
+  requestedAt: DateTime.makeUnsafe("2026-01-01T00:00:00.000Z"),
+  startedAt: null,
+  completedAt: null,
+  checkpointId: null,
+  contextHandoffId: null,
+});
+const promotedStartCommands: ReadonlyArray<OrchestrationV2ServerCommand> = [
+  {
+    type: "queued-message.restore-after-steer-rejection",
+    commandId: CommandId.make(`command:steer-start-restore:${promotedStartEffectId}`),
+    threadId,
+    queuedRunId: promotedStartQueuedRunId,
+    targetRunId: promotedStartTargetRunId,
+    messageId: promotedStartMessageId,
+    queuePosition: 3,
+    queueHeld: true,
+    previousTargetRun: promotedStartPreviousTarget,
+  },
+  {
+    type: "queue.resume",
+    commandId: CommandId.make(`command:steer-start-resume:${promotedStartEffectId}`),
+    threadId,
+    preserveHolds: true,
+    skipParkedWake: true,
+  },
+];
+
+function promotedStartEffect(now: DateTime.Utc): EffectOutbox.OrchestrationEffectV2 {
+  const timestamp = DateTime.formatIso(now);
+  return {
+    id: promotedStartEffectId,
+    commandId: CommandId.make("command:start-promoted"),
+    threadId,
+    request: {
+      type: "provider-turn.start",
+      runId: promotedStartTargetRunId,
+      queuedMessagePromotion: {
+        queuedRunId: promotedStartQueuedRunId,
+        targetRunId: promotedStartTargetRunId,
+        messageId: promotedStartMessageId,
+        queuePosition: 3,
+        queueHeld: true,
+        previousTargetRun: promotedStartPreviousTarget,
+      },
+    },
+    status: "running",
+    attemptCount: 1,
+    availableAt: timestamp,
+    leaseOwner: "test-worker",
+    leaseExpiresAt: timestamp,
+    createdAt: timestamp,
+    updatedAt: timestamp,
+    completedAt: null,
+    lastError: null,
+  };
+}
+
+function promotedStartExecutor(input: {
+  readonly events: Ref.Ref<ReadonlyArray<string>>;
+  readonly dispatched: Ref.Ref<ReadonlyArray<OrchestrationV2ServerCommand>>;
+  readonly failStart: Ref.Ref<boolean>;
+}) {
+  return EffectWorker.OrchestrationEffectExecutorV2.pipe(
+    Effect.provide(
+      layerExecutorFor({
+        events: input.events,
+        failFirstStart: input.failStart,
+        threads: {
+          dispatch: (command) =>
+            Ref.update(input.dispatched, (commands) => [...commands, command]).pipe(
+              Effect.as({ sequence: 1, storedEvents: [] }),
+            ),
+        },
+      }),
+    ),
+  );
+}
+
+it.effect("restores a promoted queue item once when the final native start attempt fails", () =>
+  Effect.gen(function* () {
+    const now = yield* DateTime.now;
+    const events = yield* Ref.make<ReadonlyArray<string>>([]);
+    const dispatched = yield* Ref.make<ReadonlyArray<OrchestrationV2ServerCommand>>([]);
+    const failStart = yield* Ref.make(true);
+    const executor = yield* promotedStartExecutor({ events, dispatched, failStart });
+
+    const finalExit = yield* executor
+      .execute(promotedStartEffect(now), { willRetry: false })
+      .pipe(Effect.exit);
+    if (Exit.isFailure(finalExit)) {
+      assert.include(Cause.pretty(finalExit.cause), "simulated first start failure");
+    } else {
+      assert.fail("final native start attempt should surface its error");
+    }
+
+    assert.deepEqual(yield* Ref.get(events), ["start"]);
+    assert.deepEqual(yield* Ref.get(dispatched), promotedStartCommands);
+  }),
+);
+
+it.effect("restores a promoted queue item once when the final attempt fails after a retry", () =>
+  Effect.gen(function* () {
+    const now = yield* DateTime.now;
+    const events = yield* Ref.make<ReadonlyArray<string>>([]);
+    const dispatched = yield* Ref.make<ReadonlyArray<OrchestrationV2ServerCommand>>([]);
+    const failStart = yield* Ref.make(true);
+    const executor = yield* promotedStartExecutor({ events, dispatched, failStart });
+
+    const retryExit = yield* executor
+      .execute(promotedStartEffect(now), { willRetry: true })
+      .pipe(Effect.exit);
+    assert.isTrue(Exit.isFailure(retryExit));
+    assert.deepEqual(yield* Ref.get(dispatched), []);
+
+    yield* Ref.set(failStart, true);
+    const finalExit = yield* executor
+      .execute(promotedStartEffect(now), { willRetry: false })
+      .pipe(Effect.exit);
+    if (Exit.isFailure(finalExit)) {
+      assert.include(Cause.pretty(finalExit.cause), "simulated first start failure");
+    } else {
+      assert.fail("final native start attempt should surface its error");
+    }
+
+    assert.deepEqual(yield* Ref.get(events), ["start", "start"]);
+    assert.deepEqual(yield* Ref.get(dispatched), promotedStartCommands);
+  }),
+);
+
+it.effect("does not restore a promoted queue item when a retry starts the native turn", () =>
+  Effect.gen(function* () {
+    const now = yield* DateTime.now;
+    const events = yield* Ref.make<ReadonlyArray<string>>([]);
+    const dispatched = yield* Ref.make<ReadonlyArray<OrchestrationV2ServerCommand>>([]);
+    const failStart = yield* Ref.make(true);
+    const executor = yield* promotedStartExecutor({ events, dispatched, failStart });
+
+    const retryExit = yield* executor
+      .execute(promotedStartEffect(now), { willRetry: true })
+      .pipe(Effect.exit);
+    assert.isTrue(Exit.isFailure(retryExit));
+    yield* executor.execute(promotedStartEffect(now), { willRetry: false });
+
+    assert.deepEqual(yield* Ref.get(events), ["start", "start"]);
+    assert.deepEqual(yield* Ref.get(dispatched), []);
+  }),
+);
+
 it.effect("requeues a claim when a pre-execution worker check fails", () =>
   Effect.gen(function* () {
     const now = DateTime.formatIso(yield* DateTime.now);

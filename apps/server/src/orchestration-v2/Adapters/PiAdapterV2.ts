@@ -1599,7 +1599,7 @@ export function makePiAdapterV2(
             hasSubagentJobDetails(resultRecord)) &&
           phase !== "preview"
         ) {
-          yield* emitSubagentTasks(turn, toolCallId, resultRecord, completed, args);
+          yield* emitSubagentTasks(turn, toolCallId, resultRecord, completed, args, isError);
         }
         if (completed) {
           yield* settleToolCallSubagents(turn, toolCallId, resultRecord, isError, emittedAt);
@@ -2216,6 +2216,7 @@ export function makePiAdapterV2(
         resultRecord: unknown,
         completed: boolean,
         args?: unknown,
+        isError = false,
       ) {
         const details = recordField(resultRecord, "details");
         const jobs = recordField(details, "jobs") ?? recordField(resultRecord, "jobs");
@@ -2239,11 +2240,27 @@ export function makePiAdapterV2(
           ) {
             results = progressEntries;
           }
-          if (!Array.isArray(results) && args !== undefined) {
-            const tasks = recordField(args, "tasks");
-            if (Array.isArray(tasks)) {
-              results = tasks.map((t) =>
-                typeof t === "object" && t !== null ? { ...t, finished: false } : t,
+          const requestedTasks = recordField(args, "tasks");
+          const asyncState = recordString(
+            recordField(details, "async") ?? recordField(resultRecord, "async"),
+            "state",
+          );
+          if (
+            completed &&
+            isError &&
+            asyncState !== "running" &&
+            (!Array.isArray(results) || results.length === 0) &&
+            Array.isArray(requestedTasks)
+          ) {
+            results = requestedTasks.map((task) =>
+              typeof task === "object" && task !== null
+                ? { ...task, status: turn.interrupted ? "interrupted" : "failed", finished: true }
+                : task,
+            );
+          } else if (!Array.isArray(results) && args !== undefined) {
+            if (Array.isArray(requestedTasks)) {
+              results = requestedTasks.map((task) =>
+                typeof task === "object" && task !== null ? { ...task, finished: false } : task,
               );
             }
           }
@@ -2253,7 +2270,7 @@ export function makePiAdapterV2(
           recordField(details, "async") !== undefined ||
           recordField(resultRecord, "async") !== undefined ||
           Array.isArray(jobs);
-        const taskCompleted = completed && !isAsyncJob;
+        const taskCompleted = completed && !isAsyncJob && !isError;
         const emittedAt = yield* DateTime.now;
         for (const [index, result] of results.entries()) {
           if (result === null || typeof result !== "object") continue;

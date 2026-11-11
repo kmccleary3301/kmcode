@@ -1,6 +1,7 @@
 import * as Context from "effect/Context";
 import type * as DateTime from "effect/DateTime";
 import * as Schema from "effect/Schema";
+import * as SchemaTransformation from "effect/SchemaTransformation";
 import * as HttpApi from "effect/http-api/HttpApi";
 import * as HttpApiEndpoint from "effect/http-api/HttpApiEndpoint";
 import * as HttpApiGroup from "effect/http-api/HttpApiGroup";
@@ -48,10 +49,13 @@ import {
   DpopFailureReason,
   AuthSessionId,
   ThreadId,
+  TurnItemId,
   TrimmedNonEmptyString,
 } from "./baseSchemas.ts";
 import {
+  OrchestrationV2ActivityMode,
   OrchestrationV2ShellSnapshot,
+  OrchestrationV2ThreadActivityPage,
   OrchestrationV2ThreadBoundedSnapshot,
   OrchestrationV2ThreadDetailSnapshot,
   OrchestrationV2ThreadHistoryPage,
@@ -93,6 +97,8 @@ export const EnvironmentRequestInvalidReason = Schema.Literals([
   "scope_not_granted",
   "invalid_command",
   "invalid_history_cursor",
+  "invalid_thread_activity_cursor",
+  "invalid_thread_activity_request",
 ]);
 export type EnvironmentRequestInvalidReason = typeof EnvironmentRequestInvalidReason.Type;
 
@@ -124,6 +130,7 @@ export const EnvironmentInternalErrorReason = Schema.Literals([
   "orchestration_thread_snapshot_failed",
   "orchestration_thread_bounded_snapshot_failed",
   "orchestration_thread_history_failed",
+  "orchestration_thread_activity_page_failed",
   "internal_error",
 ]);
 export type EnvironmentInternalErrorReason = typeof EnvironmentInternalErrorReason.Type;
@@ -585,10 +592,62 @@ const EnvironmentOrchestrationThreadSnapshotParams = Schema.Struct({
   threadId: ThreadId,
 });
 
-const EnvironmentOrchestrationThreadHistoryQuery = Schema.Struct({
-  cursor: TrimmedNonEmptyString,
-  throughEntryId: Schema.optional(TrimmedNonEmptyString),
-  view: Schema.optional(Schema.Literals(["conversation", "activity"])),
+const THREAD_HISTORY_CURSOR_MAX_LENGTH = 4_096;
+const THREAD_ACTIVITY_PAGE_MAX_LIMIT = 75;
+
+export const EnvironmentOrchestrationThreadHistoryQuery = Schema.Struct({
+  cursor: Schema.optionalKey(
+    TrimmedNonEmptyString.check(Schema.isMaxLength(THREAD_HISTORY_CURSOR_MAX_LENGTH)),
+  ),
+  throughEntryId: Schema.optionalKey(
+    TrimmedNonEmptyString.check(Schema.isMaxLength(THREAD_HISTORY_CURSOR_MAX_LENGTH)),
+  ),
+  view: Schema.optionalKey(Schema.Literals(["conversation", "activity"])),
+}).check(
+  Schema.makeFilter((query) => query.cursor !== undefined || query.throughEntryId !== undefined),
+);
+export type EnvironmentOrchestrationThreadHistoryQuery =
+  typeof EnvironmentOrchestrationThreadHistoryQuery.Type;
+
+const EnvironmentOrchestrationBooleanQuery = Schema.Literals(["true", "false"]).pipe(
+  Schema.decodeTo(
+    Schema.Boolean,
+    SchemaTransformation.transform({
+      decode: (value) => value === "true",
+      encode: (value) => (value ? "true" : "false"),
+    }),
+  ),
+);
+
+export const EnvironmentOrchestrationThreadActivityPageQuery = Schema.Struct({
+  sourceThreadId: Schema.optionalKey(ThreadId),
+  groupStartItemId: Schema.optionalKey(TurnItemId),
+  cursor: Schema.optionalKey(
+    TrimmedNonEmptyString.check(Schema.isMaxLength(THREAD_HISTORY_CURSOR_MAX_LENGTH)),
+  ),
+  anchorItemId: Schema.optionalKey(TurnItemId),
+  limit: Schema.optionalKey(
+    Schema.NumberFromString.check(
+      Schema.isInt(),
+      Schema.isGreaterThanOrEqualTo(1),
+      Schema.isLessThanOrEqualTo(THREAD_ACTIVITY_PAGE_MAX_LIMIT),
+    ),
+  ),
+  summaryOnly: Schema.optionalKey(EnvironmentOrchestrationBooleanQuery),
+}).check(
+  Schema.makeFilter(
+    (query) =>
+      (query.sourceThreadId === undefined) === (query.groupStartItemId === undefined) &&
+      (query.anchorItemId !== undefined ||
+        query.cursor !== undefined ||
+        query.sourceThreadId !== undefined),
+  ),
+);
+export type EnvironmentOrchestrationThreadActivityPageQuery =
+  typeof EnvironmentOrchestrationThreadActivityPageQuery.Type;
+
+const EnvironmentOrchestrationThreadBoundedQuery = Schema.Struct({
+  activityMode: Schema.optionalKey(OrchestrationV2ActivityMode),
 });
 
 const EnvironmentOrchestrationThreadHistoryErrors = [
@@ -618,6 +677,7 @@ class EnvironmentOrchestrationHttpApi extends HttpApiGroup.make("orchestration")
     HttpApiEndpoint.get("threadBoundedSnapshot", "/api/orchestration/threads/:threadId/bounded", {
       headers: OrchestrationProtocolHeaders,
       params: EnvironmentOrchestrationThreadSnapshotParams,
+      query: EnvironmentOrchestrationThreadBoundedQuery,
       success: OrchestrationV2ThreadBoundedSnapshot,
       error: EnvironmentOrchestrationThreadSnapshotErrors,
     }).middleware(EnvironmentAuthenticatedAuth),
@@ -628,6 +688,15 @@ class EnvironmentOrchestrationHttpApi extends HttpApiGroup.make("orchestration")
       params: EnvironmentOrchestrationThreadSnapshotParams,
       query: EnvironmentOrchestrationThreadHistoryQuery,
       success: OrchestrationV2ThreadHistoryPage,
+      error: EnvironmentOrchestrationThreadHistoryErrors,
+    }).middleware(EnvironmentAuthenticatedAuth),
+  )
+  .add(
+    HttpApiEndpoint.get("threadActivityPage", "/api/orchestration/threads/:threadId/activity", {
+      headers: OrchestrationProtocolHeaders,
+      params: EnvironmentOrchestrationThreadSnapshotParams,
+      query: EnvironmentOrchestrationThreadActivityPageQuery,
+      success: OrchestrationV2ThreadActivityPage,
       error: EnvironmentOrchestrationThreadHistoryErrors,
     }).middleware(EnvironmentAuthenticatedAuth),
   ) {}

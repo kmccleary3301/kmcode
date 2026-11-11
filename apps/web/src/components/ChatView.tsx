@@ -118,7 +118,6 @@ import { threadSupportsProviderHandoff } from "@t3tools/client-runtime/state/thr
 import {
   codexFeedbackMessage,
   parseCodexFeedbackCommand,
-  shouldShowLoadEarlierControl,
   submitCodexFeedback,
   type CodexFeedbackSubmission,
 } from "@t3tools/client-runtime/state/threads";
@@ -449,6 +448,7 @@ import {
   useThreadRefs,
   useThreadVisibleTurnItems,
   waitForThreadShell,
+  useThreadActivity,
 } from "../state/entities";
 import { environmentShell } from "../state/shell";
 import { ChatComposer, type ChatComposerHandle } from "./chat/ChatComposer";
@@ -460,6 +460,11 @@ import { PullRequestThreadDialog } from "./PullRequestThreadDialog";
 import type { AssistantCitationRequest } from "./chat/AssistantCitationSource";
 import { MessagesTimeline, type MessagesTimelineHistoryControls } from "./chat/MessagesTimeline";
 import { ProviderSubagentBar } from "./chat/ProviderSubagentBar";
+import {
+  deriveTimelineActivityGroups,
+  mergeActivityRowsIntoVisibleItems,
+} from "./chat/timelineActivity";
+import type { ThreadActivityPageRequest } from "@t3tools/client-runtime/state/threads";
 import { getTriggerDisplayModelName } from "./chat/providerIconUtils";
 import {
   resolveTimelineIsAtEnd,
@@ -1690,6 +1695,10 @@ export default function ChatView(props: ChatViewProps) {
     label: "load earlier thread history",
     reportFailure: false,
   });
+  const loadThreadActivityPage = useAtomCommand(threadEnvironment.loadActivityPage, {
+    label: "load thread activity page",
+    reportFailure: false,
+  });
   const respondToThreadApproval = useOrchestrationCommand(threadEnvironment.respondToApproval, {
     reportFailure: false,
   });
@@ -1751,6 +1760,7 @@ export default function ChatView(props: ChatViewProps) {
     shellExists: serverThread !== null,
     waitForShell: draftThread !== null,
   });
+  const activity = useThreadActivity(routeThreadDetailRef);
   const { overlay: subagentLiveOverlay, rateLimited: liveViewRateLimited } =
     useThreadLiveOverlay(routeThreadDetailRef);
   const serverThreadProjection = useThreadProjection(routeThreadDetailRef);
@@ -1822,10 +1832,13 @@ export default function ChatView(props: ChatViewProps) {
     }
     return latestLiveContent;
   }, [subagentLiveOverlay, subagents]);
+  const activityVisibleTurnItems = useMemo(
+    () => mergeActivityRowsIntoVisibleItems(serverVisibleTurnItems, activity),
+    [activity, serverVisibleTurnItems],
+  );
+  const timelineActivityGroups = useMemo(() => deriveTimelineActivityGroups(activity), [activity]);
   const threadHistoryControls = useMemo<MessagesTimelineHistoryControls | undefined>(() => {
-    if (routeThreadDetailRef === null || !shouldShowLoadEarlierControl(serverThreadHistory)) {
-      return undefined;
-    }
+    if (routeThreadDetailRef === null) return undefined;
     return {
       hasMoreHistory: serverThreadHistory.hasMoreHistory,
       loading: serverThreadHistory.loading,
@@ -1841,6 +1854,19 @@ export default function ChatView(props: ChatViewProps) {
       },
     };
   }, [loadEarlierThreadHistory, routeThreadDetailRef, serverThreadHistory]);
+  const onLoadActivityPage = useCallback(
+    (request: ThreadActivityPageRequest) => {
+      if (routeThreadDetailRef === null) return;
+      return loadThreadActivityPage({
+        environmentId: routeThreadDetailRef.environmentId,
+        input: {
+          threadId: routeThreadDetailRef.threadId,
+          ...request,
+        },
+      });
+    },
+    [loadThreadActivityPage, routeThreadDetailRef],
+  );
   const committedServerMessageIds = useMemo(
     () => deriveCommittedServerUserMessageIds(serverVisibleTurnItems),
     [serverVisibleTurnItems],
@@ -4124,7 +4150,7 @@ export default function ChatView(props: ChatViewProps) {
     const previous = timelineProjectionRef.current;
     const projection = deriveTimelineEntriesFromVisibleTurnItemsWithState(
       {
-        visibleTurnItems: serverVisibleTurnItems,
+        visibleTurnItems: activityVisibleTurnItems,
         optimisticMessages: optimisticUserMessages,
         anchoredMessages: anchoredTimelineMessages,
         attachmentUrlById: timelineAttachmentUrlById,
@@ -4144,7 +4170,7 @@ export default function ChatView(props: ChatViewProps) {
     activeThreadKey,
     anchoredTimelineMessages,
     optimisticUserMessages,
-    serverVisibleTurnItems,
+    activityVisibleTurnItems,
     serverProjection,
     timelineAttachmentUrlById,
   ]);
@@ -12021,6 +12047,9 @@ export default function ChatView(props: ChatViewProps) {
                     ? (heldPaintContext?.markdownCwd ?? undefined)
                     : (gitCwd ?? undefined)
                 }
+                {...(!paintOnlyDisplayedTimeline
+                  ? { activityGroups: timelineActivityGroups, onLoadActivityPage }
+                  : {})}
                 resolvedTheme={resolvedTheme}
                 timestampFormat={timestampFormat}
                 workspaceRoot={

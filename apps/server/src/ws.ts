@@ -629,8 +629,9 @@ export function hasCompatibleOrchestrationProtocol(url: URL): boolean {
 
 export function shouldUseBoundedThreadSnapshot(input: {
   readonly acceptBoundedSnapshot?: boolean;
+  readonly activityMode?: "summary-v1";
 }): boolean {
-  return input.acceptBoundedSnapshot === true;
+  return input.acceptBoundedSnapshot === true || input.activityMode === "summary-v1";
 }
 
 // Optional client identity announced on the /ws upgrade URL next to wsTicket.
@@ -766,6 +767,7 @@ export const subscribeOrchestrationV2Thread = Effect.fn("ws.orchestrationV2.subs
     readonly afterSequence?: number;
     readonly requestCompletionMarker?: boolean;
     readonly acceptBoundedSnapshot?: boolean;
+    readonly activityMode?: "summary-v1";
   }) {
     const threadManagement = yield* ThreadManagementService.ThreadManagementService;
     const applicationEvents = yield* OrchestrationEventStore.OrchestrationEventStore;
@@ -840,13 +842,43 @@ export const subscribeOrchestrationV2Thread = Effect.fn("ws.orchestrationV2.subs
 
     const snapshotThenLive = Effect.fn("ws.orchestrationV2.threadSnapshotThenLive")(function* () {
       const useBoundedSnapshot = shouldUseBoundedThreadSnapshot(input);
-      const snapshot = yield* (
+      const snapshotResult = yield* (
         useBoundedSnapshot
-          ? threadManagement.getThreadSnapshotWindow(input.threadId, {
-              rowLimit: THREAD_HISTORY_SNAPSHOT_ROW_LIMIT,
-              userTurnLimit: THREAD_HISTORY_PAGE_POLICY.maxUserTurns,
-            })
-          : threadManagement.getThreadSnapshot(input.threadId)
+          ? threadManagement
+              .getThreadSnapshotWindow(input.threadId, {
+                rowLimit: THREAD_HISTORY_SNAPSHOT_ROW_LIMIT,
+                userTurnLimit: THREAD_HISTORY_PAGE_POLICY.maxUserTurns,
+                ...(input.activityMode === "summary-v1"
+                  ? { activityMode: input.activityMode }
+                  : {}),
+              })
+              .pipe(
+                Effect.map((snapshot) => {
+                  const boundedSnapshot = buildBoundedThreadStreamSnapshot(snapshot);
+                  const snapshotItem =
+                    input.activityMode === "summary-v1" && snapshot.activityMode === "summary-v1"
+                      ? {
+                          ...boundedSnapshot,
+                          activityMode: "summary-v1" as const,
+                          activitySummaries: snapshot.activitySummaries,
+                        }
+                      : boundedSnapshot;
+                  return {
+                    snapshotSequence: snapshot.snapshotSequence,
+                    snapshotItem,
+                  };
+                }),
+              )
+          : threadManagement.getThreadSnapshot(input.threadId).pipe(
+              Effect.map((snapshot) => ({
+                snapshotSequence: snapshot.snapshotSequence,
+                snapshotItem: {
+                  kind: "snapshot" as const,
+                  snapshotSequence: snapshot.snapshotSequence,
+                  projection: projectThreadProjectionForWire(snapshot.projection),
+                },
+              })),
+            )
       ).pipe(
         Effect.mapError(
           (cause) =>
@@ -857,14 +889,7 @@ export const subscribeOrchestrationV2Thread = Effect.fn("ws.orchestrationV2.subs
             }),
         ),
       );
-      const { snapshotSequence } = snapshot;
-      const snapshotItem = useBoundedSnapshot
-        ? buildBoundedThreadStreamSnapshot(snapshot)
-        : {
-            kind: "snapshot" as const,
-            snapshotSequence,
-            projection: projectThreadProjectionForWire(snapshot.projection),
-          };
+      const { snapshotSequence, snapshotItem } = snapshotResult;
       const snapshotPrelude = Stream.concat(rpcInitialItems([snapshotItem]), completionMarker);
       return Stream.concat(snapshotPrelude, eventStreamFrom(snapshotSequence));
     });

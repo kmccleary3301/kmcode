@@ -9,10 +9,8 @@ import {
   ThreadId,
   TurnItemId,
 } from "@t3tools/contracts";
-import type {
-  OrchestrationV2ProjectedTurnItem,
-  OrchestrationV2TurnItem,
-} from "@t3tools/contracts";
+import type { OrchestrationV2ProjectedTurnItem, OrchestrationV2TurnItem } from "@t3tools/contracts";
+import type { TimelineActivityGroup } from "./timelineActivity";
 import { RegistryContext } from "@effect/atom-react";
 import { formatDuration } from "@t3tools/shared/orchestrationTiming";
 import * as DateTime from "effect/DateTime";
@@ -411,11 +409,7 @@ function buildLongUserMessageText(tail = "deep hidden detail only after expand")
   ).join("\n");
 }
 
-function buildUserTimelineEntry(
-  text: string,
-  entryId = "entry-1",
-  messageId = "message-1",
-) {
+function buildUserTimelineEntry(text: string, entryId = "entry-1", messageId = "message-1") {
   return {
     id: entryId,
     kind: "message" as const,
@@ -432,11 +426,7 @@ function buildUserTimelineEntry(
   };
 }
 
-function buildAssistantTimelineEntry(
-  text: string,
-  entryId = "entry-1",
-  messageId = "message-1",
-) {
+function buildAssistantTimelineEntry(text: string, entryId = "entry-1", messageId = "message-1") {
   const entry = buildUserTimelineEntry(text, entryId, messageId);
   return {
     ...entry,
@@ -484,10 +474,8 @@ type MountedTimeline = {
 async function mountTimeline(element: ReactElement): Promise<MountedTimeline> {
   vi.unstubAllGlobals();
   vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
-  vi.stubGlobal(
-    "requestAnimationFrame",
-    (callback: FrameRequestCallback) =>
-      window.setTimeout(() => callback(performance.now()), 0),
+  vi.stubGlobal("requestAnimationFrame", (callback: FrameRequestCallback) =>
+    window.setTimeout(() => callback(performance.now()), 0),
   );
   vi.stubGlobal("cancelAnimationFrame", (handle: number) => window.clearTimeout(handle));
   vi.stubGlobal(
@@ -2359,6 +2347,75 @@ describe("MessagesTimeline", () => {
     }
   });
 
+  it("loads the latest activity page when expanding an unloaded summary group", async () => {
+    const sourceThreadId = ThreadId.make("summary-source");
+    const groupStartItemId = TurnItemId.make("summary-start");
+    const lastItemId = TurnItemId.make("summary-last");
+    const initialRequest = { sourceThreadId, groupStartItemId, anchorItemId: lastItemId };
+    const group: TimelineActivityGroup = {
+      key: JSON.stringify([sourceThreadId, groupStartItemId]),
+      summary: {
+        sourceThreadId,
+        groupStartItemId,
+        turnStartItemId: groupStartItemId,
+        runId: null,
+        firstItemId: TurnItemId.make("summary-first"),
+        firstOrdinal: 1,
+        lastItemId,
+        lastOrdinal: 2,
+        activityCount: 2,
+        countsByType: [{ type: "command_execution", count: 2 }],
+        statusCounts: [{ status: "completed", count: 2 }],
+        runStatus: "completed",
+        stepCount: 2,
+        filesEditedCount: 0,
+        diffStats: { added: 0, removed: 0 },
+        hasFailure: false,
+        labelPreview: null,
+        intentPreview: null,
+        startedAt: DateTime.makeUnsafe("2026-03-17T19:12:28.000Z"),
+        endedAt: DateTime.makeUnsafe("2026-03-17T19:12:43.000Z"),
+      },
+      loadedCount: 0,
+      loadedFirstOrdinal: null,
+      loadedFirstItemId: null,
+      loadedLastOrdinal: null,
+      loadedLastItemId: null,
+      initialRequest,
+      previousRequest: null,
+      nextRequest: null,
+      loading: false,
+      error: null,
+    };
+    const onLoadActivityPage = vi.fn();
+    const mounted = await mountTimeline(
+      <MessagesTimeline
+        {...buildProps()}
+        timelineEntries={[]}
+        activityGroups={[group]}
+        onLoadActivityPage={onLoadActivityPage}
+      />,
+    );
+
+    try {
+      const fold = mounted.container.querySelector<HTMLButtonElement>(
+        '[data-t3-part="timeline-checkpoint"] button',
+      );
+      if (!fold) throw new Error("Missing summary activity fold");
+      await act(async () => fold.click());
+
+      expect(onLoadActivityPage).toHaveBeenCalledTimes(1);
+      expect(onLoadActivityPage).toHaveBeenCalledWith(initialRequest);
+      expect(
+        mounted.container
+          .querySelector('[data-t3-part="timeline-checkpoint"] button')
+          ?.getAttribute("aria-expanded"),
+      ).toBe("true");
+    } finally {
+      await unmountTimeline(mounted);
+    }
+  });
+
   it("keeps the collapsed summary icon neutral when the group ends in a failure", () => {
     const markup = renderToStaticMarkup(
       <MessagesTimeline
@@ -2986,12 +3043,10 @@ describe("MessagesTimeline", () => {
         expect(closed.getAttribute("aria-label")).toBe(verb);
         expect(mounted.container.querySelectorAll("strong")).toHaveLength(0);
         await act(async () => closed.click());
-        await waitForTimelineMarkdown(
-          mounted.container,
-          (container) =>
-            Array.from(container.querySelectorAll("strong")).some(
-              (node) => node.textContent === "Viewing image first",
-            ),
+        await waitForTimelineMarkdown(mounted.container, (container) =>
+          Array.from(container.querySelectorAll("strong")).some(
+            (node) => node.textContent === "Viewing image first",
+          ),
         );
         expect(mounted.container.querySelectorAll("strong")).toHaveLength(1);
       } finally {
@@ -3098,9 +3153,7 @@ describe("MessagesTimeline", () => {
       />
     );
     const mounted = await mountTimeline(
-      renderTimeline([
-        reasoning("reasoning-entry", "reasoning-item", "idle", "First thought."),
-      ]),
+      renderTimeline([reasoning("reasoning-entry", "reasoning-item", "idle", "First thought.")]),
     );
     const workRow = () =>
       mounted.container.querySelector<HTMLElement>('[data-timeline-row-kind="work-live"]');
@@ -3271,9 +3324,9 @@ describe("MessagesTimeline", () => {
           ]),
         );
       });
-      expect(
-        mounted.container.querySelector(`[data-timeline-row-id="${firstId}"]`),
-      ).toBe(firstWaitRow);
+      expect(mounted.container.querySelector(`[data-timeline-row-id="${firstId}"]`)).toBe(
+        firstWaitRow,
+      );
       expect(mounted.container.querySelector(`[data-timeline-row-id="${nextId}"]`)).toBe(
         nextWaitRow,
       );
@@ -3290,10 +3343,8 @@ describe("MessagesTimeline", () => {
 });
 
 describe("Thought body continuity", () => {
-  const thoughtContinuityCases = (
-    ["minimal", "km", "minimal-plus", "terminal"] as const
-  ).flatMap((transcriptStyle) =>
-    [true, false].map((expanded) => ({ transcriptStyle, expanded })),
+  const thoughtContinuityCases = (["minimal", "km", "minimal-plus", "terminal"] as const).flatMap(
+    (transcriptStyle) => [true, false].map((expanded) => ({ transcriptStyle, expanded })),
   );
 
   it.each(thoughtContinuityCases)(
@@ -3364,14 +3415,7 @@ describe("Thought body continuity", () => {
             work("thought-entry", "reasoning", firstThoughtStatus, firstDetail),
             ...(latestThoughtStatus === null
               ? []
-              : [
-                  work(
-                    "thought-latest",
-                    "reasoning",
-                    latestThoughtStatus,
-                    latestDetail,
-                  ),
-                ]),
+              : [work("thought-latest", "reasoning", latestThoughtStatus, latestDetail)]),
             ...(siblingStatus === null
               ? []
               : [work("thought-sibling", "dynamic_tool", siblingStatus)]),
@@ -3379,9 +3423,9 @@ describe("Thought body continuity", () => {
         />
       );
       const findThoughtBody = (container: HTMLElement, detail: string) =>
-        Array.from(
-          container.querySelectorAll<HTMLElement>('[data-t3-part="markdown"]'),
-        ).find((node) => node.textContent?.includes(detail)) ?? null;
+        Array.from(container.querySelectorAll<HTMLElement>('[data-t3-part="markdown"]')).find(
+          (node) => node.textContent?.includes(detail),
+        ) ?? null;
       const findThoughtDisclosure = (body: HTMLElement) =>
         body.closest<HTMLElement>('[role="button"][aria-controls]');
 
@@ -3408,8 +3452,9 @@ describe("Thought body continuity", () => {
         }),
       );
       try {
-        await waitForTimelineMarkdown(mounted.container, (container) =>
-          findThoughtBody(container, firstDetail) !== null,
+        await waitForTimelineMarkdown(
+          mounted.container,
+          (container) => findThoughtBody(container, firstDetail) !== null,
         );
         let firstBody = findThoughtBody(mounted.container, firstDetail);
         if (!firstBody) throw new Error("Missing first reasoning body");
@@ -3421,8 +3466,9 @@ describe("Thought body continuity", () => {
           }
           if (expanded) {
             await act(async () => firstDisclosure?.click());
-            await waitForTimelineMarkdown(mounted.container, (container) =>
-              findThoughtBody(container, firstDetail) !== null,
+            await waitForTimelineMarkdown(
+              mounted.container,
+              (container) => findThoughtBody(container, firstDetail) !== null,
             );
             firstBody = findThoughtBody(mounted.container, firstDetail);
           } else {
@@ -3472,8 +3518,9 @@ describe("Thought body continuity", () => {
             }),
           );
         });
-        await waitForTimelineMarkdown(mounted.container, (container) =>
-          findThoughtBody(container, latestDetail) !== null,
+        await waitForTimelineMarkdown(
+          mounted.container,
+          (container) => findThoughtBody(container, latestDetail) !== null,
         );
         if (firstBody !== null) {
           expect(findThoughtBody(mounted.container, firstDetail)).toBe(firstBody);
@@ -3488,8 +3535,9 @@ describe("Thought body continuity", () => {
           }
           if (expanded) {
             await act(async () => latestDisclosure?.click());
-            await waitForTimelineMarkdown(mounted.container, (container) =>
-              findThoughtBody(container, latestDetail) !== null,
+            await waitForTimelineMarkdown(
+              mounted.container,
+              (container) => findThoughtBody(container, latestDetail) !== null,
             );
             latestBody = findThoughtBody(mounted.container, latestDetail);
           } else {
@@ -3623,9 +3671,9 @@ describe("Thought body continuity", () => {
         />
       );
       const findThoughtBody = (container: HTMLElement, detail: string) =>
-        Array.from(
-          container.querySelectorAll<HTMLElement>('[data-t3-part="markdown"]'),
-        ).find((node) => node.textContent?.includes(detail)) ?? null;
+        Array.from(container.querySelectorAll<HTMLElement>('[data-t3-part="markdown"]')).find(
+          (node) => node.textContent?.includes(detail),
+        ) ?? null;
 
       activityTestState.expanded = true;
       vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
@@ -3643,8 +3691,9 @@ describe("Thought body continuity", () => {
       });
       const mounted = await mountTimeline(renderTimeline(false));
       try {
-        await waitForTimelineMarkdown(mounted.container, (container) =>
-          findThoughtBody(container, firstDetail) !== null,
+        await waitForTimelineMarkdown(
+          mounted.container,
+          (container) => findThoughtBody(container, firstDetail) !== null,
         );
         const bodyBeforeTool = findThoughtBody(mounted.container, firstDetail);
         if (!bodyBeforeTool) throw new Error("Missing first reasoning body");

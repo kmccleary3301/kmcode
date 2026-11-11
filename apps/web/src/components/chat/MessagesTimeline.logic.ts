@@ -5,6 +5,7 @@ import {
   resolveSubagentLifecycle,
   type SubagentLifecycle,
 } from "@t3tools/client-runtime/state/subagentRuntime";
+import * as DateTime from "effect/DateTime";
 import * as Equal from "effect/Equal";
 import { shallow } from "zustand/vanilla/shallow";
 import { renderCodexDirectivesForCopy } from "@t3tools/client-runtime/codex-markdown-directives";
@@ -74,12 +75,15 @@ import {
   type OrchestrationV2Subagent,
   type OrchestrationV2ProjectedTurnItem,
   type OrchestrationV2TurnItem,
+  type OrchestrationV2ThreadActivitySummary,
   type RunAttemptId,
   RunId,
   type RuntimeRequestId,
   type ThreadId,
   type TurnItemId,
 } from "@t3tools/contracts";
+import type { ThreadActivityPageRequest } from "@t3tools/client-runtime/state/threads";
+import type { TimelineActivityGroup } from "./timelineActivity";
 import type { ThreadRunSummary } from "@t3tools/client-runtime/state/shell";
 import {
   resolveT3McpToolDefinition,
@@ -693,11 +697,22 @@ type MessagesTimelineRowContent =
       kind: "turn-fold";
       id: string;
       createdAt: string;
-      runId: RunId;
+      runId: RunId | null;
+      activityGroup?: TimelineActivityGroup | undefined;
       label: string;
       /** Set when the turn edited files: the label's trailing `+n −m`. */
       diffStats?: DiffStats;
       expanded: boolean;
+    }
+  | {
+      kind: "activity-page-boundary";
+      id: string;
+      createdAt: string | null;
+      groupKey: string;
+      request: ThreadActivityPageRequest;
+      direction: "previous" | "next";
+      loading: boolean;
+      error: string | null;
     }
   | {
       kind: "attempt-fold";
@@ -903,12 +918,13 @@ function deriveTerminalAssistantMessageIds(timelineEntries: ReadonlyArray<Timeli
 }
 
 interface TurnFold {
-  runId: RunId;
+  runId: RunId | null;
   anchorEntryId: string;
   createdAt: string;
   hiddenEntryIds: ReadonlySet<string>;
   label: string;
   diffStats?: DiffStats;
+  activityGroup?: TimelineActivityGroup;
 }
 
 interface SupersededAttemptFold {
@@ -1197,6 +1213,158 @@ function failedTimelineRunIds(
   return failed;
 }
 
+/** A turn fold's label and stats, read from the complete activity summary. */
+function summaryFoldLabel(summary: OrchestrationV2ThreadActivitySummary): {
+  label: string;
+  diffStats?: DiffStats;
+} {
+  const elapsedMs =
+    summary.startedAt && summary.endedAt
+      ? computeElapsedMs(DateTime.formatIso(summary.startedAt), DateTime.formatIso(summary.endedAt))
+      : null;
+  const duration = elapsedMs !== null ? formatDuration(elapsedMs) : null;
+  const diffStats = { added: summary.diffStats.added, removed: summary.diffStats.removed };
+  return {
+    label: formatTurnFoldSummary({
+      duration,
+      stepCount: summary.stepCount,
+      filesEdited: summary.filesEditedCount,
+      diffStats,
+    }),
+    ...(diffStats.added > 0 || diffStats.removed > 0 ? { diffStats } : {}),
+  };
+}
+
+function projectedItemForTimelineEntry(
+  entry: TimelineEntry,
+): OrchestrationV2ProjectedTurnItem | undefined {
+  if (entry.kind === "message") return entry.projectedItem;
+  if (entry.kind === "event") return entry.projectedItem;
+  if (entry.kind === "work") return entry.entry.projectedItem;
+  return undefined;
+}
+
+function activityGroupContainsEntry(entry: TimelineEntry, group: TimelineActivityGroup): boolean {
+  const projectedItem = projectedItemForTimelineEntry(entry);
+  if (projectedItem === undefined) return false;
+  const sourceThreadId = projectedItem.orderKey?.sourceThreadId ?? projectedItem.sourceThreadId;
+  const ordinal = projectedItem.orderKey?.ordinal ?? projectedItem.item.ordinal;
+  return (
+    String(sourceThreadId) === String(group.summary.sourceThreadId) &&
+    ordinal >= group.summary.firstOrdinal &&
+    ordinal <= group.summary.lastOrdinal
+  );
+}
+
+function activityGroupIsExpanded(
+  group: TimelineActivityGroup,
+  input: {
+    readonly expandedActivityGroupKeys?: ReadonlySet<string>;
+    readonly expandedRunIds?: ReadonlySet<RunId>;
+  },
+): boolean {
+  return (
+    (input.expandedActivityGroupKeys?.has(group.key) ?? false) ||
+    (group.summary.runId !== null && (input.expandedRunIds?.has(group.summary.runId) ?? false))
+  );
+}
+
+interface ActivityBoundaryRows {
+  /** Rows that precede the keyed entry. */
+  readonly before: ReadonlyMap<string, ReadonlyArray<MessagesTimelineRow>>;
+  /** Rows that follow the keyed entry's turn-fold header. */
+  readonly afterHeader: ReadonlyMap<string, ReadonlyArray<MessagesTimelineRow>>;
+  /** Rows after the last entry of the timeline. */
+  readonly trailing: ReadonlyArray<MessagesTimelineRow>;
+  /** Entries that own a row; work-group consumption must stop at them. */
+  readonly entryIds: ReadonlySet<string>;
+}
+
+/**
+ * Marks a summary-backed turn's unloaded activity at the loaded edge. Earlier
+ * activity sits under the turn header; later activity sits before the next entry.
+ */
+function deriveActivityBoundaryRows(input: {
+  timelineEntries: ReadonlyArray<TimelineEntry>;
+  activityGroups: ReadonlyArray<TimelineActivityGroup>;
+  foldAnchors: ReadonlyMap<string, TurnFold>;
+  isVisible: (group: TimelineActivityGroup) => boolean;
+}): ActivityBoundaryRows {
+  const before = new Map<string, MessagesTimelineRow[]>();
+  const afterHeader = new Map<string, MessagesTimelineRow[]>();
+  const trailing: MessagesTimelineRow[] = [];
+  for (const group of input.activityGroups) {
+    if (!input.isVisible(group)) continue;
+    const matchingEntries = input.timelineEntries.flatMap((entry, index) =>
+      activityGroupContainsEntry(entry, group) ? [{ entry, index }] : [],
+    );
+    const foldAnchor = Array.from(input.foldAnchors.values()).find(
+      (fold) => fold.activityGroup?.key === group.key,
+    )?.anchorEntryId;
+    const firstLoadedIndex =
+      group.loadedFirstItemId === null
+        ? -1
+        : input.timelineEntries.findIndex(
+            (entry) =>
+              String(projectedItemForTimelineEntry(entry)?.sourceItemId) ===
+              group.loadedFirstItemId,
+          );
+    const lastLoadedIndex =
+      group.loadedLastItemId === null
+        ? -1
+        : input.timelineEntries.findIndex(
+            (entry) =>
+              String(projectedItemForTimelineEntry(entry)?.sourceItemId) === group.loadedLastItemId,
+          );
+    const firstIndex =
+      firstLoadedIndex >= 0
+        ? firstLoadedIndex
+        : foldAnchor === undefined
+          ? (matchingEntries[0]?.index ?? -1)
+          : input.timelineEntries.findIndex((entry) => entry.id === foldAnchor);
+    const lastIndex =
+      lastLoadedIndex >= 0 ? lastLoadedIndex : (matchingEntries.at(-1)?.index ?? firstIndex);
+    const firstEntry = input.timelineEntries[firstIndex];
+    const followingEntry = input.timelineEntries[lastIndex + 1];
+    if (group.previousRequest !== null && firstEntry !== undefined) {
+      const row: MessagesTimelineRow = {
+        kind: "activity-page-boundary",
+        id: `activity-boundary:${group.key}:previous`,
+        createdAt: null,
+        groupKey: group.key,
+        request: group.previousRequest,
+        direction: "previous",
+        loading: group.loading,
+        error: group.error,
+      };
+      afterHeader.set(firstEntry.id, [...(afterHeader.get(firstEntry.id) ?? []), row]);
+    }
+    if (group.nextRequest !== null) {
+      const row: MessagesTimelineRow = {
+        kind: "activity-page-boundary",
+        id: `activity-boundary:${group.key}:next`,
+        createdAt: null,
+        groupKey: group.key,
+        request: group.nextRequest,
+        direction: "next",
+        loading: group.loading,
+        error: group.error,
+      };
+      if (followingEntry === undefined) {
+        trailing.push(row);
+      } else {
+        before.set(followingEntry.id, [...(before.get(followingEntry.id) ?? []), row]);
+      }
+    }
+  }
+  return {
+    before,
+    afterHeader,
+    trailing,
+    entryIds: new Set([...before.keys(), ...afterHeader.keys()]),
+  };
+}
+
 /**
  * Settled turns fold activity before their terminal assistant message behind
  * a "Worked for ..." row. Ordinary trailing work joins the fold, while failures
@@ -1214,6 +1382,7 @@ function deriveTurnFolds(input: {
   runlessWorkActive: boolean;
   liveSubagentEntryIds: ReadonlySet<string>;
   liveChildEntryIds?: ReadonlySet<string>;
+  activityGroups?: ReadonlyArray<TimelineActivityGroup>;
 }): ReadonlyMap<string, TurnFold> {
   const interruptedRunIds = new Set<RunId>();
   for (const entry of input.timelineEntries) {
@@ -1298,6 +1467,11 @@ function deriveTurnFolds(input: {
 
   const foldsByAnchorEntryId = new Map<string, TurnFold>();
   for (const [runId, group] of groupsByRunId) {
+    const activityGroup = (input.activityGroups ?? []).find(
+      (candidate) =>
+        candidate.summary.runId === runId ||
+        group.entries.some((entry) => activityGroupContainsEntry(entry, candidate)),
+    );
     if (
       input.unfoldedRunIds.has(runId) ||
       interruptedRunIds.has(runId) ||
@@ -1424,26 +1598,77 @@ function deriveTurnFolds(input: {
         removed += stats.removed;
       }
     }
-    const label = isLatestInterruptedTurn
-      ? duration
-        ? `You stopped after ${duration}`
-        : "You stopped this response"
-      : formatTurnFoldSummary({
-          duration,
-          stepCount,
-          filesEdited: Object.keys(editedFiles).length,
-          diffStats: { added, removed },
-        });
+    const editedFileCount = Object.keys(editedFiles).length;
+    const fold = activityGroup
+      ? summaryFoldLabel(activityGroup.summary)
+      : isLatestInterruptedTurn
+        ? {
+            label: duration ? `You stopped after ${duration}` : "You stopped this response",
+            diffStats: undefined,
+          }
+        : {
+            label: formatTurnFoldSummary({
+              duration,
+              stepCount,
+              filesEdited: editedFileCount,
+              diffStats: { added, removed },
+            }),
+            diffStats: editedFileCount > 0 ? { added, removed } : undefined,
+          };
 
     foldsByAnchorEntryId.set(group.anchorEntryId, {
-      runId,
+      runId: activityGroup === undefined ? runId : activityGroup.summary.runId,
       anchorEntryId: group.anchorEntryId,
       createdAt: group.startBoundary ?? firstEntry.createdAt,
       hiddenEntryIds,
-      label,
-      ...(!isLatestInterruptedTurn && Object.keys(editedFiles).length > 0
-        ? { diffStats: { added, removed } }
-        : {}),
+      label: fold.label,
+      ...(fold.diffStats ? { diffStats: fold.diffStats } : {}),
+      ...(activityGroup === undefined ? {} : { activityGroup }),
+    });
+  }
+  // A summary group still needs its metadata fold when no page rows are loaded
+  // and the legacy activity fold has nothing hideable to attach to.
+  const representedGroupKeys = new Set(
+    Array.from(foldsByAnchorEntryId.values()).flatMap((fold) =>
+      fold.activityGroup === undefined ? [] : [fold.activityGroup.key],
+    ),
+  );
+  const runIdByEntryId = timelineEntryTurnFoldRunIdsByEntryId(input.timelineEntries);
+  for (const activityGroup of input.activityGroups ?? []) {
+    if (representedGroupKeys.has(activityGroup.key)) continue;
+    const { summary } = activityGroup;
+    const matchingEntries = input.timelineEntries.filter((entry) =>
+      activityGroupContainsEntry(entry, activityGroup),
+    );
+    const matchingRunEntry =
+      summary.runId === null
+        ? undefined
+        : input.timelineEntries.find((entry) => runIdByEntryId.get(entry.id) === summary.runId);
+    const anchorEntry =
+      matchingEntries.find((entry) => !timelineEntryStartsResponse(entry)) ??
+      matchingEntries[0] ??
+      matchingRunEntry ??
+      input.timelineEntries.find((entry) => {
+        const projectedItem = projectedItemForTimelineEntry(entry);
+        return (
+          projectedItem !== undefined &&
+          String(projectedItem.orderKey?.sourceThreadId ?? projectedItem.sourceThreadId) ===
+            String(summary.sourceThreadId) &&
+          (projectedItem.orderKey?.ordinal ?? projectedItem.item.ordinal) > summary.lastOrdinal
+        );
+      });
+    const anchorEntryId = anchorEntry?.id ?? `activity-summary:${activityGroup.key}`;
+    const fold = summaryFoldLabel(summary);
+    foldsByAnchorEntryId.set(anchorEntryId, {
+      runId: summary.runId,
+      anchorEntryId,
+      createdAt: summary.startedAt
+        ? DateTime.formatIso(summary.startedAt)
+        : (anchorEntry?.createdAt ?? ""),
+      hiddenEntryIds: new Set(),
+      label: fold.label,
+      ...(fold.diffStats ? { diffStats: fold.diffStats } : {}),
+      activityGroup,
     });
   }
   return foldsByAnchorEntryId;
@@ -1674,9 +1899,11 @@ export function deriveMessagesTimelineRows(input: {
   runTimingsById?: ReadonlyMap<RunId, TimelineRunTiming>;
   runningRunId?: RunId | null;
   expandedRunIds?: ReadonlySet<RunId>;
+  expandedActivityGroupKeys?: ReadonlySet<string>;
   expandedAttemptIds?: ReadonlySet<RunAttemptId>;
   expandedWorkGroupIds?: ReadonlySet<string>;
   explicitActivityCache?: ReadonlySet<string>;
+  activityGroups?: ReadonlyArray<TimelineActivityGroup>;
   isWorking: boolean;
   /** Current run label; absent only when there is no live status slot. */
   activityStatus?: MessagesTimelineActivityStatus | null;
@@ -1789,10 +2016,20 @@ export function deriveMessagesTimelineRows(input: {
           latestRun: input.latestRun ?? null,
           runTimingsById: input.runTimingsById,
           unfoldedRunIds: new Set([...activeVisualResponseRunIds, ...failedRunIds]),
-          runlessWorkActive,
           liveSubagentEntryIds,
+          runlessWorkActive,
           liveChildEntryIds: activityDecisions.liveChildEntryIds,
+          ...(input.activityGroups === undefined ? {} : { activityGroups: input.activityGroups }),
         });
+  const activityBoundaryRows = deriveActivityBoundaryRows({
+    timelineEntries,
+    activityGroups: input.activityGroups ?? [],
+    foldAnchors: foldsByAnchorEntryId,
+    isVisible: (group) =>
+      input.layout === "flat" ||
+      (input.expandedActivityGroupKeys?.has(group.key) ?? false) ||
+      (group.summary.runId !== null && (input.expandedRunIds?.has(group.summary.runId) ?? false)),
+  });
   const collapsedEntryIds = new Set<string>();
   const explicitlyOpenedEntryIds = new Set<string>();
   if (input.explicitActivityCache?.size) {
@@ -1808,11 +2045,16 @@ export function deriveMessagesTimelineRows(input: {
     }
   }
   for (const fold of foldsByAnchorEntryId.values()) {
-    if (!input.expandedRunIds?.has(fold.runId)) {
+    const expanded =
+      fold.activityGroup === undefined
+        ? fold.runId !== null && (input.expandedRunIds?.has(fold.runId) ?? false)
+        : activityGroupIsExpanded(fold.activityGroup, input);
+    if (!expanded) {
       for (const entryId of fold.hiddenEntryIds) {
         if (
           explicitlyOpenedEntryIds.has(entryId) &&
-          !input.explicitActivityCache?.has(`turn-collapsed:${fold.runId}`)
+          (fold.activityGroup !== undefined ||
+            !input.explicitActivityCache?.has(`turn-collapsed:${fold.runId}`))
         )
           continue;
         collapsedEntryIds.add(entryId);
@@ -1911,6 +2153,7 @@ export function deriveMessagesTimelineRows(input: {
         collapsedEntryIds.has(entry.id) ||
         collapsedSupersededEntryIds.has(entry.id) ||
         foldsByAnchorEntryId.has(entry.id) ||
+        activityBoundaryRows.entryIds.has(entry.id) ||
         supersededFoldsByAnchorEntryId.has(entry.id)
       ) {
         break;
@@ -2197,17 +2440,31 @@ export function deriveMessagesTimelineRows(input: {
       continue;
     }
 
+    for (const row of activityBoundaryRows.before.get(timelineEntry.id) ?? []) {
+      nextRows.push(row);
+    }
     const turnFold = foldsByAnchorEntryId.get(timelineEntry.id);
     if (turnFold) {
+      const expanded =
+        turnFold.activityGroup === undefined
+          ? turnFold.runId !== null && (input.expandedRunIds?.has(turnFold.runId) ?? false)
+          : activityGroupIsExpanded(turnFold.activityGroup, input);
       nextRows.push({
         kind: "turn-fold",
-        id: `turn-fold:${turnFold.runId}`,
+        id:
+          turnFold.activityGroup === undefined
+            ? `turn-fold:${turnFold.runId}`
+            : `turn-fold:${turnFold.activityGroup.key}`,
         createdAt: turnFold.createdAt,
         runId: turnFold.runId,
+        ...(turnFold.activityGroup === undefined ? {} : { activityGroup: turnFold.activityGroup }),
         label: turnFold.label,
         ...(turnFold.diffStats ? { diffStats: turnFold.diffStats } : {}),
-        expanded: input.expandedRunIds?.has(turnFold.runId) ?? false,
+        expanded,
       });
+    }
+    for (const row of activityBoundaryRows.afterHeader.get(timelineEntry.id) ?? []) {
+      nextRows.push(row);
     }
 
     if (collapsedEntryIds.has(timelineEntry.id)) {
@@ -2363,6 +2620,7 @@ export function deriveMessagesTimelineRows(input: {
           collapsedEntryIds.has(nextEntry.id) ||
           collapsedSupersededEntryIds.has(nextEntry.id) ||
           foldsByAnchorEntryId.has(nextEntry.id) ||
+          activityBoundaryRows.entryIds.has(nextEntry.id) ||
           supersededFoldsByAnchorEntryId.has(nextEntry.id) ||
           (nextEntry.entry.runId ?? null) !== (timelineEntry.entry.runId ?? null) ||
           nextEntry.attempt?.id !== timelineEntry.attempt?.id
@@ -2747,6 +3005,30 @@ export function deriveMessagesTimelineRows(input: {
       );
     }
   }
+  const renderedTurnFoldIds = new Set(
+    nextRows.flatMap((row) => (row.kind === "turn-fold" ? [row.id] : [])),
+  );
+  for (const fold of foldsByAnchorEntryId.values()) {
+    const id =
+      fold.activityGroup === undefined
+        ? `turn-fold:${fold.runId}`
+        : `turn-fold:${fold.activityGroup.key}`;
+    if (renderedTurnFoldIds.has(id)) continue;
+    nextRows.push({
+      kind: "turn-fold",
+      id,
+      createdAt: fold.createdAt,
+      runId: fold.runId,
+      ...(fold.activityGroup === undefined ? {} : { activityGroup: fold.activityGroup }),
+      label: fold.label,
+      ...(fold.diffStats ? { diffStats: fold.diffStats } : {}),
+      expanded:
+        fold.activityGroup === undefined
+          ? fold.runId !== null && (input.expandedRunIds?.has(fold.runId) ?? false)
+          : activityGroupIsExpanded(fold.activityGroup, input),
+    });
+  }
+  nextRows.push(...activityBoundaryRows.trailing);
 
   // A setup that owns the working slot sits under it and shows no activity
   // row of its own; every other state gets the usual tail.
@@ -2788,7 +3070,8 @@ function attachCreatedThreadSummaries(
     if (row.kind === "message" && row.showAssistantMeta && row.message.runId) {
       terminalIndexes.set(row.message.runId, index);
     }
-    if (row.kind === "turn-fold" && !row.expanded) collapsedRuns.add(row.runId);
+    if (row.kind === "turn-fold" && !row.expanded && row.runId !== null)
+      collapsedRuns.add(row.runId);
   }
   for (const entry of timelineEntries) {
     const projectedItem =
@@ -2991,9 +3274,46 @@ function isRowUnchanged(a: MessagesTimelineRow, b: MessagesTimelineRow): boolean
       );
     }
 
+    case "activity-page-boundary": {
+      const boundary = b as typeof a;
+      return (
+        a.groupKey === boundary.groupKey &&
+        a.direction === boundary.direction &&
+        a.loading === boundary.loading &&
+        a.error === boundary.error &&
+        a.request.cursor === boundary.request.cursor &&
+        a.request.anchorItemId === boundary.request.anchorItemId
+      );
+    }
+
     case "turn-fold": {
       const bf = b as typeof a;
-      return a.createdAt === bf.createdAt && a.label === bf.label && a.expanded === bf.expanded;
+      const activityGroupUnchanged =
+        a.activityGroup === undefined
+          ? bf.activityGroup === undefined
+          : bf.activityGroup !== undefined &&
+            a.activityGroup.key === bf.activityGroup.key &&
+            a.activityGroup.summary === bf.activityGroup.summary &&
+            a.activityGroup.loadedCount === bf.activityGroup.loadedCount &&
+            a.activityGroup.loadedFirstOrdinal === bf.activityGroup.loadedFirstOrdinal &&
+            a.activityGroup.loadedFirstItemId === bf.activityGroup.loadedFirstItemId &&
+            a.activityGroup.loadedLastOrdinal === bf.activityGroup.loadedLastOrdinal &&
+            a.activityGroup.loadedLastItemId === bf.activityGroup.loadedLastItemId &&
+            a.activityGroup.loading === bf.activityGroup.loading &&
+            a.activityGroup.error === bf.activityGroup.error &&
+            a.activityGroup.previousRequest?.cursor === bf.activityGroup.previousRequest?.cursor &&
+            a.activityGroup.previousRequest?.anchorItemId ===
+              bf.activityGroup.previousRequest?.anchorItemId &&
+            a.activityGroup.nextRequest?.cursor === bf.activityGroup.nextRequest?.cursor &&
+            a.activityGroup.nextRequest?.anchorItemId ===
+              bf.activityGroup.nextRequest?.anchorItemId;
+      return (
+        a.createdAt === bf.createdAt &&
+        a.runId === bf.runId &&
+        a.label === bf.label &&
+        a.expanded === bf.expanded &&
+        activityGroupUnchanged
+      );
     }
 
     case "attempt-fold": {

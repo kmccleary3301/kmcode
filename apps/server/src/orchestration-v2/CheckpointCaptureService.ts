@@ -88,6 +88,12 @@ export const layer: Layer.Layer<
       if (run?.status === "rolled_back") {
         return;
       }
+      // A parked native root woken in place continues this run with a new
+      // attempt. This capture belonged to the parked boundary; the
+      // continuation's own terminal enqueues the next capture.
+      if (run?.status === "preparing" || run?.status === "starting" || run?.status === "running") {
+        return;
+      }
 
       if (
         run === undefined ||
@@ -130,7 +136,7 @@ export const layer: Layer.Layer<
         appRunOrdinal: run.ordinal,
         capturedAt,
       });
-      const commandId = CommandId.make(`command:effect:checkpoint.capture:${run.id}`);
+      const commandId = RunExecutionService.checkpointCaptureCommandId(run.id, rootNode.id);
       const interruptedItemEvents: Array<OrchestrationV2DomainEvent> = [];
       if (!stopped) {
         const completionProjection = yield* projections.getThreadRecords(
@@ -169,6 +175,9 @@ export const layer: Layer.Layer<
         threadId: input.threadId,
         commandType: "checkpoint.capture",
         acceptedAt: capturedAt,
+        // An automatic wake can start a new attempt while checkpoint I/O runs;
+        // this capture then belongs to a superseded boundary and must not settle the run.
+        requireRun: { runId: run.id, activeAttemptId: run.activeAttemptId, status: run.status },
         effects: [],
         events: [
           ...(threadStartCheckpoint === null

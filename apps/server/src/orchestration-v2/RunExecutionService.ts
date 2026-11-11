@@ -109,6 +109,14 @@ function isSettledTurnItemStatus(status: OrchestrationV2TurnItem["status"]): boo
   return !isOrchestrationV2WorkActive(status);
 }
 
+/**
+ * One capture command per root attempt. A parked run woken in place settles
+ * again under a new root node, and a run-scoped id would make the command
+ * receipt swallow that second capture.
+ */
+export const checkpointCaptureCommandId = (runId: string, rootNodeId: string) =>
+  CommandId.make(`command:effect:checkpoint.capture:${runId}:${rootNodeId}`);
+
 export function interruptLeftoverTurnItemsOnRunCompletion(input: {
   readonly run: OrchestrationV2Run;
   readonly projection: Pick<
@@ -764,9 +772,7 @@ export const layer: Layer.Layer<
         const runEventId = yield* allocateEventId();
         const nodeEventId = yield* allocateEventId();
         const providerThreadEventId = yield* allocateEventId();
-        const checkpointCaptureCommandId = CommandId.make(
-          `command:effect:checkpoint.capture:${input.run.id}`,
-        );
+        const captureCommandId = checkpointCaptureCommandId(input.run.id, input.rootNode.id);
         // Stopped runs capture too: their checkpoint is the rollback point for
         // the next message. The capture is enqueued with these terminal events,
         // ahead of any later run's start on this thread's effect lane.
@@ -777,8 +783,11 @@ export const layer: Layer.Layer<
             input.terminal.status === "cancelled"
               ? [
                   {
-                    id: `effect:checkpoint.capture:${input.run.id}`,
-                    commandId: checkpointCaptureCommandId,
+                    // One capture per root attempt: an in-place continuation of
+                    // the same run must not collide with the parked capture's
+                    // retained outbox row.
+                    id: `effect:checkpoint.capture:${input.run.id}:${input.rootNode.id}`,
+                    commandId: captureCommandId,
                     threadId: input.run.threadId,
                     request: {
                       type: "checkpoint.capture" as const,

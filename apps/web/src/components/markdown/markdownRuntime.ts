@@ -13,7 +13,12 @@ import {
   type UrlTransform,
 } from "@stream-mdx/core";
 import type { EngineExtensions } from "@stream-mdx/worker/engine";
-import type { AnimatedOptions, MathEngine, MermaidEngine, StreamingFeatureFlags } from "@stream-mdx/react";
+import type {
+  AnimatedOptions,
+  MathEngine,
+  MermaidEngine,
+  StreamingFeatureFlags,
+} from "@stream-mdx/react";
 import { defaultSchema } from "rehype-sanitize";
 import { useMemo } from "react";
 import { THREAD_LINK_PROTOCOL } from "@t3tools/shared/threadLinks";
@@ -141,6 +146,10 @@ class MarkdownSnapshotLru {
 export const kmMarkdownSnapshotCache = new MarkdownSnapshotLru();
 
 let snapshotCompiler: MarkdownSnapshotCompiler | undefined;
+// The compiler already serializes work internally, but rejects bursts beyond its
+// queue limit. Admit one snapshot at a time so mounted history waits rather than
+// permanently falling back to literal Markdown under load.
+let snapshotAdmission: Promise<void> = Promise.resolve();
 const pendingSnapshots = new Map<string, Promise<Block[]>>();
 
 function getSnapshotCompiler(): MarkdownSnapshotCompiler {
@@ -161,7 +170,12 @@ function getSnapshotCompiler(): MarkdownSnapshotCompiler {
 
 export const kmMarkdownSnapshotCompiler: MarkdownSnapshotCompiler = {
   compile(options) {
-    return getSnapshotCompiler().compile(options);
+    const compilation = snapshotAdmission.then(() => getSnapshotCompiler().compile(options));
+    snapshotAdmission = compilation.then(
+      () => undefined,
+      () => undefined,
+    );
+    return compilation;
   },
 };
 
@@ -201,7 +215,10 @@ export function kmMarkdownSnapshotCacheKey(text: string, config: KmMarkdownRende
   });
 }
 
-export function compileKmMarkdownSnapshot(text: string, config: KmMarkdownRenderConfig): Promise<Block[]> {
+export function compileKmMarkdownSnapshot(
+  text: string,
+  config: KmMarkdownRenderConfig,
+): Promise<Block[]> {
   const key = kmMarkdownSnapshotCacheKey(text, config);
   const cached = kmMarkdownSnapshotCache.get(key);
   if (cached !== undefined) return Promise.resolve(cached);
@@ -219,7 +236,9 @@ export function compileKmMarkdownSnapshot(text: string, config: KmMarkdownRender
   return compilation;
 }
 
-function createSyntaxDescriptor(skillNames: readonly string[]): SyntaxExtensionDescriptor | undefined {
+function createSyntaxDescriptor(
+  skillNames: readonly string[],
+): SyntaxExtensionDescriptor | undefined {
   const inline: NonNullable<SyntaxExtensionDescriptor["inline"]>[number][] = [];
   const skills = [...new Set(skillNames.filter((name) => name.length > 0))].sort();
   if (skills.length > 0) {
@@ -258,17 +277,13 @@ function markdownTheme(appearance: "light" | "dark"): CodeHighlightTheme {
   return syntaxThemeRegistration(stableThemeName(appearance, variant.id, source), variant);
 }
 
-export function useKmMarkdownRenderConfig(options: KmMarkdownRenderOptions): KmMarkdownRenderConfig {
+export function useKmMarkdownRenderConfig(
+  options: KmMarkdownRenderOptions,
+): KmMarkdownRenderConfig {
   const mermaidEngine = useThemedMermaidEngine();
   const { theme, appearanceMode, themeHalves, resolvedTheme } = useTheme();
-  const {
-    lineBreaks,
-    parseRawHtml,
-    streamWordFade,
-    isStreaming,
-    skillNames,
-    urlTransform,
-  } = options;
+  const { lineBreaks, parseRawHtml, streamWordFade, isStreaming, skillNames, urlTransform } =
+    options;
   const skillNamesKey = skillNames.join("\u0000");
   return useMemo(() => {
     const themes = {
@@ -315,12 +330,7 @@ export function useKmMarkdownRenderConfig(options: KmMarkdownRenderOptions): KmM
         "data-skill-name",
       ],
       a: [...(attributes.a ?? []), "data-pull-request-autolink"],
-      img: [
-        ...(attributes.img ?? []),
-        "data-local-src",
-        "data-markdown-title",
-        "data-standalone",
-      ],
+      img: [...(attributes.img ?? []), "data-local-src", "data-markdown-title", "data-standalone"],
     };
     const html: HtmlOptions = {
       mode: parseRawHtml ? "sanitize" : "literal",
@@ -344,9 +354,7 @@ export function useKmMarkdownRenderConfig(options: KmMarkdownRenderOptions): KmM
     const linkDestinations: LinkDestinationOptions = { windowsDrivePaths: "preserve" };
     const mathOptions: MathParseOptions = { singleDollar: "currency-safe" };
     const animated: AnimatedOptions | false =
-      streamWordFade && isStreaming
-        ? { scope: "last-block", className: "stream-word" }
-        : false;
+      streamWordFade && isStreaming ? { scope: "last-block", className: "stream-word" } : false;
     const syntax = createSyntaxDescriptor(skillNames);
     return {
       features,

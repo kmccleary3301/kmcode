@@ -54,10 +54,11 @@ it("accepts only the current orchestration protocol before websocket RPC setup",
   );
 });
 
-it("keeps full thread snapshot fallback unless the client opts into bounded history", () => {
+it("keeps full thread snapshot fallback unless the client opts into bounded history or summary mode", () => {
   assert.isFalse(shouldUseBoundedThreadSnapshot({}));
   assert.isFalse(shouldUseBoundedThreadSnapshot({ acceptBoundedSnapshot: false }));
   assert.isTrue(shouldUseBoundedThreadSnapshot({ acceptBoundedSnapshot: true }));
+  assert.isTrue(shouldUseBoundedThreadSnapshot({ activityMode: "summary-v1" }));
 });
 
 it.effect("does not block server config when editor discovery never resolves", () =>

@@ -12,6 +12,7 @@ import {
   executeAuthenticatedEnvironmentHttpRequest,
   withOrchestrationProtocolHeader,
 } from "./environmentHttpAuth.ts";
+import type { ThreadActivityState } from "./threadActivityMerge.ts";
 
 // Long enough for a slow but alive server to finish. On a cold open a timeout
 // makes the socket ask the same server for the same snapshot again, and older
@@ -41,6 +42,7 @@ export type ThreadSnapshotLoadResult =
       readonly _tag: "present";
       readonly snapshot: OrchestrationV2ThreadDetailSnapshot;
       readonly history?: ThreadSnapshotHistoryMeta;
+      readonly activity?: ThreadActivityState;
     }
   | { readonly _tag: "missing" }
   | { readonly _tag: "unavailable" };

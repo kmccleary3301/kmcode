@@ -67,10 +67,8 @@ const sendModeScenarios: ReadonlyArray<{
   readonly runStatus: "running" | "waiting" | "completed";
   readonly providerTurnStatus: "running" | "completed";
   readonly supportsActiveSteering: boolean;
-  readonly expectedDispatchMode:
-    | "steer_active"
-    | "queue_after_active"
-    | "start_immediately";
+  readonly expectedDispatchMode: "queue_after_active" | "start_immediately";
+  readonly expectedDeliveryIntent?: "auto";
 }> = [
   {
     mode: "auto",
@@ -78,7 +76,26 @@ const sendModeScenarios: ReadonlyArray<{
     runStatus: "running",
     providerTurnStatus: "running",
     supportsActiveSteering: true,
-    expectedDispatchMode: "steer_active",
+    expectedDispatchMode: "start_immediately",
+    expectedDeliveryIntent: "auto",
+  },
+  {
+    mode: "auto",
+    hasSenderThread: false,
+    runStatus: "running",
+    providerTurnStatus: "running",
+    supportsActiveSteering: true,
+    expectedDispatchMode: "start_immediately",
+    expectedDeliveryIntent: "auto",
+  },
+  {
+    mode: "steer",
+    hasSenderThread: true,
+    runStatus: "waiting",
+    providerTurnStatus: "completed",
+    supportsActiveSteering: true,
+    expectedDispatchMode: "start_immediately",
+    expectedDeliveryIntent: "auto",
   },
   {
     mode: "queue",
@@ -86,7 +103,7 @@ const sendModeScenarios: ReadonlyArray<{
     runStatus: "running",
     providerTurnStatus: "running",
     supportsActiveSteering: true,
-    expectedDispatchMode: "steer_active",
+    expectedDispatchMode: "queue_after_active",
   },
   {
     mode: "queue",
@@ -110,7 +127,8 @@ const sendModeScenarios: ReadonlyArray<{
     runStatus: "waiting",
     providerTurnStatus: "completed",
     supportsActiveSteering: true,
-    expectedDispatchMode: "queue_after_active",
+    expectedDispatchMode: "start_immediately",
+    expectedDeliveryIntent: "auto",
   },
   {
     mode: "auto",
@@ -118,7 +136,8 @@ const sendModeScenarios: ReadonlyArray<{
     runStatus: "running",
     providerTurnStatus: "running",
     supportsActiveSteering: false,
-    expectedDispatchMode: "queue_after_active",
+    expectedDispatchMode: "start_immediately",
+    expectedDeliveryIntent: "auto",
   },
 ];
 
@@ -198,9 +217,7 @@ it.effect.each(sendModeScenarios)(
             providerThreadId,
           },
         ],
-        providerTurns: [
-          { runAttemptId: attemptId, status: scenario.providerTurnStatus },
-        ],
+        providerTurns: [{ runAttemptId: attemptId, status: scenario.providerTurnStatus }],
         providerThreads: [providerThread],
         messages: [
           {
@@ -226,16 +243,28 @@ it.effect.each(sendModeScenarios)(
           },
         ],
       } as unknown as OrchestrationV2ThreadProjection;
-      const dispatchModes = yield* Ref.make<ReadonlyArray<string>>([]);
+      const dispatchRequests = yield* Ref.make<
+        ReadonlyArray<{
+          readonly mode: string;
+          readonly deliveryIntent?: "auto";
+        }>
+      >([]);
       const layerTest = ThreadManagementService.layer.pipe(
         Layer.provide(
           Layer.mergeAll(
             Layer.mock(Orchestrator.OrchestratorV2)({
               getThreadRecords: () => Effect.succeed(projection),
               dispatch: (command) =>
-                Ref.update(dispatchModes, (modes) => [
-                  ...modes,
-                  command.type === "message.dispatch" ? command.dispatchMode.type : "other",
+                Ref.update(dispatchRequests, (requests) => [
+                  ...requests,
+                  command.type === "message.dispatch"
+                    ? {
+                        mode: command.dispatchMode.type,
+                        ...(command.deliveryIntent === "auto"
+                          ? { deliveryIntent: "auto" as const }
+                          : {}),
+                      }
+                    : { mode: "other" },
                 ]).pipe(Effect.as({ sequence: 1, storedEvents: [] })),
             }),
             Layer.mock(LegacyV1ThreadImporter.LegacyV1ThreadImporter)({
@@ -267,7 +296,12 @@ it.effect.each(sendModeScenarios)(
         creationSource: scenario.hasSenderThread ? "mcp" : "web",
       });
 
-      expect((yield* Ref.get(dispatchModes))[0]).toBe(scenario.expectedDispatchMode);
+      expect((yield* Ref.get(dispatchRequests))[0]).toEqual({
+        mode: scenario.expectedDispatchMode,
+        ...(scenario.expectedDeliveryIntent === undefined
+          ? {}
+          : { deliveryIntent: scenario.expectedDeliveryIntent }),
+      });
     }),
 );
 

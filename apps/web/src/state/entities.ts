@@ -5,8 +5,10 @@ import type {
   EnvironmentThreadShell,
 } from "@t3tools/client-runtime/state/shell";
 import {
+  EMPTY_THREAD_ACTIVITY_STATE,
   EMPTY_THREAD_HISTORY_META,
   type EnvironmentThreadStatus,
+  type ThreadActivityState,
   type ThreadHistoryMeta,
 } from "@t3tools/client-runtime/state/threads";
 import type { ScopedProjectRef, ScopedThreadRef, ServerConfig } from "@t3tools/contracts";
@@ -48,6 +50,9 @@ const EMPTY_VISIBLE_TURN_ITEMS_ATOM = Atom.make(EMPTY_VISIBLE_TURN_ITEMS).pipe(
 );
 const EMPTY_THREAD_HISTORY_ATOM = Atom.make<ThreadHistoryMeta>(EMPTY_THREAD_HISTORY_META).pipe(
   Atom.withLabel("web-thread-history:empty"),
+);
+const EMPTY_THREAD_ACTIVITY_ATOM = Atom.make<ThreadActivityState>(EMPTY_THREAD_ACTIVITY_STATE).pipe(
+  Atom.withLabel("web-thread-activity:empty"),
 );
 
 const activeEnvironmentIdAtom = Atom.make<EnvironmentId | null>(null).pipe(
@@ -132,6 +137,12 @@ export function useThreadStatus(ref: ScopedThreadRef | null): EnvironmentThreadS
 export function useThreadHistory(ref: ScopedThreadRef | null): ThreadHistoryMeta {
   return useAtomValue(
     ref === null ? EMPTY_THREAD_HISTORY_ATOM : environmentThreadDetails.historyAtom(ref),
+  );
+}
+
+export function useThreadActivity(ref: ScopedThreadRef | null): ThreadActivityState {
+  return useAtomValue(
+    ref === null ? EMPTY_THREAD_ACTIVITY_ATOM : environmentThreadDetails.activityAtom(ref),
   );
 }
 

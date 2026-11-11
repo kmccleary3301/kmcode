@@ -687,7 +687,7 @@ const threadSendCommand = Command.make("send", {
         Effect.fn("cli.thread.send")(function* (tools) {
           const sent = yield* tools.call(
             "t3_thread_send",
-            { threadId, message, mode: "queue" },
+            { threadId, message, mode: "auto" },
             OrchestratorMcpThreadSendResult,
           );
           if (flags.wait) {

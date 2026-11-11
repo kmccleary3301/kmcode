@@ -4,6 +4,7 @@ import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Ref from "effect/Ref";
 
+import type { ThreadActivityPageRequest } from "./threadActivityMerge.ts";
 import { threadKey } from "./entities.ts";
 
 export type ThreadHistoryLoadEarlierResult =
@@ -12,8 +13,14 @@ export type ThreadHistoryLoadEarlierResult =
   | { readonly _tag: "busy" }
   | { readonly _tag: "error"; readonly message: string };
 
+/** Outcome of opening or paging a per-turn activity window. */
+export type ThreadActivityLoadResult = ThreadHistoryLoadEarlierResult;
+
 export type ThreadHistoryHandler = {
-  readonly loadEarlier: () => Effect.Effect<ThreadHistoryLoadEarlierResult>;
+  readonly loadEarlier: (throughEntryId?: string) => Effect.Effect<ThreadHistoryLoadEarlierResult>;
+  readonly loadActivityPage: (
+    request: ThreadActivityPageRequest,
+  ) => Effect.Effect<ThreadActivityLoadResult>;
 };
 
 /**
@@ -42,7 +49,13 @@ export class ThreadHistoryController extends Context.Service<
     readonly loadEarlier: (
       environmentId: EnvironmentId,
       threadId: ThreadId,
+      throughEntryId?: string,
     ) => Effect.Effect<ThreadHistoryLoadEarlierResult>;
+    readonly loadActivityPage: (
+      environmentId: EnvironmentId,
+      threadId: ThreadId,
+      request: ThreadActivityPageRequest,
+    ) => Effect.Effect<ThreadActivityLoadResult>;
   }
 >()("@t3tools/client-runtime/state/threadHistoryController") {}
 
@@ -78,14 +91,24 @@ export const layer: Layer.Layer<ThreadHistoryController> = Layer.effect(
           next.delete(key);
           return next;
         }),
-      loadEarlier: (environmentId, threadId) =>
+      loadEarlier: (environmentId, threadId, throughEntryId) =>
         Ref.get(handlers).pipe(
           Effect.flatMap((current) => {
             const handler = current.get(threadKey({ environmentId, threadId }));
             if (handler === undefined) {
               return Effect.succeed({ _tag: "noop" } satisfies ThreadHistoryLoadEarlierResult);
             }
-            return handler.loadEarlier();
+            return handler.loadEarlier(throughEntryId);
+          }),
+        ),
+      loadActivityPage: (environmentId, threadId, request) =>
+        Ref.get(handlers).pipe(
+          Effect.flatMap((current) => {
+            const handler = current.get(threadKey({ environmentId, threadId }));
+            if (handler === undefined) {
+              return Effect.succeed({ _tag: "noop" } satisfies ThreadActivityLoadResult);
+            }
+            return handler.loadActivityPage(request);
           }),
         ),
     });

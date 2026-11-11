@@ -131,6 +131,16 @@ export interface EventSinkV2Shape {
     readonly events: ReadonlyArray<OrchestrationV2DomainEvent>;
     readonly effects: ReadonlyArray<EffectOutbox.PendingOrchestrationEffectV2>;
     readonly updateDelegatedCompletionOnlyRunId?: RunId;
+    /**
+     * Commit only while the run still has this attempt and status, checked in
+     * the commit transaction. Otherwise the receipt is recorded as rejected and
+     * nothing is written, so a stale snapshot cannot overwrite a newer attempt.
+     */
+    readonly requireRun?: {
+      readonly runId: RunId;
+      readonly activeAttemptId: RunAttemptId | null;
+      readonly status: OrchestrationV2Run["status"];
+    };
     readonly cancelUnsettledEffects?: {
       readonly effectTypes: ReadonlyArray<EffectOutbox.OrchestrationEffectRequestV2["type"]>;
       readonly reason: string;
@@ -923,6 +933,36 @@ const layerBase: Layer.Layer<
           if (!reserved) {
             const existing = yield* existingCommandResult(input.commandId);
             return { ...existing, committed: false as const, cancelledEffectIds: [] };
+          }
+
+          const requiredRun = input.requireRun;
+          if (requiredRun !== undefined) {
+            const { runs } = yield* projectionStore.getThreadRecords(input.threadId, ["runs"], {
+              runIds: [requiredRun.runId],
+            });
+            const current = runs.find((run) => run.id === requiredRun.runId);
+            if (
+              current === undefined ||
+              current.status !== requiredRun.status ||
+              current.activeAttemptId !== requiredRun.activeAttemptId
+            ) {
+              const receipt: CommandReceiptStore.CommandReceiptV2 = {
+                commandId: input.commandId,
+                threadId: input.threadId,
+                commandType: input.commandType,
+                acceptedAt: input.acceptedAt,
+                resultSequence: yield* eventStore.latestSequence({ threadId: input.threadId }),
+                status: "rejected",
+                error: `Run ${requiredRun.runId} moved past the attempt this command was prepared for.`,
+              };
+              yield* commandReceipts.upsert(receipt);
+              return {
+                receipt,
+                storedEvents: [],
+                committed: false as const,
+                cancelledEffectIds: [],
+              };
+            }
           }
 
           const completionRunId = input.updateDelegatedCompletionOnlyRunId;

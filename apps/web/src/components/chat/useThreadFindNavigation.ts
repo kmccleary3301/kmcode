@@ -1,7 +1,24 @@
 import type { LegendListRef } from "@legendapp/list/react";
+import type { ThreadActivityPageRequest } from "@t3tools/client-runtime/state/threads";
 import { useCallback, useEffect, useLayoutEffect, useRef, type RefObject } from "react";
+import {
+  activityGroupForEntry,
+  activityGroupForTarget,
+  activityPageRequest,
+  type TimelineActivityEntry,
+} from "./activityTargetNavigation";
 import type { ThreadFindMatch } from "./threadFind";
 import { useThreadFindHighlights } from "./threadFindHighlights";
+import type { TimelineActivityGroup } from "./timelineActivity";
+interface FindTargetHydration {
+  key: string;
+  historyRequested: boolean;
+  historyEntries: ReadonlyArray<TimelineActivityEntry>;
+  historyLoadingObserved: boolean;
+  activityRequested: boolean;
+  expandedGroupKeys: Set<string>;
+}
+const EMPTY_ACTIVITY_GROUPS: ReadonlyArray<TimelineActivityGroup> = [];
 
 const FIND_MATCH_VIEW_MARGIN = 96;
 
@@ -17,13 +34,16 @@ export function useThreadFindNavigation({
   contentInsetEndAdjustment,
   listReady,
   historyControls,
+  activityGroups = EMPTY_ACTIVITY_GROUPS,
+  onLoadActivityPage,
+  onExpandActivityGroup,
 }: {
   container: HTMLElement | null;
   query: string;
   match: ThreadFindMatch | null;
   navigationId: number;
   rowIndex: number;
-  entries: readonly { readonly id: string }[];
+  entries: ReadonlyArray<TimelineActivityEntry>;
   listRef: RefObject<LegendListRef | null>;
   contentInsetEndAdjustment: number;
   listReady: boolean;
@@ -35,6 +55,9 @@ export function useThreadFindNavigation({
         readonly onLoadEarlier: (throughEntryId?: string) => void;
       }
     | undefined;
+  activityGroups?: ReadonlyArray<TimelineActivityGroup>;
+  onLoadActivityPage?: (request: ThreadActivityPageRequest) => void | Promise<unknown>;
+  onExpandActivityGroup?: (group: TimelineActivityGroup) => void;
 }) {
   const matchKey = match ? `${navigationId}:${query}:${match.entryId}:${match.occurrence}` : null;
   const positioningRef = useRef<{
@@ -43,6 +66,8 @@ export function useThreadFindNavigation({
     entries: typeof entries;
   } | null>(null);
   const settledMatchRef = useRef<string | null>(null);
+  const positionedEntriesRef = useRef<typeof entries | null>(null);
+  const revealedMatchRef = useRef<string | null>(null);
   const currentMatchKeyRef = useRef(matchKey);
   const activeRangeRef = useRef<Range | null>(null);
   const pagingPositionRef = useRef<{ key: string; entries: typeof entries; top: number } | null>(
@@ -79,30 +104,74 @@ export function useThreadFindNavigation({
       currentMatchKeyRef.current = null;
     };
   }, [matchKey]);
-  const revealedMatchRef = useRef<string | null>(null);
-  const positionedEntriesRef = useRef<typeof entries | null>(null);
-  const requestedPagesRef = useRef<{ key: string | null; pages: Set<string> }>({
-    key: null,
-    pages: new Set(),
-  });
+  const requestedTargetRef = useRef<FindTargetHydration | null>(null);
   useEffect(() => {
-    if (requestedPagesRef.current.key !== matchKey)
-      requestedPagesRef.current = { key: matchKey, pages: new Set() };
+    if (!match || !matchKey || !listReady) return;
+    let hydration = requestedTargetRef.current;
+    if (hydration?.key !== matchKey) {
+      hydration = {
+        key: matchKey,
+        historyRequested: false,
+        historyEntries: entries,
+        historyLoadingObserved: false,
+        activityRequested: false,
+        expandedGroupKeys: new Set(),
+      };
+      requestedTargetRef.current = hydration;
+    }
+    const targetEntry = entries.find((entry) => entry.id === match.entryId);
+    const targetGroup = targetEntry
+      ? activityGroupForEntry(targetEntry, activityGroups)
+      : activityGroupForTarget(match.entryId, activityGroups, match.runId);
+    if (targetEntry && targetGroup) {
+      if (rowIndex < 0) {
+        if (!hydration.activityRequested && onLoadActivityPage) {
+          hydration.activityRequested = true;
+          void onLoadActivityPage(activityPageRequest(match.entryId, targetEntry, targetGroup));
+        }
+        if (onExpandActivityGroup && !hydration.expandedGroupKeys.has(targetGroup.key)) {
+          hydration.expandedGroupKeys.add(targetGroup.key);
+          onExpandActivityGroup(targetGroup);
+        }
+      }
+      return;
+    }
+    if (targetEntry || rowIndex >= 0 || !historyControls) return;
+    if (historyControls.loading) {
+      if (hydration.historyRequested) hydration.historyLoadingObserved = true;
+      return;
+    }
+    if (!hydration.historyRequested) {
+      hydration.historyRequested = true;
+      hydration.historyEntries = entries;
+      historyControls.onLoadEarlier(match.entryId);
+      return;
+    }
+    const historySettled = hydration.historyLoadingObserved || hydration.historyEntries !== entries;
     if (
-      !match ||
-      !listReady ||
-      rowIndex >= 0 ||
-      entries.some((entry) => entry.id === match.entryId)
+      !historySettled ||
+      activityGroups.length === 0 ||
+      !onLoadActivityPage ||
+      hydration.activityRequested
     )
       return;
-    if (!historyControls?.hasMoreHistory || historyControls.loading || historyControls.error)
-      return;
-    const cursor = entries[0]?.id ?? "first";
-    if (requestedPagesRef.current.pages.has(cursor)) return;
-    requestedPagesRef.current.pages.add(cursor);
-
-    historyControls.onLoadEarlier(match.entryId);
-  }, [entries, historyControls, listReady, match, matchKey, rowIndex]);
+    hydration.activityRequested = true;
+    void onLoadActivityPage(activityPageRequest(match.entryId, undefined, targetGroup));
+    if (targetGroup && onExpandActivityGroup && !hydration.expandedGroupKeys.has(targetGroup.key)) {
+      hydration.expandedGroupKeys.add(targetGroup.key);
+      onExpandActivityGroup(targetGroup);
+    }
+  }, [
+    activityGroups,
+    entries,
+    historyControls,
+    listReady,
+    match,
+    matchKey,
+    onExpandActivityGroup,
+    onLoadActivityPage,
+    rowIndex,
+  ]);
   const reveal = useCallback(
     (range: Range | null) => {
       activeRangeRef.current = range;

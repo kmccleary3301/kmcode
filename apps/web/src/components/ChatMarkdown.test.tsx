@@ -136,8 +136,6 @@ async function waitForMarkdownSnapshot(renderer: ReactTestRenderer, expectedText
   });
 }
 
-
-
 function codeButton(renderer: ReactTestRenderer, label: string) {
   const button = renderer.root
     .findAllByType(Button)
@@ -298,9 +296,7 @@ describe("ChatMarkdown over-indented list recovery", () => {
       />,
     );
     const markdown = document.querySelector('[data-t3-part="markdown"]');
-    const itemText = [...(markdown?.querySelectorAll("li") ?? [])].map(
-      (item) => item.textContent,
-    );
+    const itemText = [...(markdown?.querySelectorAll("li") ?? [])].map((item) => item.textContent);
 
     expect(markdown?.querySelector("pre")).toBeNull();
     expect(itemText).toContain("for (const step of rest.steps) {");
@@ -357,9 +353,12 @@ describe("ChatMarkdown over-indented list recovery", () => {
 
   it("recursively recovers nested lists in a list item's tail", async () => {
     const document = await renderChatMarkdownDocument(
-      <ChatMarkdown cwd="/tmp/project" text={`-       first block
+      <ChatMarkdown
+        cwd="/tmp/project"
+        text={`-       first block
 
-        -       nested block`} />,
+        -       nested block`}
+      />,
     );
     const markdown = document.querySelector('[data-t3-part="markdown"]');
     const outerItem = markdown?.querySelector("li");
@@ -384,8 +383,11 @@ describe("ChatMarkdown over-indented list recovery", () => {
 
   it("preserves indented code that begins below the list marker", async () => {
     const document = await renderChatMarkdownDocument(
-      <ChatMarkdown cwd="/tmp/project" text={`-
-      const value = 1;`} />,
+      <ChatMarkdown
+        cwd="/tmp/project"
+        text={`-
+      const value = 1;`}
+      />,
     );
     const code = document.querySelector("li pre code");
 
@@ -401,7 +403,6 @@ describe("ChatMarkdown over-indented list recovery", () => {
     expect(code?.textContent).toBe("const value = 1;");
   });
 });
-
 
 describe("ChatMarkdown context references", () => {
   it("renders text and image references through the chip renderer, with readable fallback", async () => {
@@ -563,8 +564,11 @@ describe("ChatMarkdown Mermaid controls", () => {
             .findAllByType(Button)
             .some((button) => button.props["aria-label"] === "Copy diagram code"),
         ).toBe(false);
-        expect(renderer!.root.findByProps({ className: "chat-markdown-mermaid" }).props["data-markdown-copy"])
-          .toBe(source);
+        expect(
+          renderer!.root.findByProps({ className: "chat-markdown-mermaid" }).props[
+            "data-markdown-copy"
+          ],
+        ).toBe(source);
       });
 
       await act(async () => {
@@ -591,7 +595,6 @@ describe("ChatMarkdown Mermaid controls", () => {
     }
   });
 });
-
 
 describe("ChatMarkdown streaming", () => {
   it("matches the static render after appending chunks across Markdown split points", async () => {
@@ -650,14 +653,122 @@ describe("ChatMarkdown streaming", () => {
       });
       await act(async () => {
         await vi.waitFor(() => {
-          expect(
-            container.querySelector('[data-t3-part="markdown"]')?.textContent,
-          ).toBe(expectedText);
+          expect(container.querySelector('[data-t3-part="markdown"]')?.textContent).toBe(
+            expectedText,
+          );
         });
       });
     } finally {
       await act(async () => root.unmount());
       container.remove();
+    }
+  });
+
+  it("renders every file link and codespan when history mounts beyond the compiler queue limit", async () => {
+    const document = await renderChatMarkdownDocument(
+      <>
+        {Array.from({ length: 40 }, (_, index) => (
+          <section key={index} data-history-message={index}>
+            <ChatMarkdown
+              cwd="/tmp/project"
+              text={`History ${index}: [packet_${index}.md](/tmp/history/packet_${index}.md:12) and \`span_${index}\`.`}
+            />
+          </section>
+        ))}
+      </>,
+    );
+    for (let index = 0; index < 40; index += 1) {
+      const message = document.querySelector(`[data-history-message="${index}"]`);
+      expect(message?.querySelector("code")?.textContent).toBe(`span_${index}`);
+      expect(
+        message?.querySelector(".chat-markdown-file-link")?.getAttribute("data-markdown-copy"),
+      ).toContain(`/tmp/history/packet_${index}.md:12`);
+      expect(message?.textContent).not.toContain(`\`span_${index}\``);
+    }
+  });
+
+  it("re-parses completed long nested items after streamed chunk boundaries", async () => {
+    const path = "/tmp/agent-session-42/docs/a_b.md:18";
+    const item = `The **finished emphasis** and \`inline_code\` link to [a_b.md:18](${path}); escaped \\*\\*stars\\*\\* and \`**code text**\` stay literal. ${"completed context ".repeat(36)}`;
+    expect(item.length).toBeGreaterThan(512);
+    const text = `- Section\n  - ${item}\n  - Follow-up **sibling** and \`tail_code\`.`;
+    const assertSemantics = (root: ParentNode) => {
+      const markdown = root.querySelector('[data-t3-part="markdown"]');
+      expect(markdown).not.toBeNull();
+      expect(
+        Array.from(markdown?.querySelectorAll("strong") ?? [], (node) => node.textContent),
+      ).toEqual(["finished emphasis", "sibling"]);
+      expect(
+        Array.from(markdown?.querySelectorAll("code") ?? [], (node) => node.textContent),
+      ).toEqual(["inline_code", "**code text**", "tail_code"]);
+      expect(
+        markdown?.querySelector(".chat-markdown-file-link")?.getAttribute("data-markdown-copy"),
+      ).toContain(path);
+      expect(markdown?.textContent).toContain("completed context completed context");
+      expect(markdown?.textContent).toContain("**stars**");
+      expect(markdown?.textContent).not.toContain("**finished emphasis**");
+      expect(markdown?.textContent).not.toContain("`inline_code`");
+      expect(markdown?.textContent).not.toContain(`[a_b.md:18](${path})`);
+    };
+    const snapshot = await renderChatMarkdownDocument(
+      <ChatMarkdown cwd="/tmp/project" text={text} />,
+    );
+    assertSemantics(snapshot);
+
+    const itemStart = text.indexOf(item);
+    const strongOpen = text.indexOf("**", itemStart);
+    const strongClose = text.indexOf("**", strongOpen + 2);
+    const codeOpen = text.indexOf("`", itemStart);
+    const codeClose = text.indexOf("`", codeOpen + 1);
+    const linkStart = text.indexOf("[a_b.md:18]", itemStart);
+    const linkEnd = text.indexOf("](", linkStart);
+    const lineSelector = text.indexOf(":18", linkStart);
+    const delimiterSplitPoints = [
+      strongOpen + 1,
+      strongOpen + 2,
+      strongClose + 1,
+      strongClose + 2,
+      codeOpen,
+      codeOpen + 1,
+      codeClose,
+      codeClose + 1,
+      linkStart + 1,
+      linkEnd + 1,
+      linkEnd + 2,
+      text.indexOf("_", linkStart) + 1,
+      lineSelector + 2,
+      itemStart + 511,
+      itemStart + 512,
+      itemStart + 513,
+      text.length - 1,
+    ]
+      .filter((point) => point > 0 && point < text.length)
+      .filter((point, index, points) => points.indexOf(point) === index)
+      .sort((left, right) => left - right);
+    vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+
+    for (const chunkEnds of [[text.length], delimiterSplitPoints]) {
+      const container = document.createElement("div");
+      const root = createRoot(container);
+      try {
+        await act(async () => {
+          root.render(<ChatMarkdown cwd="/tmp/project" text="" isStreaming />);
+        });
+        for (const end of [...chunkEnds, text.length]) {
+          await act(async () => {
+            root.render(<ChatMarkdown cwd="/tmp/project" text={text.slice(0, end)} isStreaming />);
+          });
+        }
+        await act(async () => {
+          root.render(<ChatMarkdown cwd="/tmp/project" text={text} isStreaming={false} />);
+        });
+        await act(async () => {
+          await vi.waitFor(() => assertSemantics(container));
+        });
+      } finally {
+        await act(async () => root.unmount());
+        container.remove();
+      }
     }
   });
 
@@ -710,7 +821,13 @@ describe("ChatMarkdown streaming", () => {
         });
         await waitForMarkdownState(mounted, () => {
           const visibleText = textContent(mounted.root.findByProps({ "data-t3-part": "markdown" }));
-          expect(visibleText).toContain(text.includes("tilde") ? "echo tilde" : text.includes("quote") ? "echo quote" : "echo four");
+          expect(visibleText).toContain(
+            text.includes("tilde")
+              ? "echo tilde"
+              : text.includes("quote")
+                ? "echo quote"
+                : "echo four",
+          );
           expect(
             mounted.root
               .findAllByType(Button)
@@ -767,7 +884,6 @@ describe("ChatMarkdown streaming", () => {
     }
   });
 
-
   it("keeps code controls and wrapping available when streamed code changes", async () => {
     vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
     let renderer: ReactTestRenderer | undefined;
@@ -797,9 +913,7 @@ describe("ChatMarkdown streaming", () => {
 
       expect(textContent(updatedCodeBlock)).toContain("recovered");
       expect(updatedCodeBlock.props["data-wrap"]).toBe(String(!initialWrap));
-      expect(
-        codeButton(mounted, initialWrap ? "Wrap lines" : "Disable line wrap"),
-      ).toBeDefined();
+      expect(codeButton(mounted, initialWrap ? "Wrap lines" : "Disable line wrap")).toBeDefined();
     } finally {
       await act(async () => renderer?.unmount());
       vi.unstubAllGlobals();
@@ -848,9 +962,11 @@ describe("ChatMarkdown streaming", () => {
       await act(async () => {
         detailsButton.props.onClick({ nativeEvent: new Event("click") });
       });
-      expect(mounted.root.findByProps({ "data-markdown-details": "" }).props[
-        "data-markdown-details-open"
-      ]).toBe("true");
+      expect(
+        mounted.root.findByProps({ "data-markdown-details": "" }).props[
+          "data-markdown-details-open"
+        ],
+      ).toBe("true");
       expect(writeText).toHaveBeenCalledWith("First code block\n");
 
       for (let index = 0; index < 10; index += 1) {
@@ -1457,24 +1573,21 @@ describe("ChatMarkdown Windows file links", () => {
     },
   );
 
-  it.each([true, false])(
-    "preserves reference links with parseRawHtml=%s",
-    async (parseRawHtml) => {
-      const document = await renderChatMarkdownDocument(
-        <ChatMarkdown
-          cwd="C:/Users/shawn/project"
-          environmentId={environmentId}
-          text={"[Open][source]\n\n[source]: C:/Users/shawn/project/src/main.ts"}
-          lineBreaks={!parseRawHtml}
-          parseRawHtml={parseRawHtml}
-        />,
-      );
-      const link = document.querySelector('a[href="C:/Users/shawn/project/src/main.ts"]');
+  it.each([true, false])("preserves reference links with parseRawHtml=%s", async (parseRawHtml) => {
+    const document = await renderChatMarkdownDocument(
+      <ChatMarkdown
+        cwd="C:/Users/shawn/project"
+        environmentId={environmentId}
+        text={"[Open][source]\n\n[source]: C:/Users/shawn/project/src/main.ts"}
+        lineBreaks={!parseRawHtml}
+        parseRawHtml={parseRawHtml}
+      />,
+    );
+    const link = document.querySelector('a[href="C:/Users/shawn/project/src/main.ts"]');
 
-      expect(link).not.toBeNull();
-      expect(link?.closest(".chat-markdown-file-link")).not.toBeNull();
-    },
-  );
+    expect(link).not.toBeNull();
+    expect(link?.closest(".chat-markdown-file-link")).not.toBeNull();
+  });
 
   it.each([true, false])(
     "still rejects unsafe schemes with parseRawHtml=%s",

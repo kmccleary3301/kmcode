@@ -139,10 +139,14 @@ describe("ProviderContinuationService", () => {
           delegatedCompletion: { parentRunId, generation: 1, messageId: delegatedMessageId },
         });
         const command = (yield* Queue.take(dispatched)) as {
-          messageId: MessageId;
-          delegatedCompletion: { generation: number; taskIds: readonly string[] };
+          readonly dispatchMode: { readonly type: string };
+          readonly deliveryIntent: string;
+          readonly messageId: MessageId;
+          readonly delegatedCompletion: { generation: number; taskIds: readonly string[] };
         };
         assert.equal(command.messageId, delegatedMessageId);
+        assert.deepEqual(command.dispatchMode, { type: "start_immediately" });
+        assert.equal(command.deliveryIntent, "auto");
         assert.equal(command.delegatedCompletion.generation, 1);
         assert.equal(command.delegatedCompletion.taskIds.length, 2);
       }).pipe(
@@ -154,31 +158,39 @@ describe("ProviderContinuationService", () => {
     }),
   );
 
-  it.effect("marks an adapter-buffered wake with the provider creation source", () => {
-    return Effect.gen(function* () {
-      const dispatched = yield* Queue.unbounded<unknown>();
-      yield* Effect.gen(function* () {
-        const requests = yield* ProviderContinuationRequests.ProviderContinuationRequests;
-        yield* requests.offer(request());
-        const command = (yield* Queue.take(dispatched)) as {
-          readonly creationSource: string;
-          readonly notification: OrchestrationV2Notification;
-        };
-        // ClaudeAdapterV2 keys on this to attach buffered CLI output.
-        assert.equal(command.creationSource, "provider");
-        assert.deepEqual(command.notification, {
-          source: { kind: "background_task" },
-          outcome: "updated",
-          summary: "Background activity updated",
-        });
-      }).pipe(
-        Effect.provide(
-          layerTest({ dispatched, getThreadRecords: () => Effect.succeed(projection) }),
-        ),
-        Effect.scoped,
-      );
-    });
-  });
+  it.effect(
+    "preserves adapter-buffered wakes without scheduling a second automatic delivery",
+    () => {
+      return Effect.gen(function* () {
+        const dispatched = yield* Queue.unbounded<unknown>();
+        yield* Effect.gen(function* () {
+          const requests = yield* ProviderContinuationRequests.ProviderContinuationRequests;
+          yield* requests.offer(request());
+          const command = (yield* Queue.take(dispatched)) as {
+            readonly creationSource: string;
+            readonly dispatchMode: { readonly type: string };
+            readonly deliveryIntent?: string;
+            readonly notification: OrchestrationV2Notification;
+          };
+          // ClaudeAdapterV2 keys on this to attach buffered CLI output.
+          // Its native session already received the wake, so it must not be auto-steered.
+          assert.equal(command.creationSource, "provider");
+          assert.deepEqual(command.dispatchMode, { type: "queue_after_active" });
+          assert.equal(command.deliveryIntent, undefined);
+          assert.deepEqual(command.notification, {
+            source: { kind: "background_task" },
+            outcome: "updated",
+            summary: "Background activity updated",
+          });
+        }).pipe(
+          Effect.provide(
+            layerTest({ dispatched, getThreadRecords: () => Effect.succeed(projection) }),
+          ),
+          Effect.scoped,
+        );
+      });
+    },
+  );
 
   it.effect("delivers a message_text wake as a real prompt, not a buffered wake", () => {
     return Effect.gen(function* () {
@@ -200,6 +212,8 @@ describe("ProviderContinuationService", () => {
         const command = (yield* Queue.take(dispatched)) as {
           readonly creationSource: string;
           readonly text: string;
+          readonly dispatchMode: { readonly type: string };
+          readonly deliveryIntent: string;
           readonly notification: OrchestrationV2Notification;
         };
         // An app-owned child buffers nothing in the adapter, so this text is
@@ -208,6 +222,8 @@ describe("ProviderContinuationService", () => {
         assert.notEqual(command.creationSource, "provider");
         assert.equal(command.creationSource, "server");
         assert.equal(command.text, "Delegated task completed.");
+        assert.deepEqual(command.dispatchMode, { type: "start_immediately" });
+        assert.equal(command.deliveryIntent, "auto");
         assert.deepEqual(command.notification, {
           source: { kind: "monitor" },
           outcome: "updated",
@@ -222,7 +238,7 @@ describe("ProviderContinuationService", () => {
     });
   });
 
-  it.effect("dispatches a current delegated completion as one server-owned queued message", () => {
+  it.effect("dispatches a current delegated completion as an automatic durable message", () => {
     return Effect.gen(function* () {
       const dispatched = yield* Queue.unbounded<unknown>();
       yield* Effect.gen(function* () {
@@ -248,12 +264,14 @@ describe("ProviderContinuationService", () => {
             readonly taskIds: ReadonlyArray<string>;
           };
           readonly dispatchMode: { readonly type: string };
+          readonly deliveryIntent: string;
           readonly messageId: MessageId;
           readonly text: string;
         };
         assert.equal(command.createdBy, "agent");
         assert.equal(command.creationSource, "server");
-        assert.deepEqual(command.dispatchMode, { type: "queue_after_active" });
+        assert.deepEqual(command.dispatchMode, { type: "start_immediately" });
+        assert.equal(command.deliveryIntent, "auto");
         assert.equal(command.messageId, delegatedMessageId);
         assert.equal(command.delegatedCompletion.parentRunId, parentRunId);
         assert.equal(command.delegatedCompletion.generation, 1);
@@ -510,38 +528,43 @@ describe("ProviderContinuationService", () => {
     });
   });
 
-  it.effect("keeps a Grok delegated completion queued instead of restarting active work", () => {
-    return Effect.gen(function* () {
-      const dispatched = yield* Queue.unbounded<unknown>();
-      yield* Effect.gen(function* () {
-        const requests = yield* ProviderContinuationRequests.ProviderContinuationRequests;
-        yield* requests.offer({
-          threadId,
-          providerThreadId,
-          driver: ProviderDriverKind.make("grok"),
-          detail: null,
-          delivery: "message_text",
-          delegatedCompletion: {
-            parentRunId,
-            generation: 1,
-            messageId: delegatedMessageId,
-          },
-        });
-        const command = (yield* Queue.take(dispatched)) as {
-          readonly dispatchMode: { readonly type: string };
-        };
-        assert.deepEqual(command.dispatchMode, { type: "queue_after_active" });
-      }).pipe(
-        Effect.provide(
-          layerTest({
-            dispatched,
-            getThreadRecords: () => Effect.succeed(delegatedProjection()),
-          }),
-        ),
-        Effect.scoped,
-      );
-    });
-  });
+  it.effect(
+    "routes a Grok delegated completion through automatic admission without restarting",
+    () => {
+      return Effect.gen(function* () {
+        const dispatched = yield* Queue.unbounded<unknown>();
+        yield* Effect.gen(function* () {
+          const requests = yield* ProviderContinuationRequests.ProviderContinuationRequests;
+          yield* requests.offer({
+            threadId,
+            providerThreadId,
+            driver: ProviderDriverKind.make("grok"),
+            detail: null,
+            delivery: "message_text",
+            delegatedCompletion: {
+              parentRunId,
+              generation: 1,
+              messageId: delegatedMessageId,
+            },
+          });
+          const command = (yield* Queue.take(dispatched)) as {
+            readonly dispatchMode: { readonly type: string };
+            readonly deliveryIntent: string;
+          };
+          assert.deepEqual(command.dispatchMode, { type: "start_immediately" });
+          assert.equal(command.deliveryIntent, "auto");
+        }).pipe(
+          Effect.provide(
+            layerTest({
+              dispatched,
+              getThreadRecords: () => Effect.succeed(delegatedProjection()),
+            }),
+          ),
+          Effect.scoped,
+        );
+      });
+    },
+  );
 
   it.effect(
     "drops stopped and disposed delegated completions instead of reviving them after recovery",

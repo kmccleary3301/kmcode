@@ -26,6 +26,15 @@ Transcript prompt-width rules must target the outer user-message wrapper, not ev
 paint size text over neighboring Markdown. Verify chip bounds and prompt width in a real browser;
 jsdom does not lay out inline flex content.
 
+## Markdown rendering
+
+Streaming and completed messages use the same stream-mdx extensions. Compare finalized link targets,
+codespans, and emphasis across arbitrary stream boundaries, not only rendered text.
+[`markdownRuntime.ts`](../../apps/web/src/components/markdown/markdownRuntime.ts) serializes snapshot
+admission before the compiler's bounded queue. Historical messages may mount in bursts larger than
+that queue; they must wait for parsing rather than remain literal Markdown after a capacity error.
+Use a real worker/browser check for this path; jsdom exercises the main-thread engine.
+
 ## Composition
 
 The composer banners are the reference.

@@ -5,9 +5,9 @@ import * as DateTime from "effect/DateTime";
 import { v2Projection, v2ThreadId } from "./orchestrationV2TestFixtures.ts";
 import {
   applyHistoryPageMeta,
-  clearActiveHistoryLoading,
+  clearHistoryRequestLoading,
   isActiveHistoryRequestCursor,
-  mergeOlderHistoryIntoProjection,
+  mergeHistoryIntoProjection,
   shouldShowLoadEarlierControl,
 } from "./threadHistoryMerge.ts";
 import { applyOrchestrationV2ProjectionEvent } from "./orchestrationV2Projection.ts";
@@ -53,7 +53,7 @@ describe("threadHistoryMerge", () => {
       visibleTurnItems: recent.map((entry, position) => ({ ...entry, position })),
     };
     const older = [row(0), row(1), row(2)];
-    const merged = mergeOlderHistoryIntoProjection(projection, older);
+    const merged = mergeHistoryIntoProjection(projection, older);
     expect(merged.visibleTurnItems.map((entry) => entry.sourceItemId)).toEqual([
       "item-0",
       "item-1",
@@ -77,7 +77,7 @@ describe("threadHistoryMerge", () => {
       visibleTurnItems: live.map((entry, position) => ({ ...entry, position })),
     };
     const older = [row(3), row(4)];
-    const merged = mergeOlderHistoryIntoProjection(projection, older);
+    const merged = mergeHistoryIntoProjection(projection, older);
     expect(merged.visibleTurnItems.map((entry) => entry.sourceItemId)).toEqual([
       "item-3",
       "item-4",
@@ -87,19 +87,40 @@ describe("threadHistoryMerge", () => {
   });
 
   it("does not resurrect a local item hidden while an older page was in flight", () => {
+    const hiddenRunId = "run-rolled-back" as never;
     const stalePageRow = row(1);
     const currentItem = {
       ...stalePageRow.item,
+      runId: hiddenRunId,
       output: "newer live output",
       updatedAt: DateTime.makeUnsafe("2026-06-20T00:00:01.000Z"),
     };
     const projection = {
       ...v2Projection,
+      runs: [
+        {
+          id: hiddenRunId,
+          threadId: v2ThreadId,
+          ordinal: 1,
+          providerInstanceId: "codex" as never,
+          modelSelection: { instanceId: "codex" as never, model: "gpt-5" },
+          providerThreadId: null,
+          userMessageId: "message-1" as never,
+          rootNodeId: "node-1" as never,
+          activeAttemptId: null,
+          status: "rolled_back" as const,
+          requestedAt: NOW,
+          startedAt: NOW,
+          completedAt: NOW,
+          checkpointId: null,
+          contextHandoffId: null,
+        },
+      ],
       turnItems: [currentItem],
       visibleTurnItems: [],
     };
 
-    const merged = mergeOlderHistoryIntoProjection(projection, [stalePageRow]);
+    const merged = mergeHistoryIntoProjection(projection, [stalePageRow]);
 
     expect(merged).toBe(projection);
     expect(merged.turnItems).toEqual([currentItem]);
@@ -134,7 +155,7 @@ describe("threadHistoryMerge", () => {
     expect(isActiveHistoryRequestCursor("cursor-a", { historyCursor: null })).toBe(false);
   });
 
-  it("clears loading on interrupt only for the active request cursor", () => {
+  it("clears loading on interrupt only for the active request", () => {
     const loading = {
       historyCursor: "cursor-a",
       hasMoreHistory: true,
@@ -142,18 +163,22 @@ describe("threadHistoryMerge", () => {
       error: null,
       expanded: false,
       latestLocalTurnOrdinal: 10,
+      activeRequestId: 7,
     };
-    expect(clearActiveHistoryLoading("cursor-a", loading)).toEqual({
-      ...loading,
+    expect(clearHistoryRequestLoading(7, loading)).toEqual({
+      historyCursor: "cursor-a",
+      hasMoreHistory: true,
       loading: false,
+      error: null,
+      expanded: false,
+      latestLocalTurnOrdinal: 10,
     });
-    // Stale cursor must not mutate replacement progressive meta.
-    expect(
-      clearActiveHistoryLoading("cursor-a", { ...loading, historyCursor: "cursor-b" }),
-    ).toEqual({ ...loading, historyCursor: "cursor-b" });
-    // Already idle: identity-preserving no-op shape.
+    // A replacement request owns the state; the stale request id must not mutate it.
+    const replaced = { ...loading, activeRequestId: 8 };
+    expect(clearHistoryRequestLoading(7, replaced)).toBe(replaced);
+    // Already idle: the same object comes back.
     const idle = { ...loading, loading: false };
-    expect(clearActiveHistoryLoading("cursor-a", idle)).toBe(idle);
+    expect(clearHistoryRequestLoading(7, idle)).toBe(idle);
   });
 
   it("shows the load-earlier control when history remains or a local error is set", () => {
@@ -196,7 +221,7 @@ describe("threadHistoryMerge", () => {
       turnItems: recent.map((entry) => entry.item),
       visibleTurnItems: recent.map((entry, position) => ({ ...entry, position })),
     };
-    const merged = mergeOlderHistoryIntoProjection(projection, [row(0), row(1)]);
+    const merged = mergeHistoryIntoProjection(projection, [row(0), row(1)]);
     const liveItem = {
       ...row(3).item,
       output: "streamed",
@@ -307,7 +332,7 @@ describe("threadHistoryMerge", () => {
       visibleTurnItems: [{ ...recent, position: 0 }],
     };
 
-    const requestMerged = mergeOlderHistoryIntoProjection(coldOpen, [
+    const requestMerged = mergeHistoryIntoProjection(coldOpen, [
       {
         position: 0,
         visibility: "local",
@@ -321,7 +346,7 @@ describe("threadHistoryMerge", () => {
       "item-5",
     ]);
 
-    const rolledBackRequestMerged = mergeOlderHistoryIntoProjection(
+    const rolledBackRequestMerged = mergeHistoryIntoProjection(
       {
         ...coldOpen,
         runs: coldOpen.runs.map((run) => ({
@@ -344,7 +369,7 @@ describe("threadHistoryMerge", () => {
       rolledBackRequestMerged.visibleTurnItems.map((entry) => String(entry.sourceItemId)),
     ).toEqual(["item-5"]);
 
-    const merged = mergeOlderHistoryIntoProjection(coldOpen, [resultRow]);
+    const merged = mergeHistoryIntoProjection(coldOpen, [resultRow]);
     expect(merged.visibleTurnItems.map((entry) => String(entry.sourceItemId))).toEqual([
       "item-interrupt-result",
       "item-5",
@@ -412,5 +437,33 @@ describe("threadHistoryMerge", () => {
       { partialTimeline: true },
     );
     expect(hidden?.visibleTurnItems.map((entry) => String(entry.sourceItemId))).toEqual(["item-5"]);
+  });
+
+  it("places a direct-target row by canonical orderKey among its source's rows", () => {
+    const withKey = (
+      entry: OrchestrationV2ProjectedTurnItem,
+      ordinal: number,
+    ): OrchestrationV2ProjectedTurnItem => ({
+      ...entry,
+      orderKey: { sourceThreadId: v2ThreadId, ordinal, itemId: entry.sourceItemId },
+    });
+    const loaded = [withKey(row(2), 3), withKey(row(3), 4)];
+    const projection = {
+      ...v2Projection,
+      turnItems: loaded.map((entry) => entry.item),
+      visibleTurnItems: loaded.map((entry, position) => ({ ...entry, position })),
+    };
+    const merged = mergeHistoryIntoProjection(projection, [withKey(row(1), 2)]);
+    expect(merged.visibleTurnItems.map((entry) => entry.sourceItemId)).toEqual([
+      "item-1",
+      "item-2",
+      "item-3",
+    ]);
+    expect(merged.visibleTurnItems.map((entry) => entry.position)).toEqual([0, 1, 2]);
+    expect(merged.visibleTurnItems[0]?.orderKey).toEqual({
+      sourceThreadId: v2ThreadId,
+      ordinal: 2,
+      itemId: "item-1",
+    });
   });
 });

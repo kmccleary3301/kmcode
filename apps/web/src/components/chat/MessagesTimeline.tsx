@@ -67,6 +67,7 @@ import { formatAttachmentSize } from "@t3tools/client-runtime/state/attachments"
 
 const NOOP_USE_ARTIFACT_TEMPLATE = () => {};
 const NOOP_OPEN_ATTACHMENT = (_attachment: ChatFileAttachment) => {};
+const NOOP_LOAD_ACTIVITY_PAGE = (_request: ThreadActivityPageRequest) => {};
 
 import { resolveChatListAnchoredEndSpace } from "@t3tools/shared/chatList";
 import { toolActivityFaviconUrl } from "@t3tools/shared/favicon";
@@ -109,6 +110,8 @@ const NOOP_OPEN_NATIVE_TERMINAL = (
   _fallback: NonNullable<WorkLogEntry["nativeTerminalFallback"]>,
 ) => {};
 import type { CodexArtifactTemplate } from "@t3tools/client-runtime/codex-artifact-templates";
+import type { ThreadActivityPageRequest } from "@t3tools/client-runtime/state/threads";
+import type { TimelineActivityGroup } from "./timelineActivity";
 import {
   type ChatMessage,
   type ChatFileAttachment,
@@ -397,7 +400,8 @@ interface TimelineRowSharedState {
     readonly checkpointId: string;
     readonly scopeId: string;
   }) => void;
-  onToggleTurnFold: (runId: RunId) => void;
+  onToggleTurnFold: (runId: RunId | null, activityGroup?: TimelineActivityGroup) => void;
+  onLoadActivityPage: (request: ThreadActivityPageRequest) => void | Promise<unknown>;
   onToggleAttemptFold: (attemptId: RunAttemptId) => void;
   onFileOpen: (attachment: ChatFileAttachment) => void;
   onFileDownload: (attachment: ChatFileAttachment) => void;
@@ -517,6 +521,7 @@ const EMPTY_TIMELINE_RUN_TIMINGS_BY_ID: ReadonlyMap<RunId, TimelineRunTiming> = 
   TimelineRunTiming
 >();
 const EMPTY_RUN_IDS: ReadonlySet<RunId> = new Set();
+const EMPTY_ACTIVITY_GROUPS: ReadonlyArray<TimelineActivityGroup> = [];
 const EMPTY_PENDING_APPROVALS: ReadonlyArray<PendingApproval> = [];
 const EMPTY_RESPONDING_REQUEST_IDS: ReadonlyArray<RuntimeRequestId> = [];
 const EMPTY_SUBAGENT_SOURCES: ReadonlyMap<string, ReadonlyArray<TimelineLiveSubagent> | undefined> =
@@ -640,6 +645,9 @@ interface MessagesTimelineProps {
   hideEmptyPlaceholder?: boolean;
   topFadeEnabled?: boolean;
   historyControls?: MessagesTimelineHistoryControls;
+  /** Summary-backed activity groups; absent or empty keeps the legacy timeline. */
+  activityGroups?: ReadonlyArray<TimelineActivityGroup>;
+  onLoadActivityPage?: (request: ThreadActivityPageRequest) => void | Promise<unknown>;
   /** Non-null when older turns exist beyond the loaded window. */
   loadEarlier?: CitationHistoryPage | null;
   /** Renders in this style instead of the saved setting (the Appearance preview). */
@@ -717,6 +725,8 @@ export const MessagesTimeline = memo(function MessagesTimeline({
   hideEmptyPlaceholder = false,
   topFadeEnabled = false,
   historyControls,
+  activityGroups = EMPTY_ACTIVITY_GROUPS,
+  onLoadActivityPage = NOOP_LOAD_ACTIVITY_PAGE,
   loadEarlier = null,
   transcriptStyle: transcriptStyleOverride,
 }: MessagesTimelineProps) {
@@ -856,6 +866,9 @@ export const MessagesTimeline = memo(function MessagesTimeline({
   const [expandedRunIds, setExpandedRunIds] = useState<ReadonlySet<RunId>>(
     () => rememberedPosition?.disclosures?.runs ?? new Set(),
   );
+  const [expandedActivityGroupKeys, setExpandedActivityGroupKeys] = useState<ReadonlySet<string>>(
+    () => rememberedPosition?.disclosures?.activityGroups ?? new Set(),
+  );
   const [expandedWorkGroupIds, setExpandedWorkGroupIds] = useState<ReadonlySet<string>>(
     () => rememberedPosition?.disclosures?.workGroups ?? new Set(),
   );
@@ -871,9 +884,11 @@ export const MessagesTimeline = memo(function MessagesTimeline({
   // The list stays mounted across thread switches. Its first end pins on the
   // new thread must snap, not glide, even if that thread is mid-turn.
   const [settlingListIdentity, setSettlingListIdentity] = useState<string | null>(null);
+  const initialActivityPageRequestedRef = useRef(new Set<string>());
   let paintedExpandedRunIds = expandedRunIds;
   let paintedExpandedWorkGroupIds = expandedWorkGroupIds;
   let paintedExpandedAttemptIds = expandedAttemptIds;
+  let paintedExpandedActivityGroupKeys = expandedActivityGroupKeys;
   if (listIdentityRef.current !== listIdentityKey) {
     listIdentityRef.current = listIdentityKey;
     setPositionedThreadKey(null);
@@ -881,10 +896,13 @@ export const MessagesTimeline = memo(function MessagesTimeline({
     setSettlingListIdentity(listIdentityKey);
     paintedExpandedRunIds = rememberedPosition?.disclosures?.runs ?? new Set();
     paintedExpandedWorkGroupIds = rememberedPosition?.disclosures?.workGroups ?? new Set();
+    paintedExpandedActivityGroupKeys = rememberedPosition?.disclosures?.activityGroups ?? new Set();
+    initialActivityPageRequestedRef.current.clear();
     paintedExpandedAttemptIds = rememberedPosition?.disclosures?.attempts ?? new Set();
     setExpandedRunIds(paintedExpandedRunIds);
     setExpandedWorkGroupIds(paintedExpandedWorkGroupIds);
     setExpandedAttemptIds(paintedExpandedAttemptIds);
+    setExpandedActivityGroupKeys(paintedExpandedActivityGroupKeys);
   }
   const citationThreadRef = useMemo(() => parseScopedThreadKey(routeThreadKey), [routeThreadKey]);
   const openPullRequest = useOpenPrLink(citationThreadRef ?? undefined);
@@ -962,9 +980,48 @@ export const MessagesTimeline = memo(function MessagesTimeline({
     const disclosureAnchorKey = disclosureAnchorKeyRef.current;
     return disclosureAnchorKey === null || row.id === disclosureAnchorKey;
   }, []);
+  const onExpandActivityGroup = useCallback(
+    (group: TimelineActivityGroup) => {
+      suspendEndScrollMaintenanceForDisclosure(`turn-fold:${group.key}`);
+      setExpandedActivityGroupKeys((existing) =>
+        existing.has(group.key) ? existing : new Set([...existing, group.key]),
+      );
 
+      const latestPageIsLoaded = group.loadedLastOrdinal === group.summary.lastOrdinal;
+      if (latestPageIsLoaded || group.loading || group.error !== null) return;
+      const requestKey = JSON.stringify([listIdentityKey, group.key]);
+      if (initialActivityPageRequestedRef.current.has(requestKey)) return;
+      initialActivityPageRequestedRef.current.add(requestKey);
+      void onLoadActivityPage(group.initialRequest);
+    },
+    [listIdentityKey, onLoadActivityPage, suspendEndScrollMaintenanceForDisclosure],
+  );
   const onToggleTurnFold = useCallback(
-    (runId: RunId) => {
+    (runId: RunId | null, activityGroup?: TimelineActivityGroup) => {
+      if (activityGroup !== undefined) {
+        const isExpanded =
+          paintedExpandedActivityGroupKeys.has(activityGroup.key) ||
+          (runId !== null && paintedExpandedRunIds.has(runId));
+        if (!isExpanded) {
+          onExpandActivityGroup(activityGroup);
+          return;
+        }
+        suspendEndScrollMaintenanceForDisclosure(`turn-fold:${activityGroup.key}`, true);
+        setExpandedActivityGroupKeys((existing) => {
+          const next = new Set(existing);
+          next.delete(activityGroup.key);
+          return next;
+        });
+        if (runId !== null) {
+          setExpandedRunIds((existing) => {
+            const next = new Set(existing);
+            next.delete(runId);
+            return next;
+          });
+        }
+        return;
+      }
+      if (runId === null) return;
       suspendEndScrollMaintenanceForDisclosure(`turn-fold:${runId}`);
       setExpandedRunIds((existing) => {
         const next = new Set(existing);
@@ -978,8 +1035,15 @@ export const MessagesTimeline = memo(function MessagesTimeline({
         return next;
       });
     },
-    [suspendEndScrollMaintenanceForDisclosure, workGroupViewState.expandedEntries],
+    [
+      onExpandActivityGroup,
+      paintedExpandedActivityGroupKeys,
+      paintedExpandedRunIds,
+      suspendEndScrollMaintenanceForDisclosure,
+      workGroupViewState.expandedEntries,
+    ],
   );
+
   const onToggleWorkGroup = useCallback(
     (groupId: string, anchorKey: string, isCurrentlyExpanded: boolean) => {
       suspendEndScrollMaintenanceForDisclosure(anchorKey, isCurrentlyExpanded);
@@ -1089,7 +1153,9 @@ export const MessagesTimeline = memo(function MessagesTimeline({
         latestRun,
         runTimingsById,
         runningRunId,
-        expandedRunIds,
+        expandedRunIds: paintedExpandedRunIds,
+        expandedActivityGroupKeys: paintedExpandedActivityGroupKeys,
+        activityGroups,
         expandedAttemptIds,
         expandedWorkGroupIds,
         explicitActivityCache: workGroupViewState.expandedEntries,
@@ -1122,7 +1188,9 @@ export const MessagesTimeline = memo(function MessagesTimeline({
     latestRun,
     runTimingsById,
     runningRunId,
-    expandedRunIds,
+    paintedExpandedRunIds,
+    paintedExpandedActivityGroupKeys,
+    activityGroups,
     expandedAttemptIds,
     expandedWorkGroupIds,
     workGroupViewState.expandedEntries,
@@ -1444,6 +1512,9 @@ export const MessagesTimeline = memo(function MessagesTimeline({
     viewport: timelineViewportElement,
     historyLoading: citationHistoryLoading,
     loadEarlier,
+    activityGroups,
+    onLoadActivityPage,
+    onExpandActivityGroup,
     onExpandTurn: expandCitedRun,
     onManualNavigation,
   });
@@ -1593,6 +1664,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
           disclosures: {
             runs: paintedExpandedRunIds,
             workGroups: paintedExpandedWorkGroupIds,
+            activityGroups: paintedExpandedActivityGroupKeys,
             attempts: paintedExpandedAttemptIds,
             workGroupState: workGroupViewState,
           },
@@ -1645,6 +1717,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
     paintedExpandedRunIds,
     paintedExpandedWorkGroupIds,
     paintedExpandedAttemptIds,
+    paintedExpandedActivityGroupKeys,
     workGroupViewState,
     timelineData,
     listIdentityKey,
@@ -1725,6 +1798,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
       onForkFromRun,
       onRollbackCheckpoint,
       onToggleTurnFold,
+      onLoadActivityPage,
       onToggleAttemptFold,
       onToggleWorkGroup,
       onToggleWorkEntry: suspendEndScrollMaintenanceForDisclosure,
@@ -1768,6 +1842,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
       onForkFromRun,
       onRollbackCheckpoint,
       onToggleTurnFold,
+      onLoadActivityPage,
       onToggleAttemptFold,
       onToggleWorkGroup,
       suspendEndScrollMaintenanceForDisclosure,
@@ -1880,6 +1955,9 @@ export const MessagesTimeline = memo(function MessagesTimeline({
     contentInsetEndAdjustment,
     listReady: timelineScroller !== null && !restoringThreadPosition,
     historyControls,
+    activityGroups,
+    onLoadActivityPage,
+    onExpandActivityGroup,
   });
   const setTimelineList = useCallback(
     (list: LegendListRef | null) => {
@@ -2549,6 +2627,7 @@ const TimelineRowContent = memo(function TimelineRowContent({ row }: { row: Time
         </WorkLogBlock>
       ) : null}
       {row.kind === "turn-fold" ? <TurnFoldTimelineRow row={row} /> : null}
+      {row.kind === "activity-page-boundary" ? <ActivityPageBoundaryTimelineRow row={row} /> : null}
       {row.kind === "attempt-fold" ? <AttemptFoldTimelineRow row={row} /> : null}
       {row.kind === "context-compaction" ? <ContextCompactionTimelineRow row={row} /> : null}
       {row.kind === "message" && row.message.role === "user" ? <UserTimelineRow row={row} /> : null}
@@ -3477,29 +3556,93 @@ function DiffStatSummary({ text, diffStats }: { text: string; diffStats: DiffSta
 
 function TurnFoldTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "turn-fold" }> }) {
   const ctx = use(TimelineRowCtx);
+  const activityGroup = row.activityGroup;
 
   return (
     <div
-      className="group/timeline-row relative flex items-center gap-1 border-b border-border/60 pb-2 pe-0.5 pt-1"
+      className="group/timeline-row relative flex flex-col gap-1 border-b border-border/60 pb-2 pe-0.5 pt-1"
       data-t3-part="timeline-checkpoint"
     >
+      <div className="flex items-center gap-1">
+        <button
+          type="button"
+          aria-expanded={row.expanded}
+          data-scroll-anchor-ignore
+          onClick={() => ctx.onToggleTurnFold(row.runId, activityGroup)}
+          className="flex cursor-pointer select-none items-center gap-1 rounded-md px-1 text-sm leading-relaxed text-muted-foreground tabular-nums transition-colors hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring/70"
+        >
+          <span>
+            <DiffStatSummary text={row.label} diffStats={row.diffStats} />
+          </span>
+          <MorphIcon className="size-3.5" icon={row.expanded ? ChevronDown : ChevronRight} />
+        </button>
+        <TimelineRowTimestamp
+          createdAt={row.createdAt}
+          timestampFormat={ctx.timestampFormat}
+          className="ms-auto"
+        />
+      </div>
+      {activityGroup !== undefined && activityGroup.loadedCount === 0 && activityGroup.loading ? (
+        <p role="status" className="px-1 text-xs text-muted-foreground">
+          Loading activity…
+        </p>
+      ) : null}
+      {activityGroup === undefined ||
+      activityGroup.loadedCount !== 0 ||
+      activityGroup.error === null ? null : (
+        <p role="status" className="flex items-center gap-2 px-1 text-xs text-muted-foreground">
+          <span>{activityGroup.error}</span>
+          <button
+            type="button"
+            disabled={activityGroup.loading}
+            aria-label="Retry loading activity"
+            onClick={() => ctx.onLoadActivityPage(activityGroup.initialRequest)}
+            className="font-medium text-foreground underline underline-offset-2 disabled:cursor-default disabled:opacity-50"
+          >
+            Retry
+          </button>
+        </p>
+      )}
+    </div>
+  );
+}
+
+function ActivityPageBoundaryTimelineRow({
+  row,
+}: {
+  row: Extract<TimelineRow, { kind: "activity-page-boundary" }>;
+}) {
+  const ctx = use(TimelineRowCtx);
+  const label = row.direction === "previous" ? "Load earlier activity" : "Load later activity";
+
+  return (
+    <div className="flex flex-col gap-1 py-1">
       <button
         type="button"
-        aria-expanded={row.expanded}
-        data-scroll-anchor-ignore
-        onClick={() => ctx.onToggleTurnFold(row.runId)}
-        className="flex cursor-pointer select-none items-center gap-1 rounded-md px-1 text-sm leading-relaxed text-muted-foreground tabular-nums transition-colors hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring/70"
+        aria-label={label}
+        disabled={row.loading}
+        onClick={() => ctx.onLoadActivityPage(row.request)}
+        className="w-full py-1.5 text-xs text-muted-foreground/60 hover:text-foreground disabled:cursor-default"
       >
-        <span>
-          <DiffStatSummary text={row.label} diffStats={row.diffStats} />
-        </span>
-        <MorphIcon className="size-3.5" icon={row.expanded ? ChevronDown : ChevronRight} />
+        {row.loading ? "Loading activity…" : label}
       </button>
-      <TimelineRowTimestamp
-        createdAt={row.createdAt}
-        timestampFormat={ctx.timestampFormat}
-        className="ms-auto"
-      />
+      {row.error === null ? null : (
+        <p
+          role="status"
+          className="flex items-center justify-center gap-2 text-xs text-muted-foreground"
+        >
+          <span>{row.error}</span>
+          <button
+            type="button"
+            disabled={row.loading}
+            aria-label="Retry loading activity"
+            onClick={() => ctx.onLoadActivityPage(row.request)}
+            className="font-medium text-foreground underline underline-offset-2 disabled:cursor-default disabled:opacity-50"
+          >
+            Retry
+          </button>
+        </p>
+      )}
     </div>
   );
 }

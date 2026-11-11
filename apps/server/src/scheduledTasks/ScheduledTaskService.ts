@@ -834,8 +834,8 @@ export const layer = Layer.effect(
                   text: prompt,
                   attachments: [],
                   modelSelection: active.modelSelection,
-                  // Scheduled prompts must not interrupt tools in the bound thread.
-                  mode: "queue",
+                  // Bound schedules use the same provider-aware admission as other automatic offers.
+                  mode: "auto",
                   createdBy: active.createdBy,
                   creationSource: active.creationSource,
                 }),

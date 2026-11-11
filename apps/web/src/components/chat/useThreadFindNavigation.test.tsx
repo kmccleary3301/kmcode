@@ -1,10 +1,12 @@
 // @vitest-environment jsdom
 
 import type { LegendListRef } from "@legendapp/list/react";
+import { ThreadId, TurnItemId, type OrchestrationV2ProjectedTurnItem } from "@t3tools/contracts";
 import { act, type ComponentProps } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 import { useThreadFindNavigation } from "./useThreadFindNavigation";
+import type { TimelineActivityGroup } from "./timelineActivity";
 
 const renders = vi.fn();
 function Probe(props: Parameters<typeof useThreadFindNavigation>[0]) {
@@ -213,12 +215,12 @@ describe("find result navigation", () => {
     expect(scrollToOffset).toHaveBeenCalledExactlyOnceWith({ offset: 366, animated: false });
   });
 
-  it("loads history until a distant match can be revealed in the conversation", async () => {
+  it("loads the target directly only once while history changes", async () => {
     const onLoadEarlier = vi.fn();
     const historyControls = { hasMoreHistory: true, loading: false, error: null, onLoadEarlier };
     const pending = { ...props, rowIndex: -1, entries: [{ id: "recent" }], historyControls };
     await act(async () => root.render(<Probe {...pending} />));
-    expect(onLoadEarlier).toHaveBeenCalledTimes(1);
+    expect(onLoadEarlier).toHaveBeenCalledExactlyOnceWith("message");
     expect(scrollToIndex).not.toHaveBeenCalled();
     await act(async () =>
       root.render(<Probe {...pending} historyControls={{ ...historyControls, loading: true }} />),
@@ -227,14 +229,61 @@ describe("find result navigation", () => {
     await act(async () =>
       root.render(<Probe {...pending} entries={[{ id: "older" }, ...pending.entries]} />),
     );
-    expect(onLoadEarlier).toHaveBeenCalledTimes(2);
+    expect(onLoadEarlier).toHaveBeenCalledTimes(1);
     rect = new DOMRect(0, 1800, 40, 20);
     scrollToIndex.mockImplementationOnce(async () => {
       rect = new DOMRect(0, 200, 40, 20);
     });
     await act(async () => root.render(<Probe {...props} historyControls={historyControls} />));
-    expect(onLoadEarlier).toHaveBeenCalledTimes(2);
+    expect(onLoadEarlier).toHaveBeenCalledTimes(1);
     expect(scrollToIndex).toHaveBeenCalledTimes(1);
+  });
+
+  it("loads and expands a known activity target in its source thread", async () => {
+    const sourceThreadId = ThreadId.make("subagent-thread");
+    const sourceItemId = TurnItemId.make("activity-item");
+    const group = {
+      key: "subagent-thread:group-start",
+      summary: {
+        sourceThreadId,
+        groupStartItemId: TurnItemId.make("group-start"),
+        firstItemId: TurnItemId.make("first-item"),
+        firstOrdinal: 1,
+        lastItemId: TurnItemId.make("last-item"),
+        lastOrdinal: 9,
+        runId: null,
+      },
+    } as TimelineActivityGroup;
+    const entry = {
+      id: "activity-item",
+      projectedItem: {
+        sourceThreadId,
+        sourceItemId,
+        item: { ordinal: 5 },
+      } as OrchestrationV2ProjectedTurnItem,
+    };
+    const onLoadActivityPage = vi.fn();
+    const onExpandActivityGroup = vi.fn();
+
+    await act(async () =>
+      root.render(
+        <Probe
+          {...props}
+          match={{ entryId: "activity-item", runId: null, occurrence: 0 }}
+          rowIndex={-1}
+          entries={[entry]}
+          activityGroups={[group]}
+          onLoadActivityPage={onLoadActivityPage}
+          onExpandActivityGroup={onExpandActivityGroup}
+        />,
+      ),
+    );
+
+    expect(onLoadActivityPage).toHaveBeenCalledExactlyOnceWith({
+      anchorItemId: sourceItemId,
+      sourceThreadId,
+    });
+    expect(onExpandActivityGroup).toHaveBeenCalledExactlyOnceWith(group);
   });
 
   it("waits for list bootstrap before positioning the first result", async () => {

@@ -36,6 +36,9 @@ import {
   OrchestrationV2ShellSnapshot,
   OrchestrationV2SubscribeThreadInput,
   OrchestrationV2Subagent,
+  OrchestrationV2ThreadBoundedSnapshot,
+  OrchestrationV2ThreadActivityPage,
+  OrchestrationV2ThreadActivitySummary,
   OrchestrationV2ThreadHistoryPage,
   OrchestrationV2ThreadProjection,
   OrchestrationV2ThreadStreamItem,
@@ -78,9 +81,7 @@ const decodeOrchestrationV2ThreadProjection = Schema.decodeUnknownSync(
 const decodeOrchestrationV2ThreadStreamItem = Schema.decodeUnknownSync(
   OrchestrationV2ThreadStreamItem,
 );
-const decodeOrchestrationV2ThreadLiveItem = Schema.decodeUnknownSync(
-  OrchestrationV2ThreadLiveItem,
-);
+const decodeOrchestrationV2ThreadLiveItem = Schema.decodeUnknownSync(OrchestrationV2ThreadLiveItem);
 const decodeOrchestrationV2ProviderThreadJson = Schema.decodeUnknownSync(
   OrchestrationV2ProviderThreadJson,
 );
@@ -316,8 +317,12 @@ describe("orchestration V2 contracts", () => {
       decodeOrchestrationV2SubscribeThreadInput({
         threadId: "thread-1",
         acceptBoundedSnapshot: true,
-      }).acceptBoundedSnapshot,
-    ).toBe(true);
+        activityMode: "summary-v1",
+      }),
+    ).toMatchObject({
+      acceptBoundedSnapshot: true,
+      activityMode: "summary-v1",
+    });
     expect(
       decodeOrchestrationV2SubscribeThreadInput({ threadId: "thread-1" }).acceptBoundedSnapshot,
     ).toBeUndefined();
@@ -326,9 +331,96 @@ describe("orchestration V2 contracts", () => {
       threadId: "thread-1",
       afterSequence: 12,
       acceptBoundedSnapshot: true,
+      activityMode: "summary-v1",
     });
     expect(legacyDecoded.afterSequence).toBe(12);
     expect("acceptBoundedSnapshot" in legacyDecoded).toBe(false);
+    expect("activityMode" in legacyDecoded).toBe(false);
+  });
+  it("decodes semantic activity summaries and indexed activity rows", () => {
+    const encodedNow = DateTime.formatIso(now);
+    const summary = {
+      sourceThreadId: "thread-1",
+      groupStartItemId: "turn-item-1",
+      turnStartItemId: "turn-item-1",
+      runId: null,
+      firstItemId: "turn-item-1",
+      firstOrdinal: 1,
+      lastItemId: "turn-item-2",
+      lastOrdinal: 2,
+      activityCount: 2,
+      countsByType: [{ type: "command_execution", count: 1 }],
+      statusCounts: [{ status: "completed", count: 2 }],
+      runStatus: null,
+      stepCount: 1,
+      filesEditedCount: 0,
+      diffStats: { added: 0, removed: 0 },
+      hasFailure: false,
+      labelPreview: "Build",
+      intentPreview: null,
+      startedAt: encodedNow,
+      endedAt: encodedNow,
+    };
+    const decodeSummary = Schema.decodeUnknownSync(
+      Schema.toCodecJson(OrchestrationV2ThreadActivitySummary),
+    );
+    expect(decodeSummary(summary)).toMatchObject({
+      sourceThreadId: "thread-1",
+      groupStartItemId: "turn-item-1",
+      runId: null,
+      activityCount: 2,
+      diffStats: { added: 0, removed: 0 },
+    });
+
+    const decodePage = Schema.decodeUnknownSync(
+      Schema.toCodecJson(OrchestrationV2ThreadActivityPage),
+    );
+    const page = decodePage({
+      snapshotSequence: 9,
+      sourceThreadId: "thread-1",
+      groupStartItemId: "turn-item-1",
+      summary,
+      items: [
+        {
+          sourceThreadId: "thread-1",
+          sourceItemId: "turn-item-1",
+          visibility: "local",
+          ordinal: 1,
+          item: {
+            id: "turn-item-1",
+            type: "system_notice",
+            threadId: "thread-1",
+            runId: null,
+            nodeId: null,
+            providerThreadId: null,
+            providerTurnId: null,
+            nativeItemRef: null,
+            parentItemId: null,
+            ordinal: 1,
+            status: "completed",
+            title: null,
+            startedAt: null,
+            completedAt: null,
+            updatedAt: encodedNow,
+            message: "Build completed",
+          },
+          orderKey: {
+            sourceThreadId: "thread-1",
+            ordinal: 1,
+            itemId: "turn-item-1",
+          },
+        },
+      ],
+      previousCursor: null,
+      nextCursor: null,
+      hasPrevious: false,
+      hasNext: false,
+    });
+    expect(page.items[0]).toMatchObject({
+      sourceThreadId: "thread-1",
+      sourceItemId: "turn-item-1",
+      orderKey: { ordinal: 1, itemId: "turn-item-1" },
+    });
   });
 
   it("keeps thread live items on their separate stream contract", () => {
@@ -904,7 +996,6 @@ describe("orchestration V2 contracts", () => {
     );
   });
 
-
   it("decodes app-owned subagent parent-wake policies", () => {
     const appOwnedSubagent = {
       id: "node-subagent-2",
@@ -957,9 +1048,7 @@ describe("orchestration V2 contracts", () => {
       },
     });
     expect(followupMetadata.modelSelection?.model).toBe("gpt-5.4");
-    expect(followupMetadata.workflow?.runHandles?.scriptPath).toBe(
-      "/workspace/.t3/workflow.ts",
-    );
+    expect(followupMetadata.workflow?.runHandles?.scriptPath).toBe("/workspace/.t3/workflow.ts");
   });
 
   it("decodes thread projections with an ordered turn item rendering stream", () => {
@@ -1065,6 +1154,8 @@ describe("orchestration V2 contracts", () => {
       hasMoreHistory: true,
       latestLocalTurnOrdinal: 1,
       payloadBudgetExceeded: false,
+      activityMode: "summary-v1",
+      activitySummaries: [],
     });
     expect(boundedSnapshot).toMatchObject({
       kind: "snapshot",
@@ -1072,7 +1163,29 @@ describe("orchestration V2 contracts", () => {
       hasMoreHistory: true,
       latestLocalTurnOrdinal: 1,
       payloadBudgetExceeded: false,
+      activityMode: "summary-v1",
+      activitySummaries: [],
     });
+    const decodeBoundedSnapshot = Schema.decodeUnknownSync(OrchestrationV2ThreadBoundedSnapshot);
+    const boundedHttpBase = {
+      snapshotSequence: 12,
+      projection,
+      historyCursor: "older-page",
+      hasMoreHistory: true,
+      latestLocalTurnOrdinal: 1,
+      payloadBudgetExceeded: false,
+    };
+    expect(
+      decodeBoundedSnapshot({
+        ...boundedHttpBase,
+        activityMode: "summary-v1",
+        activitySummaries: [],
+      }),
+    ).toMatchObject({
+      activityMode: "summary-v1",
+      activitySummaries: [],
+    });
+    expect(decodeBoundedSnapshot(boundedHttpBase)).not.toHaveProperty("activityMode");
   });
 
   it("decodes orchestration lifecycle turn items for compaction, handoff, and fork UI", () => {

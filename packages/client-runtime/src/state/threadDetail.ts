@@ -11,6 +11,7 @@ import { deriveThreadTurnSubagents, type ThreadTurnSubagents } from "./threadSub
 import { presentRunStop, type RunStopPresentation } from "./threadExecution.ts";
 import type { EnvironmentThread } from "./models.ts";
 import { EMPTY_ENVIRONMENT_THREAD_STATE, type EnvironmentThreadState } from "./threadState.ts";
+import type { ThreadActivityState } from "./threadActivityMerge.ts";
 import {
   createQuestionHistoryProjector,
   derivePendingThreadRequests,
@@ -211,6 +212,13 @@ export function createEnvironmentThreadDetailAtoms<E>(
     ),
   );
 
+  const activityAtomFamily = Atom.family((key: string) =>
+    Atom.make((get): ThreadActivityState => get(threadStateValueAtomFamily(key)).activity).pipe(
+      Atom.setIdleTTL(0),
+      Atom.withLabel(`environment-thread-activity:${key}`),
+    ),
+  );
+
   return {
     worktreePathAtom: (ref: ScopedThreadRef) => worktreePathAtomFamily(threadKey(ref)),
     pendingRequestsAtom: (ref: ScopedThreadRef) => pendingRequestsAtomFamily(threadKey(ref)),
@@ -224,5 +232,6 @@ export function createEnvironmentThreadDetailAtoms<E>(
     statusAtom: (ref: ScopedThreadRef) => statusAtomFamily(threadKey(ref)),
     errorAtom: (ref: ScopedThreadRef) => errorAtomFamily(threadKey(ref)),
     historyAtom: (ref: ScopedThreadRef) => historyAtomFamily(threadKey(ref)),
+    activityAtom: (ref: ScopedThreadRef) => activityAtomFamily(threadKey(ref)),
   };
 }

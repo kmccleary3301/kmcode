@@ -733,49 +733,30 @@ const make = Effect.gen(function* () {
       }
 
       const steerableRun = latestSteerableRun(target);
-      const canSteerActiveRun = yield* Effect.gen(function* () {
-        const maySteer =
-          input.mode === "auto" ||
-          (input.mode === "queue" && input.senderThreadId !== undefined);
-        // The dispatch policy requires a matching running provider turn, and Pi requires its
-        // matching turn to remain active. Pi's idle-race behavior only applies after selection.
-        if (!maySteer || steerableRun === undefined) return false;
-        const providerThread = target.providerThreads.find(
-          (candidate) => candidate.id === steerableRun.providerThreadId,
-        );
-        if (providerThread?.providerSessionId == null) return false;
-        const session = yield* sessions
-          .get(providerThread.providerSessionId)
-          .pipe(Effect.orElseSucceed(() => Option.none()));
-        return (
-          Option.isSome(session) &&
-          session.value.providerSession.capabilities.turns.supportsActiveSteering
-        );
-      });
       let dispatchMode: Extract<
         OrchestrationV2Command,
         { readonly type: "message.dispatch" }
       >["dispatchMode"];
-      if (input.mode === "steer" || input.mode === "restart") {
+      let deliveryIntent: "auto" | "restart" | undefined;
+      if (input.mode === "restart") {
         if (steerableRun === undefined) {
           return yield* new ThreadManagementNoSteerableRunError({
             threadId: input.threadId,
             mode: input.mode,
           });
         }
-        dispatchMode = {
-          type: input.mode === "steer" ? "steer_active" : "restart_active",
-          targetRunId: steerableRun.id,
-        };
-      } else if (canSteerActiveRun && steerableRun !== undefined) {
-        dispatchMode = { type: "steer_active", targetRunId: steerableRun.id };
+        dispatchMode = { type: "restart_active", targetRunId: steerableRun.id };
+        deliveryIntent = "restart";
+      } else if (input.mode === "queue") {
+        // Only the explicit Queue selection stays after the active run.
+        dispatchMode =
+          latestActiveRun(target) === undefined
+            ? { type: "start_immediately" }
+            : { type: "queue_after_active" };
       } else {
-        const shouldQueueAfterActive =
-          latestActiveRun(target) !== undefined ||
-          (input.mode === "queue" && input.senderThreadId === undefined);
-        dispatchMode = {
-          type: shouldQueueAfterActive ? "queue_after_active" : "start_immediately",
-        };
+        // Auto, Steer, and every server default use the same serialized admission path.
+        dispatchMode = { type: "start_immediately" };
+        deliveryIntent = "auto";
       }
 
       const dispatch = yield* orchestrator.dispatch({
@@ -789,6 +770,7 @@ const make = Effect.gen(function* () {
         attachments: input.attachments,
         ...(input.modelSelection === undefined ? {} : { modelSelection: input.modelSelection }),
         dispatchMode,
+        ...(deliveryIntent === undefined ? {} : { deliveryIntent }),
         createdBy: input.createdBy,
         creationSource: input.creationSource,
       });

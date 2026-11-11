@@ -14,6 +14,7 @@ import {
   withOrchestrationProtocolHeader,
 } from "./environmentHttpAuth.ts";
 import * as ThreadSnapshotLoader from "./threadSnapshotHttp.ts";
+import { threadActivityStateFromSnapshot } from "./threadActivityMerge.ts";
 
 // Same cold-open budget as the full snapshot path; bounded payloads should fit.
 const DEFAULT_BOUNDED_THREAD_SNAPSHOT_TIMEOUT_MS = 6_000;
@@ -40,6 +41,7 @@ export const fetchEnvironmentBoundedThreadSnapshot = Effect.fn(
     request: ({ client, headers }) =>
       client.threadBoundedSnapshot({
         params: { threadId: input.threadId },
+        query: { activityMode: "summary-v1" },
         headers: withOrchestrationProtocolHeader(headers),
       }),
   });
@@ -119,6 +121,14 @@ export const layer: Layer.Layer<
               hasMoreHistory: bounded.hasMoreHistory,
               latestLocalTurnOrdinal: bounded.latestLocalTurnOrdinal,
             },
+            ...(bounded.activityMode === "summary-v1" && bounded.activitySummaries !== undefined
+              ? {
+                  activity: threadActivityStateFromSnapshot({
+                    snapshotSequence: bounded.snapshotSequence,
+                    activitySummaries: bounded.activitySummaries,
+                  }),
+                }
+              : {}),
           })),
           Effect.provideService(HttpClient.HttpClient, httpClient),
           Effect.catchTags({

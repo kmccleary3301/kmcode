@@ -38,6 +38,113 @@ export type ThreadHistoryCursorPayload = {
   readonly si: string;
   readonly p: number;
 };
+export const THREAD_ACTIVITY_PAGE_LIMIT = 75;
+export const THREAD_ACTIVITY_CURSOR_MAX_LENGTH = 4_096;
+
+export type ThreadActivityCursorPayload = {
+  readonly v: 1;
+  readonly threadId: string;
+  readonly sourceThreadId: string;
+  readonly groupStartItemId: string;
+  readonly ordinal: number;
+  readonly sourceItemId: string;
+  readonly direction: "previous" | "next";
+};
+
+export class InvalidThreadActivityCursorError extends Error {
+  readonly _tag = "InvalidThreadActivityCursorError";
+
+  constructor() {
+    super("Invalid thread activity cursor.");
+    this.name = "InvalidThreadActivityCursorError";
+  }
+}
+
+export class ThreadHistoryEntryNotFoundError extends Error {
+  readonly _tag = "ThreadHistoryEntryNotFoundError";
+
+  readonly entryId: string;
+
+  constructor(entryId: string) {
+    super(`Thread history entry ${entryId} was not found.`);
+    this.entryId = entryId;
+    this.name = "ThreadHistoryEntryNotFoundError";
+  }
+}
+
+export function encodeThreadActivityCursor(payload: ThreadActivityCursorPayload): string {
+  const cursor = encodeCursorPayload(payload);
+  if (cursor.length > THREAD_ACTIVITY_CURSOR_MAX_LENGTH) {
+    throw new InvalidThreadActivityCursorError();
+  }
+  return cursor;
+}
+
+export function decodeThreadActivityCursor(cursor: string): ThreadActivityCursorPayload {
+  if (cursor.length === 0 || cursor.length > THREAD_ACTIVITY_CURSOR_MAX_LENGTH) {
+    throw new InvalidThreadActivityCursorError();
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(Buffer.from(cursor, "base64url").toString("utf8")) as unknown;
+  } catch {
+    throw new InvalidThreadActivityCursorError();
+  }
+  if (
+    typeof parsed !== "object" ||
+    parsed === null ||
+    !("v" in parsed) ||
+    parsed.v !== 1 ||
+    !("threadId" in parsed) ||
+    typeof parsed.threadId !== "string" ||
+    parsed.threadId.length === 0 ||
+    !("sourceThreadId" in parsed) ||
+    typeof parsed.sourceThreadId !== "string" ||
+    parsed.sourceThreadId.length === 0 ||
+    !("groupStartItemId" in parsed) ||
+    typeof parsed.groupStartItemId !== "string" ||
+    parsed.groupStartItemId.length === 0 ||
+    !("ordinal" in parsed) ||
+    typeof parsed.ordinal !== "number" ||
+    !Number.isSafeInteger(parsed.ordinal) ||
+    parsed.ordinal < 0 ||
+    !("sourceItemId" in parsed) ||
+    typeof parsed.sourceItemId !== "string" ||
+    parsed.sourceItemId.length === 0 ||
+    !("direction" in parsed) ||
+    (parsed.direction !== "previous" && parsed.direction !== "next")
+  ) {
+    throw new InvalidThreadActivityCursorError();
+  }
+  return parsed as ThreadActivityCursorPayload;
+}
+
+export function selectHistoryPageThroughEntry<Row extends HistoryRow>(input: {
+  readonly items: ReadonlyArray<Row>;
+  readonly throughEntryId: string;
+  readonly snapshotSequence: number;
+  readonly policy?: ThreadHistoryPagePolicy | undefined;
+  readonly rowEncodedBytes?: ((row: Row) => number) | undefined;
+}): SelectTimelinePageResult<Row> {
+  const targetIndex = input.items.findIndex(
+    (row) =>
+      String(row.item.messageId ?? "") === input.throughEntryId ||
+      String(row.item.id ?? "") === input.throughEntryId,
+  );
+  if (targetIndex < 0) {
+    throw new ThreadHistoryEntryNotFoundError(input.throughEntryId);
+  }
+  return selectOlderTimelinePage({
+    items: input.items,
+    exclusiveEndIndex: targetIndex + 1,
+    snapshotSequence: input.snapshotSequence,
+    policy: input.policy ?? {
+      ...THREAD_HISTORY_PAGE_POLICY,
+      maxUserTurns: OLDER_THREAD_USER_TURN_LIMIT,
+    },
+    ...(input.rowEncodedBytes === undefined ? {} : { rowEncodedBytes: input.rowEncodedBytes }),
+  });
+}
 
 type HistoryRow = Pick<
   OrchestrationV2ProjectedTurnItem,
@@ -101,7 +208,9 @@ function renumberPositions<Row extends HistoryRow>(items: ReadonlyArray<Row>): R
   return items.map((row, position) => (row.position === position ? row : { ...row, position }));
 }
 
-function encodeCursorPayload(payload: ThreadHistoryCursorPayload): string {
+function encodeCursorPayload(
+  payload: ThreadHistoryCursorPayload | ThreadActivityCursorPayload,
+): string {
   return Buffer.from(JSON.stringify(payload), "utf8").toString("base64url");
 }
 
@@ -279,12 +388,24 @@ function findCursorIndex(
 
 export function selectHistoryPageFromCursor<Row extends HistoryRow>(input: {
   readonly items: ReadonlyArray<Row>;
-  readonly cursor: string;
+  readonly cursor?: string | undefined;
   readonly snapshotSequence: number;
   readonly policy?: ThreadHistoryPagePolicy | undefined;
   readonly rowEncodedBytes?: ((row: Row) => number) | undefined;
   readonly throughEntryId?: string | undefined;
 }): SelectTimelinePageResult<Row> {
+  if (input.cursor === undefined) {
+    if (input.throughEntryId === undefined) {
+      throw new InvalidThreadHistoryCursorError();
+    }
+    return selectHistoryPageThroughEntry({
+      items: input.items,
+      throughEntryId: input.throughEntryId,
+      snapshotSequence: input.snapshotSequence,
+      ...(input.policy === undefined ? {} : { policy: input.policy }),
+      ...(input.rowEncodedBytes === undefined ? {} : { rowEncodedBytes: input.rowEncodedBytes }),
+    });
+  }
   const decoded = decodeThreadHistoryCursor(input.cursor);
   const anchorIndex = findCursorIndex(input.items, decoded);
   let policy = input.policy ?? {

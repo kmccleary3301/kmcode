@@ -51,11 +51,10 @@ function delegatedCompletionRetryKey(
 }
 
 /**
- * Drains ProviderContinuationRequests and dispatches an internal
- * message.dispatch per request so the wake turn buffered by the adapter is
- * ingested as a normal run. Delegated completions are durable mailbox offers:
- * the orchestrator selects native steering or queued delivery under its thread
- * lock. Adapter-buffered continuations still queue behind active work.
+ * Drains provider continuation requests into durable message.dispatch offers.
+ * Adapter-buffered wakes keep the provider-owned no-prompt after-active path;
+ * new message_text and delegated-completion inputs use central auto admission.
+ * Delegated completions remain generation-checked mailbox offers.
  */
 export const layer = Layer.effectDiscard(
   Effect.gen(function* () {
@@ -133,7 +132,8 @@ export const layer = Layer.effectDiscard(
             messageId: delivery.messageId,
             text: delegatedCompletionText(delivery.taskIds),
             attachments: [],
-            dispatchMode: { type: "queue_after_active" },
+            dispatchMode: { type: "start_immediately" },
+            deliveryIntent: "auto",
             createdBy: "agent",
             creationSource: "server",
             delegatedCompletion: {
@@ -158,13 +158,19 @@ export const layer = Layer.effectDiscard(
           threadId: request.threadId,
           messageId,
           text: request.detail ?? CONTINUATION_MESSAGE_TEXT,
+          attachments: [],
           notification: request.notification ?? {
             source: { kind: "background_task" },
             outcome: "updated",
             summary: "Background activity updated",
           },
-          attachments: [],
-          dispatchMode: { type: "queue_after_active" },
+          // An adapter-buffered wake was already delivered to the native session.
+          // Keep it on the no-prompt after-active path instead of auto-steering it twice.
+          dispatchMode:
+            request.delivery === "message_text"
+              ? { type: "start_immediately" }
+              : { type: "queue_after_active" },
+          ...(request.delivery === "message_text" ? { deliveryIntent: "auto" as const } : {}),
           createdBy: "agent",
           // "provider" marks an adapter-buffered wake, which ClaudeAdapterV2
           // detects to attach the buffered CLI output and drop this text. A

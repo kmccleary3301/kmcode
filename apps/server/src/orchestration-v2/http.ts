@@ -27,10 +27,12 @@ import {
   InvalidThreadHistoryCursorError,
   selectHistoryPageFromCursor,
   type SelectTimelinePageResult,
+  type ThreadHistoryCursorPayload,
   THREAD_HISTORY_SNAPSHOT_ROW_LIMIT,
   THREAD_HISTORY_PAGE_POLICY,
   OLDER_THREAD_USER_TURN_LIMIT,
 } from "./threadHistoryPaging.ts";
+import * as ProjectionStore from "./ProjectionStore.ts";
 import * as ThreadManagementService from "./ThreadManagementService.ts";
 import * as ProjectStore from "./ProjectStore.ts";
 import { buildActiveShellSnapshot } from "./ShellStream.ts";
@@ -75,6 +77,7 @@ export const layer = HttpApiBuilder.group(
     const sql = yield* SqlClient.SqlClient;
     const threadManagement = yield* ThreadManagementService.ThreadManagementService;
     const applicationEvents = yield* OrchestrationEventStore.OrchestrationEventStore;
+    const projectionStore = yield* ProjectionStore.ProjectionStoreV2;
     const projectStore = yield* ProjectStore.ProjectStoreV2;
     const projectEnrichment = yield* ProjectEnrichmentService.ProjectEnrichmentService;
 
@@ -138,22 +141,35 @@ export const layer = HttpApiBuilder.group(
     const loadThreadSnapshotWindow = Effect.fn("http.orchestration.loadThreadSnapshotWindow")(
       function* (
         threadId: Parameters<typeof threadManagement.getThreadSnapshot>[0],
-        anchorItemId?: Parameters<
-          typeof threadManagement.getThreadSnapshotWindow
-        >[1]["anchorItemId"],
-        anchorThreadId?: Parameters<
-          typeof threadManagement.getThreadSnapshotWindow
-        >[1]["anchorThreadId"],
+        options?: {
+          readonly anchorItemId?: Parameters<
+            typeof threadManagement.getThreadSnapshotWindow
+          >[1]["anchorItemId"];
+          readonly anchorThreadId?: Parameters<
+            typeof threadManagement.getThreadSnapshotWindow
+          >[1]["anchorThreadId"];
+          readonly rowLimit?: number;
+          readonly activityMode?: "summary-v1";
+          readonly compactTimeline?: boolean;
+          readonly throughEntryId?: string;
+        },
       ) {
+        const anchorItemId = options?.anchorItemId;
+        const throughEntryId = options?.throughEntryId;
         return yield* threadManagement
           .getThreadSnapshotWindow(threadId, {
-            rowLimit: THREAD_HISTORY_SNAPSHOT_ROW_LIMIT,
+            rowLimit: options?.rowLimit ?? THREAD_HISTORY_SNAPSHOT_ROW_LIMIT,
             userTurnLimit:
-              anchorItemId === undefined
+              anchorItemId === undefined && throughEntryId === undefined
                 ? THREAD_HISTORY_PAGE_POLICY.maxUserTurns
                 : OLDER_THREAD_USER_TURN_LIMIT,
             ...(anchorItemId === undefined ? {} : { anchorItemId }),
-            ...(anchorThreadId === undefined ? {} : { anchorThreadId }),
+            ...(options?.anchorThreadId === undefined
+              ? {}
+              : { anchorThreadId: options.anchorThreadId }),
+            ...(options?.activityMode === undefined ? {} : { activityMode: options.activityMode }),
+            ...(options?.compactTimeline === true ? { compactTimeline: true } : {}),
+            ...(throughEntryId === undefined ? {} : { throughEntryId }),
           })
           .pipe(
             Effect.map((snapshot) => ({
@@ -206,13 +222,25 @@ export const layer = HttpApiBuilder.group(
         Effect.fn("environment.orchestration.threadBoundedSnapshot")(function* (args) {
           yield* annotateEnvironmentRequest(args.endpoint.name);
           yield* requireEnvironmentScope(AuthOrchestrationReadScope);
-          const snapshot = yield* loadThreadSnapshotWindow(args.params.threadId).pipe(
-            traceLocalHandlerWork,
-          );
+          const snapshot = yield* loadThreadSnapshotWindow(
+            args.params.threadId,
+            args.query.activityMode === "summary-v1"
+              ? { activityMode: args.query.activityMode }
+              : undefined,
+          ).pipe(traceLocalHandlerWork);
           const bounded = buildBoundedThreadProjection({
             projection: snapshot.projection,
             snapshotSequence: snapshot.snapshotSequence,
           });
+          const compact =
+            args.query.activityMode === "summary-v1" &&
+            snapshot.activityMode === "summary-v1" &&
+            snapshot.activitySummaries !== undefined
+              ? {
+                  activityMode: "summary-v1" as const,
+                  activitySummaries: snapshot.activitySummaries,
+                }
+              : {};
           return {
             snapshotSequence: snapshot.snapshotSequence,
             projection: bounded.projection,
@@ -220,7 +248,47 @@ export const layer = HttpApiBuilder.group(
             hasMoreHistory: bounded.hasMoreHistory,
             latestLocalTurnOrdinal: bounded.latestLocalTurnOrdinal,
             payloadBudgetExceeded: bounded.payloadBudgetExceeded,
+            ...compact,
           };
+        }),
+      )
+      .handle(
+        "threadActivityPage",
+        Effect.fn("environment.orchestration.threadActivityPage")(function* (args) {
+          yield* annotateEnvironmentRequest(args.endpoint.name);
+          yield* requireEnvironmentScope(AuthOrchestrationReadScope);
+          const threadId = args.params.threadId;
+          return yield* threadManagement.ensureLegacyTranscript(threadId).pipe(
+            Effect.andThen(
+              projectionStore.getThreadActivityPage({
+                threadId,
+                ...args.query,
+              }),
+            ),
+            traceLocalHandlerWork,
+            Effect.catch(
+              Effect.fnUntraced(function* (error) {
+                if (Predicate.hasProperty(error, "_tag")) {
+                  if (error._tag === "ProjectionStoreInvalidActivityCursorError") {
+                    return yield* failEnvironmentInvalidRequest("invalid_thread_activity_cursor");
+                  }
+                  if (error._tag === "ProjectionStoreInvalidActivityRequestError") {
+                    return yield* failEnvironmentInvalidRequest("invalid_thread_activity_request");
+                  }
+                  if (
+                    error._tag === "ProjectionStoreActivityNotFoundError" ||
+                    error._tag === "ProjectionStoreThreadNotFoundError"
+                  ) {
+                    return yield* failEnvironmentNotFound("thread_not_found");
+                  }
+                }
+                return yield* failEnvironmentInternal(
+                  "orchestration_thread_activity_page_failed",
+                  error,
+                );
+              }),
+            ),
+          );
         }),
       )
       .handle(
@@ -228,24 +296,54 @@ export const layer = HttpApiBuilder.group(
         Effect.fn("environment.orchestration.threadHistoryPage")(function* (args) {
           yield* annotateEnvironmentRequest(args.endpoint.name);
           yield* requireEnvironmentScope(AuthOrchestrationReadScope);
-          let anchorItemId;
+          const cursor = args.query.cursor;
+          let decodedCursor: ThreadHistoryCursorPayload | undefined;
           try {
-            anchorItemId = TurnItemId.make(decodeThreadHistoryCursor(args.query.cursor).si);
+            if (cursor !== undefined) {
+              decodedCursor = decodeThreadHistoryCursor(cursor);
+            }
           } catch (cause) {
             if (cause instanceof InvalidThreadHistoryCursorError) {
               return yield* failEnvironmentInvalidRequest("invalid_history_cursor");
             }
             return yield* failEnvironmentInternal("orchestration_thread_history_failed", cause);
           }
-          const decodedCursor = decodeThreadHistoryCursor(args.query.cursor);
-          const snapshot = yield* loadThreadSnapshotWindow(
-            args.params.threadId,
-            anchorItemId,
-            ThreadId.make(decodedCursor.st),
-          ).pipe(traceLocalHandlerWork);
+
+          if (args.query.throughEntryId !== undefined) {
+            const snapshot = yield* loadThreadSnapshotWindow(args.params.threadId, {
+              throughEntryId: args.query.throughEntryId,
+              rowLimit: THREAD_HISTORY_PAGE_POLICY.maxItems,
+              compactTimeline: true,
+            }).pipe(traceLocalHandlerWork);
+            const bounded = buildBoundedThreadProjection({
+              projection: snapshot.projection,
+              snapshotSequence: snapshot.snapshotSequence,
+            });
+            return {
+              snapshotSequence: snapshot.snapshotSequence,
+              items: bounded.projection.visibleTurnItems.map((row) => ({
+                ...row,
+                orderKey: {
+                  sourceThreadId: row.sourceThreadId,
+                  ordinal: row.item.ordinal,
+                  itemId: row.sourceItemId,
+                },
+              })),
+              nextCursor: bounded.historyCursor,
+              hasMoreHistory: bounded.hasMoreHistory,
+            };
+          }
+          if (cursor === undefined || decodedCursor === undefined) {
+            return yield* failEnvironmentInvalidRequest("invalid_history_cursor");
+          }
+
+          const snapshot = yield* loadThreadSnapshotWindow(args.params.threadId, {
+            anchorItemId: TurnItemId.make(decodedCursor.si),
+            anchorThreadId: ThreadId.make(decodedCursor.st),
+          }).pipe(traceLocalHandlerWork);
           const pageOrError = selectHistoryPageFromCursorOrError({
             items: snapshot.projection.visibleTurnItems,
-            cursor: args.query.cursor,
+            cursor,
             snapshotSequence: snapshot.snapshotSequence,
           });
           if (pageOrError._tag === "invalid_cursor") {
@@ -259,7 +357,14 @@ export const layer = HttpApiBuilder.group(
           }
           return {
             snapshotSequence: snapshot.snapshotSequence,
-            items: pageOrError.page.items,
+            items: pageOrError.page.items.map((row) => ({
+              ...row,
+              orderKey: {
+                sourceThreadId: row.sourceThreadId,
+                ordinal: row.item.ordinal,
+                itemId: row.sourceItemId,
+              },
+            })),
             nextCursor: pageOrError.page.nextCursor,
             hasMoreHistory: pageOrError.page.hasMoreHistory,
           };

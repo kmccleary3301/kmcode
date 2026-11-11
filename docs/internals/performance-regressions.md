@@ -20,6 +20,13 @@ The v2 checks pin these invariants:
 - Clients with confirmed history paging opt into socket snapshot fallbacks that use the same
   bounded recent-history window and carry the cursor needed to fetch older history. Older clients
   and WebSocket-only starts retain the compatible full-snapshot fallback.
+- Long single turns use `activityMode: "summary-v1"`: snapshots carry per-turn activity
+  summaries plus at most the snapshot row limit and the turn's boundary anchors, and activity
+  rows load lazily from `/activity` pages (75 rows per cursor page). Direct history jumps are
+  bounded the same way. For a 10,000-tool turn,
+  `apps/server/integration/transferBudgetV2.integration.test.ts` measured about 8.6 KB encoded
+  and 102 KB decoded with a 29 ms cold open, against 842 KB encoded, 12.7 MB decoded, and 403 ms
+  in legacy mode. Clients that do not opt in keep the legacy snapshot.
 - Snapshot queries bound timeline reads per fork ancestor, not total rows: dependency and
   control records still accompany the window. Smaller socket frames alone do not establish a
   whole-server memory reduction.

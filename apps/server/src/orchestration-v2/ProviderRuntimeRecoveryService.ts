@@ -1,3 +1,4 @@
+import { OMP_ASYNC_JOB_TASK_ID_PREFIX } from "@t3tools/shared/orchestrationV2PendingBackgroundWork";
 import { runRanAfter } from "@t3tools/shared/orchestrationV2ThreadError";
 import { resolveProjectSettings } from "@t3tools/shared/projectSettings";
 import {
@@ -22,6 +23,7 @@ import * as EffectOutbox from "./EffectOutbox.ts";
 import * as EventSink from "./EventSink.ts";
 import * as IdAllocator from "./IdAllocator.ts";
 import * as ProjectionStore from "./ProjectionStore.ts";
+import * as RunExecutionService from "./RunExecutionService.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import { restartContinuationRun } from "./RestartContinuation.ts";
 import {
@@ -100,14 +102,6 @@ function isNonterminalNodeStatus(status: string): boolean {
   return status === "pending" || status === "running" || status === "waiting";
 }
 
-type ProviderNativeSubagentTurnItem = Extract<
-  OrchestrationV2ThreadProjection["turnItems"][number],
-  { readonly type: "subagent" }
->;
-type DynamicToolTurnItem = Extract<
-  OrchestrationV2ThreadProjection["turnItems"][number],
-  { readonly type: "dynamic_tool" }
->;
 type RecoveredSubagentStatus = Extract<
   OrchestrationV2Subagent["status"],
   "completed" | "failed" | "interrupted"
@@ -135,6 +129,28 @@ function isTerminalTurnItemStatus(status: string): boolean {
     status === "cancelled"
   );
 }
+
+type TerminalTurnItemStatus = Extract<
+  OrchestrationV2Subagent["status"],
+  "completed" | "failed" | "cancelled" | "interrupted"
+>;
+
+function terminalTurnItemStatus(status: string): TerminalTurnItemStatus | null {
+  return status === "completed" ||
+    status === "failed" ||
+    status === "cancelled" ||
+    status === "interrupted"
+    ? status
+    : null;
+}
+type ProviderNativeSubagentTurnItem = Extract<
+  OrchestrationV2ThreadProjection["turnItems"][number],
+  { readonly type: "subagent" }
+>;
+type DynamicToolTurnItem = Extract<
+  OrchestrationV2ThreadProjection["turnItems"][number],
+  { readonly type: "dynamic_tool" }
+>;
 
 function unknownRecordField(value: unknown, key: string): unknown {
   return typeof value === "object" && value !== null ? Reflect.get(value, key) : undefined;
@@ -168,41 +184,6 @@ function parentReportsActiveTask(
   });
 }
 
-function hasLaterRunningSubagentEvidence(
-  item: ProviderNativeSubagentTurnItem,
-  parentItem: DynamicToolTurnItem,
-  subagent: OrchestrationV2Subagent,
-  projection: ProjectionStore.ProjectionRuntimeRecoveryState,
-): boolean {
-  const parentUpdatedAt = DateTime.toEpochMillis(parentItem.updatedAt);
-  if (
-    DateTime.toEpochMillis(item.updatedAt) > parentUpdatedAt ||
-    DateTime.toEpochMillis(subagent.updatedAt) > parentUpdatedAt
-  ) {
-    return true;
-  }
-  const providerThread = projection.providerThreads.find(
-    (candidate) => candidate.id === subagent.providerThreadId,
-  );
-  if (
-    providerThread === undefined ||
-    DateTime.toEpochMillis(providerThread.updatedAt) <= parentUpdatedAt
-  ) {
-    return false;
-  }
-  const subagentId = String(subagent.id);
-  const nativeAgentId = subagent.nativeAgentId;
-  const nativeTaskId = subagent.nativeTaskRef?.nativeId;
-  return (
-    providerThread.pendingBackgroundTasks?.some(
-      (task) =>
-        task.taskId === subagentId ||
-        (nativeAgentId !== undefined && task.taskId === nativeAgentId) ||
-        (nativeTaskId !== undefined && task.taskId === nativeTaskId),
-    ) === true
-  );
-}
-
 function settleableProviderNativeSubagent(
   item: OrchestrationV2ThreadProjection["turnItems"][number],
   projection: ProjectionStore.ProjectionRuntimeRecoveryState,
@@ -218,7 +199,12 @@ function settleableProviderNativeSubagent(
     return null;
   }
   const run = projection.runs.find((candidate) => candidate.id === item.runId);
-  if (run === undefined || !isEndedRunStatus(run.status)) return null;
+  if (
+    run === undefined ||
+    !isEndedRunStatus(run.status) ||
+    !isProcessBoundProviderRuntimeItem(item, projection)
+  )
+    return null;
   const parentItem = projection.turnItems.find((candidate) => candidate.id === item.parentItemId);
   if (
     parentItem?.type !== "dynamic_tool" ||
@@ -236,23 +222,17 @@ function settleableProviderNativeSubagent(
   ) {
     return null;
   }
-  const asyncState = unknownRecordField(unknownRecordField(parentItem.details, "async"), "state");
-
-  const hasRecordedAsyncState = typeof asyncState === "string" && asyncState.length > 0;
-  if (asyncState === "running") return null;
-  if (
-    !hasRecordedAsyncState &&
-    hasLaterRunningSubagentEvidence(item, parentItem, subagent, projection)
-  ) {
-    return null;
-  }
-  if (parentReportsActiveTask(item, parentItem, subagent)) return null;
   let status: RecoveredSubagentStatus;
   if (
     run.status === "interrupted" ||
     run.status === "cancelled" ||
     parentItem.status === "interrupted" ||
     parentItem.status === "cancelled"
+  ) {
+    status = "interrupted";
+  } else if (
+    parentItem.status === "completed" &&
+    parentClaimsChildWasAsync(item, parentItem, subagent)
   ) {
     status = "interrupted";
   } else if (parentItem.status === "completed") {
@@ -285,11 +265,162 @@ function isAppOwnedDelegationItem(
 ): boolean {
   return item.type === "subagent" && isAppOwnedDelegation(item);
 }
-
-function providerThreadHasPendingBackgroundTasks(
+function isProcessBoundProviderThread(
   providerThread: OrchestrationV2ThreadProjection["providerThreads"][number],
+  projection: ProjectionStore.ProjectionRuntimeRecoveryState,
 ): boolean {
-  return (providerThread.pendingBackgroundTasks?.length ?? 0) > 0;
+  const providerSessionId = providerThread.providerSessionId;
+  return (
+    providerSessionId !== null &&
+    providerSessionId !== undefined &&
+    projection.providerSessions.some(
+      (candidate) =>
+        candidate.id === providerSessionId &&
+        candidate.providerInstanceId === providerThread.providerInstanceId &&
+        candidate.driver === providerThread.driver,
+    )
+  );
+}
+
+function processBoundProviderThread(
+  run: OrchestrationV2ThreadProjection["runs"][number],
+  projection: ProjectionStore.ProjectionRuntimeRecoveryState,
+) {
+  if (run.providerThreadId === null) return undefined;
+  const providerThread = projection.providerThreads.find(
+    (candidate) => candidate.id === run.providerThreadId,
+  );
+  if (
+    providerThread === undefined ||
+    providerThread.providerInstanceId !== run.providerInstanceId ||
+    !isProcessBoundProviderThread(providerThread, projection)
+  ) {
+    return undefined;
+  }
+  return providerThread;
+}
+
+function isProcessBoundProviderRuntimeItem(
+  item: OrchestrationV2ThreadProjection["turnItems"][number],
+  projection: ProjectionStore.ProjectionRuntimeRecoveryState,
+): boolean {
+  const itemProviderThreadId = unknownRecordField(item, "providerThreadId");
+  const itemProviderTurnId = unknownRecordField(item, "providerTurnId");
+  if (item.runId === null) {
+    if (typeof itemProviderThreadId !== "string") return false;
+    const providerThread = projection.providerThreads.find(
+      (candidate) => candidate.id === itemProviderThreadId,
+    );
+    return providerThread !== undefined && isProcessBoundProviderThread(providerThread, projection);
+  }
+  const run = projection.runs.find((candidate) => candidate.id === item.runId);
+  if (run === undefined) return false;
+  const providerThread = processBoundProviderThread(run, projection);
+  if (
+    providerThread === undefined ||
+    (typeof itemProviderThreadId === "string" && itemProviderThreadId !== providerThread.id) ||
+    (typeof itemProviderTurnId === "string" &&
+      !projection.attempts.some(
+        (attempt) => attempt.runId === run.id && attempt.providerTurnId === itemProviderTurnId,
+      ))
+  ) {
+    return false;
+  }
+  return item.type !== "subagent" || item.providerInstanceId === run.providerInstanceId;
+}
+
+function isProcessBoundProviderNativeSubagent(
+  subagent: OrchestrationV2Subagent,
+  projection: ProjectionStore.ProjectionRuntimeRecoveryState,
+): boolean {
+  if (subagent.origin !== "provider_native" || subagent.runId === null) return false;
+  const run = projection.runs.find((candidate) => candidate.id === subagent.runId);
+  if (run === undefined || subagent.providerInstanceId !== run.providerInstanceId) return false;
+  const providerThread = processBoundProviderThread(run, projection);
+  return (
+    providerThread !== undefined &&
+    (subagent.providerThreadId === null || subagent.providerThreadId === providerThread.id)
+  );
+}
+
+function parentClaimsChildWasAsync(
+  item: ProviderNativeSubagentTurnItem,
+  parentItem: DynamicToolTurnItem,
+  subagent: OrchestrationV2Subagent,
+): boolean {
+  const asyncState = unknownRecordField(unknownRecordField(parentItem.details, "async"), "state");
+  return asyncState === "running" || parentReportsActiveTask(item, parentItem, subagent);
+}
+
+function isEndedProviderNativeChildThreadItem(
+  item: OrchestrationV2ThreadProjection["turnItems"][number],
+  projection: ProjectionStore.ProjectionRuntimeRecoveryState,
+): boolean {
+  if (
+    item.type !== "subagent" ||
+    item.origin !== "provider_native" ||
+    item.childThreadId === null ||
+    item.childThreadId === undefined ||
+    item.runId === null
+  ) {
+    return false;
+  }
+  const run = projection.runs.find((candidate) => candidate.id === item.runId);
+  return (
+    run !== undefined &&
+    isEndedRunStatus(run.status) &&
+    projection.subagents.some(
+      (subagent) =>
+        subagent.id === item.subagentId &&
+        subagent.runId === run.id &&
+        subagent.origin === "provider_native" &&
+        subagent.childThreadId === item.childThreadId &&
+        isNonterminalSubagentStatus(subagent.status),
+    )
+  );
+}
+
+function terminalBackgroundTaskIds(
+  projection: ProjectionStore.ProjectionRuntimeRecoveryState,
+): Set<string> {
+  const ids = new Set<string>();
+  const add = (value: unknown, omp: boolean) => {
+    if (typeof value !== "string" || value.length === 0) return;
+    ids.add(value);
+    if (omp && !value.startsWith(OMP_ASYNC_JOB_TASK_ID_PREFIX)) {
+      ids.add(`${OMP_ASYNC_JOB_TASK_ID_PREFIX}${value}`);
+    }
+  };
+  for (const item of projection.turnItems) {
+    if (
+      terminalTurnItemStatus(item.status) === null ||
+      !isBackgroundCapableTurnItemType(item.type)
+    ) {
+      continue;
+    }
+    const run =
+      item.runId === null
+        ? undefined
+        : projection.runs.find((candidate) => candidate.id === item.runId);
+    const itemProviderThreadId = unknownRecordField(item, "providerThreadId");
+    const providerThreadId =
+      typeof itemProviderThreadId === "string" ? itemProviderThreadId : run?.providerThreadId;
+    const providerThread =
+      providerThreadId === null || providerThreadId === undefined
+        ? undefined
+        : projection.providerThreads.find((candidate) => candidate.id === providerThreadId);
+    const omp = String(providerThread?.driver) === "omp";
+    add(item.id, omp);
+    add(unknownRecordField(unknownRecordField(item, "nativeItemRef"), "nativeId"), omp);
+    if (item.type !== "subagent") continue;
+    add(item.subagentId, omp);
+    const subagent = projection.subagents.find(
+      (candidate) => candidate.id === item.subagentId && candidate.runId === item.runId,
+    );
+    add(subagent?.nativeAgentId, omp);
+    add(unknownRecordField(subagent?.nativeTaskRef, "nativeId"), omp);
+  }
+  return ids;
 }
 
 /**
@@ -371,18 +502,26 @@ export const make = Effect.gen(function* () {
       const runs = [] as Array<OrchestrationV2ThreadProjection["runs"][number]>;
       for (const run of nonterminalRuns(projection)) {
         if (run.status === "waiting") {
-          const checkpointEffects = yield* outbox
-            .listByCommandId(CommandId.make(`command:effect:checkpoint.capture:${run.id}`))
-            .pipe(
-              Effect.mapError(
-                (cause) =>
-                  new ProviderRuntimeRecoveryError({
-                    operation: "reconcile",
-                    threadId: projection.thread.id,
-                    cause,
-                  }),
-              ),
-            );
+          // Captures enqueued before per-attempt command ids used the run id alone.
+          const captureCommandIds = [
+            CommandId.make(`command:effect:checkpoint.capture:${run.id}`),
+            ...(run.rootNodeId === null
+              ? []
+              : [RunExecutionService.checkpointCaptureCommandId(run.id, run.rootNodeId)]),
+          ];
+          const checkpointEffects = yield* Effect.forEach(captureCommandIds, (commandId) =>
+            outbox.listByCommandId(commandId),
+          ).pipe(
+            Effect.map((lists) => lists.flat()),
+            Effect.mapError(
+              (cause) =>
+                new ProviderRuntimeRecoveryError({
+                  operation: "reconcile",
+                  threadId: projection.thread.id,
+                  cause,
+                }),
+            ),
+          );
           const hasReplayableCheckpoint = checkpointEffects.some(
             (effect) =>
               effect.request.type === "checkpoint.capture" &&
@@ -479,6 +618,28 @@ export const make = Effect.gen(function* () {
           ),
         );
       const events: Array<OrchestrationV2DomainEvent> = [];
+      const updatedStaleNodeIds = new Set<string>();
+      const terminalizedSubagentIds = new Set<string>();
+      const terminalizedBackgroundTaskIds = terminalBackgroundTaskIds(projection);
+      const unboundProviderNativeSubagentIds = new Set(
+        projection.subagents
+          .filter(
+            (subagent) =>
+              subagent.origin === "provider_native" &&
+              !isProcessBoundProviderNativeSubagent(subagent, projection),
+          )
+          .map((subagent) => String(subagent.id)),
+      );
+      const unboundBackgroundNodeIds = new Set(
+        projection.turnItems.flatMap((item) =>
+          isBackgroundCapableTurnItemType(item.type) &&
+          !isProcessBoundProviderRuntimeItem(item, projection) &&
+          item.nodeId !== null &&
+          item.nodeId !== undefined
+            ? [String(item.nodeId)]
+            : [],
+        ),
+      );
       // Background work that outlived its settled turn. The provider transcript
       // cannot record its death, so the next provider turn is told instead.
       // Shutdown records it too: a graceful restart cancels it there first.
@@ -512,6 +673,70 @@ export const make = Effect.gen(function* () {
           cancelledBackgroundNativeIds.add(item.nativeItemRef.nativeId);
         }
       };
+      for (const item of projection.turnItems) {
+        const status = terminalTurnItemStatus(item.status);
+        if (
+          status === null ||
+          !isBackgroundCapableTurnItemType(item.type) ||
+          (item.type === "subagent" &&
+            (item.origin !== "provider_native" || isAppOwnedDelegationItem(item)))
+        ) {
+          continue;
+        }
+        let linkedNodeId = item.type === "subagent" ? item.subagentId : item.nodeId;
+        if (item.type === "subagent") {
+          const subagent = projection.subagents.find(
+            (candidate) =>
+              candidate.id === item.subagentId &&
+              candidate.runId === item.runId &&
+              candidate.origin === "provider_native" &&
+              isNonterminalSubagentStatus(candidate.status),
+          );
+          if (subagent !== undefined) {
+            if (!terminalizedSubagentIds.has(String(subagent.id))) {
+              terminalizedSubagentIds.add(String(subagent.id));
+              events.push({
+                id: yield* allocateEventId(),
+                type: "subagent.updated",
+                threadId: projection.thread.id,
+                ...(item.runId === null ? {} : { runId: item.runId }),
+                nodeId: subagent.id,
+                driver: subagent.driver,
+                providerInstanceId: subagent.providerInstanceId,
+                occurredAt: now,
+                payload: {
+                  ...subagent,
+                  status,
+                  ...(item.result === null ? {} : { result: item.result }),
+                  completedAt: item.completedAt,
+                  updatedAt: item.updatedAt,
+                },
+              });
+            }
+            linkedNodeId = subagent.id;
+          }
+        }
+        if (linkedNodeId === null || linkedNodeId === undefined) continue;
+        const staleNode = projection.nodes.find(
+          (candidate) =>
+            candidate.id === linkedNodeId &&
+            candidate.runId === item.runId &&
+            candidate.providerTurnId === item.providerTurnId &&
+            isNonterminalNodeStatus(candidate.status),
+        );
+        if (staleNode === undefined || updatedStaleNodeIds.has(String(staleNode.id))) continue;
+        updatedStaleNodeIds.add(String(staleNode.id));
+        events.push({
+          id: yield* allocateEventId(),
+          type: "node.updated",
+          threadId: projection.thread.id,
+          ...(item.runId === null ? {} : { runId: item.runId }),
+          nodeId: staleNode.id,
+          providerInstanceId: resolveStaleBackgroundItemProviderInstanceId(item, projection),
+          occurredAt: now,
+          payload: { ...staleNode, status, completedAt: item.completedAt },
+        });
+      }
       // Queued runs have not started provider work. Preserve their execution
       // identities and order, but require explicit consent before draining them.
       for (const run of projection.runs) {
@@ -589,6 +814,10 @@ export const make = Effect.gen(function* () {
             candidate.runId === run.id &&
             !messageRequestNodeIds.has(candidate.id) &&
             !delegatedTaskNodeIds.has(candidate.id) &&
+            !unboundBackgroundNodeIds.has(String(candidate.id)) &&
+            !unboundProviderNativeSubagentIds.has(String(candidate.id)) &&
+            !updatedStaleNodeIds.has(String(candidate.id)) &&
+            !terminalizedSubagentIds.has(String(candidate.id)) &&
             (candidate.status === "pending" ||
               candidate.status === "running" ||
               candidate.status === "waiting"),
@@ -608,6 +837,16 @@ export const make = Effect.gen(function* () {
           (candidate) =>
             candidate.runId === run.id &&
             !isAppOwnedDelegation(candidate) &&
+            (isProcessBoundProviderNativeSubagent(candidate, projection) ||
+              projection.turnItems.some(
+                (item) =>
+                  item.type === "subagent" &&
+                  item.subagentId === candidate.id &&
+                  item.runId === run.id &&
+                  isNonterminalTurnItemStatus(item.status) &&
+                  isProcessBoundProviderRuntimeItem(item, projection),
+              )) &&
+            !terminalizedSubagentIds.has(String(candidate.id)) &&
             (candidate.status === "pending" ||
               candidate.status === "running" ||
               candidate.status === "waiting"),
@@ -669,6 +908,8 @@ export const make = Effect.gen(function* () {
             candidate.runId === run.id &&
             (candidate.nodeId === null || !messageRequestNodeIds.has(candidate.nodeId)) &&
             !isAppOwnedDelegationItem(candidate) &&
+            (!isBackgroundCapableTurnItemType(candidate.type) ||
+              isProcessBoundProviderRuntimeItem(candidate, projection)) &&
             (candidate.status === "pending" ||
               candidate.status === "running" ||
               candidate.status === "waiting"),
@@ -693,7 +934,6 @@ export const make = Effect.gen(function* () {
       // cancelled above for recovered nonterminal runs to avoid duplicate
       // cancellation events.
       const recoveredNonterminalRunIds = new Set(runs.map((run) => run.id));
-      const updatedStaleNodeIds = new Set<string>();
       for (const item of projection.turnItems ?? []) {
         if (item.runId !== null && recoveredNonterminalRunIds.has(item.runId)) {
           continue;
@@ -701,7 +941,12 @@ export const make = Effect.gen(function* () {
         if (!isBackgroundCapableTurnItemType(item.type)) {
           continue;
         }
-        if (!isNonterminalTurnItemStatus(item.status) || isAppOwnedDelegationItem(item)) {
+        if (
+          !isNonterminalTurnItemStatus(item.status) ||
+          isAppOwnedDelegationItem(item) ||
+          (!isProcessBoundProviderRuntimeItem(item, projection) &&
+            !isEndedProviderNativeChildThreadItem(item, projection))
+        ) {
           continue;
         }
         if (item.type === "subagent") {
@@ -711,6 +956,9 @@ export const make = Effect.gen(function* () {
               item,
               projection,
             );
+            if (settlement.status === "interrupted") {
+              recordCancelledBackgroundItem(item);
+            }
             events.push({
               id: yield* allocateEventId(),
               type: "turn-item.updated",
@@ -745,6 +993,8 @@ export const make = Effect.gen(function* () {
             const subagentNode = projection.nodes.find(
               (candidate) =>
                 candidate.id === settlement.subagent.id &&
+                candidate.runId === item.runId &&
+                candidate.providerTurnId === item.providerTurnId &&
                 isNonterminalNodeStatus(candidate.status),
             );
             if (subagentNode !== undefined && !updatedStaleNodeIds.has(subagentNode.id)) {
@@ -782,7 +1032,10 @@ export const make = Effect.gen(function* () {
         if (item.nodeId !== null && item.nodeId !== undefined) {
           const staleItemNode = projection.nodes.find(
             (candidate) =>
-              candidate.id === item.nodeId && isNonterminalNodeStatus(candidate.status),
+              candidate.id === item.nodeId &&
+              candidate.runId === item.runId &&
+              candidate.providerTurnId === item.providerTurnId &&
+              isNonterminalNodeStatus(candidate.status),
           );
           if (staleItemNode !== undefined && !updatedStaleNodeIds.has(staleItemNode.id)) {
             updatedStaleNodeIds.add(staleItemNode.id);
@@ -807,7 +1060,9 @@ export const make = Effect.gen(function* () {
         // that already finished is never overwritten.
         const staleSubagent = projection.subagents.find(
           (candidate) =>
-            candidate.id === item.subagentId && isNonterminalSubagentStatus(candidate.status),
+            candidate.id === item.subagentId &&
+            candidate.runId === item.runId &&
+            isNonterminalSubagentStatus(candidate.status),
         );
         if (staleSubagent !== undefined) {
           events.push({
@@ -824,7 +1079,10 @@ export const make = Effect.gen(function* () {
         }
         const staleSubagentNode = projection.nodes.find(
           (candidate) =>
-            candidate.id === item.subagentId && isNonterminalNodeStatus(candidate.status),
+            candidate.id === item.subagentId &&
+            candidate.runId === item.runId &&
+            candidate.providerTurnId === item.providerTurnId &&
+            isNonterminalNodeStatus(candidate.status),
         );
         if (staleSubagentNode !== undefined && !updatedStaleNodeIds.has(staleSubagentNode.id)) {
           updatedStaleNodeIds.add(staleSubagentNode.id);
@@ -847,6 +1105,9 @@ export const make = Effect.gen(function* () {
       const cancelledStaleItemIds = new Set(
         events.flatMap((event) => (event.type === "turn-item.updated" ? [event.payload.id] : [])),
       );
+      const providerNativeSubagentThread =
+        projection.thread.lineage?.relationshipToParent === "subagent" &&
+        projection.thread.creationSource === "provider";
       for (const node of projection.nodes) {
         if (
           node.kind !== "root_turn" ||
@@ -856,20 +1117,33 @@ export const make = Effect.gen(function* () {
         ) {
           continue;
         }
+        const providerThread = projection.providerThreads.find(
+          (candidate) => candidate.id === node.providerThreadId,
+        );
+        if (
+          !providerNativeSubagentThread &&
+          (providerThread === undefined ||
+            !isProcessBoundProviderThread(providerThread, projection))
+        ) {
+          continue;
+        }
         updatedStaleNodeIds.add(node.id);
         events.push({
           id: yield* allocateEventId(),
           type: "node.updated",
           threadId: projection.thread.id,
           nodeId: node.id,
-          providerInstanceId: projection.thread.providerInstanceId,
+          providerInstanceId:
+            providerThread?.providerInstanceId ?? projection.thread.providerInstanceId,
           occurredAt: now,
           payload: { ...node, status: "cancelled", completedAt: now },
         });
         for (const item of projection.turnItems) {
+          const itemProviderThreadId = unknownRecordField(item, "providerThreadId");
           if (
             item.nodeId !== node.id ||
             item.runId !== null ||
+            (!providerNativeSubagentThread && itemProviderThreadId !== providerThread?.id) ||
             !isNonterminalTurnItemStatus(item.status) ||
             cancelledStaleItemIds.has(item.id)
           ) {
@@ -881,7 +1155,8 @@ export const make = Effect.gen(function* () {
             type: "turn-item.updated",
             threadId: projection.thread.id,
             nodeId: node.id,
-            providerInstanceId: projection.thread.providerInstanceId,
+            providerInstanceId:
+              providerThread?.providerInstanceId ?? projection.thread.providerInstanceId,
             occurredAt: now,
             payload: {
               ...item,
@@ -899,13 +1174,21 @@ export const make = Effect.gen(function* () {
       // persisted Waiting roster (including idle threads from settled roots)
       // and idle active threads without resurrecting active status.
       for (const providerThread of projection.providerThreads ?? []) {
-        const needsIdle = providerThread.status === "active";
-        const needsRosterClear = providerThreadHasPendingBackgroundTasks(providerThread);
-        if (!needsIdle && !needsRosterClear && !nativeHeadRefByThreadId.has(providerThread.id)) {
+        const processBound = isProcessBoundProviderThread(providerThread, projection);
+        const needsIdle = processBound && providerThread.status === "active";
+        const pendingBackgroundTasks = providerThread.pendingBackgroundTasks ?? [];
+        const retainedBackgroundTasks = pendingBackgroundTasks.filter(
+          (task) => !terminalizedBackgroundTaskIds.has(task.taskId) && !processBound,
+        );
+        const cancelledBackgroundTasks = processBound
+          ? pendingBackgroundTasks.filter((task) => !terminalizedBackgroundTaskIds.has(task.taskId))
+          : [];
+        const needsRosterUpdate = retainedBackgroundTasks.length !== pendingBackgroundTasks.length;
+        if (!needsIdle && !needsRosterUpdate && !nativeHeadRefByThreadId.has(providerThread.id)) {
           continue;
         }
-        if (providerThread.ownerNodeId === null) {
-          for (const task of providerThread.pendingBackgroundTasks ?? []) {
+        if (processBound && providerThread.ownerNodeId === null) {
+          for (const task of cancelledBackgroundTasks) {
             if (cancelledBackgroundNativeIds.has(task.taskId)) continue;
             cancelledBackgroundNativeIds.add(task.taskId);
             recordCancelledBackgroundWork(providerThread.id, cancelledRosterTaskWork(task));
@@ -926,13 +1209,20 @@ export const make = Effect.gen(function* () {
                 }
               : {}),
             status: needsIdle ? "idle" : providerThread.status,
-            pendingBackgroundTasks: [],
+            pendingBackgroundTasks: retainedBackgroundTasks,
             updatedAt: now,
           },
         });
       }
       for (const session of projection.providerSessions.filter(
-        (candidate) => candidate.status !== "stopped" && candidate.status !== "error",
+        (candidate) =>
+          candidate.status !== "stopped" &&
+          candidate.status !== "error" &&
+          projection.providerThreads.some(
+            (providerThread) =>
+              providerThread.providerSessionId === candidate.id &&
+              isProcessBoundProviderThread(providerThread, projection),
+          ),
       )) {
         events.push({
           id: yield* allocateEventId(),

@@ -149,10 +149,61 @@ export const layerExecutor: Layer.Layer<
                     }),
                 ),
               );
-          case "provider-turn.start":
+          case "provider-turn.start": {
+            const request = effect.request;
             return providerTurnStart
-              .start({ threadId: effect.threadId, runId: effect.request.runId, willRetry })
+              .start({ threadId: effect.threadId, runId: request.runId, willRetry })
               .pipe(
+                Effect.catch((error) =>
+                  Effect.gen(function* () {
+                    const promotion = request.queuedMessagePromotion;
+                    const messageId = promotion?.messageId;
+                    const previousTargetRun = promotion?.previousTargetRun;
+                    if (
+                      willRetry ||
+                      promotion === undefined ||
+                      messageId === undefined ||
+                      previousTargetRun === undefined
+                    ) {
+                      return yield* error;
+                    }
+                    yield* Effect.gen(function* () {
+                      yield* threads.dispatch({
+                        type: "queued-message.restore-after-steer-rejection",
+                        commandId: CommandId.make(`command:steer-start-restore:${effect.id}`),
+                        threadId: effect.threadId,
+                        queuedRunId: promotion.queuedRunId,
+                        targetRunId: previousTargetRun.id,
+                        messageId,
+                        queuePosition: promotion.queuePosition,
+                        ...(promotion.queueHeld === undefined
+                          ? {}
+                          : { queueHeld: promotion.queueHeld }),
+                        previousTargetRun,
+                      });
+                      yield* threads.dispatch({
+                        type: "queue.resume",
+                        commandId: CommandId.make(`command:steer-start-resume:${effect.id}`),
+                        threadId: effect.threadId,
+                        preserveHolds: true,
+                        skipParkedWake: true,
+                      });
+                    }).pipe(
+                      Effect.catchCause((cause) =>
+                        Effect.logError(
+                          "Failed to restore promoted queued message after start failure",
+                          {
+                            effectId: effect.id,
+                            threadId: effect.threadId,
+                            cause,
+                          },
+                        ),
+                      ),
+                    );
+                    // The original start failure stays the effect's failure.
+                    return yield* error;
+                  }),
+                ),
                 Effect.mapError(
                   (cause) =>
                     new OrchestrationEffectExecutionError({
@@ -162,6 +213,7 @@ export const layerExecutor: Layer.Layer<
                     }),
                 ),
               );
+          }
           case "provider-turn.interrupt": {
             const request = effect.request;
             return providerTurnControl
@@ -212,24 +264,24 @@ export const layerExecutor: Layer.Layer<
                 ),
               );
           }
-          case "provider-turn.steer":
+          case "provider-turn.steer": {
+            const request = effect.request;
             return providerTurnControl
               .steer({
                 threadId: effect.threadId,
-                providerSessionId: effect.request.providerSessionId,
-                providerThreadId: effect.request.providerThreadId,
-                providerTurnId: effect.request.providerTurnId,
-                messageId: effect.request.messageId,
+                providerSessionId: request.providerSessionId,
+                providerThreadId: request.providerThreadId,
+                providerTurnId: request.providerTurnId,
+                messageId: request.messageId,
               })
               .pipe(
                 Effect.tap(() =>
                   Effect.gen(function* () {
-                    if (effect.request.type !== "provider-turn.steer") return;
-                    const messageId = effect.request.messageId;
+                    const messageId = request.messageId;
                     const projection = yield* threads.getThreadRecords(
                       effect.threadId,
                       ["messages", "runs"],
-                      { messageIds: [effect.request.messageId] },
+                      { messageIds: [messageId] },
                     );
                     const message = projection.messages.find((row) => row.id === messageId);
                     if (message?.delegatedCompletion === undefined) return;
@@ -243,30 +295,55 @@ export const layerExecutor: Layer.Layer<
                 ),
                 Effect.catch((error) =>
                   Effect.gen(function* () {
-                    if (effect.request.type !== "provider-turn.steer") return yield* error;
-                    if (!("turnCompleted" in error) || error.turnCompleted !== true) {
-                      const promotion = effect.request.queuedMessagePromotion;
-                      if (promotion === undefined) return yield* error;
-                      yield* threads.dispatch({
-                        type: "queued-message.restore-after-steer-rejection",
-                        commandId: CommandId.make(`command:steer-restore:${effect.id}`),
-                        threadId: effect.threadId,
-                        queuedRunId: promotion.queuedRunId,
-                        targetRunId: promotion.targetRunId,
-                        messageId: effect.request.messageId,
-                        queuePosition: promotion.queuePosition,
-                        ...(promotion.queueHeld === undefined
-                          ? {}
-                          : { queueHeld: promotion.queueHeld }),
-                      });
-                      return;
+                    const promotion = request.queuedMessagePromotion;
+                    const turnCompleted = "turnCompleted" in error && error.turnCompleted === true;
+                    if (promotion !== undefined) {
+                      // Only the final attempt compensates. A retry that later succeeds
+                      // must not leave the same message both restored and steered.
+                      if (willRetry) return yield* error;
+                      yield* Effect.gen(function* () {
+                        yield* threads.dispatch({
+                          type: "queued-message.restore-after-steer-rejection",
+                          commandId: CommandId.make(`command:steer-restore:${effect.id}`),
+                          threadId: effect.threadId,
+                          queuedRunId: promotion.queuedRunId,
+                          targetRunId: promotion.targetRunId,
+                          messageId: request.messageId,
+                          queuePosition: promotion.queuePosition,
+                          ...(promotion.queueHeld === undefined
+                            ? {}
+                            : { queueHeld: promotion.queueHeld }),
+                        });
+                        if (turnCompleted) {
+                          yield* threads.dispatch({
+                            type: "queue.resume",
+                            commandId: CommandId.make(`command:steer-resume:${effect.id}`),
+                            threadId: effect.threadId,
+                            preserveHolds: true,
+                          });
+                        }
+                      }).pipe(
+                        Effect.catchCause((cause) =>
+                          Effect.logError(
+                            "Failed to restore promoted queued message after steer rejection",
+                            {
+                              effectId: effect.id,
+                              threadId: effect.threadId,
+                              cause,
+                            },
+                          ),
+                        ),
+                      );
+                      // The original rejection stays the effect's failure.
+                      return yield* error;
                     }
+                    if (!turnCompleted) return yield* error;
                     const projection = yield* threads.getThreadRecords(
                       effect.threadId,
                       ["messages", "runs"],
-                      { messageIds: [effect.request.messageId] },
+                      { messageIds: [request.messageId] },
                     );
-                    const messageId = effect.request.messageId;
+                    const messageId = request.messageId;
                     const message = projection.messages.find((item) => item.id === messageId);
                     const run = projection.runs.find((item) => item.id === message?.runId);
                     if (message === undefined || run === undefined) return yield* error;
@@ -286,12 +363,20 @@ export const layerExecutor: Layer.Layer<
                       ...(message.delegatedCompletion === undefined
                         ? {}
                         : { modelSelection: run.modelSelection }),
+                      // Notifications and delegated completions are only accepted
+                      // as queued deliveries.
                       dispatchMode: {
                         type:
-                          message.delegatedCompletion === undefined
+                          message.delegatedCompletion === undefined &&
+                          message.notification === undefined
                             ? "start_immediately"
                             : "queue_after_active",
                       },
+                      // An Auto steer that lost the completion race stays automatic
+                      // in its replacement run, so queue absorption still sees it.
+                      ...(request.deliveryIntent === undefined
+                        ? {}
+                        : { deliveryIntent: request.deliveryIntent }),
                       createdBy: message.createdBy,
                       creationSource: message.creationSource,
                       ...(message.delegatedCompletion === undefined
@@ -318,6 +403,7 @@ export const layerExecutor: Layer.Layer<
                     }),
                 ),
               );
+          }
           case "provider-turn.restart":
             return providerTurnControl
               .interruptAndAwaitTerminal({

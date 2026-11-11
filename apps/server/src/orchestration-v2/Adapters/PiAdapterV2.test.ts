@@ -2518,6 +2518,85 @@ describe("PiAdapterV2", () => {
       assert.equal(DateTime.toEpochMillis(completionNotice!.startedAt!), 1_800_000_000_000);
     }).pipe(Effect.scoped, Effect.provide(layerTest)),
   );
+  it.effect("terminalizes requested OMP tasks after a validation error before launch", () =>
+    Effect.gen(function* () {
+      const fake = yield* makeFakePi;
+      yield* fake.emit({
+        type: "ready",
+        protocolVersion: 1,
+        supportedProtocolVersions: [1, 2],
+      });
+      const { runtime, takeEvent } = yield* openRuntime(
+        fake,
+        "default",
+        THREAD_ID,
+        SESSION_ID,
+        undefined,
+        OMP_DIALECT,
+      );
+      const providerThread = yield* runtime.ensureThread({
+        threadId: THREAD_ID,
+        modelSelection: modelSelection("default"),
+        runtimePolicy,
+      });
+      yield* startTurn(runtime, providerThread);
+      yield* fake.takeRequest("prompt");
+      yield* fake.emit({ type: "agent_start" });
+      yield* fake.emit({
+        type: "tool_execution_start",
+        toolCallId: "call_rejected_tasks",
+        toolName: "task",
+        args: {
+          tasks: [
+            { id: "RejectedA", task: "inspect the first path" },
+            { id: "RejectedB", task: "inspect the second path" },
+          ],
+        },
+      });
+      yield* fake.emit({
+        type: "tool_execution_end",
+        toolCallId: "call_rejected_tasks",
+        toolName: "task",
+        isError: true,
+        result: {
+          content: [{ type: "text", text: "model is only accepted for seance" }],
+          details: { results: [] },
+        },
+      });
+
+      const failedCards = [];
+      const failedItems = [];
+      for (let index = 0; index < 2; index += 1) {
+        const card = yield* takeEvent(
+          (event) => event.type === "subagent.updated" && event.subagent.status === "failed",
+        );
+        if (card.type !== "subagent.updated") {
+          return yield* Effect.die("Expected a failed OMP subagent projection");
+        }
+        failedCards.push(card.subagent);
+        const item = yield* takeEvent(
+          (event) =>
+            event.type === "turn_item.updated" &&
+            event.turnItem.type === "subagent" &&
+            event.turnItem.status === "failed",
+        );
+        if (item.type !== "turn_item.updated" || item.turnItem.type !== "subagent") {
+          return yield* Effect.die("Expected a failed OMP subagent timeline item");
+        }
+        failedItems.push(item.turnItem);
+      }
+      assert.deepEqual(failedCards.map((subagent) => subagent.prompt).sort(), [
+        "inspect the first path",
+        "inspect the second path",
+      ]);
+      assert.deepEqual(failedItems.map((item) => item.prompt).sort(), [
+        "inspect the first path",
+        "inspect the second path",
+      ]);
+      assert.isTrue(failedCards.every((subagent) => subagent.completedAt !== null));
+      assert.isTrue(failedItems.every((item) => item.completedAt !== null));
+    }).pipe(Effect.scoped, Effect.provide(layerTest)),
+  );
   it.effect("settles workpool subagents when their parent tool ends without an async job", () =>
     Effect.gen(function* () {
       const fake = yield* makeFakePi;

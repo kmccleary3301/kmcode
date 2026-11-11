@@ -125,6 +125,7 @@ const makeHarness = Effect.fn("TestThreadCommands.makeHarness")(function* () {
             yield* Deferred.await(release);
             return { _tag: "loaded" as const };
           }),
+        loadActivityPage: () => Effect.succeed({ _tag: "noop" as const }),
       }),
     ),
   );

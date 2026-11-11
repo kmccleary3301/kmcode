@@ -5,6 +5,7 @@ import {
   OrchestrationV2ProviderCapabilities,
   type OrchestrationV2Run,
   OrchestrationV2ThreadProjection,
+  ProviderDriverKind,
   ProviderInstanceId,
   ProviderTurnId,
   RunId,
@@ -138,13 +139,11 @@ export function resolveMessageDispatchIntent(
   if (deliveryIntent === "restart") {
     return { type: "restart_active", targetRunId: activeRun.id };
   }
-  if (activeRun.status === "preparing" || activeRun.status === "starting") {
-    return { type: "queue_after_active" };
-  }
-
-  const providerThread = projection.providerThreads.find(
-    (candidate) => candidate.id === activeRun.providerThreadId,
-  );
+  const providerThread =
+    activeRun.providerThreadId !== null &&
+    activeRun.providerThreadId === projection.thread.activeProviderThreadId
+      ? projection.providerThreads.find((candidate) => candidate.id === activeRun.providerThreadId)
+      : undefined;
   const providerSession =
     providerThread?.providerSessionId == null
       ? undefined
@@ -152,15 +151,37 @@ export function resolveMessageDispatchIntent(
           (candidate) => candidate.id === providerThread.providerSessionId,
         );
   const capabilities = providerSession?.capabilities.turns;
-  if (capabilities?.supportsActiveSteering === true) {
+  const runningRootTurn =
+    activeRun.activeAttemptId !== null &&
+    activeRun.rootNodeId !== null &&
+    providerThread !== undefined &&
+    projection.providerTurns.some(
+      (turn) =>
+        turn.status === "running" &&
+        turn.runAttemptId === activeRun.activeAttemptId &&
+        turn.nodeId === activeRun.rootNodeId &&
+        turn.providerThreadId === activeRun.providerThreadId &&
+        turn.providerThreadId === projection.thread.activeProviderThreadId,
+    );
+  if (capabilities?.supportsActiveSteering === true && runningRootTurn) {
     return { type: "steer_active", targetRunId: activeRun.id };
   }
-  if (capabilities?.supportsQueuedMessages === true) {
+  if (activeRun.status === "preparing" || activeRun.status === "starting") {
     return { type: "queue_after_active" };
   }
-  if (capabilities?.supportsSteeringByInterruptRestart === true) {
-    return { type: "restart_active", targetRunId: activeRun.id };
+
+  const nativeSessionCanResumeWithoutInterrupt =
+    activeRun.status === "waiting" &&
+    activeRun.rootNodeId !== null &&
+    providerThread !== undefined &&
+    (providerThread.driver === ProviderDriverKind.make("pi") ||
+      providerThread.driver === ProviderDriverKind.make("omp")) &&
+    providerSession !== undefined;
+  if (capabilities?.supportsActiveSteering === true && nativeSessionCanResumeWithoutInterrupt) {
+    return { type: "steer_active", targetRunId: activeRun.id };
   }
+  // Automatic admission never turns an unsupported steer into an interrupt.
+  // Providers without a current native root boundary keep a truthful queue.
   return { type: "queue_after_active" };
 }
 

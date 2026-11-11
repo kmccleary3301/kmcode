@@ -3,6 +3,7 @@ import type {
   OrchestrationV2ThreadProjection,
   OrchestrationV2TurnItem,
 } from "@t3tools/contracts";
+import * as DateTime from "effect/DateTime";
 import { isOrchestrationV2TurnItemVisible } from "@t3tools/shared/orchestrationV2Timeline";
 
 export type ThreadHistoryMeta = {
@@ -17,6 +18,7 @@ export type ThreadHistoryMeta = {
    * unknown (legacy cache) or when history meta is cleared for a full snapshot.
    */
   readonly latestLocalTurnOrdinal: number | null;
+  readonly activeRequestId?: number;
 };
 
 export const EMPTY_THREAD_HISTORY_META: ThreadHistoryMeta = {
@@ -28,7 +30,12 @@ export const EMPTY_THREAD_HISTORY_META: ThreadHistoryMeta = {
   latestLocalTurnOrdinal: null,
 };
 
-/** Whether a history-page response still matches the cursor that started it. */
+/** Whether the in-flight history response still owns the thread history state. */
+export function isActiveHistoryRequest(requestId: number, history: ThreadHistoryMeta): boolean {
+  return history.loading && history.activeRequestId === requestId;
+}
+
+/** Whether a cursor page still addresses the cursor that started it. */
 export function isActiveHistoryRequestCursor(
   requestCursor: string,
   history: { readonly historyCursor: string | null },
@@ -36,22 +43,18 @@ export function isActiveHistoryRequestCursor(
   return history.historyCursor === requestCursor;
 }
 
-/**
- * Clear history loading after an interrupted load-earlier only when the
- * request cursor is still active. Does not touch stream/status/error.
- */
-export function clearActiveHistoryLoading(
-  requestCursor: string,
+/** Clear loading only for the request that currently owns the history state. */
+export function clearHistoryRequestLoading(
+  requestId: number,
   history: ThreadHistoryMeta,
 ): ThreadHistoryMeta {
-  if (!isActiveHistoryRequestCursor(requestCursor, history) || !history.loading) {
-    return history;
-  }
-  return { ...history, loading: false };
+  if (!isActiveHistoryRequest(requestId, history)) return history;
+  const { activeRequestId: _activeRequestId, ...idle } = history;
+  return { ...idle, loading: false };
 }
 
 function projectedItemKey(row: OrchestrationV2ProjectedTurnItem): string {
-  return `${row.sourceThreadId}:${row.sourceItemId}`;
+  return JSON.stringify([row.sourceThreadId, row.sourceItemId]);
 }
 
 function renumberVisible(
@@ -61,40 +64,52 @@ function renumberVisible(
 }
 
 /**
- * Merge an older history page into the live projection. Dedupes by
- * sourceThreadId + sourceItemId, keeps chronological order (older first), and
- * preserves newer live rows already present in state.
+ * Merge a bounded history window into the projection. Canonical order keys
+ * place anchored rows among the matching source's rows; local dense positions
+ * are used only by legacy pages.
  */
-export function mergeOlderHistoryIntoProjection(
+export function mergeHistoryIntoProjection(
   projection: OrchestrationV2ThreadProjection,
-  olderItems: ReadonlyArray<OrchestrationV2ProjectedTurnItem>,
+  pageItems: ReadonlyArray<OrchestrationV2ProjectedTurnItem>,
 ): OrchestrationV2ThreadProjection {
-  if (olderItems.length === 0) {
-    return projection;
-  }
-
-  const existingKeys = new Set(projection.visibleTurnItems.map(projectedItemKey));
+  if (pageItems.length === 0) return projection;
+  const projected = new Map<string, OrchestrationV2ProjectedTurnItem>();
+  for (const row of projection.visibleTurnItems) projected.set(projectedItemKey(row), row);
   const turnItemById = new Map<string, OrchestrationV2TurnItem>();
-  for (const item of projection.turnItems) {
-    turnItemById.set(String(item.id), item);
-  }
-  const prepended: OrchestrationV2ProjectedTurnItem[] = [];
-  for (const pageRow of olderItems) {
-    let row = pageRow;
-    const key = projectedItemKey(row);
-    if (existingKeys.has(key)) {
+  for (const item of projection.turnItems) turnItemById.set(String(item.id), item);
+  const additions: OrchestrationV2ProjectedTurnItem[] = [];
+  let changed = false;
+
+  for (const pageRow of pageItems) {
+    const key = projectedItemKey(pageRow);
+    const current = projected.get(key);
+    if (current !== undefined) {
+      const currentItem = turnItemById.get(String(pageRow.sourceItemId)) ?? current.item;
+      const item =
+        DateTime.toEpochMillis(currentItem.updatedAt) >=
+        DateTime.toEpochMillis(pageRow.item.updatedAt)
+          ? currentItem
+          : pageRow.item;
+      if (
+        item !== current.item ||
+        (pageRow.orderKey !== undefined && current.orderKey === undefined)
+      ) {
+        const orderKey = pageRow.orderKey ?? current.orderKey;
+        projected.set(key, {
+          ...pageRow,
+          ...current,
+          item,
+          ...(orderKey === undefined ? {} : { orderKey }),
+        });
+        changed = true;
+      }
       continue;
     }
+
+    let row = pageRow;
     if (row.visibility === "local" || row.sourceThreadId === projection.thread.id) {
       const currentItem = turnItemById.get(String(row.sourceItemId));
       if (currentItem !== undefined) {
-        // A live event may have hidden this item while the page was in flight.
-        // Do not resurrect the stale page copy. Retained interrupt requests are
-        // the exception: they intentionally exist outside the bounded visible
-        // window and should become visible when their history page arrives.
-        if (currentItem.type !== "run_interrupt_request") {
-          continue;
-        }
         if (
           !isOrchestrationV2TurnItemVisible({
             item: currentItem,
@@ -106,28 +121,80 @@ export function mergeOlderHistoryIntoProjection(
           continue;
         }
         row = { ...row, item: currentItem };
+      } else {
+        turnItemById.set(String(row.sourceItemId), row.item);
       }
     }
-    existingKeys.add(key);
-    prepended.push(row);
+    projected.set(key, row);
+    additions.push(row);
+    changed = true;
   }
-  if (prepended.length === 0) {
-    return projection;
+  if (!changed) return projection;
+
+  const additionKeys = new Set(additions.map(projectedItemKey));
+  const rows = projection.visibleTurnItems
+    .map((row) => projected.get(projectedItemKey(row)) ?? row)
+    .filter((row) => !additionKeys.has(projectedItemKey(row)));
+  const legacyAdditions = additions.filter((row) => row.orderKey === undefined);
+  rows.unshift(...legacyAdditions);
+  const canonicalBySource = new Map<string, OrchestrationV2ProjectedTurnItem[]>();
+  for (const row of additions) {
+    if (row.orderKey === undefined) continue;
+    const sourceThreadId = String(row.orderKey.sourceThreadId);
+    const group = canonicalBySource.get(sourceThreadId) ?? [];
+    group.push(row);
+    canonicalBySource.set(sourceThreadId, group);
+  }
+  for (const [sourceThreadId, sourceRows] of canonicalBySource) {
+    sourceRows.sort(
+      (left, right) =>
+        left.orderKey!.ordinal - right.orderKey!.ordinal ||
+        String(left.orderKey!.itemId).localeCompare(String(right.orderKey!.itemId)),
+    );
+    for (const row of sourceRows) {
+      const orderKey = row.orderKey!;
+      let insertionIndex = -1;
+      let lastSourceIndex = -1;
+      for (let index = 0; index < rows.length; index += 1) {
+        const candidate = rows[index]!;
+        const candidateSource = String(
+          candidate.orderKey?.sourceThreadId ?? candidate.sourceThreadId,
+        );
+        if (candidateSource !== sourceThreadId) continue;
+        lastSourceIndex = index;
+        const candidateOrdinal = candidate.orderKey?.ordinal ?? candidate.item.ordinal;
+        const candidateItemId = String(candidate.orderKey?.itemId ?? candidate.sourceItemId);
+        if (
+          candidateOrdinal > orderKey.ordinal ||
+          (candidateOrdinal === orderKey.ordinal &&
+            candidateItemId.localeCompare(String(orderKey.itemId)) > 0)
+        ) {
+          insertionIndex = index;
+          break;
+        }
+      }
+      let at = rows.length;
+      if (insertionIndex >= 0) at = insertionIndex;
+      else if (lastSourceIndex >= 0) at = lastSourceIndex + 1;
+      rows.splice(at, 0, row);
+    }
   }
 
-  const visibleTurnItems = renumberVisible([...prepended, ...projection.visibleTurnItems]);
-
-  for (const row of prepended) {
+  const visibleTurnItems = renumberVisible(rows);
+  for (const row of visibleTurnItems) {
     if (row.visibility === "local" || row.sourceThreadId === projection.thread.id) {
-      if (!turnItemById.has(String(row.sourceItemId))) {
+      const currentItem = turnItemById.get(String(row.sourceItemId));
+      if (
+        currentItem === undefined ||
+        DateTime.toEpochMillis(currentItem.updatedAt) < DateTime.toEpochMillis(row.item.updatedAt)
+      ) {
         turnItemById.set(String(row.sourceItemId), row.item);
       }
     }
   }
-
   return {
     ...projection,
-    turnItems: [...turnItemById.values()],
+    turnItems: Array.from(turnItemById.values()),
     visibleTurnItems,
   };
 }

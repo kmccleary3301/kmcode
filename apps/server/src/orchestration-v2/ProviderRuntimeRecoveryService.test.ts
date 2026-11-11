@@ -156,6 +156,11 @@ it.effect("expires orphaned runtime requests before command readiness", () => {
     providerThreads: [],
     runs: [],
     nodes: [],
+    attempts: [],
+    providerTurns: [],
+    subagents: [],
+    messages: [],
+    turnItems: [],
   } as unknown as OrchestrationV2ThreadProjection;
   const layer = ProviderRuntimeRecovery.layer.pipe(
     Layer.provide(ServerSettings.layerTest()),
@@ -207,6 +212,10 @@ it.effect("preserves async questions across startup and shutdown", () => {
     runs: [],
     nodes: [],
     turnItems: [],
+    attempts: [],
+    providerTurns: [],
+    subagents: [],
+    messages: [],
   } as unknown as OrchestrationV2ThreadProjection;
   const commitCommand = vi.fn(() => Effect.die("an async question needs no process-loss write"));
   const layer = ProviderRuntimeRecovery.layer.pipe(
@@ -256,6 +265,11 @@ it.effect("uses the same reconciliation path to cancel runtime requests during s
     providerThreads: [],
     runs: [],
     nodes: [],
+    attempts: [],
+    providerTurns: [],
+    subagents: [],
+    messages: [],
+    turnItems: [],
   } as unknown as OrchestrationV2ThreadProjection;
   const layer = ProviderRuntimeRecovery.layer.pipe(
     Layer.provide(ServerSettings.layerTest()),
@@ -306,16 +320,25 @@ it.effect(
     const runId = RunId.make("run_waiting_checkpoint");
     const providerThreadId = ProviderThreadId.make("provider_thread_waiting_checkpoint");
     const providerInstanceId = ProviderInstanceId.make("claude");
+    const providerSessionId = ProviderSessionId.make("provider_session_waiting_checkpoint");
     const backgroundItemId = TurnItemId.make("turn_item_waiting_checkpoint");
     let committedInput: Parameters<EventSink.EventSinkV2["Service"]["commitCommand"]>[0] | null =
       null;
     const projection = {
       thread: { id: threadId },
       runtimeRequests: [],
-      providerSessions: [],
+      providerSessions: [
+        {
+          id: providerSessionId,
+          driver: ProviderDriverKind.make("claude"),
+          providerInstanceId,
+          status: "ready",
+        },
+      ],
       providerThreads: [
         {
           id: providerThreadId,
+          providerSessionId,
           driver: ProviderDriverKind.make("claude"),
           providerInstanceId,
           status: "idle",
@@ -428,16 +451,25 @@ it.effect(
     const codexThreadId = ProviderThreadId.make("provider_thread_switch_note_codex");
     const claude = ProviderInstanceId.make("claude");
     const codex = ProviderInstanceId.make("codex");
+    const claudeProviderSessionId = ProviderSessionId.make("provider_session_switch_note_claude");
     let committedInput: Parameters<EventSink.EventSinkV2["Service"]["commitCommand"]>[0] | null =
       null;
     // Claude launched a background subagent, then the thread switched to Codex.
     const projection = {
       thread: { id: threadId },
       runtimeRequests: [],
-      providerSessions: [],
+      providerSessions: [
+        {
+          id: claudeProviderSessionId,
+          driver: ProviderDriverKind.make("claudeAgent"),
+          providerInstanceId: claude,
+          status: "ready",
+        },
+      ],
       providerThreads: [
         {
           id: claudeThreadId,
+          providerSessionId: claudeProviderSessionId,
           ownerNodeId: null,
           driver: ProviderDriverKind.make("claudeAgent"),
           providerInstanceId: claude,
@@ -480,6 +512,7 @@ it.effect(
           nodeId: null,
           providerThreadId: claudeThreadId,
           nativeItemRef: null,
+          providerInstanceId: claude,
           type: "subagent",
           title: "Background subagent",
           status: "running",
@@ -762,6 +795,7 @@ it.effect(
         {
           id: providerThreadId,
           driver: ProviderDriverKind.make("codex"),
+          providerSessionId,
           providerInstanceId: ProviderInstanceId.make("codex"),
           status: "active",
         },
@@ -879,6 +913,9 @@ it.effect(
       "provider_thread_recovery_background_secondary",
     );
     const providerSessionId = ProviderSessionId.make("provider_session_recovery_background");
+    const secondaryProviderSessionId = ProviderSessionId.make(
+      "provider_session_recovery_background_secondary",
+    );
     const settledStaleItemId = TurnItemId.make("turn_item_recovery_background_stale");
     const activeRunItemId = TurnItemId.make("turn_item_recovery_background_active");
     const nullRunCommandItemId = TurnItemId.make("turn_item_recovery_background_null_run");
@@ -898,10 +935,17 @@ it.effect(
           providerInstanceId: claudeInstanceId,
           status: "ready",
         },
+        {
+          id: secondaryProviderSessionId,
+          driver: ProviderDriverKind.make("claude"),
+          providerInstanceId: secondaryInstanceId,
+          status: "ready",
+        },
       ],
       providerThreads: [
         {
           id: idleProviderThreadId,
+          providerSessionId,
           driver: ProviderDriverKind.make("claude"),
           // Index-0 is intentionally a different instance so misattribution
           // to providerThreads[0] fails the assertions below.
@@ -911,6 +955,7 @@ it.effect(
         },
         {
           id: activeProviderThreadId,
+          providerSessionId,
           driver: ProviderDriverKind.make("claude"),
           providerInstanceId: claudeInstanceId,
           status: "active",
@@ -918,6 +963,7 @@ it.effect(
         },
         {
           id: secondaryProviderThreadId,
+          providerSessionId: secondaryProviderSessionId,
           driver: ProviderDriverKind.make("claude"),
           providerInstanceId: secondaryInstanceId,
           status: "idle",
@@ -930,11 +976,13 @@ it.effect(
           id: settledRunId,
           status: "completed",
           providerInstanceId: claudeInstanceId,
+          providerThreadId: idleProviderThreadId,
         },
         {
           id: activeRunId,
           status: "running",
           providerInstanceId: claudeInstanceId,
+          providerThreadId: activeProviderThreadId,
         },
       ],
       attempts: [
@@ -1088,15 +1136,24 @@ it.effect(
     const orphanWaitNodeId = NodeId.make("node_recovery_orphan_wait");
     const persistentMonitorNodeId = NodeId.make("node_recovery_persistent_monitor");
     const codexInstanceId = ProviderInstanceId.make("codex");
+    const providerSessionId = ProviderSessionId.make("provider_session_recovery_orphan_wait");
     let committedInput: Parameters<EventSink.EventSinkV2["Service"]["commitCommand"]>[0] | null =
       null;
     const projection = {
       thread: { id: threadId, providerInstanceId: codexInstanceId },
       runtimeRequests: [],
-      providerSessions: [],
+      providerSessions: [
+        {
+          id: providerSessionId,
+          driver: ProviderDriverKind.make("codex"),
+          providerInstanceId: codexInstanceId,
+          status: "ready",
+        },
+      ],
       providerThreads: [
         {
           id: providerThreadId,
+          providerSessionId,
           driver: ProviderDriverKind.make("codex"),
           providerInstanceId: codexInstanceId,
           status: "idle",
@@ -1104,7 +1161,14 @@ it.effect(
         },
       ],
       providerTurns: [],
-      runs: [{ id: settledRunId, status: "completed", providerInstanceId: codexInstanceId }],
+      runs: [
+        {
+          id: settledRunId,
+          status: "completed",
+          providerInstanceId: codexInstanceId,
+          providerThreadId,
+        },
+      ],
       attempts: [],
       nodes: [
         { id: orphanWaitNodeId, runId: settledRunId, status: "running", kind: "tool_call" },
@@ -1209,15 +1273,24 @@ it.effect(
     const staleItemId = TurnItemId.make("turn_item_recovery_subagent_stale");
     const doneItemId = TurnItemId.make("turn_item_recovery_subagent_done");
     const claudeInstanceId = ProviderInstanceId.make("claude");
+    const providerSessionId = ProviderSessionId.make("provider_session_recovery_subagent");
     let committedInput: Parameters<EventSink.EventSinkV2["Service"]["commitCommand"]>[0] | null =
       null;
     const projection = {
       thread: { id: threadId },
       runtimeRequests: [],
-      providerSessions: [],
+      providerSessions: [
+        {
+          id: providerSessionId,
+          driver: ProviderDriverKind.make("claude"),
+          providerInstanceId: claudeInstanceId,
+          status: "ready",
+        },
+      ],
       providerThreads: [
         {
           id: providerThreadId,
+          providerSessionId,
           driver: ProviderDriverKind.make("claude"),
           providerInstanceId: claudeInstanceId,
           status: "idle",
@@ -1226,7 +1299,14 @@ it.effect(
       ],
       providerTurns: [],
       // Settled run: the stale-item loop owns it, not the nonterminal loop.
-      runs: [{ id: settledRunId, status: "completed", providerInstanceId: claudeInstanceId }],
+      runs: [
+        {
+          id: settledRunId,
+          status: "completed",
+          providerInstanceId: claudeInstanceId,
+          providerThreadId,
+        },
+      ],
       attempts: [],
       nodes: [
         { id: staleSubagentNodeId, runId: settledRunId, status: "running" },
@@ -1473,7 +1553,7 @@ it.effect("leaves delegated tasks to their own child threads after process loss"
           ? [event.payload.id]
           : [],
     );
-    // The cut run itself is cancelled; only the provider-native subagent dies with it.
+    // The run is recovered, but provider work without a bound session remains untouched.
     assert.isTrue(
       events.some(
         (event) =>
@@ -1484,14 +1564,13 @@ it.effect("leaves delegated tasks to their own child threads after process loss"
     );
     assert.notInclude(touched, settledTaskId);
     assert.notInclude(touched, runningTaskId);
-    assert.include(touched, nativeSubagentId);
-    // The note lists only provider-native work: delegated tasks report back on their own.
+    assert.notInclude(touched, nativeSubagentId);
     const noted = events.flatMap((event) =>
       event.type === "run.background-work-cancelled"
         ? event.payload.restartCancelledBackgroundWork.map((work) => work.label)
         : [],
     );
-    assert.deepEqual(noted, [`subagent ${nativeSubagentId}`]);
+    assert.deepEqual(noted, []);
   }).pipe(Effect.provide(layer));
 });
 
@@ -1737,7 +1816,7 @@ describe("ProviderRuntimeRecoveryService safe native settlement inspection", () 
     readonly runStatus: OrchestrationV2Run["status"];
     readonly expectedChildStatus: "completed" | "interrupted";
   }>)(
-    "settles a stale provider-native subagent conservatively when its parent run is $runStatus",
+    "ignores persisted async, job, and newer-timestamp claims after process loss when the parent run is $runStatus",
     ({ runStatus, expectedChildStatus }) => {
       const fixture = makeRecoveryFixture();
       const parentItem = fixture.projection.turnItems[0];
@@ -1931,12 +2010,12 @@ describe("ProviderRuntimeRecoveryService safe native settlement inspection", () 
         };
         assert.equal(statusForTurnItem(staleChildItem.id), expectedChildStatus);
         assert.equal(statusForSubagent(subagent.id), expectedChildStatus);
-        assert.equal(statusForTurnItem(laterChildItem.id), "cancelled");
-        assert.equal(statusForSubagent(laterSubagent.id), "cancelled");
-        assert.equal(statusForTurnItem(asyncChildItem.id), "cancelled");
-        assert.equal(statusForSubagent(asyncSubagent.id), "cancelled");
-        assert.equal(statusForTurnItem(activeJobChildItem.id), "cancelled");
-        assert.equal(statusForSubagent(activeJobSubagent.id), "cancelled");
+        assert.equal(statusForTurnItem(laterChildItem.id), expectedChildStatus);
+        assert.equal(statusForSubagent(laterSubagent.id), expectedChildStatus);
+        assert.equal(statusForTurnItem(asyncChildItem.id), "interrupted");
+        assert.equal(statusForSubagent(asyncSubagent.id), "interrupted");
+        assert.equal(statusForTurnItem(activeJobChildItem.id), "interrupted");
+        assert.equal(statusForSubagent(activeJobSubagent.id), "interrupted");
       }).pipe(Effect.provide(layer));
     },
   );

@@ -20,8 +20,11 @@ import {
   type TimelineEntry,
 } from "../../session-logic";
 import { makeStreamingTimelineFixture } from "../../test-fixtures";
-import type { TurnDiffSummary } from "../../types";
+import type { ChatMessage, TurnDiffSummary } from "../../types";
 import { describe, expect, it } from "vite-plus/test";
+import { EMPTY_THREAD_ACTIVITY_STATE } from "@t3tools/client-runtime/state/threads";
+import { mergeActivityRowsIntoVisibleItems } from "./timelineActivity";
+import type { TimelineActivityGroup } from "./timelineActivity";
 import { MessageId, RunId } from "@t3tools/contracts";
 import {
   computeStableMessagesTimelineRows,
@@ -2458,7 +2461,8 @@ describe("deriveMessagesTimelineRows", () => {
 
     // Each fold opens on its own.
     const launchFold = settled.find((row) => row.kind === "turn-fold");
-    if (launchFold?.kind !== "turn-fold") throw new Error("Expected the launch fold");
+    if (launchFold?.kind !== "turn-fold" || launchFold.runId === null)
+      throw new Error("Expected the launch fold to have a run");
     const expanded = rows({
       resume: "completed",
       working: false,
@@ -7441,5 +7445,219 @@ describe("timeline activity disclosure policy and progressive disclosure transit
 
     expect(rows.some((row) => row.kind === "turn-fold" || row.kind === "work-toggle")).toBe(false);
     expect(workRows.map((row) => row.id)).toEqual(["read-1", "read-2"]);
+  });
+});
+describe("summary-backed activity folds", () => {
+  const threadId = ThreadId.make("summary-thread");
+  const activityGroup = (
+    groupStartItemId: string,
+    firstItemId: string,
+    firstOrdinal: number,
+    lastItemId: string,
+    lastOrdinal: number,
+    runId: RunId | null = null,
+  ): TimelineActivityGroup => {
+    const groupStart = TurnItemId.make(groupStartItemId);
+    const firstItem = TurnItemId.make(firstItemId);
+    const lastItem = TurnItemId.make(lastItemId);
+    const key = JSON.stringify([threadId, groupStart]);
+    const initialRequest = {
+      sourceThreadId: threadId,
+      groupStartItemId: groupStart,
+      anchorItemId: lastItem,
+    };
+    return {
+      key,
+      summary: {
+        sourceThreadId: threadId,
+        groupStartItemId: groupStart,
+        turnStartItemId: groupStart,
+        runId,
+        firstItemId: firstItem,
+        firstOrdinal,
+        lastItemId: lastItem,
+        lastOrdinal,
+        activityCount: lastOrdinal - firstOrdinal + 1,
+        countsByType: [{ type: "command_execution", count: 2 }],
+        statusCounts: [{ status: "completed", count: 2 }],
+        runStatus: "completed",
+        stepCount: 4,
+        filesEditedCount: 2,
+        diffStats: { added: 17, removed: 5 },
+        hasFailure: true,
+        labelPreview: "Inspecting the workspace",
+        intentPreview: "Check the failing activity",
+        startedAt: DateTime.makeUnsafe("2026-10-20T10:00:00.000Z"),
+        endedAt: DateTime.makeUnsafe("2026-10-20T10:00:24.000Z"),
+      },
+      loadedCount: 0,
+      loadedFirstOrdinal: null,
+      loadedFirstItemId: null,
+      loadedLastOrdinal: null,
+      loadedLastItemId: null,
+      initialRequest,
+      previousRequest: initialRequest,
+      nextRequest: null,
+      loading: false,
+      error: null,
+    };
+  };
+  const entry = (
+    entryId: string,
+    itemId: string,
+    ordinal: number,
+    role: "user" | "assistant",
+    runId: RunId | null = null,
+  ): TimelineEntry => {
+    const createdAt = `2026-10-20T10:00:${String(ordinal).padStart(2, "0")}.000Z`;
+    const sourceItemId = TurnItemId.make(itemId);
+    return {
+      id: entryId,
+      kind: "message",
+      createdAt,
+      message: {
+        id: MessageId.make(entryId),
+        role,
+        text: entryId,
+        runId,
+        streaming: false,
+        createdAt,
+        updatedAt: createdAt,
+      } as ChatMessage,
+      projectedItem: {
+        position: ordinal,
+        visibility: "local",
+        sourceThreadId: threadId,
+        sourceItemId,
+        item: { ordinal } as OrchestrationV2TurnItem,
+        orderKey: { sourceThreadId: threadId, ordinal, itemId: sourceItemId },
+      },
+    };
+  };
+  const deriveRows = (
+    timelineEntries: ReadonlyArray<TimelineEntry>,
+    activityGroups: ReadonlyArray<TimelineActivityGroup>,
+    expandedActivityGroupKeys?: ReadonlySet<string>,
+  ) =>
+    deriveMessagesTimelineRows({
+      timelineEntries,
+      activityGroups,
+      ...(expandedActivityGroupKeys === undefined ? {} : { expandedActivityGroupKeys }),
+      isWorking: false,
+      turnDiffSummaries: [],
+      supportsConversationRollback: false,
+    });
+
+  it("renders complete summary metadata when the activity page has no raw rows", () => {
+    const group = activityGroup("start", "user-item", 1, "answer-item", 2);
+    const rows = deriveRows(
+      [entry("prompt", "user-item", 1, "user"), entry("answer", "answer-item", 2, "assistant")],
+      [group],
+    );
+    const fold = rows.find((row) => row.kind === "turn-fold");
+
+    expect(fold).toMatchObject({
+      kind: "turn-fold",
+      id: `turn-fold:${group.key}`,
+      runId: null,
+      expanded: false,
+      label: "Worked for 24s · 4 steps · edited 2 files +17 −5",
+      diffStats: { added: 17, removed: 5 },
+      activityGroup: {
+        loadedCount: 0,
+        summary: {
+          hasFailure: true,
+          labelPreview: "Inspecting the workspace",
+          intentPreview: "Check the failing activity",
+          stepCount: 4,
+          filesEditedCount: 2,
+          diffStats: { added: 17, removed: 5 },
+        },
+      },
+    });
+  });
+
+  it("keeps null-run user turns in separate stable summary groups", () => {
+    const first = activityGroup("first-start", "first-user-item", 1, "first-answer-item", 2);
+    const second = activityGroup("second-start", "second-user-item", 3, "second-answer-item", 4);
+    const rows = deriveRows(
+      [
+        entry("first-prompt", "first-user-item", 1, "user"),
+        entry("first-answer", "first-answer-item", 2, "assistant"),
+        entry("second-prompt", "second-user-item", 3, "user"),
+        entry("second-answer", "second-answer-item", 4, "assistant"),
+      ],
+      [first, second],
+    );
+    const folds = rows.filter((row) => row.kind === "turn-fold");
+
+    expect(folds.map((row) => row.id)).toEqual([
+      `turn-fold:${first.key}`,
+      `turn-fold:${second.key}`,
+    ]);
+    expect(folds.map((row) => row.runId)).toEqual([null, null]);
+  });
+
+  it("emits previous and next page boundary rows for an expanded group", () => {
+    const base = activityGroup("start", "first-item", 1, "last-item", 3, RunId.make("run"));
+    const group: TimelineActivityGroup = {
+      ...base,
+      loadedCount: 1,
+      loadedFirstOrdinal: 2,
+      loadedFirstItemId: "middle-item",
+      loadedLastOrdinal: 2,
+      loadedLastItemId: "middle-item",
+      previousRequest: {
+        sourceThreadId: threadId,
+        groupStartItemId: base.summary.groupStartItemId,
+        cursor: "previous-cursor",
+        direction: "previous",
+      },
+      nextRequest: {
+        sourceThreadId: threadId,
+        groupStartItemId: base.summary.groupStartItemId,
+        cursor: "next-cursor",
+        direction: "next",
+      },
+    };
+    const rows = deriveRows(
+      [
+        entry("prompt", "first-item", 1, "user", RunId.make("run")),
+        entry("loaded-step", "middle-item", 2, "assistant", RunId.make("run")),
+        entry("answer", "last-item", 3, "assistant", RunId.make("run")),
+      ],
+      [group],
+      new Set([group.key]),
+    );
+    const boundaries = rows.filter((row) => row.kind === "activity-page-boundary");
+
+    expect(boundaries).toMatchObject([
+      {
+        direction: "previous",
+        request: { cursor: "previous-cursor", direction: "previous" },
+      },
+      {
+        direction: "next",
+        request: { cursor: "next-cursor", direction: "next" },
+      },
+    ]);
+  });
+});
+
+describe("legacy activity timeline mode", () => {
+  it("passes the visible projection through unchanged", () => {
+    const visibleTurnItems = [
+      {
+        position: 0,
+        visibility: "local" as const,
+        sourceThreadId: ThreadId.make("legacy-thread"),
+        sourceItemId: TurnItemId.make("legacy-item"),
+        item: { ordinal: 0 } as OrchestrationV2TurnItem,
+      },
+    ];
+
+    expect(mergeActivityRowsIntoVisibleItems(visibleTurnItems, EMPTY_THREAD_ACTIVITY_STATE)).toBe(
+      visibleTurnItems,
+    );
   });
 });

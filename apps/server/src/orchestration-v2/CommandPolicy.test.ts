@@ -1,11 +1,15 @@
 import { assert, it } from "@effect/vitest";
 import {
   CommandId,
+  NodeId,
   type OrchestrationV2ProviderCapabilities,
   type OrchestrationV2ThreadProjection,
+  ProviderDriverKind,
   ProviderInstanceId,
   ProviderSessionId,
   ProviderThreadId,
+  ProviderTurnId,
+  RunAttemptId,
   RunId,
   ThreadId,
 } from "@t3tools/contracts";
@@ -19,6 +23,9 @@ import * as CommandPolicy from "./CommandPolicy.ts";
 const commandId = CommandId.make("command-policy-test");
 const threadId = ThreadId.make("command-policy-thread");
 const activeRunId = RunId.make("command-policy-active-run");
+const activeAttemptId = RunAttemptId.make("command-policy-active-attempt");
+const activeTurnId = ProviderTurnId.make("command-policy-active-turn");
+const rootNodeId = NodeId.make("command-policy-root-node");
 
 const baseCapabilities: OrchestrationV2ProviderCapabilities = CodexProviderCapabilitiesV2;
 
@@ -30,20 +37,56 @@ function capabilities(
 
 function dispatchProjection(
   sessionCapabilities?: OrchestrationV2ProviderCapabilities,
+  options: {
+    readonly driver?: string;
+    readonly runStatus?: "preparing" | "starting" | "running" | "waiting";
+    readonly runningTurn?: boolean;
+  } = {},
 ): OrchestrationV2ThreadProjection {
   const providerThreadId = ProviderThreadId.make("command-policy-provider-thread");
   const providerSessionId = ProviderSessionId.make("command-policy-provider-session");
   return {
+    thread: {
+      activeProviderThreadId: sessionCapabilities === undefined ? null : providerThreadId,
+    },
     runs:
       sessionCapabilities === undefined
         ? []
-        : [{ id: activeRunId, status: "running", providerThreadId }],
+        : [
+            {
+              id: activeRunId,
+              status: options.runStatus ?? "running",
+              activeAttemptId: options.runningTurn === false ? null : activeAttemptId,
+              providerThreadId,
+              rootNodeId,
+            },
+          ],
     providerThreads:
-      sessionCapabilities === undefined ? [] : [{ id: providerThreadId, providerSessionId }],
+      sessionCapabilities === undefined
+        ? []
+        : [
+            {
+              id: providerThreadId,
+              providerSessionId,
+              driver: ProviderDriverKind.make(options.driver ?? "codex"),
+            },
+          ],
     providerSessions:
       sessionCapabilities === undefined
         ? []
         : [{ id: providerSessionId, capabilities: sessionCapabilities }],
+    providerTurns:
+      sessionCapabilities === undefined || options.runningTurn === false
+        ? []
+        : [
+            {
+              id: activeTurnId,
+              providerThreadId,
+              nodeId: rootNodeId,
+              runAttemptId: activeAttemptId,
+              status: "running",
+            },
+          ],
   } as unknown as OrchestrationV2ThreadProjection;
 }
 
@@ -98,20 +141,110 @@ it("resolves automatic message delivery from authoritative provider capabilities
       { type: "start_immediately" },
       "auto",
     ),
-    { type: "restart_active", targetRunId: activeRunId },
+    { type: "queue_after_active" },
+  );
+});
+
+it("prefers a matching native turn over a stale run status badge", () => {
+  assert.deepEqual(
+    CommandPolicy.resolveMessageDispatchIntent(
+      dispatchProjection(baseCapabilities, { runStatus: "waiting" }),
+      { type: "start_immediately" },
+      "auto",
+    ),
+    { type: "steer_active", targetRunId: activeRunId },
+  );
+});
+
+it("requires the active run's root node and provider thread before steering", () => {
+  const projection = dispatchProjection(baseCapabilities, { runStatus: "waiting" });
+  const turn = projection.providerTurns[0]!;
+  const otherProviderThreadId = ProviderThreadId.make("command-policy-other-provider-thread");
+  for (const candidate of [
+    {
+      ...projection,
+      providerTurns: [{ ...turn, nodeId: NodeId.make("command-policy-subagent-node") }],
+    },
+    {
+      ...projection,
+      providerTurns: [{ ...turn, providerThreadId: otherProviderThreadId }],
+    },
+    {
+      ...projection,
+      thread: { ...projection.thread, activeProviderThreadId: otherProviderThreadId },
+    },
+  ]) {
+    assert.deepEqual(
+      CommandPolicy.resolveMessageDispatchIntent(candidate, { type: "start_immediately" }, "auto"),
+      { type: "queue_after_active" },
+    );
+  }
+});
+
+it.each(["pi", "omp"] as const)(
+  "does not same-session resume a %s run unless the root is waiting",
+  (driver) => {
+    assert.deepEqual(
+      CommandPolicy.resolveMessageDispatchIntent(
+        dispatchProjection(baseCapabilities, {
+          driver,
+          runStatus: "running",
+          runningTurn: false,
+        }),
+        { type: "start_immediately" },
+        "auto",
+      ),
+      { type: "queue_after_active" },
+    );
+  },
+);
+it.each(["pi", "omp"] as const)(
+  "resumes a waiting %s session at the next prompt boundary without a live turn",
+  (driver) => {
+    const projection = dispatchProjection(baseCapabilities, {
+      driver,
+      runStatus: "waiting",
+      runningTurn: false,
+    });
+    assert.deepEqual(
+      CommandPolicy.resolveMessageDispatchIntent(projection, { type: "start_immediately" }, "auto"),
+      { type: "steer_active", targetRunId: activeRunId },
+    );
+  },
+);
+
+it("keeps deliberate Queue after the active run and never restarts unsupported steering", () => {
+  const requestedQueue = { type: "queue_after_active" } as const;
+  assert.deepEqual(
+    CommandPolicy.resolveMessageDispatchIntent(
+      dispatchProjection(baseCapabilities),
+      requestedQueue,
+    ),
+    requestedQueue,
+  );
+  assert.deepEqual(
+    CommandPolicy.resolveMessageDispatchIntent(
+      dispatchProjection(baseCapabilities, {
+        driver: "claude",
+        runStatus: "waiting",
+        runningTurn: false,
+      }),
+      { type: "start_immediately" },
+      "auto",
+    ),
+    { type: "queue_after_active" },
   );
 });
 
 it.each(["preparing", "starting"] as const)(
   "queues an automatic message while the handoff run is %s",
   (status) => {
-    const projection = dispatchProjection(baseCapabilities);
+    const projection = dispatchProjection(baseCapabilities, {
+      runStatus: status,
+      runningTurn: false,
+    });
     assert.deepEqual(
-      CommandPolicy.resolveMessageDispatchIntent(
-        { ...projection, runs: projection.runs.map((run) => ({ ...run, status })) },
-        { type: "start_immediately" },
-        "auto",
-      ),
+      CommandPolicy.resolveMessageDispatchIntent(projection, { type: "start_immediately" }, "auto"),
       { type: "queue_after_active" },
     );
   },

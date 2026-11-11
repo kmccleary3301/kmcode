@@ -7,6 +7,7 @@ import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Schema from "effect/Schema";
+import * as Ref from "effect/Ref";
 import * as TestClock from "effect/testing/TestClock";
 
 import * as ThreadLaunchService from "../orchestration-v2/ThreadLaunchService.ts";
@@ -106,6 +107,49 @@ it.effect("preserves a due run when a save only pads the scheduled hour", () =>
       expect(rescheduled.task.nextRunAt).toBe(
         DateTime.formatIso(DateTime.toUtc(DateTime.add(dueAt, { minutes: 30 }))),
       );
+    }).pipe(Effect.provide(ScheduledTaskService.layer.pipe(Layer.provide(layerDependencies))));
+  }).pipe(Effect.provide(SqlitePersistence.layerMemory)),
+);
+
+it.effect("routes bound scheduled runs through automatic thread admission", () =>
+  Effect.gen(function* () {
+    const sent = yield* Ref.make<ThreadManagementService.ThreadManagementSendInput | null>(null);
+    const layerDependencies = Layer.mergeAll(
+      NodeCrypto.layer,
+      Scheduler.layer,
+      Layer.mock(ThreadLaunchService.ThreadLaunchService)({}),
+      Layer.mock(ThreadManagementService.ThreadManagementService)({
+        sendToThread: (input) => Ref.set(sent, input).pipe(Effect.as({} as never)),
+      }),
+      Layer.mock(SecretRequests.SecretRequests)({}),
+    );
+    yield* Effect.gen(function* () {
+      const service = yield* ScheduledTaskService.ScheduledTaskService;
+      const { task } = yield* service.upsert(
+        yield* decodeUpsertInput({
+          id: "scheduled-task:bound-auto",
+          title: "Bound automation",
+          prompt: "Review the latest changes.",
+          enabled: true,
+          schedule: { type: "interval", everyMs: 60_000 },
+          projectId: "project-scheduled-auto",
+          threadId: "thread-scheduled-auto",
+          workspaceStrategy: { type: "root" },
+          modelSelection: { instanceId: "codex", model: "gpt-5.4" },
+          runtimeMode: "full-access",
+          interactionMode: "default",
+          createdBy: "agent",
+          creationSource: "mcp",
+        }),
+      );
+
+      yield* service.runNow({ id: task.id });
+
+      expect(yield* Ref.get(sent)).toMatchObject({
+        mode: "auto",
+        scheduledTaskId: task.id,
+        text: "Review the latest changes.",
+      });
     }).pipe(Effect.provide(ScheduledTaskService.layer.pipe(Layer.provide(layerDependencies))));
   }).pipe(Effect.provide(SqlitePersistence.layerMemory)),
 );

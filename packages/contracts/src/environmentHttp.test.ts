@@ -1,9 +1,12 @@
 import { describe, expect, it } from "vite-plus/test";
+import * as Schema from "effect/Schema";
 
 import {
   EnvironmentAuthInvalidError,
   EnvironmentInternalError,
   EnvironmentOperationForbiddenError,
+  EnvironmentOrchestrationThreadActivityPageQuery,
+  EnvironmentOrchestrationThreadHistoryQuery,
   EnvironmentRequestInvalidError,
   EnvironmentResourceNotFoundError,
   EnvironmentScopeRequiredError,
@@ -58,5 +61,56 @@ describe("environment HTTP errors", () => {
     errors.forEach((error, index) => {
       expect(error.message).toContain(details[index]);
     });
+  });
+});
+
+describe("orchestration HTTP query contracts", () => {
+  const decodeActivityQuery = Schema.decodeUnknownSync(
+    EnvironmentOrchestrationThreadActivityPageQuery,
+  );
+  const decodeHistoryQuery = Schema.decodeUnknownSync(EnvironmentOrchestrationThreadHistoryQuery);
+
+  it("decodes bounded activity page query values and requires a page selector", () => {
+    expect(
+      decodeActivityQuery({
+        anchorItemId: "item-1",
+        limit: "75",
+        summaryOnly: "true",
+      }),
+    ).toMatchObject({ anchorItemId: "item-1", limit: 75, summaryOnly: true });
+    expect(
+      decodeActivityQuery({
+        sourceThreadId: "thread-1",
+        groupStartItemId: "item-1",
+        cursor: "adjacent-page",
+      }),
+    ).toMatchObject({
+      sourceThreadId: "thread-1",
+      groupStartItemId: "item-1",
+      cursor: "adjacent-page",
+    });
+
+    for (const query of [
+      {},
+      { sourceThreadId: "thread-1" },
+      { groupStartItemId: "item-1" },
+      { anchorItemId: "item-1", limit: "0" },
+      { anchorItemId: "item-1", limit: "76" },
+      { anchorItemId: "item-1", limit: "1.5" },
+      { anchorItemId: "item-1", cursor: "x".repeat(4_097) },
+      { anchorItemId: "item-1", summaryOnly: "yes" },
+    ]) {
+      expect(() => decodeActivityQuery(query)).toThrow();
+    }
+  });
+
+  it("accepts history cursors or direct targets, but never an unanchored request", () => {
+    expect(decodeHistoryQuery({ throughEntryId: "item-1" })).toMatchObject({
+      throughEntryId: "item-1",
+    });
+    expect(decodeHistoryQuery({ cursor: "older-page" })).toMatchObject({
+      cursor: "older-page",
+    });
+    expect(() => decodeHistoryQuery({})).toThrow();
   });
 });

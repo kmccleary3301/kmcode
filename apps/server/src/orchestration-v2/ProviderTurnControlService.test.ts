@@ -228,6 +228,7 @@ it.effect(
           hasUnpairedRunInterruptRequest: () => Effect.die("unused interrupt read"),
           isNodeStored: () => Effect.die("unused node lookup"),
           getThreadAttachmentIds: () => Effect.die("Unused attachment lookup"),
+          getThreadActivityPage: () => Effect.die("unused"),
           getTimelinePage: () => Effect.die("Unused timeline read"),
           searchThread: () => Effect.die("unused thread search"),
           searchThreadStream: () => Stream.empty,

@@ -2479,6 +2479,7 @@ const make = Effect.gen(function* () {
                     attachments: [],
                     modelSelection: target.modelSelection,
                     dispatchMode: { type: "start_immediately" },
+                    deliveryIntent: "auto",
                   })
                   .pipe(
                     Effect.mapError((error) =>

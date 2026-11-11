@@ -104,6 +104,15 @@ Policy:
 - If the user explicitly requests a new turn, queue even if steering is available.
 - If no run is active, start immediately.
 
+Automatic delivery (`deliveryIntent: "auto"`, notifications, delegated completions, scheduled tasks; persisted as `run.automaticDelivery`) follows the next native boundary:
+
+- A running turn that supports active steering receives the message as a steer immediately.
+- Otherwise the message queues and is promoted, in queue order and exactly once, into the next steerable turn. Queued inter-thread messages (agent-created over MCP) batch into that turn the same way.
+- A parked native pi/omp root (run and root node `waiting`) is woken in place: same run and provider session, new attempt and root node. Each root attempt captures its own checkpoint under its own command id. A capture still in flight for the parked attempt commits only if the run has not moved on (`requireRun`); otherwise its receipt is rejected and the live attempt is untouched. Once the parked capture commits the run is completed, and later automatic messages start a new run.
+- A user's explicit Queue item never promotes automatically. A held user item stays held and in place; automatic items may deliver past it, but automation never releases or reorders it.
+- Goal and native maintenance commands always run as their own turn.
+- If a promoted start fails, the item is restored to the queue once, and the parked run is not woken again by the same compensation.
+
 The model supports this because `Run` and `ProviderTurn` are separate. A single app run may have multiple provider-turn attempts when the first attempt was interrupted for steering.
 
 ```ts

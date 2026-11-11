@@ -165,6 +165,125 @@ const addRolledBackRecoveryCandidate = Effect.fn("addRolledBackRecoveryCandidate
   return threadId;
 });
 
+// A runless user turn followed by two command executions: one null-run activity group.
+const addNullRunActivityThread = Effect.fn("addNullRunActivityThread")(function* (suffix: string) {
+  const projectionStore = yield* ProjectionStore.ProjectionStoreV2;
+  const now = yield* DateTime.now;
+  const threadId = ThreadId.make(`thread:${suffix}:null-run`);
+  yield* projectionStore.apply({
+    id: EventId.make(`event:${suffix}:thread-created`),
+    type: "thread.created",
+    threadId,
+    occurredAt: now,
+    payload: {
+      createdBy: "user",
+      creationSource: "web",
+      id: threadId,
+      projectId: ProjectId.make(`project:${suffix}`),
+      title: "Null-run activity",
+      providerInstanceId,
+      modelSelection,
+      runtimeMode: "full-access",
+      interactionMode: "default",
+      branch: null,
+      worktreePath: null,
+      activeProviderThreadId: null,
+      lineage: {
+        parentThreadId: null,
+        relationshipToParent: null,
+        rootThreadId: threadId,
+      },
+      forkedFrom: null,
+      createdAt: now,
+      updatedAt: now,
+      archivedAt: null,
+      settledOverride: null,
+      settledAt: null,
+      lastVisitedAt: null,
+      deletedAt: null,
+    },
+  });
+  yield* projectionStore.apply({
+    id: EventId.make(`event:${suffix}:user`),
+    type: "turn-item.updated",
+    threadId,
+    occurredAt: now,
+    payload: {
+      createdBy: "user",
+      creationSource: "web",
+      id: TurnItemId.make(`turn-item:${suffix}:user`),
+      threadId,
+      runId: null,
+      nodeId: null,
+      providerThreadId: null,
+      providerTurnId: null,
+      nativeItemRef: null,
+      parentItemId: null,
+      ordinal: 100,
+      status: "completed",
+      title: null,
+      startedAt: now,
+      completedAt: now,
+      updatedAt: now,
+      type: "user_message",
+      messageId: MessageId.make(`message:${suffix}:user`),
+      inputIntent: "turn_start",
+      text: "summarize the build",
+      attachments: [],
+    },
+  });
+  yield* projectionStore.apply({
+    id: EventId.make(`event:${suffix}:cmd-1`),
+    type: "turn-item.updated",
+    threadId,
+    occurredAt: now,
+    payload: {
+      id: TurnItemId.make(`turn-item:${suffix}:cmd-1`),
+      threadId,
+      runId: null,
+      nodeId: null,
+      providerThreadId: null,
+      providerTurnId: null,
+      nativeItemRef: null,
+      parentItemId: null,
+      ordinal: 200,
+      status: "completed",
+      title: "bun test",
+      startedAt: now,
+      completedAt: now,
+      updatedAt: now,
+      type: "command_execution",
+      input: "bun test",
+    },
+  });
+  yield* projectionStore.apply({
+    id: EventId.make(`event:${suffix}:cmd-2`),
+    type: "turn-item.updated",
+    threadId,
+    occurredAt: now,
+    payload: {
+      id: TurnItemId.make(`turn-item:${suffix}:cmd-2`),
+      threadId,
+      runId: null,
+      nodeId: null,
+      providerThreadId: null,
+      providerTurnId: null,
+      nativeItemRef: null,
+      parentItemId: null,
+      ordinal: 300,
+      status: "completed",
+      title: "bun run lint",
+      startedAt: now,
+      completedAt: now,
+      updatedAt: now,
+      type: "command_execution",
+      input: "bun run lint",
+    },
+  });
+
+  return threadId;
+});
+
 const addOrphanedRecoveryCandidate = Effect.fn("addOrphanedRecoveryCandidate")(function* (
   suffix: string,
 ) {
@@ -330,6 +449,143 @@ it.effect("memory recovery selection includes unfinished items from missing runs
 
     assert.include(yield* projectionStore.getRecoveryThreadIds("runtime"), threadId);
   }).pipe(Effect.provide(ProjectionStore.layerMemory)),
+);
+
+const nullRunActivitySummaryWindow = Effect.gen(function* () {
+  const projectionStore = yield* ProjectionStore.ProjectionStoreV2;
+  const threadId = yield* addNullRunActivityThread("null-run-summary");
+  const legacy = yield* projectionStore.getThreadSnapshotWindow(threadId, { rowLimit: 50 });
+  assert.lengthOf(legacy.projection.visibleTurnItems, 3);
+  assert.isUndefined(legacy.activityMode);
+  assert.isUndefined(legacy.activitySummaries);
+  const compact = yield* projectionStore.getThreadSnapshotWindow(threadId, {
+    rowLimit: 50,
+    activityMode: "summary-v1",
+  });
+  assert.equal(compact.activityMode, "summary-v1");
+  assert.deepEqual(
+    compact.projection.visibleTurnItems.map((row) => row.sourceItemId),
+    [
+      TurnItemId.make("turn-item:null-run-summary:user"),
+      TurnItemId.make("turn-item:null-run-summary:cmd-1"),
+      TurnItemId.make("turn-item:null-run-summary:cmd-2"),
+    ],
+  );
+  assert.lengthOf(compact.activitySummaries ?? [], 1);
+  const [group] = compact.activitySummaries ?? [];
+  assert.equal(group?.groupStartItemId, "turn-item:null-run-summary:user");
+  assert.isNull(group?.runId ?? null);
+  assert.equal(group?.activityCount, 2);
+  assert.equal(group?.stepCount, 2);
+  assert.equal(group?.labelPreview, "bun test");
+  assert.isNull(group?.intentPreview ?? null);
+});
+
+const nullRunActivityPaging = Effect.gen(function* () {
+  const projectionStore = yield* ProjectionStore.ProjectionStoreV2;
+  const threadId = yield* addNullRunActivityThread("null-run-paging");
+  const groupStartItemId = TurnItemId.make("turn-item:null-run-paging:user");
+  const summaryOnly = yield* projectionStore.getThreadActivityPage({
+    threadId,
+    groupStartItemId,
+    summaryOnly: true,
+  });
+  assert.deepEqual(summaryOnly.items, []);
+  assert.equal(summaryOnly.summary.activityCount, 2);
+  assert.isFalse(summaryOnly.hasNext);
+  const first = yield* projectionStore.getThreadActivityPage({
+    threadId,
+    groupStartItemId,
+    limit: 2,
+  });
+  assert.deepEqual(
+    first.items.map((row) => row.sourceItemId),
+    [groupStartItemId, TurnItemId.make("turn-item:null-run-paging:cmd-1")],
+  );
+  assert.isFalse(first.hasPrevious);
+  assert.isTrue(first.hasNext);
+  assert.isNotNull(first.nextCursor);
+  const second = yield* projectionStore.getThreadActivityPage({
+    threadId,
+    cursor: first.nextCursor!,
+    limit: 2,
+  });
+  assert.deepEqual(
+    second.items.map((row) => row.sourceItemId),
+    [TurnItemId.make("turn-item:null-run-paging:cmd-2")],
+  );
+  assert.isTrue(second.hasPrevious);
+  assert.isFalse(second.hasNext);
+  assert.isNull(second.nextCursor);
+});
+
+// Many raw tool rows after one turn start: the summary window keeps only the newest activity rows.
+const addManyToolRowsThread = Effect.fn("addManyToolRowsThread")(function* (
+  suffix: string,
+  count: number,
+) {
+  const threadId = yield* addNullRunActivityThread(suffix);
+  const projectionStore = yield* ProjectionStore.ProjectionStoreV2;
+  const now = yield* DateTime.now;
+  for (let index = 0; index < count; index += 1) {
+    yield* projectionStore.apply({
+      id: EventId.make(`event:${suffix}:tool-${index}`),
+      type: "turn-item.updated",
+      threadId,
+      occurredAt: now,
+      payload: {
+        id: TurnItemId.make(`turn-item:${suffix}:tool-${index}`),
+        threadId,
+        runId: null,
+        nodeId: null,
+        providerThreadId: null,
+        providerTurnId: null,
+        nativeItemRef: null,
+        parentItemId: null,
+        ordinal: 1000 + index,
+        status: "completed",
+        title: `tool ${index}`,
+        startedAt: now,
+        completedAt: now,
+        updatedAt: now,
+        type: "command_execution",
+        input: `tool ${index}`,
+      },
+    });
+  }
+  return threadId;
+});
+
+const toolRowsSummaryWindow = Effect.gen(function* () {
+  const projectionStore = yield* ProjectionStore.ProjectionStoreV2;
+  const threadId = yield* addManyToolRowsThread("tool-rows-summary", 100);
+  const compact = yield* projectionStore.getThreadSnapshotWindow(threadId, {
+    rowLimit: 75,
+    activityMode: "summary-v1",
+  });
+  assert.equal(compact.projection.visibleTurnItems.length, 76);
+  assert.equal(
+    compact.projection.visibleTurnItems[0]?.sourceItemId,
+    TurnItemId.make("turn-item:tool-rows-summary:user"),
+  );
+  assert.equal(
+    compact.projection.visibleTurnItems.at(-1)?.sourceItemId,
+    TurnItemId.make("turn-item:tool-rows-summary:tool-99"),
+  );
+  const [group] = compact.activitySummaries ?? [];
+  assert.equal(group?.activityCount, 102);
+});
+
+it.effect("memory summary-v1 window caps raw activity rows at the row limit", () =>
+  toolRowsSummaryWindow.pipe(Effect.provide(ProjectionStore.layerMemory)),
+);
+
+it.effect("memory summary-v1 window groups null-run activity and compacts rows", () =>
+  nullRunActivitySummaryWindow.pipe(Effect.provide(ProjectionStore.layerMemory)),
+);
+
+it.effect("memory activity page pages a null-run group by cursor", () =>
+  nullRunActivityPaging.pipe(Effect.provide(ProjectionStore.layerMemory)),
 );
 
 it.effect.each([

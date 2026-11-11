@@ -89,6 +89,8 @@ export type OrchestrationV2CreationSource = typeof OrchestrationV2CreationSource
 
 export const OrchestrationV2ThreadHistoryOrigin = Schema.Literals(["native", "v1_import"]);
 export type OrchestrationV2ThreadHistoryOrigin = typeof OrchestrationV2ThreadHistoryOrigin.Type;
+export const OrchestrationV2ActivityMode = Schema.Literal("summary-v1");
+export type OrchestrationV2ActivityMode = typeof OrchestrationV2ActivityMode.Type;
 
 const OrchestrationV2CreationFields = {
   createdBy: OrchestrationV2Actor,
@@ -571,6 +573,8 @@ export const OrchestrationV2Run = Schema.Struct({
   queuePosition: Schema.optional(Schema.NullOr(PositiveInt)),
   /** Restart recovery holds the queue until the user explicitly resumes it. */
   queueHeld: Schema.optional(Schema.Boolean),
+  /** Automatic admissions queued during provider startup are promoted when its turn becomes live. */
+  automaticDelivery: Schema.optional(Schema.Boolean),
   requestedAt: Schema.DateTimeUtc,
   startedAt: Schema.NullOr(Schema.DateTimeUtc),
   completedAt: Schema.NullOr(Schema.DateTimeUtc),
@@ -640,7 +644,13 @@ export const OrchestrationV2RunAttempt = Schema.Struct({
   providerInstanceId: ProviderInstanceId,
   providerThreadId: ProviderThreadId,
   providerTurnId: Schema.NullOr(ProviderTurnId),
-  reason: Schema.Literals(["initial", "steering_restart", "retry", "provider_recovery"]),
+  reason: Schema.Literals([
+    "initial",
+    "continuation",
+    "steering_restart",
+    "retry",
+    "provider_recovery",
+  ]),
   status: Schema.Literals([
     "pending",
     "running",
@@ -1879,14 +1889,69 @@ const projectedTurnItemArray = <Row extends Schema.Top, Item extends Schema.Top>
     ),
   );
 
+export const OrchestrationV2ThreadActivityOrderKey = Schema.Struct({
+  sourceThreadId: ThreadId,
+  ordinal: NonNegativeInt,
+  itemId: TurnItemId,
+});
+export type OrchestrationV2ThreadActivityOrderKey =
+  typeof OrchestrationV2ThreadActivityOrderKey.Type;
+
 export const OrchestrationV2ProjectedTurnItem = Schema.Struct({
   position: NonNegativeInt,
   visibility: Schema.Literals(["local", "inherited", "synthetic"]),
   sourceThreadId: ThreadId,
   sourceItemId: TurnItemId,
   item: OrchestrationV2TurnItem,
+  /** Canonical source ordering, present on summary-mode history rows. */
+  orderKey: Schema.optionalKey(OrchestrationV2ThreadActivityOrderKey),
 });
 export type OrchestrationV2ProjectedTurnItem = typeof OrchestrationV2ProjectedTurnItem.Type;
+
+export const OrchestrationV2ThreadActivitySummary = Schema.Struct({
+  sourceThreadId: ThreadId,
+  groupStartItemId: TurnItemId,
+  turnStartItemId: Schema.NullOr(TurnItemId),
+  runId: Schema.NullOr(RunId),
+  firstItemId: TurnItemId,
+  firstOrdinal: NonNegativeInt,
+  lastItemId: TurnItemId,
+  lastOrdinal: NonNegativeInt,
+  activityCount: NonNegativeInt,
+  countsByType: Schema.Array(Schema.Struct({ type: Schema.String, count: NonNegativeInt })),
+  statusCounts: Schema.Array(Schema.Struct({ status: Schema.String, count: NonNegativeInt })),
+  runStatus: Schema.NullOr(Schema.String),
+  stepCount: NonNegativeInt,
+  filesEditedCount: NonNegativeInt,
+  diffStats: Schema.Struct({
+    added: NonNegativeInt,
+    removed: NonNegativeInt,
+  }),
+  hasFailure: Schema.Boolean,
+  labelPreview: Schema.NullOr(Schema.String),
+  intentPreview: Schema.NullOr(Schema.String),
+  startedAt: Schema.NullOr(Schema.DateTimeUtc),
+  endedAt: Schema.NullOr(Schema.DateTimeUtc),
+});
+export type OrchestrationV2ThreadActivitySummary = typeof OrchestrationV2ThreadActivitySummary.Type;
+
+export const OrchestrationV2ThreadActivityRow = Schema.Struct({
+  sourceThreadId: ThreadId,
+  sourceItemId: TurnItemId,
+  visibility: Schema.Literals(["local", "inherited", "synthetic"]),
+  ordinal: NonNegativeInt,
+  item: OrchestrationV2TurnItem,
+  orderKey: OrchestrationV2ThreadActivityOrderKey,
+});
+export type OrchestrationV2ThreadActivityRow = typeof OrchestrationV2ThreadActivityRow.Type;
+
+const OrchestrationV2ThreadActivityRowArray = projectedTurnItemArray(
+  OrchestrationV2ThreadActivityRow,
+  OrchestrationV2ThreadActivityRow.mapFields((fields) => ({
+    ...fields,
+    item: ForwardCompatibleUnion(OrchestrationV2TurnItem.members, "type"),
+  })),
+);
 
 export const OrchestrationV2RawProviderEvent = Schema.Struct({
   id: RawEventId,
@@ -3223,11 +3288,25 @@ export const OrchestrationV2Command = Schema.Union([
     threadId: ThreadId,
     queuedRunId: RunId,
     targetRunId: RunId,
+    /** System promotion of an automatic queue item; validates provenance and queue order. */
+    automaticDelivery: Schema.optional(Schema.Boolean),
   }),
   Schema.Struct({
     type: Schema.Literal("queue.resume"),
     commandId: CommandId,
     threadId: ThreadId,
+    /**
+     * Internal compensation after a rejected promoted steer or start. Keeps every
+     * user hold; only a provably automatic queued run may advance. Omitted, the
+     * manual Resume control releases every hold.
+     */
+    preserveHolds: Schema.optional(Schema.Boolean),
+    /**
+     * Set after a parked wake's own start failed: waking the same parked run
+     * again would repeat that failure, so the restored item waits for the next
+     * native boundary instead.
+     */
+    skipParkedWake: Schema.optional(Schema.Boolean),
   }),
   Schema.Struct({
     type: Schema.Literal("queued-run.reorder"),
@@ -3435,6 +3514,7 @@ const OrchestrationV2InternalCommand = Schema.Union([
     messageId: MessageId,
     queuePosition: PositiveInt,
     queueHeld: Schema.optional(Schema.Boolean),
+    previousTargetRun: Schema.optional(OrchestrationV2Run),
   }),
   /**
    * Records or updates a secret an agent asked the user for. Internal so no
@@ -3576,6 +3656,8 @@ export const OrchestrationV2SubscribeThreadInput = Schema.Struct({
   requestCompletionMarker: Schema.optionalKey(Schema.Boolean),
   /** Allows snapshot fallbacks to contain a bounded, pageable history window. */
   acceptBoundedSnapshot: Schema.optionalKey(Schema.Boolean),
+  /** Requests bounded semantic summaries alongside the initial timeline window. */
+  activityMode: Schema.optionalKey(OrchestrationV2ActivityMode),
 });
 export type OrchestrationV2SubscribeThreadInput = typeof OrchestrationV2SubscribeThreadInput.Type;
 
@@ -3615,6 +3697,9 @@ export const OrchestrationV2ThreadBoundedSnapshot = Schema.Struct({
   latestLocalTurnOrdinal: Schema.NullOr(NonNegativeInt),
   /** True when complete turns or required live control state exceed the usual byte budget. */
   payloadBudgetExceeded: Schema.optional(Schema.Boolean),
+  /** Present only when the request opted into semantic activity hydration. */
+  activityMode: Schema.optionalKey(OrchestrationV2ActivityMode),
+  activitySummaries: Schema.optionalKey(Schema.Array(OrchestrationV2ThreadActivitySummary)),
 });
 export type OrchestrationV2ThreadBoundedSnapshot = typeof OrchestrationV2ThreadBoundedSnapshot.Type;
 
@@ -3631,6 +3716,18 @@ export const OrchestrationV2ThreadHistoryPage = Schema.Struct({
   nextCursor: Schema.NullOr(TrimmedNonEmptyString),
   hasMoreHistory: Schema.Boolean,
 });
+export const OrchestrationV2ThreadActivityPage = Schema.Struct({
+  snapshotSequence: NonNegativeInt,
+  sourceThreadId: ThreadId,
+  groupStartItemId: TurnItemId,
+  summary: OrchestrationV2ThreadActivitySummary,
+  items: OrchestrationV2ThreadActivityRowArray,
+  previousCursor: Schema.NullOr(TrimmedNonEmptyString),
+  nextCursor: Schema.NullOr(TrimmedNonEmptyString),
+  hasPrevious: Schema.Boolean,
+  hasNext: Schema.Boolean,
+});
+export type OrchestrationV2ThreadActivityPage = typeof OrchestrationV2ThreadActivityPage.Type;
 export type OrchestrationV2ThreadHistoryPage = typeof OrchestrationV2ThreadHistoryPage.Type;
 
 const knownDomainEventTypes: ReadonlySet<string> = new Set(
@@ -3710,6 +3807,8 @@ export const OrchestrationV2ThreadStreamItem = Schema.Union([
     hasMoreHistory: Schema.optionalKey(Schema.Boolean),
     latestLocalTurnOrdinal: Schema.optionalKey(Schema.NullOr(NonNegativeInt)),
     payloadBudgetExceeded: Schema.optionalKey(Schema.Boolean),
+    activityMode: Schema.optionalKey(OrchestrationV2ActivityMode),
+    activitySummaries: Schema.optionalKey(Schema.Array(OrchestrationV2ThreadActivitySummary)),
   }),
   Schema.Struct({
     kind: Schema.Literal("event"),

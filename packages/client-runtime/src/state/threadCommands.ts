@@ -94,10 +94,14 @@ import {
 import type { EnvironmentRegistry } from "../connection/registry.ts";
 import * as EnvironmentSupervisor from "../connection/supervisor.ts";
 import * as ThreadHistoryController from "./threadHistoryController.ts";
+import { activityPageRequestKey, type ThreadActivityPageRequest } from "./threadActivityMerge.ts";
 
 export type LoadEarlierThreadHistoryInput = {
   readonly threadId: ThreadId;
+  readonly throughEntryId?: string;
 };
+
+export type LoadActivityPageInput = { readonly threadId: ThreadId } & ThreadActivityPageRequest;
 
 export type {
   ArchiveThreadInput,
@@ -371,6 +375,33 @@ export function createThreadEnvironmentAtoms<R, E>(
       scheduler,
       concurrency,
     }),
+    loadActivityPage: createEnvironmentCommand(runtime, {
+      label: "environment-data:commands:thread:load-activity-page",
+      execute: (input: LoadActivityPageInput) =>
+        Effect.gen(function* () {
+          const supervisor = yield* EnvironmentSupervisor.EnvironmentSupervisor;
+          const controller = yield* Effect.serviceOption(
+            ThreadHistoryController.ThreadHistoryController,
+          );
+          if (Option.isNone(controller)) {
+            return {
+              _tag: "noop",
+            } satisfies ThreadHistoryController.ThreadActivityLoadResult;
+          }
+          const { threadId, ...request } = input;
+          return yield* controller.value.loadActivityPage(
+            supervisor.target.environmentId,
+            threadId,
+            request,
+          );
+        }),
+      scheduler,
+      concurrency: {
+        mode: "serial",
+        key: ({ environmentId, input }) =>
+          JSON.stringify([environmentId, input.threadId, activityPageRequestKey(input)]),
+      },
+    }),
     loadEarlierHistory: createEnvironmentCommand(runtime, {
       label: "environment-data:commands:thread:load-earlier-history",
       execute: (input: LoadEarlierThreadHistoryInput) =>
@@ -387,6 +418,7 @@ export function createThreadEnvironmentAtoms<R, E>(
           return yield* controller.value.loadEarlier(
             supervisor.target.environmentId,
             input.threadId,
+            input.throughEntryId,
           );
         }),
       scheduler,

@@ -12,6 +12,7 @@ import {
   RunId,
   RuntimeRequestId,
   ThreadId,
+  OrchestrationV2Run,
 } from "@t3tools/contracts";
 import * as Context from "effect/Context";
 import * as DateTime from "effect/DateTime";
@@ -42,6 +43,16 @@ export const OrchestrationEffectRequestV2 = Schema.Union([
   Schema.Struct({
     type: Schema.Literal("provider-turn.start"),
     runId: RunId,
+    queuedMessagePromotion: Schema.optional(
+      Schema.Struct({
+        queuedRunId: RunId,
+        targetRunId: RunId,
+        messageId: Schema.optional(MessageId),
+        queuePosition: Schema.Number,
+        queueHeld: Schema.optional(Schema.Boolean),
+        previousTargetRun: Schema.optional(OrchestrationV2Run),
+      }),
+    ),
   }),
   Schema.Struct({
     type: Schema.Literal("provider-turn.interrupt"),
@@ -55,12 +66,15 @@ export const OrchestrationEffectRequestV2 = Schema.Union([
     providerThreadId: ProviderThreadId,
     providerTurnId: ProviderTurnId,
     messageId: MessageId,
+    deliveryIntent: Schema.optional(Schema.Literal("auto")),
     queuedMessagePromotion: Schema.optional(
       Schema.Struct({
         queuedRunId: RunId,
         targetRunId: RunId,
+        messageId: Schema.optional(MessageId),
         queuePosition: Schema.Number,
         queueHeld: Schema.optional(Schema.Boolean),
+        previousTargetRun: Schema.optional(OrchestrationV2Run),
       }),
     ),
   }),
@@ -276,10 +290,9 @@ type EffectRow = {
   readonly last_error: string | null;
 };
 
-const encodeRequest = Schema.encodeSync(Schema.fromJsonString(OrchestrationEffectRequestV2));
-const decodeRequest = Schema.decodeUnknownEffect(
-  Schema.fromJsonString(OrchestrationEffectRequestV2),
-);
+const requestJsonSchema = Schema.fromJsonString(Schema.toCodecJson(OrchestrationEffectRequestV2));
+const encodeRequest = Schema.encodeSync(requestJsonSchema);
+const decodeRequest = Schema.decodeUnknownEffect(requestJsonSchema);
 
 const rowToEffect = (row: EffectRow) =>
   decodeRequest(row.payload_json).pipe(

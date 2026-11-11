@@ -16,6 +16,7 @@ import { describe, expect, it } from "vite-plus/test";
 
 import { v2Projection, v2Now } from "./orchestrationV2TestFixtures.ts";
 import { EMPTY_THREAD_HISTORY_META } from "./threadHistoryMerge.ts";
+import { EMPTY_THREAD_ACTIVITY_STATE } from "./threadActivityMerge.ts";
 import { createEnvironmentThreadDetailAtoms } from "./threadDetail.ts";
 import type { EnvironmentThreadState } from "./threads.ts";
 
@@ -28,7 +29,11 @@ function threadState(
   partial: Pick<EnvironmentThreadState, "data" | "status" | "error"> &
     Partial<Pick<EnvironmentThreadState, "history">>,
 ): EnvironmentThreadState {
-  return { ...partial, history: partial.history ?? EMPTY_THREAD_HISTORY_META };
+  return {
+    ...partial,
+    history: partial.history ?? EMPTY_THREAD_HISTORY_META,
+    activity: EMPTY_THREAD_ACTIVITY_STATE,
+  };
 }
 
 describe("createEnvironmentThreadDetailAtoms", () => {

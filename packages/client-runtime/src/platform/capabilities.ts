@@ -19,10 +19,11 @@ export interface MobileSshCredentials {
 
 export interface PreparedSshEnvironment {
   readonly bootstrap: DesktopSshEnvironmentBootstrap;
-  readonly bearerToken: string;
+  readonly bearerToken: string | null;
 }
 
 export interface ProvisionedSshEnvironment extends PreparedSshEnvironment {
+  readonly bearerToken: string;
   readonly environmentId: EnvironmentId;
   readonly label: string;
 }
@@ -78,6 +79,12 @@ export class SshEnvironmentGateway extends Context.Service<
       readonly expectedEnvironmentId: EnvironmentId;
       readonly target: DesktopSshEnvironmentTarget;
       readonly credentials?: MobileSshCredentials;
+      /**
+       * The caller holds a bearer for this environment and retries without this
+       * flag if the server rejects it. A gateway may skip pairing and return
+       * `bearerToken: null`, or ignore the flag if it cannot skip pairing.
+       */
+      readonly reuseCredential?: boolean;
     }) => Effect.Effect<PreparedSshEnvironment, ConnectionAttemptError>;
     readonly disconnect: (
       target: DesktopSshEnvironmentTarget,

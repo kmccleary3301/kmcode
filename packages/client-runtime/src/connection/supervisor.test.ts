@@ -1283,7 +1283,7 @@ describe("EnvironmentSupervisor", () => {
     }).pipe(Effect.provide(TestClock.layer())),
   );
 
-  it.effect("uses the full tolerance window for a stalled desktop foreground probe", () =>
+  it.effect("quickly times out a stalled desktop foreground probe", () =>
     Effect.gen(function* () {
       const harness = yield* makeHarness({
         probe: (attempt) => (attempt === 1 ? Effect.never : Effect.void),
@@ -1294,32 +1294,6 @@ describe("EnvironmentSupervisor", () => {
 
       yield* awaitState(supervisor.state, (state) => state.phase === "connected");
       yield* harness.wake("application-active");
-      yield* TestClock.adjust("14999 millis");
-      expect(yield* Ref.get(harness.sessionCount)).toBe(1);
-      yield* TestClock.adjust("1 milli");
-      yield* awaitState(
-        supervisor.state,
-        (state) => state.phase === "connected" && state.generation === 2 && state.attempt === 1,
-      );
-
-      expect(yield* Ref.get(harness.sessionCount)).toBe(2);
-    }).pipe(Effect.provide(TestClock.layer())),
-  );
-
-  it.effect("an explicit retry shortens a stalled desktop foreground probe", () =>
-    Effect.gen(function* () {
-      const harness = yield* makeHarness({
-        probe: (attempt) => (attempt === 1 ? Effect.never : Effect.void),
-      });
-      const supervisor = yield* EnvironmentSupervisor.make(TARGET_ENTRY, {
-        initiallyDesired: true,
-      }).pipe(Effect.provide(harness.dependencies));
-
-      yield* awaitState(supervisor.state, (state) => state.phase === "connected");
-      yield* harness.wake("application-active");
-      yield* TestClock.adjust("5 seconds");
-      yield* supervisor.retryNow;
-      // The retry's 3 second limit applies, not the 10 seconds left of the 15.
       yield* TestClock.adjust("2999 millis");
       expect(yield* Ref.get(harness.sessionCount)).toBe(1);
       yield* TestClock.adjust("1 milli");

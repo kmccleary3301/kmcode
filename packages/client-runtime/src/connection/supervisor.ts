@@ -36,10 +36,10 @@ const RETRY_BASE_DELAY_MS = 1_000;
 const RETRY_MAX_DELAY_MS = 300_000;
 const CONNECTION_ESTABLISHMENT_TIMEOUT = "15 seconds";
 const establishmentTimeout = Duration.fromInputUnsafe(CONNECTION_ESTABLISHMENT_TIMEOUT);
-const CONNECTION_PROBE_TIMEOUT = "15 seconds";
-// Mobile resumes, explicit retries, and offline events want a fast answer:
-// the user is waiting, or the network may be gone.
-const QUICK_CONNECTION_PROBE_TIMEOUT = "3 seconds";
+// How long a live session has to answer a probe. Every probe has someone
+// waiting on the answer: a return to the app, a wake from sleep, an explicit
+// retry, or a network change, and a dead socket only shows itself by timing out.
+const CONNECTION_PROBE_TIMEOUT = "3 seconds";
 const BACKOFF_RESET_AFTER_MS = 30_000;
 // While connected over a fallback route, how often to look for a better one.
 // Network changes and returning to the app also trigger a check.
@@ -617,26 +617,24 @@ export const make = Effect.fn("EnvironmentSupervisor.make")(function* (
     return undefined;
   });
 
-  // How long a signal waits for the live session to answer a probe, or
-  // undefined when the signal does not question the connection.
-  const probeTimeoutFor = (next: SupervisorSignal): Duration.Input | undefined => {
+  // Whether a signal questions the live session, so it must answer a probe.
+  const questionsConnection = (next: SupervisorSignal): boolean => {
     switch (next._tag) {
       case "RetryRequested":
-        return QUICK_CONNECTION_PROBE_TIMEOUT;
+        return true;
       case "NetworkChanged":
-        return next.network === "offline" ? QUICK_CONNECTION_PROBE_TIMEOUT : undefined;
+        return next.network === "offline";
       case "Wakeup":
-        if (next.reason === "application-active") {
-          return CONNECTION_PROBE_TIMEOUT;
-        }
         // A socket opened on the previous network may now be unroutable.
-        return next.reason === "application-active-probe" || next.reason === "network-changed"
-          ? QUICK_CONNECTION_PROBE_TIMEOUT
-          : undefined;
+        return (
+          next.reason === "application-active" ||
+          next.reason === "application-active-probe" ||
+          next.reason === "network-changed"
+        );
       case "ConnectRequested":
       case "DisconnectRequested":
       case "BetterRouteAvailable":
-        return undefined;
+        return false;
     }
   };
 
@@ -677,14 +675,14 @@ export const make = Effect.fn("EnvironmentSupervisor.make")(function* (
       ) {
         yield* requestBetterRouteCheck(lease);
       }
-      const probeTimeout = probeTimeoutFor(next);
-      if (probeTimeout === undefined) {
+      if (!questionsConnection(next)) {
         continue;
       }
       yield* Ref.set(probeUnanswered, true);
       const probe = yield* Effect.forkChild(lease.session.probe);
       // Monotonic nanoseconds, so a wall-clock correction cannot move the deadline.
-      let deadline = (yield* Clock.monotonicTimeNanos) + Duration.toNanosUnsafe(probeTimeout);
+      const deadline =
+        (yield* Clock.monotonicTimeNanos) + Duration.toNanosUnsafe(CONNECTION_PROBE_TIMEOUT);
       for (;;) {
         const remaining = deadline - (yield* Clock.monotonicTimeNanos);
         const probeEvent = yield* Effect.raceAllFirst([
@@ -714,14 +712,6 @@ export const make = Effect.fn("EnvironmentSupervisor.make")(function* (
         if (endDuringProbe !== undefined) {
           yield* Fiber.interrupt(probe);
           return endDuringProbe === "reset";
-        }
-        // A retry or an offline report during a desktop foreground probe wants
-        // its quicker answer, so it shortens the running probe.
-        const signalTimeout = probeTimeoutFor(probeEvent.signal);
-        if (signalTimeout !== undefined) {
-          const signalDeadline =
-            (yield* Clock.monotonicTimeNanos) + Duration.toNanosUnsafe(signalTimeout);
-          if (signalDeadline < deadline) deadline = signalDeadline;
         }
       }
     }

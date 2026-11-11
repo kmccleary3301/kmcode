@@ -125,6 +125,54 @@ const networkPathChanges = Stream.callback<"network-changed">((queue) =>
   ).pipe(Effect.asVoid),
 );
 
+const SUSPEND_CHECK_INTERVAL = "2 seconds";
+const SUSPEND_GAP_MS = 10_000;
+
+/**
+ * Whether a timer tick arrived late enough to mean the device slept. Timers
+ * stop during sleep, so the wall clock jumps between ticks. A page that was
+ * hidden before the tick may only have had its timers throttled, and returning
+ * to it already wakes connections through `visibilitychange`.
+ */
+export function tickFollowsSuspend(input: {
+  readonly previousTickAtMs: number;
+  readonly nowMs: number;
+  readonly visibleBefore: boolean;
+  readonly visibleNow: boolean;
+}): boolean {
+  return (
+    input.visibleBefore &&
+    input.visibleNow &&
+    input.nowMs - input.previousTickAtMs >= SUSPEND_GAP_MS
+  );
+}
+
+/**
+ * Wakes connections after the device sleeps while the page stays visible, as
+ * when a laptop lid closes on the open app. A socket carried across the sleep
+ * can be dead without a close event, and no `visibilitychange` fires to probe it.
+ */
+const suspendResumes = Stream.callback<"application-active">((queue) =>
+  Effect.gen(function* () {
+    let previousTickAtMs = yield* Clock.currentTimeMillis;
+    let visibleBefore = document.visibilityState === "visible";
+    const tick = Effect.gen(function* () {
+      const nowMs = yield* Clock.currentTimeMillis;
+      const visibleNow = document.visibilityState === "visible";
+      if (tickFollowsSuspend({ previousTickAtMs, nowMs, visibleBefore, visibleNow })) {
+        Queue.offerUnsafe(queue, "application-active");
+      }
+      previousTickAtMs = nowMs;
+      visibleBefore = visibleNow;
+    });
+    yield* Effect.sleep(SUSPEND_CHECK_INTERVAL).pipe(
+      Effect.andThen(tick),
+      Effect.forever,
+      Effect.forkScoped,
+    );
+  }),
+);
+
 const layerWakeups = Wakeups.layer({
   changes: Stream.mergeAll(
     [
@@ -149,6 +197,7 @@ const layerWakeups = Wakeups.layer({
         Stream.map(() => "credentials-changed" as const),
       ),
       networkPathChanges,
+      suspendResumes,
     ],
     { concurrency: "unbounded" },
   ),
@@ -296,19 +345,22 @@ const layerCapabilities = Layer.effectContext(
         const bootstrap = yield* Effect.tryPromise({
           try: () =>
             bridge.ensureSshEnvironment(input.target, {
-              issuePairingToken: true,
+              issuePairingToken: input.reuseCredential !== true,
             }),
           catch: sshPreparationError,
         });
-        if (bootstrap.pairingToken === null) {
+        if (input.reuseCredential === true) {
+          return { bootstrap, bearerToken: null };
+        }
+        const pairingToken = bootstrap.pairingToken;
+        if (pairingToken === null) {
           return yield* new ConnectionBlockedError({
             reason: "authentication",
             detail: "The SSH environment did not issue a pairing credential.",
           });
         }
         const access = yield* Effect.tryPromise({
-          try: () =>
-            bridge.bootstrapSshBearerSession(bootstrap.httpBaseUrl, bootstrap.pairingToken!),
+          try: () => bridge.bootstrapSshBearerSession(bootstrap.httpBaseUrl, pairingToken),
           catch: sshPreparationError,
         });
         return {

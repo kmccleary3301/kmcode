@@ -81,7 +81,13 @@ renderer uses the forwarded endpoint through the shared connection runtime.
 [SSH cleanup](../../packages/ssh/src/tunnel.ts) stops a remote server only if the
 launcher owns it; a server it discovered already running must survive a client
 disconnect. Reconnection restores the forward before opening the application
-transport.
+transport. A forward whose SSH process has exited is rebuilt without probing it,
+and after the system resumes from sleep, desktop main closes every forward that
+no longer answers so the renderer's sockets close at once instead of timing out.
+SSH keepalives (5 s, three misses) end a dead forward the same way while awake.
+A reconnect reuses the bearer that last authorized for the connection, since a
+rebuilt forward reaches the same server; the client pairs over SSH again only
+when the server rejects that bearer.
 
 Remote servers can outlive several client releases. Clients must use advertised
 capabilities and handle their absence, rather than assume their own version

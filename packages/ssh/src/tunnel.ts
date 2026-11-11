@@ -145,6 +145,8 @@ export interface SshEnvironmentManagerShape {
     SshCommandError | SshInvalidTargetError,
     SshEnvironmentEffectContext
   >;
+  /** Close tunnels whose SSH forward no longer responds. */
+  readonly dropUnresponsiveTunnels: Effect.Effect<void, never, HttpClient.HttpClient>;
   readonly disconnectEnvironment: (
     target: DesktopSshEnvironmentTarget,
   ) => Effect.Effect<void, SshEnvironmentEffectError, SshEnvironmentEffectContext>;
@@ -505,7 +507,8 @@ const startSshTunnel = Effect.fn("ssh/tunnel.startSshTunnel")(function* (input: 
     "-o",
     "ControlPersist=no",
     "-o",
-    "ServerAliveInterval=15",
+    // SSH exits ~15s after the server stops answering, not 45s, closing forwarded sockets for reconnect.
+    "ServerAliveInterval=5",
     "-o",
     "ServerAliveCountMax=3",
     "-n",
@@ -727,6 +730,19 @@ const makeSshEnvironmentManager = Effect.fn("ssh/tunnel.SshEnvironmentManager.ma
       localPort: entry.localPort,
       remotePort: entry.remotePort,
     });
+  });
+  // Why a tunnel cannot carry traffic, or undefined when it can. An exited ssh
+  // process fails at once: its closed port would keep the readiness poll
+  // spinning until its timeout.
+  const tunnelFailure = Effect.fn("ssh/tunnel.tunnelFailure")(function* (entry: SshTunnelEntry) {
+    const running = yield* Effect.exit(entry.process.isRunning);
+    if (Exit.isSuccess(running) && !running.value) {
+      return "ssh process exited";
+    }
+    const readiness = yield* Effect.exit(
+      waitForHttpReady({ baseUrl: entry.httpBaseUrl, timeoutMs: 2_000 }),
+    );
+    return Exit.isSuccess(readiness) ? undefined : readiness.cause;
   });
 
   yield* Scope.addFinalizer(
@@ -984,10 +1000,8 @@ const makeSshEnvironmentManager = Effect.fn("ssh/tunnel.SshEnvironmentManager.ma
         localPort: entry.localPort,
         remotePort: entry.remotePort,
       });
-      const readinessExit = yield* Effect.exit(
-        waitForHttpReady({ baseUrl: entry.httpBaseUrl, timeoutMs: 2_000 }),
-      );
-      if (Exit.isSuccess(readinessExit)) {
+      const failure = yield* tunnelFailure(entry);
+      if (failure === undefined) {
         yield* Effect.logDebug("ssh.environment.tunnel.reused", {
           ...sshTargetLogFields(resolvedTarget),
           key,
@@ -1001,7 +1015,7 @@ const makeSshEnvironmentManager = Effect.fn("ssh/tunnel.SshEnvironmentManager.ma
         key,
         localPort: entry.localPort,
         remotePort: entry.remotePort,
-        cause: readinessExit.cause,
+        cause: failure,
       });
       tunnels.delete(key);
       yield* closeTunnelEntry(entry);
@@ -1107,6 +1121,36 @@ const makeSshEnvironmentManager = Effect.fn("ssh/tunnel.SshEnvironmentManager.ma
     return runningExit.value ? "running" : "stopped";
   });
 
+  const dropUnresponsiveTunnels = Effect.suspend(() =>
+    Effect.forEach(
+      [...tunnels.values()],
+      (entry) =>
+        tunnelFailure(entry).pipe(
+          Effect.flatMap((failure) =>
+            failure === undefined
+              ? Effect.void
+              : withTargetLock(
+                  entry.key,
+                  Effect.gen(function* () {
+                    // An ensure may have replaced the tunnel while it was checked.
+                    if (tunnels.get(entry.key) !== entry) return;
+                    yield* Effect.logWarning("ssh.environment.tunnel.existing.stale", {
+                      ...sshTargetLogFields(entry.target),
+                      key: entry.key,
+                      localPort: entry.localPort,
+                      remotePort: entry.remotePort,
+                      cause: failure,
+                    });
+                    tunnels.delete(entry.key);
+                    yield* closeTunnelEntry(entry);
+                  }),
+                ),
+          ),
+        ),
+      { concurrency: "unbounded", discard: true },
+    ),
+  );
+
   const disconnectEnvironment = Effect.fn("ssh/tunnel.disconnectEnvironment")(function* (
     target: DesktopSshEnvironmentTarget,
   ): Effect.fn.Return<void, SshEnvironmentEffectError, SshEnvironmentEffectContext> {
@@ -1147,7 +1191,12 @@ const makeSshEnvironmentManager = Effect.fn("ssh/tunnel.SshEnvironmentManager.ma
     );
   });
 
-  return SshEnvironmentManager.of({ ensureEnvironment, getTunnelStatus, disconnectEnvironment });
+  return SshEnvironmentManager.of({
+    ensureEnvironment,
+    getTunnelStatus,
+    dropUnresponsiveTunnels,
+    disconnectEnvironment,
+  });
 });
 
 /**

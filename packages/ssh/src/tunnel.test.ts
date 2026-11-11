@@ -684,11 +684,12 @@ describe("ssh tunnel scripts", () => {
     }).pipe(Effect.provide(NodeServices.layer));
   });
 
-
   it.live.skipIf(HostProcessPlatform.defaultValue() === "win32")(
     "does not launch beside a live default-home server that stays unready",
     () => {
-      const home = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "km-ssh-stalled-default-server-test-"));
+      const home = NodeFS.mkdtempSync(
+        NodePath.join(NodeOS.tmpdir(), "km-ssh-stalled-default-server-test-"),
+      );
       const fixturePath = NodePath.join(home, "server-fixture.cjs");
       const target = {
         alias: "stalled-default",
@@ -704,11 +705,7 @@ describe("ssh tunnel scripts", () => {
           let serverPid: number | undefined;
           try {
             writeServerFixture(fixturePath);
-            const initial = await runPosixScript(
-              home,
-              buildRemoteLaunchScript(runner),
-              [stateKey],
-            );
+            const initial = await runPosixScript(home, buildRemoteLaunchScript(runner), [stateKey]);
             assert.equal(initial.exitCode, 0, initial.stderr);
             const runtime = readRuntimeInfo(home);
             if (runtime === undefined) {
@@ -769,7 +766,9 @@ describe("ssh tunnel scripts", () => {
   it.live.skipIf(HostProcessPlatform.defaultValue() === "win32")(
     "does not relaunch a stalled default runtime when its runner changes",
     () => {
-      const home = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "km-ssh-stalled-changed-runner-test-"));
+      const home = NodeFS.mkdtempSync(
+        NodePath.join(NodeOS.tmpdir(), "km-ssh-stalled-changed-runner-test-"),
+      );
       const fixturePath = NodePath.join(home, "server-fixture.cjs");
       const changedFixturePath = NodePath.join(home, "changed-server-fixture.cjs");
       const target = {
@@ -788,11 +787,7 @@ describe("ssh tunnel scripts", () => {
           try {
             writeServerFixture(fixturePath);
             writeServerFixture(changedFixturePath);
-            const initial = await runPosixScript(
-              home,
-              buildRemoteLaunchScript(runner),
-              [stateKey],
-            );
+            const initial = await runPosixScript(home, buildRemoteLaunchScript(runner), [stateKey]);
             assert.equal(initial.exitCode, 0, initial.stderr);
             const runtime = readRuntimeInfo(home);
             if (runtime === undefined) {
@@ -850,7 +845,9 @@ describe("ssh tunnel scripts", () => {
   it.live.skipIf(HostProcessPlatform.defaultValue() === "win32")(
     "leaves a live managed server running when it does not become ready",
     () => {
-      const home = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "km-ssh-stalled-server-test-"));
+      const home = NodeFS.mkdtempSync(
+        NodePath.join(NodeOS.tmpdir(), "km-ssh-stalled-server-test-"),
+      );
       const fixturePath = NodePath.join(home, "server-fixture.cjs");
       const target = {
         alias: "stalled-managed",
@@ -866,11 +863,7 @@ describe("ssh tunnel scripts", () => {
           let serverPid: number | undefined;
           try {
             writeServerFixture(fixturePath);
-            const initial = await runPosixScript(
-              home,
-              buildRemoteLaunchScript(runner),
-              [stateKey],
-            );
+            const initial = await runPosixScript(home, buildRemoteLaunchScript(runner), [stateKey]);
             assert.equal(initial.exitCode, 0, initial.stderr);
             const runtime = readRuntimeInfo(home);
             if (runtime === undefined) {
@@ -888,8 +881,14 @@ describe("ssh tunnel scripts", () => {
             assert.include(reconnect.stderr, "the server was left running");
             assert.isTrue(isProcessAlive(serverPid));
             const stateDir = NodePath.join(home, ".t3", "ssh-launch", stateKey);
-            assert.equal(NodeFS.readFileSync(NodePath.join(stateDir, "pid"), "utf8"), `${serverPid}\n`);
-            assert.equal(NodeFS.readFileSync(NodePath.join(stateDir, "managed"), "utf8"), "managed\n");
+            assert.equal(
+              NodeFS.readFileSync(NodePath.join(stateDir, "pid"), "utf8"),
+              `${serverPid}\n`,
+            );
+            assert.equal(
+              NodeFS.readFileSync(NodePath.join(stateDir, "managed"), "utf8"),
+              "managed\n",
+            );
 
             process.kill(serverPid, "SIGCONT");
             assert.equal(await requestStatus(runtime.origin), 200);
@@ -1005,9 +1004,8 @@ net.Server.prototype.listen = function (port, host, callback) {
         Effect.callback<NodeNet.Server>((resume) => {
           const server = NodeNet.createServer((socket) => socket.destroy());
           server.once("error", (error) => resume(Effect.die(error)));
-          server.listen(
-            { port: 0, host: "0.0.0.0", reusePort: linuxHost },
-            () => resume(Effect.succeed(server)),
+          server.listen({ port: 0, host: "0.0.0.0", reusePort: linuxHost }, () =>
+            resume(Effect.succeed(server)),
           );
         }),
         (server) =>
@@ -1030,16 +1028,13 @@ net.Server.prototype.listen = function (port, host, callback) {
         const heldPort = address.port;
 
         const child = yield* spawner.spawn(
-          ChildProcess.make(
-            process.execPath,
-            [
-              ...(linuxHost ? ["--require", `${root}/preload.cjs`] : []),
-              `${root}/pick-port.cjs`,
-              "",
-              String(heldPort),
-              "20",
-            ],
-          ),
+          ChildProcess.make(process.execPath, [
+            ...(linuxHost ? ["--require", `${root}/preload.cjs`] : []),
+            `${root}/pick-port.cjs`,
+            "",
+            String(heldPort),
+            "20",
+          ]),
         );
         const [stdout, exitCode] = yield* Effect.all(
           [
@@ -1262,7 +1257,6 @@ net.Server.prototype.listen = function (port, host, callback) {
     },
   );
 
-
   it.effect("keeps the stderr reader alive until disconnect", () =>
     Effect.gen(function* () {
       const readerStarted = yield* Deferred.make<void>();
@@ -1481,16 +1475,138 @@ net.Server.prototype.listen = function (port, host, callback) {
           Effect.forkScoped,
         );
         yield* Queue.offer(input, new TextEncoder().encode("write diagnostics"));
-        assert.deepEqual(
-          yield* Fiber.join(progress).pipe(Effect.timeout("5 seconds")),
-          ["diagnostics complete"],
-        );
+        assert.deepEqual(yield* Fiber.join(progress).pipe(Effect.timeout("5 seconds")), [
+          "diagnostics complete",
+        ]);
         assert.isTrue(yield* child.isRunning);
         yield* manager.disconnectEnvironment(target);
         assert.equal(finalized, 1);
         assert.isFalse(yield* child.isRunning);
       }).pipe(Effect.provide(layer), Effect.scoped);
     }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
+  );
+
+  it.effect("rebuilds an exited SSH tunnel without probing its stale forward", () =>
+    Effect.gen(function* () {
+      let forwards = 0;
+      let readinessProbes = 0;
+      const spawner = ChildProcessSpawner.make((command) =>
+        Effect.sync(() => {
+          const args = commandArgs(command);
+          if (args.includes("-N")) {
+            forwards += 1;
+            return makeSuccessfulProcess("");
+          }
+          if (args.includes("--")) return makeSuccessfulProcess('{"remotePort":3773}\n');
+          return makeSuccessfulProcess("");
+        }),
+      );
+      const httpClient = HttpClient.make((request) =>
+        Effect.sync(() => {
+          readinessProbes += 1;
+          return HttpClientResponse.fromWeb(request, new Response("", { status: 200 }));
+        }),
+      );
+      const layer = Layer.mergeAll(
+        NodeServices.layer,
+        Layer.succeed(ChildProcessSpawner.ChildProcessSpawner, spawner),
+        Layer.succeed(HttpClient.HttpClient, httpClient),
+        Layer.succeed(NetService.NetService, testNetService),
+        SshAuth.SshPasswordPrompt.disabledLayer,
+        SshTunnel.SshEnvironmentManager.layer({ resolveCliRunner: Effect.succeed(ARCHIVE) }),
+      );
+      const target = { alias: "devbox", hostname: "devbox", username: null, port: null };
+
+      yield* Effect.gen(function* () {
+        const manager = yield* SshTunnel.SshEnvironmentManager;
+        yield* manager.ensureEnvironment(target);
+        const probesBeforeReconnect = readinessProbes;
+        yield* manager.ensureEnvironment(target);
+
+        assert.equal(forwards, 2);
+        assert.equal(readinessProbes, probesBeforeReconnect + 1);
+      }).pipe(Effect.provide(layer), Effect.scoped);
+    }),
+  );
+
+  it.effect("drops unresponsive SSH tunnels and keeps responsive ones", () =>
+    Effect.gen(function* () {
+      const probeStarted = yield* Deferred.make<void>();
+      let unresponsive = false;
+      let forwards = 0;
+      let kills = 0;
+      let stops = 0;
+      let nextLocalPort = 41_773;
+      const spawner = ChildProcessSpawner.make((command) =>
+        Effect.sync(() => {
+          const args = commandArgs(command);
+          if (args.includes("-N")) {
+            forwards += 1;
+            return makeRunningProcess(() => {
+              kills += 1;
+            });
+          }
+          if (args.includes("--")) return makeSuccessfulProcess('{"remotePort":3773}\n');
+          if (args.includes("sh")) stops += 1;
+          return makeSuccessfulProcess("");
+        }),
+      );
+      const httpClient = HttpClient.make((request) =>
+        new URL(request.url).port === "41773" && unresponsive
+          ? Deferred.succeed(probeStarted, undefined).pipe(Effect.andThen(Effect.never))
+          : Effect.succeed(HttpClientResponse.fromWeb(request, new Response("", { status: 200 }))),
+      );
+      const netService = NetService.NetService.of({
+        canListenOnHost: () => Effect.succeed(true),
+        isPortAvailableOnLoopback: () => Effect.succeed(true),
+        hasListenerOnHost: () => Effect.succeed(false),
+        reserveLoopbackPort: () => Effect.sync(() => nextLocalPort++),
+        findAvailablePort: (preferred) => Effect.succeed(preferred),
+      });
+      const layer = Layer.mergeAll(
+        NodeServices.layer,
+        Layer.succeed(ChildProcessSpawner.ChildProcessSpawner, spawner),
+        Layer.succeed(HttpClient.HttpClient, httpClient),
+        Layer.succeed(NetService.NetService, netService),
+        SshAuth.SshPasswordPrompt.disabledLayer,
+        SshTunnel.SshEnvironmentManager.layer({ resolveCliRunner: Effect.succeed(ARCHIVE) }),
+        TestClock.layer(),
+      );
+      const unresponsiveTarget = {
+        alias: "offline",
+        hostname: "offline",
+        username: null,
+        port: null,
+      };
+      const responsiveTarget = {
+        alias: "online",
+        hostname: "online",
+        username: null,
+        port: null,
+      };
+
+      yield* Effect.gen(function* () {
+        const manager = yield* SshTunnel.SshEnvironmentManager;
+        yield* manager.ensureEnvironment(unresponsiveTarget);
+        yield* manager.ensureEnvironment(responsiveTarget);
+
+        unresponsive = true;
+        const drop = yield* Effect.forkChild(manager.dropUnresponsiveTunnels);
+        yield* Deferred.await(probeStarted);
+        yield* TestClock.adjust(Duration.seconds(2));
+        yield* Fiber.join(drop);
+        assert.equal(kills, 1);
+        assert.equal(stops, 0);
+
+        unresponsive = false;
+        yield* manager.ensureEnvironment(unresponsiveTarget);
+        yield* manager.ensureEnvironment(responsiveTarget);
+
+        assert.equal(forwards, 3);
+        assert.equal(kills, 1);
+        assert.equal(stops, 0);
+      }).pipe(Effect.provide(layer), Effect.scoped);
+    }),
   );
 
   it.effect("replaces a stale SSH forward without stopping the remote server", () =>

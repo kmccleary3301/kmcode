@@ -71,6 +71,7 @@ export class DesktopSshEnvironment extends Context.Service<
     readonly getTunnelStatus: (
       target: DesktopSshEnvironmentTarget,
     ) => Effect.Effect<DesktopSshTunnelStatus, SshCommandError | SshInvalidTargetError>;
+    readonly dropUnresponsiveTunnels: Effect.Effect<void>;
     readonly disconnectEnvironment: (
       target: DesktopSshEnvironmentTarget,
     ) => Effect.Effect<void, DesktopSshEnvironmentOperationError>;
@@ -170,6 +171,11 @@ export const make = Effect.gen(function* () {
           Effect.provide(runtimeContext),
           Effect.withSpan("desktop.ssh.getTunnelStatus"),
         ),
+    dropUnresponsiveTunnels: manager.dropUnresponsiveTunnels.pipe(
+      Effect.provideService(SshAuth.SshPasswordPrompt, passwordPrompt),
+      Effect.provide(runtimeContext),
+      Effect.withSpan("desktop.ssh.dropUnresponsiveTunnels"),
+    ),
     disconnectEnvironment: (target) =>
       manager
         .disconnectEnvironment(target)

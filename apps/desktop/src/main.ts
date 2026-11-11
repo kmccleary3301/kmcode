@@ -60,6 +60,7 @@ import * as DesktopPreReadyPlatform from "./app/DesktopPreReadyPlatform.ts";
 import * as DesktopShellEnvironment from "./shell/DesktopShellEnvironment.ts";
 import * as DesktopSshEnvironment from "./ssh/DesktopSshEnvironment.ts";
 import * as DesktopSshPasswordPrompts from "./ssh/DesktopSshPasswordPrompts.ts";
+import * as DesktopSshResume from "./ssh/DesktopSshResume.ts";
 import * as DesktopState from "./app/DesktopState.ts";
 import * as PortForwardManager from "./ports/PortForwardManager.ts";
 import * as DesktopLegacyLocalStorage from "./app/DesktopLegacyLocalStorage.ts";
@@ -166,6 +167,7 @@ const layerDesktopFoundation = Layer.mergeAll(
 const layerDesktopSsh = layerDesktopSshEnvironment.pipe(
   Layer.provideMerge(DesktopSshPasswordPrompts.layer()),
 );
+const layerDesktopSshWithResume = DesktopSshResume.layer.pipe(Layer.provideMerge(layerDesktopSsh));
 
 const layerDesktopServerExposure = DesktopServerExposure.layer.pipe(
   Layer.provideMerge(DesktopNetworkInterfaces.layer),
@@ -226,7 +228,7 @@ const layerDesktopApplication = Layer.mergeAll(
   DesktopLinuxUrlHandler.layer,
   DesktopCliCommand.layer,
   DesktopShellEnvironment.layer,
-  layerDesktopSsh,
+  layerDesktopSshWithResume,
   PortForwardManager.layer,
 ).pipe(
   Layer.provideMerge(layerDesktopSnapShot),

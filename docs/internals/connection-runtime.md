@@ -16,9 +16,14 @@ client of a restarted server reconnects in the same second; with a short cap, a
 client that can never connect retries all day. Offline states and authentication
 failures wait for a wakeup instead of spending attempts on unchanged conditions.
 
-Foregrounding, an explicit retry, and an offline report probe the established
-session, and only a failed probe reconnects. Offline reports are often wrong, for
-example for a loopback server. A long mobile background suspension is the one
+Foregrounding, waking from sleep, an explicit retry, and an offline report probe
+the established session, and only a failed probe reconnects. Offline reports are
+often wrong, for example for a loopback server. Every probe gets three seconds:
+someone is waiting on the answer, and a socket that died without a close event
+(common across a sleep or a tunnel loss) only shows itself by timing out. The web
+client treats a timer tick that arrives at least ten seconds late on a visible
+page as a wake from sleep, because the page can stay visible through a sleep and
+no `visibilitychange` fires. A long mobile background suspension is the one
 exception: it replaces the session at once, because the OS can kill a socket
 without reporting closure, and a probe would hold a dead socket in "Resuming"
 until it times out. That fresh attempt runs even while the network reports

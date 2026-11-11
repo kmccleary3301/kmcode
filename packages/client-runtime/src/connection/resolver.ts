@@ -195,6 +195,7 @@ const makeSshBroker = Effect.fn("clientRuntime.connection.broker.makeSsh")(funct
   const profiles = yield* ConnectionProfileStore.ConnectionProfileStore;
   const ssh = yield* ClientCapabilities.SshEnvironmentGateway;
   const remote = yield* RemoteEnvironmentAuthorization.RemoteEnvironmentAuthorization;
+  const bearerTokens = new Map<string, string>();
 
   return Effect.fn("clientRuntime.connection.broker.ssh")(function* (
     entry: ConnectionCatalogEntry & { readonly target: SshConnectionTarget },
@@ -215,16 +216,58 @@ const makeSshBroker = Effect.fn("clientRuntime.connection.broker.makeSsh")(funct
         actual: profile.environmentId,
       });
     }
-    const prepared = yield* ssh.prepare({
+
+    const prepareInput = {
       connectionId: target.connectionId,
       expectedEnvironmentId: target.environmentId,
       target: profile.target,
+    };
+    const authorizeWith = (prepared: ClientCapabilities.PreparedSshEnvironment, token: string) =>
+      remote
+        .authorizeBearer({
+          expectedEnvironmentId: target.environmentId,
+          httpBaseUrl: prepared.bootstrap.httpBaseUrl,
+          wsBaseUrl: prepared.bootstrap.wsBaseUrl,
+          bearerToken: token,
+          connectionMethod: "ssh",
+        })
+        .pipe(Effect.map((authorized) => ({ prepared, token, authorized })));
+    const pairAndAuthorize = Effect.gen(function* () {
+      const prepared = yield* ssh.prepare(prepareInput);
+      if (prepared.bearerToken === null) {
+        return yield* credentialMissingError(target.connectionId);
+      }
+      return yield* authorizeWith(prepared, prepared.bearerToken);
     });
+
+    // A rebuilt tunnel reaches the same server, so the bearer from the last
+    // connect still works and skips pairing over SSH. Only the server turning
+    // that bearer down warrants pairing again; a transient failure says nothing
+    // about the credential.
+    const cached = bearerTokens.get(target.connectionId);
+    const authorization =
+      cached === undefined
+        ? yield* pairAndAuthorize
+        : yield* ssh.prepare({ ...prepareInput, reuseCredential: true }).pipe(
+            Effect.flatMap((prepared) =>
+              prepared.bearerToken === null
+                ? authorizeWith(prepared, cached).pipe(
+                    Effect.catchTags({
+                      ConnectionBlockedError: () =>
+                        Effect.sync(() => bearerTokens.delete(target.connectionId)).pipe(
+                          Effect.andThen(pairAndAuthorize),
+                        ),
+                    }),
+                  )
+                : authorizeWith(prepared, prepared.bearerToken),
+            ),
+          );
+    bearerTokens.set(target.connectionId, authorization.token);
     const preparedProfile = new SshConnectionProfile({
       connectionId: profile.connectionId,
       environmentId: profile.environmentId,
       label: profile.label,
-      target: prepared.bootstrap.target,
+      target: authorization.prepared.bootstrap.target,
     });
     if (
       gitHubRoutingConnectionKey(entry) !==
@@ -234,15 +277,8 @@ const makeSshBroker = Effect.fn("clientRuntime.connection.broker.makeSsh")(funct
       yield* permissions.forget(target.environmentId);
     }
     yield* profiles.put(preparedProfile);
-    const authorized = yield* remote.authorizeBearer({
-      expectedEnvironmentId: target.environmentId,
-      httpBaseUrl: prepared.bootstrap.httpBaseUrl,
-      wsBaseUrl: prepared.bootstrap.wsBaseUrl,
-      bearerToken: prepared.bearerToken,
-      connectionMethod: "ssh",
-    });
     return {
-      ...authorized,
+      ...authorization.authorized,
       target,
     } satisfies PreparedConnection;
   });

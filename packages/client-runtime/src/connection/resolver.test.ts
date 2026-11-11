@@ -25,6 +25,7 @@ import {
 import * as ConnectionCredentialStore from "./credentialStore.ts";
 import {
   BearerConnectionTarget,
+  ConnectionBlockedError,
   ConnectionTransientError,
   PrimaryConnectionTarget,
   RelayConnectionTarget,
@@ -443,9 +444,202 @@ describe("ConnectionResolver", () => {
       expect(yield* Ref.get(connectionMethods)).toEqual(["ssh"]);
     }),
   );
+  it.effect("reuses the last authorized SSH bearer without issuing another pairing token", () =>
+    Effect.gen(function* () {
+      const prepareFlags = yield* Ref.make<ReadonlyArray<boolean | undefined>>([]);
+      const authorizedTokens = yield* Ref.make<ReadonlyArray<string>>([]);
+      const target = new SshConnectionTarget({
+        environmentId: ENVIRONMENT_ID,
+        label: "SSH",
+        connectionId: "ssh-1",
+      });
+      const profile = new SshConnectionProfile({
+        connectionId: "ssh-1",
+        environmentId: ENVIRONMENT_ID,
+        label: "SSH",
+        target: SSH_TARGET,
+      });
+      const layerBroker = yield* makeDependencies({
+        prepareSsh: (input) =>
+          Ref.update(prepareFlags, (flags) => [...flags, input.reuseCredential]).pipe(
+            Effect.as({
+              bootstrap: {
+                target: input.target,
+                httpBaseUrl: "http://127.0.0.1:4010",
+                wsBaseUrl: "ws://127.0.0.1:4010",
+                pairingToken: null,
+              },
+              bearerToken: input.reuseCredential === true ? null : "ssh-bearer",
+            }),
+          ),
+        authorizeBearer: (input) =>
+          Ref.update(authorizedTokens, (tokens) => [...tokens, input.bearerToken]).pipe(
+            Effect.as({
+              environmentId: input.expectedEnvironmentId,
+              label: "SSH",
+              httpBaseUrl: input.httpBaseUrl,
+              socketUrl: "wss://environment.example.test/ws?wsTicket=bearer",
+              httpAuthorization: {
+                _tag: "Bearer" as const,
+                token: input.bearerToken,
+              },
+            }),
+          ),
+      });
+      const broker = yield* ConnectionResolver.ConnectionResolver.pipe(Effect.provide(layerBroker));
+      const entry = catalogEntry(target, Option.some(profile));
+
+      yield* broker.prepare(entry);
+      yield* broker.prepare(entry);
+
+      expect(yield* Ref.get(prepareFlags)).toEqual([undefined, true]);
+      expect(yield* Ref.get(authorizedTokens)).toEqual(["ssh-bearer", "ssh-bearer"]);
+    }),
+  );
+
+  it.effect("pairs again after a rejected cached SSH bearer and reuses the new bearer", () =>
+    Effect.gen(function* () {
+      const prepareFlags = yield* Ref.make<ReadonlyArray<boolean | undefined>>([]);
+      const authorizedTokens = yield* Ref.make<ReadonlyArray<string>>([]);
+      const target = new SshConnectionTarget({
+        environmentId: ENVIRONMENT_ID,
+        label: "SSH",
+        connectionId: "ssh-1",
+      });
+      const profile = new SshConnectionProfile({
+        connectionId: "ssh-1",
+        environmentId: ENVIRONMENT_ID,
+        label: "SSH",
+        target: SSH_TARGET,
+      });
+      const rejected = new ConnectionBlockedError({
+        reason: "authentication",
+        detail: "The cached SSH bearer was rejected.",
+      });
+      let pairingCount = 0;
+      let authorizationCount = 0;
+      const layerBroker = yield* makeDependencies({
+        prepareSsh: (input) =>
+          Ref.update(prepareFlags, (flags) => [...flags, input.reuseCredential]).pipe(
+            Effect.as({
+              bootstrap: {
+                target: input.target,
+                httpBaseUrl: "http://127.0.0.1:4010",
+                wsBaseUrl: "ws://127.0.0.1:4010",
+                pairingToken: null,
+              },
+              bearerToken:
+                input.reuseCredential === true
+                  ? null
+                  : pairingCount++ === 0
+                    ? "old-bearer"
+                    : "new-bearer",
+            }),
+          ),
+        authorizeBearer: (input) => {
+          const attempt = authorizationCount++;
+          return Ref.update(authorizedTokens, (tokens) => [...tokens, input.bearerToken]).pipe(
+            Effect.andThen(
+              attempt === 1
+                ? Effect.fail(rejected)
+                : Effect.succeed({
+                    environmentId: input.expectedEnvironmentId,
+                    label: "SSH",
+                    httpBaseUrl: input.httpBaseUrl,
+                    socketUrl: "wss://environment.example.test/ws?wsTicket=bearer",
+                    httpAuthorization: {
+                      _tag: "Bearer" as const,
+                      token: input.bearerToken,
+                    },
+                  }),
+            ),
+          );
+        },
+      });
+      const broker = yield* ConnectionResolver.ConnectionResolver.pipe(Effect.provide(layerBroker));
+      const entry = catalogEntry(target, Option.some(profile));
+
+      yield* broker.prepare(entry);
+      yield* broker.prepare(entry);
+      yield* broker.prepare(entry);
+
+      expect(yield* Ref.get(prepareFlags)).toEqual([undefined, true, undefined, true]);
+      expect(yield* Ref.get(authorizedTokens)).toEqual([
+        "old-bearer",
+        "old-bearer",
+        "new-bearer",
+        "new-bearer",
+      ]);
+    }),
+  );
+
+  it.effect("keeps a cached SSH bearer after transient authorization failure", () =>
+    Effect.gen(function* () {
+      const prepareFlags = yield* Ref.make<ReadonlyArray<boolean | undefined>>([]);
+      const authorizedTokens = yield* Ref.make<ReadonlyArray<string>>([]);
+      const target = new SshConnectionTarget({
+        environmentId: ENVIRONMENT_ID,
+        label: "SSH",
+        connectionId: "ssh-1",
+      });
+      const profile = new SshConnectionProfile({
+        connectionId: "ssh-1",
+        environmentId: ENVIRONMENT_ID,
+        label: "SSH",
+        target: SSH_TARGET,
+      });
+      const transientFailure = new ConnectionTransientError({
+        reason: "network",
+        detail: "Authorization request timed out.",
+      });
+      let authorizationCount = 0;
+      const layerBroker = yield* makeDependencies({
+        prepareSsh: (input) =>
+          Ref.update(prepareFlags, (flags) => [...flags, input.reuseCredential]).pipe(
+            Effect.as({
+              bootstrap: {
+                target: input.target,
+                httpBaseUrl: "http://127.0.0.1:4010",
+                wsBaseUrl: "ws://127.0.0.1:4010",
+                pairingToken: null,
+              },
+              bearerToken: input.reuseCredential === true ? null : "ssh-bearer",
+            }),
+          ),
+        authorizeBearer: (input) => {
+          authorizationCount += 1;
+          return Ref.update(authorizedTokens, (tokens) => [...tokens, input.bearerToken]).pipe(
+            Effect.andThen(
+              authorizationCount === 2
+                ? Effect.fail(transientFailure)
+                : Effect.succeed({
+                    environmentId: input.expectedEnvironmentId,
+                    label: "SSH",
+                    httpBaseUrl: input.httpBaseUrl,
+                    socketUrl: "wss://environment.example.test/ws?wsTicket=bearer",
+                    httpAuthorization: {
+                      _tag: "Bearer" as const,
+                      token: input.bearerToken,
+                    },
+                  }),
+            ),
+          );
+        },
+      });
+      const broker = yield* ConnectionResolver.ConnectionResolver.pipe(Effect.provide(layerBroker));
+      const entry = catalogEntry(target, Option.some(profile));
+
+      yield* broker.prepare(entry);
+      expect(yield* Effect.flip(broker.prepare(entry))).toBe(transientFailure);
+      yield* broker.prepare(entry);
+
+      expect(yield* Ref.get(prepareFlags)).toEqual([undefined, true, true]);
+      expect(yield* Ref.get(authorizedTokens)).toEqual(["ssh-bearer", "ssh-bearer", "ssh-bearer"]);
+    }),
+  );
 
   it.effect.each(["unchanged", "changed", "revocation-failed"] as const)(
-    "handles %s SSH routing consent before saving or authorizing",
+    "handles %s SSH routing consent before saving the authorized profile",
     (scenario) =>
       Effect.gen(function* () {
         const calls: string[] = [];
@@ -526,14 +720,14 @@ describe("ConnectionResolver", () => {
         if (scenario === "revocation-failed") {
           expect(yield* Effect.flip(prepare)).toBe(failure);
           expect(savedProfile).toBe(profile);
-          expect(calls).toEqual(["revoke"]);
+          expect(calls).toEqual(["authorize", "revoke"]);
         } else {
           expect((yield* prepare).socketUrl).toContain("wsTicket=ssh");
           expect(savedProfile).toMatchObject({ target: preparedTarget });
           expect(calls).toEqual(
             scenario === "unchanged"
-              ? ["profile", "authorize"]
-              : ["revoke", "profile", "authorize"],
+              ? ["authorize", "profile"]
+              : ["authorize", "revoke", "profile"],
           );
         }
         expect(yield* permissions.get(entry)).toBe(scenario === "changed" ? "off" : "read-write");

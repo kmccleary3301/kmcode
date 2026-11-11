@@ -24,6 +24,7 @@ import {
   secondaryRegistrationsToRetainAfterTopologyRead,
   secondaryBearerExpiresAtEpochMs,
   secondaryBearerRefreshAtEpochMs,
+  tickFollowsSuspend,
 } from "./platform.ts";
 
 const TARGET: DesktopSshEnvironmentTarget = {
@@ -306,5 +307,25 @@ describe("primary topology cache", () => {
         target: null,
       }),
     ).toBeUndefined();
+  });
+});
+
+describe("suspend detection", () => {
+  const tick = (gapMs: number, visibleBefore = true, visibleNow = true) =>
+    tickFollowsSuspend({
+      previousTickAtMs: 1_000,
+      nowMs: 1_000 + gapMs,
+      visibleBefore,
+      visibleNow,
+    });
+
+  it("treats a visible page's tick arriving 10 seconds late as a wake from sleep", () => {
+    expect(tick(10_000)).toBe(true);
+    expect(tick(9_999)).toBe(false);
+  });
+
+  it("ignores late ticks of a hidden page, whose timers are throttled", () => {
+    expect(tick(60_000, false, true)).toBe(false);
+    expect(tick(60_000, true, false)).toBe(false);
   });
 });

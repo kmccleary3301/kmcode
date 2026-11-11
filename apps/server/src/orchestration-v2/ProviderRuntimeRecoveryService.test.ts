@@ -348,6 +348,7 @@ it.effect(
         },
       ],
       runs: [{ id: runId, status: "waiting", providerInstanceId, providerThreadId }],
+      providerTurns: [],
       attempts: [],
       nodes: [],
       subagents: [],

@@ -737,6 +737,39 @@ export const make = Effect.gen(function* () {
           payload: { ...staleNode, status, completedAt: item.completedAt },
         });
       }
+      // A lost terminal event can leave a provider turn open after its attempt
+      // ended. No provider process survives a restart, so the turn takes the
+      // attempt's outcome. Runs settled below close their own turns.
+      if (trigger === "startup") {
+        for (const providerTurn of projection.providerTurns) {
+          if (providerTurn.status !== "pending" && providerTurn.status !== "running") continue;
+          const attempt = projection.attempts.find(
+            (candidate) => candidate.id === providerTurn.runAttemptId,
+          );
+          if (
+            attempt === undefined ||
+            attempt.status === "pending" ||
+            attempt.status === "running" ||
+            runs.some((run) => run.id === attempt.runId)
+          ) {
+            continue;
+          }
+          events.push({
+            id: yield* allocateEventId(),
+            type: "provider-turn.updated",
+            threadId: projection.thread.id,
+            runId: attempt.runId,
+            nodeId: providerTurn.nodeId,
+            providerInstanceId: attempt.providerInstanceId,
+            occurredAt: now,
+            payload: {
+              ...providerTurn,
+              status: attempt.status === "superseded" ? "interrupted" : attempt.status,
+              completedAt: attempt.completedAt ?? now,
+            },
+          });
+        }
+      }
       // Queued runs have not started provider work. Preserve their execution
       // identities and order, but require explicit consent before draining them.
       for (const run of projection.runs) {

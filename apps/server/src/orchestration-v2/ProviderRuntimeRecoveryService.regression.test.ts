@@ -7,6 +7,8 @@ import {
   ProviderInstanceId,
   ProviderSessionId,
   ProviderThreadId,
+  ProviderTurnId,
+  RunAttemptId,
   RunId,
   ThreadId,
   TurnItemId,
@@ -676,5 +678,164 @@ it("repairs terminal children, interrupts lost owned async work, and preserves u
 
     yield* recovery.reconcile("startup");
     expect(yield* eventStore.latestSequence({ threadId })).toBe(firstRecoverySequence);
+  }).pipe(Effect.provide(realRecoveryLayer), Effect.runPromise);
+});
+
+it("settles a provider turn left running after its attempt ended", async () => {
+  const threadId = ThreadId.make("thread_recovery_stranded_provider_turn");
+  const runId = RunId.make("run_recovery_stranded_provider_turn");
+  const attemptId = RunAttemptId.make("attempt_recovery_stranded_provider_turn");
+  const providerTurnId = ProviderTurnId.make("provider_turn_recovery_stranded");
+  const providerThreadId = ProviderThreadId.make("provider_thread_recovery_stranded");
+  const rootNodeId = NodeId.make("node:recovery-stranded-root");
+  const providerInstanceId = ProviderInstanceId.make("omp");
+  const driver = ProviderDriverKind.make("omp");
+  const startedAt = DateTime.makeUnsafe("2026-10-28T03:44:43.000Z");
+  const failedAt = DateTime.makeUnsafe("2026-10-28T03:44:53.000Z");
+  const modelSelection = { instanceId: providerInstanceId, model: "test-model" };
+  let eventIndex = 0;
+  const stamp = (event: UnstampedEvent) =>
+    ({
+      ...event,
+      id: EventId.make(`event:recovery-stranded:${eventIndex++}`),
+      occurredAt: failedAt,
+    }) as OrchestrationV2DomainEvent;
+  const events = [
+    stamp({
+      type: "thread.created",
+      threadId,
+      payload: {
+        createdBy: "user",
+        creationSource: "web",
+        id: threadId,
+        projectId: ProjectId.make("project:recovery-stranded"),
+        title: "Stranded provider turn",
+        providerInstanceId,
+        modelSelection,
+        runtimeMode: "full-access",
+        interactionMode: "default",
+        branch: null,
+        worktreePath: null,
+        activeProviderThreadId: providerThreadId,
+        lineage: { parentThreadId: null, relationshipToParent: null, rootThreadId: threadId },
+        forkedFrom: null,
+        createdAt: startedAt,
+        updatedAt: failedAt,
+        archivedAt: null,
+        settledOverride: null,
+        settledAt: null,
+        lastVisitedAt: null,
+        deletedAt: null,
+      },
+    }),
+    stamp({
+      type: "provider-thread.updated",
+      threadId,
+      driver,
+      providerInstanceId,
+      payload: {
+        id: providerThreadId,
+        appThreadId: threadId,
+        ownerNodeId: null,
+        driver,
+        providerInstanceId,
+        providerSessionId: null,
+        nativeThreadRef: { driver, nativeId: "native-stranded-thread", strength: "strong" },
+        nativeConversationHeadRef: null,
+        status: "idle",
+        firstRunOrdinal: 1,
+        lastRunOrdinal: 1,
+        handoffIds: [],
+        forkedFrom: null,
+        createdAt: startedAt,
+        updatedAt: failedAt,
+        pendingBackgroundTasks: [],
+      },
+    }),
+    stamp({
+      type: "run.created",
+      threadId,
+      runId,
+      payload: {
+        id: runId,
+        threadId,
+        ordinal: 1,
+        providerInstanceId,
+        modelSelection,
+        providerThreadId,
+        userMessageId: MessageId.make("message:recovery-stranded"),
+        rootNodeId,
+        activeAttemptId: attemptId,
+        status: "failed",
+        requestedAt: startedAt,
+        startedAt,
+        completedAt: failedAt,
+        checkpointId: null,
+        contextHandoffId: null,
+      },
+    }),
+    stamp({
+      type: "run-attempt.updated",
+      threadId,
+      runId,
+      nodeId: rootNodeId,
+      providerInstanceId,
+      payload: {
+        id: attemptId,
+        runId,
+        attemptOrdinal: 1,
+        rootNodeId,
+        providerInstanceId,
+        providerThreadId,
+        providerTurnId,
+        reason: "initial",
+        status: "failed",
+        startedAt,
+        completedAt: failedAt,
+      },
+    }),
+    stamp({
+      type: "provider-turn.updated",
+      threadId,
+      runId,
+      nodeId: rootNodeId,
+      providerInstanceId,
+      payload: {
+        id: providerTurnId,
+        providerThreadId,
+        nodeId: rootNodeId,
+        runAttemptId: attemptId,
+        nativeTurnRef: null,
+        ordinal: 1,
+        status: "running",
+        startedAt,
+        completedAt: null,
+      },
+    }),
+  ];
+
+  await Effect.gen(function* () {
+    const eventSink = yield* EventSink.EventSinkV2;
+    const eventStore = yield* EventStore.EventStoreV2;
+    const projections = yield* ProjectionStore.ProjectionStoreV2;
+    const recovery = yield* ProviderRuntimeRecovery.ProviderRuntimeRecoveryService;
+    yield* eventSink.write({ events });
+
+    yield* recovery.reconcile("startup");
+
+    const afterRecovery = yield* projections.getThreadProjection(threadId);
+    const providerTurn = afterRecovery.providerTurns.find(
+      (candidate) => candidate.id === providerTurnId,
+    );
+    expect(providerTurn?.status).toBe("failed");
+    expect(
+      providerTurn?.completedAt == null ? null : DateTime.toEpochMillis(providerTurn.completedAt),
+    ).toBe(DateTime.toEpochMillis(failedAt));
+    expect(afterRecovery.runs.find((candidate) => candidate.id === runId)?.status).toBe("failed");
+
+    const settledSequence = yield* eventStore.latestSequence({ threadId });
+    expect(yield* projections.getRecoveryThreadIds("runtime")).not.toContain(threadId);
+    yield* recovery.reconcile("startup");
+    expect(yield* eventStore.latestSequence({ threadId })).toBe(settledSequence);
   }).pipe(Effect.provide(realRecoveryLayer), Effect.runPromise);
 });

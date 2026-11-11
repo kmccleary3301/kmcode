@@ -3856,6 +3856,15 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
                     )
                   )
                 UNION
+                SELECT provider_turn.thread_id
+                FROM orchestration_v2_projection_provider_turns AS provider_turn
+                WHERE provider_turn.status IN ('pending', 'running')
+                  AND EXISTS (
+                    SELECT 1 FROM orchestration_v2_projection_run_attempts AS attempt
+                    WHERE attempt.attempt_id = provider_turn.run_attempt_id
+                      AND attempt.status NOT IN ('pending', 'running')
+                  )
+                UNION
                 SELECT thread_id FROM orchestration_v2_effect_outbox
                 WHERE status IN ('pending', 'running')
               `;
@@ -4224,10 +4233,17 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
               SELECT attempt.payload_json
               FROM orchestration_v2_projection_run_attempts AS attempt
               WHERE attempt.thread_id = ${threadId}
-                AND attempt.run_id IN (
-                  SELECT run_id FROM orchestration_v2_projection_runs
-                  WHERE thread_id = ${threadId}
-                    AND status IN ('queued', 'preparing', 'starting', 'running', 'waiting')
+                AND (
+                  attempt.run_id IN (
+                    SELECT run_id FROM orchestration_v2_projection_runs
+                    WHERE thread_id = ${threadId}
+                      AND status IN ('queued', 'preparing', 'starting', 'running', 'waiting')
+                  )
+                  -- Ended attempts whose provider turn was never settled.
+                  OR attempt.attempt_id IN (
+                    SELECT run_attempt_id FROM orchestration_v2_projection_provider_turns
+                    WHERE thread_id = ${threadId} AND status IN ('pending', 'running')
+                  )
                 )
               ORDER BY attempt.run_id ASC, attempt.attempt_ordinal ASC
             `,
@@ -4363,10 +4379,13 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
                 AND provider_turn.run_attempt_id IN (
                   SELECT attempt_id FROM orchestration_v2_projection_run_attempts
                   WHERE thread_id = ${threadId}
-                    AND run_id IN (
-                      SELECT run_id FROM orchestration_v2_projection_runs
-                      WHERE thread_id = ${threadId}
-                        AND status IN ('queued', 'preparing', 'starting', 'running', 'waiting')
+                    AND (
+                      status NOT IN ('pending', 'running')
+                      OR run_id IN (
+                        SELECT run_id FROM orchestration_v2_projection_runs
+                        WHERE thread_id = ${threadId}
+                          AND status IN ('queued', 'preparing', 'starting', 'running', 'waiting')
+                      )
                     )
                 )
               ORDER BY provider_turn.provider_thread_id ASC, provider_turn.ordinal ASC

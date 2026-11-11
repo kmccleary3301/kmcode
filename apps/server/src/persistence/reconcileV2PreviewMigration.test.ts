@@ -46,6 +46,7 @@ describe("V2 preview upgrade", () => {
         [63, "SubagentDeliveryState"],
         [64, "ThreadMessageSearch"],
         [65, "ExcludeAttachmentPlaceholdersFromSearch"],
+        [66, "OpenProviderTurnRecoveryIndex"],
       ]);
       assert.deepStrictEqual(yield* runMigrations(), []);
       assert.deepStrictEqual(yield* sql`SELECT * FROM orchestration_v2_legacy_imports`, imports);
@@ -134,6 +135,7 @@ describe("V2 preview upgrade", () => {
         [63, "SubagentDeliveryState"],
         [64, "ThreadMessageSearch"],
         [65, "ExcludeAttachmentPlaceholdersFromSearch"],
+        [66, "OpenProviderTurnRecoveryIndex"],
       ]);
     }).pipe(Effect.provide(NodeSqliteClient.layer({ filename: ":memory:" }))),
   );

@@ -21,6 +21,7 @@ import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as SqlClient from "effect/sql/SqlClient";
+import * as Statement from "effect/sql/Statement";
 
 import * as SqlitePersistence from "../persistence/Sqlite.ts";
 import { CodexProviderCapabilitiesV2 } from "./Adapters/CodexAdapterV2.ts";
@@ -206,9 +207,35 @@ it.effect("selects unfinished recovery work without reading settled thread histo
       WHERE thread_id = ${queued} AND ordinal = 1
     `;
     assert.deepEqual(yield* projections.getRecoveryThreadIds("queued-runs"), [queued]);
+    const runtimeStatements: Array<readonly [string, ReadonlyArray<unknown>]> = [];
+    const observeRuntimeQuery: Statement.Transformer = (statement) =>
+      Effect.sync(() => {
+        runtimeStatements.push(statement.compile());
+        return statement;
+      });
     assert.deepEqual(
-      new Set(yield* projections.getRecoveryThreadIds("runtime")),
+      new Set(
+        yield* projections
+          .getRecoveryThreadIds("runtime")
+          .pipe(Effect.provideService(Statement.CurrentTransformer, observeRuntimeQuery)),
+      ),
       new Set([queued, archived, blocked, background, outboxOnly, requestOnly]),
+    );
+    assert.lengthOf(runtimeStatements, 1);
+    const runtimeQuery = runtimeStatements[0]!;
+    const runtimePlan = yield* sql.unsafe<{ readonly detail: string }>(
+      `EXPLAIN QUERY PLAN ${runtimeQuery[0]}`,
+      runtimeQuery[1],
+    );
+    assert.isTrue(
+      runtimePlan.some(({ detail }) =>
+        detail.includes("orchestration_v2_projection_nodes_live_idx"),
+      ),
+      JSON.stringify(runtimePlan),
+    );
+    assert.isFalse(
+      runtimePlan.some(({ detail }) => detail.includes("SCAN node")),
+      JSON.stringify(runtimePlan),
     );
     assert.deepEqual(yield* projections.getRecoveryThreadIds("delegated-completions"), [delivery]);
     assert.deepEqual(yield* projections.getRecoveryThreadIds("subagent-results"), []);

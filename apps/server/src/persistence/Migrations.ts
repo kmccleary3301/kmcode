@@ -81,6 +81,9 @@ import Migration0063 from "./Migrations/063_SubagentDeliveryState.ts";
 import Migration0064 from "./Migrations/064_ThreadMessageSearch.ts";
 import Migration0065 from "./Migrations/065_ExcludeAttachmentPlaceholdersFromSearch.ts";
 import Migration0066 from "./Migrations/066_OpenProviderTurnRecoveryIndex.ts";
+import Migration0067 from "./Migrations/067_TurnItemConversationIndex.ts";
+import Migration0068 from "./Migrations/068_CommandReadIndexes.ts";
+import Migration0069 from "./Migrations/069_NodesLiveIndex.ts";
 
 /**
  * Migration loader with all migrations defined inline.
@@ -161,6 +164,9 @@ export const migrationEntries = [
   [64, "ThreadMessageSearch", Migration0064],
   [65, "ExcludeAttachmentPlaceholdersFromSearch", Migration0065],
   [66, "OpenProviderTurnRecoveryIndex", Migration0066],
+  [67, "TurnItemConversationIndex", Migration0067],
+  [68, "CommandReadIndexes", Migration0068],
+  [69, "NodesLiveIndex", Migration0069],
 ] as const;
 
 export const migrationManifest = migrationEntries.map(([id, name]) => [id, name] as const);

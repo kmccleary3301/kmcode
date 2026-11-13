@@ -968,7 +968,10 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
 
   // Command decisions need control records, not historical assistant/tool output.
   // Handoff preparation explicitly reads its history after choosing a strategy.
-  const readCommandProjection = (threadId: ThreadId) =>
+  const readCommandProjection = (
+    threadId: ThreadId,
+    recent?: ProjectionRecordFilter["sinceLastCompaction"],
+  ) =>
     projectionStore
       .getThreadRecords(
         threadId,
@@ -989,7 +992,11 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         {
           turnItemTypes: ["user_message", "error"],
           messageRoles: ["user"],
+          omitSettledLeafNodes: true,
           omitSettledSubagents: true,
+          omitSettledSubagentRecords: true,
+          contextTransferStatuses: ["pending"],
+          ...(recent === undefined ? {} : { sinceLastCompaction: recent }),
         },
       )
       .pipe(
@@ -1034,10 +1041,11 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
   const getProjectionWithPendingEvents = (
     threadId: ThreadId,
     events: Ref.Ref<Array<OrchestrationV2DomainEvent>>,
+    recent?: ProjectionRecordFilter["sinceLastCompaction"],
   ) =>
     Effect.gen(function* () {
       const pending = (yield* Ref.get(events)).filter((event) => event.threadId === threadId);
-      const stored = yield* Effect.option(readCommandProjection(threadId));
+      const stored = yield* Effect.option(readCommandProjection(threadId, recent));
       let projection: OrchestrationV2ThreadProjection;
       if (Option.isSome(stored)) {
         projection = stored.value;
@@ -4992,7 +5000,36 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     effects: Ref.Ref<Array<PendingOrchestrationEffectV2>>,
   ) =>
     Effect.gen(function* () {
-      let projection = yield* getProjectionWithPendingEvents(command.threadId, events);
+      const recentRead: ProjectionRecordFilter["sinceLastCompaction"] = {
+        keepRunIds: [
+          command.manualContinuationOfRunId,
+          command.restartContinuationOfRunId,
+          command.usageLimitContinuationOfRunId,
+          ...(command.dispatchMode.type === "steer_active" ||
+          command.dispatchMode.type === "restart_active"
+            ? [command.dispatchMode.targetRunId]
+            : []),
+          command.delegatedCompletion?.parentRunId,
+        ].filter((runId): runId is RunId => runId !== undefined),
+        keepMessageId: command.messageId,
+      };
+      let projectionFilter: ProjectionRecordFilter["sinceLastCompaction"] = recentRead;
+      let projection = yield* getProjectionWithPendingEvents(
+        command.threadId,
+        events,
+        projectionFilter,
+      );
+      const activeProviderThreadForRead = projection.providerThreads.find(
+        (candidate) => candidate.id === projection.thread.activeProviderThreadId,
+      );
+      if (
+        activeProviderThreadForRead !== undefined &&
+        activeProviderThreadForRead.providerInstanceId !==
+          (command.modelSelection ?? projection.thread.modelSelection).instanceId
+      ) {
+        projection = yield* getProjectionWithPendingEvents(command.threadId, events);
+        projectionFilter = undefined;
+      }
       if (command.manualContinuationOfRunId !== undefined) {
         const source = projection.runs.find((run) => run.id === command.manualContinuationOfRunId);
         const limited = latestRootProviderFailure(source ?? null, projection.turnItems);
@@ -5124,7 +5161,11 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           occurredAt: now,
           payload: thread,
         });
-        projection = yield* getProjectionWithPendingEvents(command.threadId, events);
+        projection = yield* getProjectionWithPendingEvents(
+          command.threadId,
+          events,
+          projectionFilter,
+        );
       }
       if (projection.thread.snoozedUntil != null) {
         const now = yield* DateTime.now;
@@ -5144,11 +5185,27 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           occurredAt: now,
           payload: thread,
         });
-        projection = yield* getProjectionWithPendingEvents(command.threadId, events);
+        projection = yield* getProjectionWithPendingEvents(
+          command.threadId,
+          events,
+          projectionFilter,
+        );
       }
       const userMessages = projection.messages.filter((message) => message.role === "user");
+      const recentUserMessages = [
+        ...userMessages,
+        ...projection.turnItems.flatMap((item) => (item.type === "user_message" ? [item] : [])),
+      ];
       const onlyMaintenanceHistory =
-        userMessages.length > 0 && userMessages.every(isNativeMaintenanceCommand);
+        recentUserMessages.length > 0 && recentUserMessages.every(isNativeMaintenanceCommand)
+          ? yield* projectionStore
+              .getThreadRecords(command.threadId, ["messages"], { messageRoles: ["user"] })
+              .pipe(
+                Effect.map(({ messages }) => [...messages, ...userMessages]),
+                Effect.map((all) => all.length > 0 && all.every(isNativeMaintenanceCommand)),
+                mapDispatchError(command),
+              )
+          : false;
       if (
         !isNativeMaintenanceCommand(command) &&
         ((command.titleSeed !== undefined &&
@@ -5181,7 +5238,11 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
             messageId: command.messageId,
           }),
         ]);
-        projection = yield* getProjectionWithPendingEvents(command.threadId, events);
+        projection = yield* getProjectionWithPendingEvents(
+          command.threadId,
+          events,
+          projectionFilter,
+        );
       }
       const modelSelection = command.modelSelection ?? projection.thread.modelSelection;
       const deliveryIntent =

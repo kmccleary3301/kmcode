@@ -13,7 +13,7 @@ layer("055_OrchestrationV2", (it) => {
     Effect.sync(() => {
       assert.deepStrictEqual(
         migrationEntries.map(([id]) => id),
-        Array.from({ length: 66 }, (_, index) => index + 1),
+        Array.from({ length: 69 }, (_, index) => index + 1),
       );
     }),
   );
@@ -38,6 +38,9 @@ layer("055_OrchestrationV2", (it) => {
         [64, "ThreadMessageSearch"],
         [65, "ExcludeAttachmentPlaceholdersFromSearch"],
         [66, "OpenProviderTurnRecoveryIndex"],
+        [67, "TurnItemConversationIndex"],
+        [68, "CommandReadIndexes"],
+        [69, "NodesLiveIndex"],
       ]);
       assert.deepStrictEqual(yield* runMigrations(), []);
 
@@ -70,6 +73,9 @@ layer("055_OrchestrationV2", (it) => {
         { migration_id: 64, name: "ThreadMessageSearch" },
         { migration_id: 65, name: "ExcludeAttachmentPlaceholdersFromSearch" },
         { migration_id: 66, name: "OpenProviderTurnRecoveryIndex" },
+        { migration_id: 67, name: "TurnItemConversationIndex" },
+        { migration_id: 68, name: "CommandReadIndexes" },
+        { migration_id: 69, name: "NodesLiveIndex" },
       ]);
 
       const tables = yield* sql<{ readonly name: string }>`
@@ -130,7 +136,12 @@ layer("055_OrchestrationV2", (it) => {
           AND name IN (
             'idx_orchestration_events_application_high_water',
             'orchestration_events_v2_created_threads_idx',
+            'orchestration_v2_projection_context_transfers_source_thread_idx',
+            'orchestration_v2_projection_context_transfers_source_thread_status_idx',
+            'orchestration_v2_projection_nodes_live_idx',
+            'orchestration_v2_projection_nodes_settled_leaf_idx',
             'orchestration_v2_projection_subagents_settled_idx',
+            'orchestration_v2_projection_turn_items_conversation_idx',
             'orchestration_v2_projection_turn_items_shell_pending_idx'
           )
         ORDER BY name
@@ -140,7 +151,11 @@ layer("055_OrchestrationV2", (it) => {
         [
           "idx_orchestration_events_application_high_water",
           "orchestration_events_v2_created_threads_idx",
+          "orchestration_v2_projection_context_transfers_source_thread_status_idx",
+          "orchestration_v2_projection_nodes_live_idx",
+          "orchestration_v2_projection_nodes_settled_leaf_idx",
           "orchestration_v2_projection_subagents_settled_idx",
+          "orchestration_v2_projection_turn_items_conversation_idx",
           "orchestration_v2_projection_turn_items_shell_pending_idx",
         ],
       );

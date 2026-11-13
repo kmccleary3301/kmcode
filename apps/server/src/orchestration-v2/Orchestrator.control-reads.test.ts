@@ -389,6 +389,51 @@ it.effect(
       yield* sql`INSERT INTO orchestration_v2_projection_context_handoffs
         (context_handoff_id, thread_id, target_run_id, to_provider_thread_id, strategy, status, updated_at, payload_json)
         VALUES ('obsolete-handoff', ${threadId}, 'old-run', 'old-provider-thread', 'full_thread_summary', 'ready', ${DateTime.formatIso(now)}, '{"obsolete":true}')`;
+      for (const status of [
+        "resolved_native",
+        "resolved_portable",
+        "failed",
+        "consumed",
+        "superseded",
+      ]) {
+        yield* sql`INSERT INTO orchestration_v2_projection_context_transfers
+          (context_transfer_id, source_thread_id, target_thread_id, target_run_id,
+            type, status, updated_at, payload_json)
+          VALUES (${`obsolete-transfer:${status}`}, 'old-source', ${threadId}, NULL,
+            'merge_back', ${status}, ${DateTime.formatIso(now)}, '{"obsolete":true}')`;
+      }
+      // A delegated task that ended and handed its result over.
+      yield* sql`INSERT INTO orchestration_v2_projection_subagents
+        (subagent_id, thread_id, run_id, parent_node_id, provider, provider_thread_id,
+          child_thread_id, origin, status, updated_at, payload_json, completion_delivery_state)
+        VALUES ('obsolete-task', ${threadId}, 'old-run', 'old-node', 'codex', 'obsolete-task-thread',
+          'old-child', 'app_owned', 'completed', ${DateTime.formatIso(now)}, '{"obsolete":true}',
+          'delivered')`;
+      yield* sql`INSERT INTO orchestration_v2_projection_nodes
+        (node_id, thread_id, run_id, root_node_id, kind, status, payload_json)
+        VALUES ('obsolete-task', ${threadId}, 'old-run', 'old-node', 'subagent', 'completed',
+          '{"obsolete":true}')`;
+      yield* sql`INSERT INTO orchestration_v2_projection_provider_threads
+        (provider_thread_id, thread_id, provider, status, updated_at, payload_json)
+        VALUES ('obsolete-task-thread', 'old-child', 'codex', 'idle', ${DateTime.formatIso(now)},
+          '{"obsolete":true}')`;
+      // Unfiltered reads still select these rows; their obsolete payloads make decoding fail.
+      assert.equal(
+        (yield* Effect.exit(projections.getThreadRecords(threadId, ["contextTransfers"])))._tag,
+        "Failure",
+      );
+      assert.equal(
+        (yield* Effect.exit(projections.getThreadRecords(threadId, ["subagents"])))._tag,
+        "Failure",
+      );
+      assert.equal(
+        (yield* Effect.exit(projections.getThreadRecords(threadId, ["nodes"])))._tag,
+        "Failure",
+      );
+      assert.equal(
+        (yield* Effect.exit(projections.getThreadRecords(threadId, ["providerThreads"])))._tag,
+        "Failure",
+      );
       yield* orchestrator.dispatch({
         type: "message.dispatch",
         commandId: CommandId.make("dispatch-with-old-history"),
@@ -403,7 +448,19 @@ it.effect(
       const fresh = yield* projections.getThreadRecords(threadId, ["turnItems"], {
         turnItemTypes: ["user_message"],
       });
-      assert.isAbove(fresh.turnItems.at(-1)!.ordinal, 900);
+      const latestFreshTurnItem = fresh.turnItems.at(-1);
+      assert.isDefined(latestFreshTurnItem);
+      if (latestFreshTurnItem === undefined) return;
+      assert.isAbove(latestFreshTurnItem.ordinal, 900);
+      // Deletion reads transfer history separately to find side chats.
+      yield* sql`DELETE FROM orchestration_v2_projection_context_transfers
+        WHERE target_thread_id = ${threadId}`;
+      // Archiving reads every task of the thread to stop the ones still running.
+      yield* sql`DELETE FROM orchestration_v2_projection_subagents
+        WHERE subagent_id = 'obsolete-task'`;
+      yield* sql`DELETE FROM orchestration_v2_projection_nodes WHERE node_id = 'obsolete-task'`;
+      yield* sql`DELETE FROM orchestration_v2_projection_provider_threads
+        WHERE provider_thread_id = 'obsolete-task-thread'`;
       yield* orchestrator.dispatch({
         type: "thread.archive",
         commandId: CommandId.make("archive-with-old-history"),

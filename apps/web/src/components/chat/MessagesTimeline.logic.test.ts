@@ -21,6 +21,7 @@ import {
 } from "../../session-logic";
 import { makeStreamingTimelineFixture } from "../../test-fixtures";
 import type { ChatMessage, TurnDiffSummary } from "../../types";
+import type { Root as MarkdownRoot } from "mdast";
 import { describe, expect, it } from "vite-plus/test";
 import { EMPTY_THREAD_ACTIVITY_STATE } from "@t3tools/client-runtime/state/threads";
 import { mergeActivityRowsIntoVisibleItems } from "./timelineActivity";
@@ -36,6 +37,8 @@ import {
   isCurrentProviderRetryActive,
   liveWorkEntryLabel,
   resolveAssistantMessageCopyState,
+  THOUGHT_PREVIEW_MAX_LENGTH,
+  remarkThoughtPreview,
   resolveWorkGroupScrollIndex,
   shouldPreserveAssistantLineBreaks,
   threadReadLabelPrefix,
@@ -69,6 +72,54 @@ describe("expanded tool group scrolling", () => {
     expect(
       resolveWorkGroupScrollIndex(entries, { entryId: "removed", offset: 120 }),
     ).toBeUndefined();
+  });
+});
+
+describe("reasoning thought previews", () => {
+  it("flattens Markdown content into compact plain text", () => {
+    const tree: MarkdownRoot = {
+      type: "root",
+      children: [
+        {
+          type: "paragraph",
+          children: [
+            { type: "text", value: "  Lead " },
+            { type: "emphasis", children: [{ type: "text", value: "bold" }] },
+            { type: "text", value: "\n\n tail  " },
+          ],
+        },
+        { type: "paragraph", children: [{ type: "text", value: "next" }] },
+      ],
+    };
+    remarkThoughtPreview("Thought")(tree);
+    expect(tree.children).toEqual([{ type: "text", value: "Lead bold tail next" }]);
+  });
+
+  it("uses the fallback when Markdown has no visible text", () => {
+    const tree: MarkdownRoot = {
+      type: "root",
+      children: [{ type: "html", value: "<div>only html</div>" }],
+    };
+    remarkThoughtPreview("Thought")(tree);
+    expect(tree.children).toEqual([{ type: "text", value: "Thought" }]);
+  });
+
+  it("does not split an emoji at the thought preview cutoff", () => {
+    const tree: MarkdownRoot = {
+      type: "root",
+      children: [
+        {
+          type: "paragraph",
+          children: [
+            { type: "text", value: `${"x".repeat(THOUGHT_PREVIEW_MAX_LENGTH - 1)}😀 tail` },
+          ],
+        },
+      ],
+    };
+    remarkThoughtPreview("Thought")(tree);
+    expect(tree.children).toEqual([
+      { type: "text", value: "x".repeat(THOUGHT_PREVIEW_MAX_LENGTH - 1) },
+    ]);
   });
 });
 

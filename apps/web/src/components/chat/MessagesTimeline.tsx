@@ -132,7 +132,6 @@ import { compileKmMarkdownSnapshot, useKmMarkdownRenderConfig } from "../markdow
 import { ChatMarkdownAssetImage } from "../markdown/MarkdownMedia";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
-import type { Root, RootContent } from "mdast";
 import { T3Wordmark } from "../T3Wordmark";
 import { ThreadContextChip } from "../ThreadContextChip";
 import {
@@ -237,6 +236,7 @@ import {
   resolveTimelineMinimapNavigationInteractive,
   resolveTimelineMinimapTopPercent,
   resolveWorkGroupScrollIndex,
+  remarkThoughtPreview,
   shouldPreserveAssistantLineBreaks,
   threadReadLabelPrefix,
   threadReadTargetId,
@@ -6581,28 +6581,6 @@ function workEntryIconName(workEntry: TimelineWorkEntry): WorkEntryIconName {
 }
 
 const stopRowToggle = (e: { stopPropagation: () => void }) => e.stopPropagation();
-
-function remarkThoughtPreview(fallback: string) {
-  return (tree: Root) => {
-    const plainText = (node: Root | RootContent): string => {
-      if (node.type === "html" || node.type === "definition") return "";
-      if ("alt" in node) return node.alt ?? "";
-      if ("value" in node) return node.value;
-      if ("children" in node) {
-        const separator = ["root", "blockquote", "list", "listItem", "table", "tableRow"].includes(
-          node.type,
-        )
-          ? " "
-          : "";
-        return node.children.map(plainText).join(separator);
-      }
-      return node.type === "break" ? " " : "";
-    };
-    tree.children = [
-      { type: "text", value: plainText(tree).replace(/\s+/g, " ").trim() || fallback },
-    ];
-  };
-}
 
 function ReasoningEntryContent(props: {
   readonly entry: TimelineWorkEntry;

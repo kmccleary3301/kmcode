@@ -8,6 +8,7 @@ import {
 import * as DateTime from "effect/DateTime";
 import * as Equal from "effect/Equal";
 import { shallow } from "zustand/vanilla/shallow";
+import type { Root, RootContent } from "mdast";
 import { renderCodexDirectivesForCopy } from "@t3tools/client-runtime/codex-markdown-directives";
 import {
   commandDisplayText,
@@ -269,6 +270,46 @@ export function workEntryReadOutput(
     return paths.join("\n");
   }
   return null;
+}
+
+export const THOUGHT_PREVIEW_MAX_LENGTH = 2_048;
+const THOUGHT_PREVIEW_BLOCK_NODE_TYPES: Readonly<Record<string, true>> = {
+  root: true,
+  blockquote: true,
+  list: true,
+  listItem: true,
+  table: true,
+  tableRow: true,
+};
+
+export function remarkThoughtPreview(fallback: string) {
+  return (tree: Root) => {
+    const fragments: string[] = [];
+    let remaining = THOUGHT_PREVIEW_MAX_LENGTH;
+    const append = (value: string) => {
+      if (remaining === 0 || value.length === 0) return;
+      const text = value.slice(0, remaining);
+      remaining -= text.length;
+      const safeText = text.replace(/[\uD800-\uDBFF]$/, "");
+      if (safeText.length > 0) fragments.push(safeText);
+    };
+    const visit = (node: Root | RootContent) => {
+      if (remaining === 0 || node.type === "html" || node.type === "definition") return;
+      if ("alt" in node) append(node.alt ?? "");
+      else if ("value" in node) append(node.value);
+      else if ("children" in node) {
+        const separator = Object.hasOwn(THOUGHT_PREVIEW_BLOCK_NODE_TYPES, node.type);
+        for (const [index, child] of node.children.entries()) {
+          if (remaining === 0) break;
+          if (index > 0 && separator) append(" ");
+          visit(child);
+        }
+      } else if (node.type === "break") append(" ");
+    };
+    visit(tree);
+    const text = fragments.join("").replace(/\s+/g, " ").trim();
+    tree.children = [{ type: "text", value: text || fallback }];
+  };
 }
 
 export function liveWorkEntryLabel(

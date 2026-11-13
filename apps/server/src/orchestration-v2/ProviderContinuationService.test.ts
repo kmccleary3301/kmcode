@@ -139,13 +139,11 @@ describe("ProviderContinuationService", () => {
           delegatedCompletion: { parentRunId, generation: 1, messageId: delegatedMessageId },
         });
         const command = (yield* Queue.take(dispatched)) as {
-          readonly dispatchMode: { readonly type: string };
           readonly deliveryIntent: string;
           readonly messageId: MessageId;
           readonly delegatedCompletion: { generation: number; taskIds: readonly string[] };
         };
         assert.equal(command.messageId, delegatedMessageId);
-        assert.deepEqual(command.dispatchMode, { type: "start_immediately" });
         assert.equal(command.deliveryIntent, "auto");
         assert.equal(command.delegatedCompletion.generation, 1);
         assert.equal(command.delegatedCompletion.taskIds.length, 2);
@@ -212,7 +210,6 @@ describe("ProviderContinuationService", () => {
         const command = (yield* Queue.take(dispatched)) as {
           readonly creationSource: string;
           readonly text: string;
-          readonly dispatchMode: { readonly type: string };
           readonly deliveryIntent: string;
           readonly notification: OrchestrationV2Notification;
         };
@@ -222,7 +219,6 @@ describe("ProviderContinuationService", () => {
         assert.notEqual(command.creationSource, "provider");
         assert.equal(command.creationSource, "server");
         assert.equal(command.text, "Delegated task completed.");
-        assert.deepEqual(command.dispatchMode, { type: "start_immediately" });
         assert.equal(command.deliveryIntent, "auto");
         assert.deepEqual(command.notification, {
           source: { kind: "monitor" },
@@ -263,14 +259,12 @@ describe("ProviderContinuationService", () => {
             readonly parentRunId: RunId;
             readonly taskIds: ReadonlyArray<string>;
           };
-          readonly dispatchMode: { readonly type: string };
           readonly deliveryIntent: string;
           readonly messageId: MessageId;
           readonly text: string;
         };
         assert.equal(command.createdBy, "agent");
         assert.equal(command.creationSource, "server");
-        assert.deepEqual(command.dispatchMode, { type: "start_immediately" });
         assert.equal(command.deliveryIntent, "auto");
         assert.equal(command.messageId, delegatedMessageId);
         assert.equal(command.delegatedCompletion.parentRunId, parentRunId);
@@ -548,10 +542,8 @@ describe("ProviderContinuationService", () => {
             },
           });
           const command = (yield* Queue.take(dispatched)) as {
-            readonly dispatchMode: { readonly type: string };
             readonly deliveryIntent: string;
           };
-          assert.deepEqual(command.dispatchMode, { type: "start_immediately" });
           assert.equal(command.deliveryIntent, "auto");
         }).pipe(
           Effect.provide(

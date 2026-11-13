@@ -40,6 +40,9 @@ import * as WorkspacePaths from "../workspace/WorkspacePaths.ts";
 import { CodexProviderCapabilitiesV2 } from "./Adapters/CodexAdapterV2.ts";
 import * as EventSink from "./EventSink.ts";
 import * as Orchestrator from "./Orchestrator.ts";
+import * as IdAllocator from "./IdAllocator.ts";
+import * as ProviderContinuationRequests from "./ProviderContinuationRequests.ts";
+import * as ProviderContinuationService from "./ProviderContinuationService.ts";
 import type { ProviderAdapterV2Shape } from "./ProviderAdapter.ts";
 import { continueRestartedRun } from "./RestartContinuation.ts";
 import * as RuntimeLayer from "./runtimeLayer.ts";
@@ -145,6 +148,12 @@ const layerTest = Layer.mergeAll(
   Layer.provide(ServerSettings.layerTest()),
   Layer.provide(layerTestProviderInstanceRegistry),
   Layer.provide(layerPlatformTest),
+);
+
+// The production worker that turns offered completions into message.dispatch.
+const layerTestWithContinuationWorker = ProviderContinuationService.layer.pipe(
+  Layer.provide(Layer.mergeAll(ProviderContinuationRequests.layer, IdAllocator.layer)),
+  Layer.provideMerge(layerTest),
 );
 
 const seedParentWithTerminalTask = (input: {
@@ -1459,3 +1468,44 @@ it.layer(layerTest)("delegated tasks across a server restart", (it) => {
     }),
   );
 });
+
+// Live clock: the worker dispatches on its own fiber and the test polls for it.
+it.layer(layerTestWithContinuationWorker, { excludeTestServices: true })(
+  "delegated completion continuation worker",
+  (it) => {
+    it.effect("delivers an offered completion as the parent's wake message", () =>
+      Effect.gen(function* () {
+        const orchestrator = yield* Orchestrator.OrchestratorV2;
+        const now = yield* DateTime.now;
+        const threadId = ThreadId.make("thread:delegated-delivery-worker");
+        const taskId = NodeId.make("node:delegated-delivery-worker-task");
+        const messageId = MessageId.make(`message:delegated-delivery:${threadId}`);
+        yield* seedParentWithTerminalTask({
+          threadId,
+          projectId: ProjectId.make("project:delegated-delivery-worker"),
+          runId: RunId.make("run:delegated-delivery-worker"),
+          rootNodeId: NodeId.make("node:delegated-delivery-worker-root"),
+          taskId,
+          deliveryState: "claimed",
+          completionWake: "always",
+          deliveryTaskIds: [taskId],
+          now,
+        });
+
+        yield* orchestrator.recoverDelegatedTasks;
+
+        // The worker dispatches on its own fiber; a rejected offer never lands.
+        const wake = yield* Effect.gen(function* () {
+          for (let attempt = 0; attempt < 200; attempt++) {
+            const projection = yield* orchestrator.getThreadProjection(threadId);
+            const message = projection.messages.find((candidate) => candidate.id === messageId);
+            if (message !== undefined) return message;
+            yield* Effect.sleep("10 millis");
+          }
+          return undefined;
+        });
+        assert.deepEqual(wake?.delegatedCompletion?.taskIds, [taskId]);
+      }),
+    );
+  },
+);

@@ -52,9 +52,12 @@ function delegatedCompletionRetryKey(
 
 /**
  * Drains provider continuation requests into durable message.dispatch offers.
- * Adapter-buffered wakes keep the provider-owned no-prompt after-active path;
- * new message_text and delegated-completion inputs use central auto admission.
- * Delegated completions remain generation-checked mailbox offers.
+ * Every offer requests queue_after_active, the only mode the orchestrator
+ * accepts for notifications and delegated completions. Adapter-buffered wakes
+ * stay on that no-prompt after-active path; message_text and
+ * delegated-completion inputs add deliveryIntent "auto", so central admission
+ * picks steer, queue or start under the thread lock. Delegated completions
+ * remain generation-checked mailbox offers.
  */
 export const layer = Layer.effectDiscard(
   Effect.gen(function* () {
@@ -132,7 +135,7 @@ export const layer = Layer.effectDiscard(
             messageId: delivery.messageId,
             text: delegatedCompletionText(delivery.taskIds),
             attachments: [],
-            dispatchMode: { type: "start_immediately" },
+            dispatchMode: { type: "queue_after_active" },
             deliveryIntent: "auto",
             createdBy: "agent",
             creationSource: "server",
@@ -166,10 +169,7 @@ export const layer = Layer.effectDiscard(
           },
           // An adapter-buffered wake was already delivered to the native session.
           // Keep it on the no-prompt after-active path instead of auto-steering it twice.
-          dispatchMode:
-            request.delivery === "message_text"
-              ? { type: "start_immediately" }
-              : { type: "queue_after_active" },
+          dispatchMode: { type: "queue_after_active" },
           ...(request.delivery === "message_text" ? { deliveryIntent: "auto" as const } : {}),
           createdBy: "agent",
           // "provider" marks an adapter-buffered wake, which ClaudeAdapterV2

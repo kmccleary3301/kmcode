@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "@effect/vitest";
-import { EnvironmentId } from "@t3tools/contracts";
+import { DEFAULT_MAX_TERMINAL_BUFFER_BYTES, EnvironmentId, WS_METHODS } from "@t3tools/contracts";
 import * as Cause from "effect/Cause";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
@@ -24,7 +24,7 @@ import {
 } from "../connection/model.ts";
 import * as EnvironmentRegistry from "../connection/registry.ts";
 import * as EnvironmentSupervisor from "../connection/supervisor.ts";
-import { EnvironmentRpcUnavailableError } from "../rpc/client.ts";
+import * as RpcClient from "../rpc/client.ts";
 import type * as RpcSession from "../rpc/session.ts";
 import {
   environmentRpcKey,
@@ -41,6 +41,7 @@ import {
   settlePromise,
   squashAtomCommandFailure,
 } from "./runtime.ts";
+import { createTerminalEnvironmentAtoms } from "./terminal.ts";
 
 const QUERY_ENVIRONMENT = new PrimaryConnectionTarget({
   environmentId: EnvironmentId.make("query-environment"),
@@ -120,6 +121,7 @@ const makeEnvironmentQueryHarness = Effect.fn("TestEnvironmentQuery.makeHarness"
   });
 
   return {
+    runtime,
     atom: family({ environmentId: QUERY_ENVIRONMENT.environmentId, input: undefined }),
     supervisorSession,
     supervisorState,
@@ -150,6 +152,48 @@ const mountEnvironmentQuery = Effect.fn("TestEnvironmentQuery.mount")(function* 
     }),
   );
   return registry;
+});
+
+describe("terminal attach subscriptions", () => {
+  it.effect("sends the retained history byte limit with attach requests", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const harness = yield* makeEnvironmentQueryHarness(Effect.void);
+        const requests = yield* Queue.unbounded<unknown>();
+        const subscribe = vi
+          .spyOn(RpcClient, "subscribe")
+          .mockImplementation((tag, input) =>
+            tag === WS_METHODS.terminalAttach
+              ? Stream.fromEffect(Queue.offer(requests, input)).pipe(Stream.drain)
+              : Stream.empty,
+          );
+        const registry = AtomRegistry.make();
+        const input = {
+          threadId: "thread-1",
+          terminalId: "term-1",
+          cwd: "/tmp/project",
+        };
+        const unmount = registry.mount(
+          createTerminalEnvironmentAtoms(harness.runtime).attach({
+            environmentId: QUERY_ENVIRONMENT.environmentId,
+            input,
+          }),
+        );
+        yield* Effect.addFinalizer(() =>
+          Effect.sync(() => {
+            unmount();
+            registry.dispose();
+            subscribe.mockRestore();
+          }),
+        );
+
+        expect(yield* Queue.take(requests)).toEqual({
+          ...input,
+          maxHistoryBytes: DEFAULT_MAX_TERMINAL_BUFFER_BYTES,
+        });
+      }),
+    ),
+  );
 });
 
 describe("settleAsyncResult", () => {
@@ -300,7 +344,7 @@ describe("environment query lifecycle", () => {
           const firstStarted = Latch.makeUnsafe();
           const failFirst = Latch.makeUnsafe();
           const firstSettled = Latch.makeUnsafe();
-          const unavailable = new EnvironmentRpcUnavailableError({
+          const unavailable = new RpcClient.EnvironmentRpcUnavailableError({
             environmentId: QUERY_ENVIRONMENT.environmentId,
             message: "Query environment is not connected.",
           });

@@ -1,4 +1,8 @@
-import { type TerminalSummary, WS_METHODS } from "@t3tools/contracts";
+import {
+  DEFAULT_MAX_TERMINAL_BUFFER_BYTES,
+  type TerminalSummary,
+  WS_METHODS,
+} from "@t3tools/contracts";
 import * as Stream from "effect/Stream";
 import { Atom } from "effect/reactivity";
 
@@ -50,9 +54,10 @@ export function createTerminalEnvironmentAtoms<R, E>(
       label: "environment-data:terminal:attach",
       subscribe: (input: EnvironmentRpcInput<typeof WS_METHODS.terminalAttach>) =>
         Stream.suspend(() =>
-          subscribe(WS_METHODS.terminalAttach, input).pipe(
-            Stream.scan(nextTerminalAttachSeedState, applyTerminalAttachStreamEvent),
-          ),
+          subscribe(WS_METHODS.terminalAttach, {
+            ...input,
+            maxHistoryBytes: DEFAULT_MAX_TERMINAL_BUFFER_BYTES,
+          }).pipe(Stream.scan(nextTerminalAttachSeedState, applyTerminalAttachStreamEvent)),
         ),
     }),
     events: createEnvironmentRpcSubscriptionAtomFamily(runtime, {

@@ -1,3 +1,5 @@
+import { retainedTerminalHistory } from "@t3tools/contracts";
+
 export interface TerminalOutputChunk {
   /** UTF-16 string offset within this generation and reset. */
   readonly startOffset: number;
@@ -42,7 +44,6 @@ export type TerminalOutputUpdate =
       readonly data: string;
     };
 
-export const DEFAULT_MAX_TERMINAL_BUFFER_BYTES = 512 * 1024;
 const DEFAULT_TERMINAL_CHUNK_BYTES = 16 * 1024;
 const MAX_TERMINAL_OUTPUT_CHUNKS = 1_024;
 const textEncoder = new TextEncoder();
@@ -99,28 +100,6 @@ function splitStringByUtf8Bytes(data: string, maxBytes: number): ReadonlyArray<U
   }
 
   return chunks;
-}
-
-function trimBufferToBytes(buffer: string, maxBufferBytes: number): string {
-  if (maxBufferBytes <= 0) {
-    return "";
-  }
-
-  const encoded = textEncoder.encode(buffer);
-  if (encoded.byteLength <= maxBufferBytes) {
-    return buffer;
-  }
-
-  let start = encoded.byteLength - maxBufferBytes;
-  while (start < encoded.length) {
-    const byte = encoded[start];
-    if (byte === undefined || (byte & 0b1100_0000) !== 0b1000_0000) {
-      break;
-    }
-    start += 1;
-  }
-
-  return textDecoder.decode(encoded.subarray(start));
 }
 
 function splitOutputChunks(
@@ -265,7 +244,7 @@ function resetOutput(
   data: string,
   maxBufferBytes: number,
 ): TerminalOutputState {
-  const retained = trimBufferToBytes(data, maxBufferBytes);
+  const retained = retainedTerminalHistory(data, maxBufferBytes);
   const reset = splitOutputChunks(
     retained,
     0,

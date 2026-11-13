@@ -164,6 +164,19 @@ describe("TerminalAttachInput", () => {
 
     expect(parsed.restartIfNotRunning).toBe(true);
   });
+
+  it("accepts an optional non-negative history budget", () => {
+    const input = {
+      threadId: "thread-1",
+      terminalId: DEFAULT_TERMINAL_ID,
+      cwd: "/tmp/project",
+    };
+    expect(decodeSync(TerminalAttachInput, input).maxHistoryBytes).toBeUndefined();
+    expect(
+      decodeSync(TerminalAttachInput, { ...input, maxHistoryBytes: 512 * 1024 }).maxHistoryBytes,
+    ).toBe(512 * 1024);
+    expect(decodes(TerminalAttachInput, { ...input, maxHistoryBytes: -1 })).toBe(false);
+  });
 });
 
 describe("TerminalWriteInput", () => {

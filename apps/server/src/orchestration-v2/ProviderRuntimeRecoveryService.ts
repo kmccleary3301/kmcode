@@ -300,6 +300,57 @@ function processBoundProviderThread(
   return providerThread;
 }
 
+/**
+ * The provider thread that ran this run's background work. The recovery
+ * projection drops a stopped session once its runs end, so an ended run keeps
+ * its thread by the session id the thread still carries. An imported provider
+ * thread never had one.
+ */
+function backgroundWorkProviderThread(
+  run: OrchestrationV2ThreadProjection["runs"][number],
+  projection: ProjectionStore.ProjectionRuntimeRecoveryState,
+) {
+  const bound = processBoundProviderThread(run, projection);
+  if (bound !== undefined || !isEndedRunStatus(run.status) || run.providerThreadId === null) {
+    return bound;
+  }
+  const providerThread = projection.providerThreads.find(
+    (candidate) => candidate.id === run.providerThreadId,
+  );
+  const providerSessionId = providerThread?.providerSessionId;
+  if (
+    providerThread === undefined ||
+    providerThread.providerInstanceId !== run.providerInstanceId ||
+    providerSessionId === null ||
+    providerSessionId === undefined ||
+    // A loaded session that did not bind above belongs to another runtime.
+    projection.providerSessions.some((candidate) => candidate.id === providerSessionId)
+  ) {
+    return undefined;
+  }
+  return providerThread;
+}
+
+/**
+ * No writer sets a run attempt's provider turn id; the provider turn names its
+ * attempt instead. Recovery loads neither for an ended run, so only a loaded
+ * turn that belongs to another run disproves ownership.
+ */
+function isProviderTurnOfAnotherRun(
+  providerTurnId: string,
+  run: OrchestrationV2ThreadProjection["runs"][number],
+  projection: ProjectionStore.ProjectionRuntimeRecoveryState,
+): boolean {
+  const providerTurn = projection.providerTurns.find(
+    (candidate) => candidate.id === providerTurnId,
+  );
+  if (providerTurn === undefined || providerTurn.runAttemptId === null) return false;
+  const attempt = projection.attempts.find(
+    (candidate) => candidate.id === providerTurn.runAttemptId,
+  );
+  return attempt !== undefined && attempt.runId !== run.id;
+}
+
 function isProcessBoundProviderRuntimeItem(
   item: OrchestrationV2ThreadProjection["turnItems"][number],
   projection: ProjectionStore.ProjectionRuntimeRecoveryState,
@@ -315,14 +366,12 @@ function isProcessBoundProviderRuntimeItem(
   }
   const run = projection.runs.find((candidate) => candidate.id === item.runId);
   if (run === undefined) return false;
-  const providerThread = processBoundProviderThread(run, projection);
+  const providerThread = backgroundWorkProviderThread(run, projection);
   if (
     providerThread === undefined ||
     (typeof itemProviderThreadId === "string" && itemProviderThreadId !== providerThread.id) ||
     (typeof itemProviderTurnId === "string" &&
-      !projection.attempts.some(
-        (attempt) => attempt.runId === run.id && attempt.providerTurnId === itemProviderTurnId,
-      ))
+      isProviderTurnOfAnotherRun(itemProviderTurnId, run, projection))
   ) {
     return false;
   }

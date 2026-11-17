@@ -1428,6 +1428,143 @@ it.effect(
   },
 );
 
+// The projection shapes below are what the recovery loader returns for real
+// rows: attempts never carry a provider turn id, and an ended run arrives
+// without its attempt, its provider turn or its stopped session.
+const lostSubagentRecovery = (run: "completed" | "running") => {
+  const threadId = ThreadId.make(`thread_recovery_lost_subagent_${run}`);
+  const runId = RunId.make(`run_recovery_lost_subagent_${run}`);
+  const attemptId = RunAttemptId.make(`attempt_recovery_lost_subagent_${run}`);
+  const rootNodeId = NodeId.make(`node_recovery_lost_subagent_root_${run}`);
+  const subagentId = NodeId.make(`node_recovery_lost_subagent_${run}`);
+  const itemId = TurnItemId.make(`turn_item_recovery_lost_subagent_${run}`);
+  const providerThreadId = ProviderThreadId.make(`provider_thread_recovery_lost_subagent_${run}`);
+  const providerTurnId = ProviderTurnId.make(`provider_turn_recovery_lost_subagent_${run}`);
+  const providerSessionId = ProviderSessionId.make(`provider_session_lost_subagent_${run}`);
+  const providerInstanceId = ProviderInstanceId.make("omp");
+  const driver = ProviderDriverKind.make("omp");
+  const live = run === "running";
+  let committedInput: Parameters<EventSink.EventSinkV2["Service"]["commitCommand"]>[0] | null =
+    null;
+  const projection = {
+    thread: { id: threadId, providerInstanceId },
+    runtimeRequests: [],
+    providerSessions: live
+      ? [{ id: providerSessionId, driver, providerInstanceId, status: "ready" }]
+      : [],
+    providerThreads: [
+      {
+        id: providerThreadId,
+        driver,
+        providerSessionId,
+        providerInstanceId,
+        status: live ? "active" : "idle",
+        pendingBackgroundTasks: [],
+      },
+    ],
+    providerTurns: live
+      ? [{ id: providerTurnId, runAttemptId: attemptId, nodeId: rootNodeId, status: "running" }]
+      : [],
+    runs: [{ id: runId, status: run, providerThreadId, providerInstanceId }],
+    attempts: live
+      ? [{ id: attemptId, runId, rootNodeId, status: "running", providerTurnId: null }]
+      : [],
+    nodes: [{ id: subagentId, runId, providerTurnId, status: "running", kind: "subagent" }],
+    subagents: [
+      {
+        id: subagentId,
+        runId,
+        origin: "provider_native",
+        childThreadId: null,
+        driver,
+        providerInstanceId,
+        providerThreadId,
+        nativeAgentId: "MockParity-2",
+        status: "running",
+      },
+    ],
+    messages: [],
+    turnItems: [
+      {
+        id: itemId,
+        runId,
+        nodeId: subagentId,
+        providerThreadId,
+        providerTurnId,
+        parentItemId: null,
+        type: "subagent",
+        status: "running",
+        subagentId,
+        origin: "provider_native",
+        childThreadId: null,
+        providerInstanceId,
+        title: "MockParity",
+      },
+    ],
+  } as unknown as OrchestrationV2ThreadProjection;
+  const layer = ProviderRuntimeRecovery.layer.pipe(
+    Layer.provide(ServerSettings.layerTest()),
+    Layer.provide(
+      Layer.mergeAll(
+        Layer.mock(ProjectionStore.ProjectionStoreV2)({
+          getRecoveryThreadIds: () => Effect.succeed([threadId]),
+          getRuntimeRecoveryProjection: () => Effect.succeed(projection),
+        }),
+        Layer.mock(EventSink.EventSinkV2)({
+          commitCommand: (input) => {
+            committedInput = input;
+            return Effect.succeed({ committed: true, cancelledEffectCount: 0 } as never);
+          },
+        }),
+        IdAllocator.layer,
+        Layer.mock(EffectWorker.OrchestrationEffectWorkerV2)({
+          runRecoveryOnce: Effect.succeed(false),
+        }),
+        Layer.mock(EffectOutbox.EffectOutboxV2)({
+          listByCommandId: () => Effect.succeed([]),
+          reconcileAfterProcessLoss: Effect.succeed({ requeued: 0, cancelled: 0 }),
+        }),
+      ),
+    ),
+  );
+  return Effect.gen(function* () {
+    yield* (yield* ProviderRuntimeRecovery.ProviderRuntimeRecoveryService).reconcile("startup");
+    const events = committedInput?.events ?? [];
+    const statusOf = (
+      type: "turn-item.updated" | "subagent.updated" | "node.updated",
+      id: string,
+    ) =>
+      events.flatMap((event) =>
+        event.type === type && event.payload.id === id ? [event.payload.status] : [],
+      );
+    return {
+      item: statusOf("turn-item.updated", itemId),
+      subagent: statusOf("subagent.updated", subagentId),
+      node: statusOf("node.updated", subagentId),
+    };
+  }).pipe(Effect.provide(layer));
+};
+
+it.effect("cancels a subagent left running in a completed run whose session has stopped", () =>
+  Effect.gen(function* () {
+    assert.deepEqual(yield* lostSubagentRecovery("completed"), {
+      item: ["cancelled"],
+      subagent: ["cancelled"],
+      node: ["cancelled"],
+    });
+  }),
+);
+
+it.effect("cancels a background subagent of a run that was live when the server stopped", () =>
+  Effect.gen(function* () {
+    assert.deepEqual(yield* lostSubagentRecovery("running"), {
+      item: ["cancelled"],
+      subagent: ["cancelled"],
+      node: ["cancelled"],
+    });
+  }),
+);
+
 it.effect("leaves delegated tasks to their own child threads after process loss", () => {
   const threadId = ThreadId.make("thread_recovery_delegation");
   const settledRunId = RunId.make("run_recovery_delegation_settled");

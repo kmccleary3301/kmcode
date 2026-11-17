@@ -1602,6 +1602,12 @@ export function makePiAdapterV2(
           yield* emitSubagentTasks(turn, toolCallId, resultRecord, completed, args, isError);
         }
         if (completed) {
+          if (
+            driver === "omp" &&
+            (toolName === "write" || toolName === "read" || toolName === "wait")
+          ) {
+            yield* handleOmpProcSnapshotResult(toolName, args, resultRecord, emittedAt);
+          }
           yield* settleToolCallSubagents(turn, toolCallId, resultRecord, isError, emittedAt);
         }
       });
@@ -2208,6 +2214,94 @@ export function makePiAdapterV2(
           },
         });
         yield* emit({ type: "turn_item.updated", driver, turnItem });
+      });
+      const emitNativeSubagentTerminal = Effect.fnUntraced(function* (
+        turn: ActivePiTurn,
+        nativeTaskId: string,
+        nativeAgentId: string,
+        status: "completed" | "failed" | "interrupted",
+        emittedAt: DateTime.Utc,
+      ) {
+        const item = turn.subagentItems[nativeTaskId];
+        if (item === undefined || !isOrchestrationV2WorkActive(item.status)) return;
+        (turn.subagentLive[nativeAgentId] ??= newPiSubagentLiveState()).nativeTaskId = nativeTaskId;
+        const parentToolSeparator = nativeTaskId.lastIndexOf(":subagent:");
+        const parentToolCallId =
+          parentToolSeparator === -1 ? "" : nativeTaskId.slice(0, parentToolSeparator);
+        yield* emitSubagentRecord(
+          turn,
+          parentToolCallId,
+          {
+            id: nativeAgentId,
+            nativeAgentId,
+            displayLabel: item.title,
+            ...(item.agentType === undefined ? {} : { agent: item.agentType }),
+            parentToolCallId,
+            status,
+          },
+          emittedAt,
+        );
+        if (threadState !== null) pruneFinishedTurnIfIdle(threadState, turn);
+      });
+
+      const handleOmpProcSnapshotResult = Effect.fnUntraced(function* (
+        toolName: string,
+        args: unknown,
+        resultRecord: unknown,
+        emittedAt: DateTime.Utc,
+      ) {
+        if (driver !== "omp") return;
+        const path = recordString(args, "path");
+        if (
+          toolName !== "wait" &&
+          ((toolName !== "read" && toolName !== "write") || !path?.startsWith("proc://"))
+        ) {
+          return;
+        }
+
+        const turns = new Set<ActivePiTurn>();
+        if (threadState?.activeTurn !== null && threadState?.activeTurn !== undefined) {
+          turns.add(threadState.activeTurn);
+        }
+        if (threadState?.lastFinalizedTurn !== undefined) {
+          turns.add(threadState.lastFinalizedTurn);
+        }
+        for (const finishedTurn of threadState?.finishedTurnsWithActiveChildren ?? []) {
+          turns.add(finishedTurn);
+        }
+        let inCompletedSection = false;
+        for (const line of contentText(recordField(resultRecord, "content")).split(/\r?\n/)) {
+          if (line.startsWith("## ")) {
+            inCompletedSection = /^## Completed(?: \(\d+\))?$/.test(line);
+            continue;
+          }
+          if (!inCompletedSection) continue;
+          const entry = /^### (\S+) \[([^\]]+)\] — (completed|cancelled|failed)\s*$/.exec(line);
+          if (entry === null || entry[2] !== "task") continue;
+          const nativeAgentId = entry[1]!;
+          const status =
+            entry[3] === "cancelled"
+              ? "interrupted"
+              : entry[3] === "completed"
+                ? "completed"
+                : "failed";
+          for (const candidateTurn of turns) {
+            const nativeTaskId = Object.entries(candidateTurn.subagentActivations).find(
+              ([, activation]) => activation.currentActivationId === nativeAgentId,
+            )?.[0];
+            if (nativeTaskId === undefined) continue;
+            const item = candidateTurn.subagentItems[nativeTaskId];
+            if (item === undefined || !isOrchestrationV2WorkActive(item.status)) continue;
+            yield* emitNativeSubagentTerminal(
+              candidateTurn,
+              nativeTaskId,
+              nativeAgentId,
+              status,
+              emittedAt,
+            );
+            break;
+          }
+        }
       });
 
       const emitSubagentTasks = Effect.fnUntraced(function* (

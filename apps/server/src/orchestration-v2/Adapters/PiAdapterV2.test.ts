@@ -2518,6 +2518,360 @@ describe("PiAdapterV2", () => {
       assert.equal(DateTime.toEpochMillis(completionNotice!.startedAt!), 1_800_000_000_000);
     }).pipe(Effect.scoped, Effect.provide(layerTest)),
   );
+  it.effect("interrupts the current native activation when its OMP job is killed", () =>
+    Effect.gen(function* () {
+      const fake = yield* makeFakePi;
+      yield* fake.emit({
+        type: "ready",
+        protocolVersion: 1,
+        supportedProtocolVersions: [1, 2],
+      });
+      const { runtime, takeEvent } = yield* openRuntime(
+        fake,
+        "default",
+        THREAD_ID,
+        SESSION_ID,
+        undefined,
+        OMP_DIALECT,
+      );
+      const providerThread = yield* runtime.ensureThread({
+        threadId: THREAD_ID,
+        modelSelection: modelSelection("default"),
+        runtimePolicy,
+      });
+      yield* startTurn(runtime, providerThread);
+      yield* fake.takeRequest("prompt");
+      yield* fake.emit({ type: "agent_start" });
+      type SubagentItem = Extract<
+        Extract<ProviderAdapterV2Event, { type: "turn_item.updated" }>["turnItem"],
+        { type: "subagent" }
+      >;
+      const subagentItem = (event: ProviderAdapterV2Event): SubagentItem | undefined =>
+        event.type === "turn_item.updated" && event.turnItem.type === "subagent"
+          ? event.turnItem
+          : undefined;
+      const emitProgress = (id: string, status: string) =>
+        fake.emit({
+          type: "subagent_progress",
+          payload: {
+            index: 0,
+            agent: "task",
+            task: "inspect the repository",
+            parentToolCallId: "call_task",
+            progress: {
+              id,
+              displayLabel: "MockParity",
+              agent: "task",
+              status,
+              task: "inspect the repository",
+            },
+          },
+        });
+
+      yield* emitProgress("MockParity", "running");
+      yield* takeEvent(
+        (event) =>
+          subagentItem(event)?.nativeAgentId === "MockParity" &&
+          subagentItem(event)?.status === "running",
+      );
+      yield* emitProgress("MockParity", "completed");
+      yield* takeEvent(
+        (event) =>
+          subagentItem(event)?.nativeAgentId === "MockParity" &&
+          subagentItem(event)?.status === "completed",
+      );
+      yield* emitProgress("MockParity-2", "running");
+      const revived = yield* takeEvent(
+        (event) =>
+          subagentItem(event)?.nativeAgentId === "MockParity-2" &&
+          subagentItem(event)?.status === "running",
+      );
+      assert.equal(subagentItem(revived)?.title, "MockParity");
+
+      yield* fake.emit({
+        type: "tool_execution_start",
+        toolCallId: "call_kill",
+        toolName: "write",
+        args: { path: "proc://MockParity-2/kill" },
+      });
+      yield* fake.emit({
+        type: "tool_execution_end",
+        toolCallId: "call_kill",
+        toolName: "write",
+        isError: false,
+        result: {
+          content: [
+            {
+              type: "text",
+              text: "## Cancelled (1)\n\n- Cancelled background job MockParity-2.\n\n## Completed (1)\n\n### MockParity-2 [task] — cancelled\nLabel: MockParity\nAgent: history://MockParity",
+            },
+          ],
+        },
+      });
+      yield* fake.emit({
+        type: "notice",
+        message: "after-kill-result",
+      });
+      let interrupted: SubagentItem | undefined;
+      let sentinelSeen = false;
+      while (!sentinelSeen) {
+        const event = yield* takeEvent(() => true);
+        const item = subagentItem(event);
+        if (item?.nativeAgentId === "MockParity-2" && item.status === "interrupted") {
+          interrupted = item;
+        }
+        sentinelSeen =
+          event.type === "turn_item.updated" &&
+          event.turnItem.type === "system_notice" &&
+          event.turnItem.message === "after-kill-result";
+      }
+      assert.equal(
+        interrupted?.status,
+        "interrupted",
+        "a cancelled current OMP activation must be interrupted",
+      );
+      assert.isNotNull(interrupted?.completedAt);
+    }).pipe(Effect.scoped, Effect.provide(layerTest)),
+  );
+  it.effect("does not interrupt a native subagent when a similarly named bash job is killed", () =>
+    Effect.gen(function* () {
+      const fake = yield* makeFakePi;
+      yield* fake.emit({
+        type: "ready",
+        protocolVersion: 1,
+        supportedProtocolVersions: [1, 2],
+      });
+      const { runtime, takeEvent } = yield* openRuntime(
+        fake,
+        "default",
+        THREAD_ID,
+        SESSION_ID,
+        undefined,
+        OMP_DIALECT,
+      );
+      const providerThread = yield* runtime.ensureThread({
+        threadId: THREAD_ID,
+        modelSelection: modelSelection("default"),
+        runtimePolicy,
+      });
+      yield* startTurn(runtime, providerThread);
+      yield* fake.takeRequest("prompt");
+      yield* fake.emit({ type: "agent_start" });
+      const subagentItem = (event: ProviderAdapterV2Event) =>
+        event.type === "turn_item.updated" && event.turnItem.type === "subagent"
+          ? event.turnItem
+          : undefined;
+      const emitProgress = (id: string, status: string) =>
+        fake.emit({
+          type: "subagent_progress",
+          payload: {
+            index: 0,
+            agent: "task",
+            task: "inspect the repository",
+            parentToolCallId: "call_task",
+            progress: {
+              id,
+              displayLabel: "MockParity",
+              agent: "task",
+              status,
+              task: "inspect the repository",
+            },
+          },
+        });
+      yield* emitProgress("MockParity", "running");
+      yield* takeEvent(
+        (event) =>
+          subagentItem(event)?.nativeAgentId === "MockParity" &&
+          subagentItem(event)?.status === "running",
+      );
+      yield* emitProgress("MockParity", "completed");
+      yield* takeEvent(
+        (event) =>
+          subagentItem(event)?.nativeAgentId === "MockParity" &&
+          subagentItem(event)?.status === "completed",
+      );
+      yield* emitProgress("MockParity-2", "running");
+      const running = yield* takeEvent(
+        (event) =>
+          subagentItem(event)?.nativeAgentId === "MockParity-2" &&
+          subagentItem(event)?.status === "running",
+      );
+      assert.equal(subagentItem(running)?.title, "MockParity");
+
+      yield* fake.emit({
+        type: "tool_execution_start",
+        toolCallId: "call_kill_bash",
+        toolName: "write",
+        args: { path: "proc://MockParity/kill" },
+      });
+      yield* fake.emit({
+        type: "tool_execution_end",
+        toolCallId: "call_kill_bash",
+        toolName: "write",
+        isError: false,
+        result: {
+          content: [
+            {
+              type: "text",
+              text: "## Completed (1)\n\n### MockParity-2 [bash] — completed\nLabel: MockParity\nAgent: history://MockParity",
+            },
+          ],
+        },
+      });
+      yield* fake.emit({ type: "notice", message: "after-bash-kill" });
+      let interrupted = false;
+      let sentinelSeen = false;
+      while (!sentinelSeen) {
+        const event = yield* takeEvent(() => true);
+        const item = subagentItem(event);
+        if (item?.nativeAgentId === "MockParity-2" && item.status === "interrupted") {
+          interrupted = true;
+        }
+        sentinelSeen =
+          event.type === "turn_item.updated" &&
+          event.turnItem.type === "system_notice" &&
+          event.turnItem.message === "after-bash-kill";
+      }
+      assert.isFalse(interrupted, "a bash job completion must not interrupt a native subagent");
+    }).pipe(Effect.scoped, Effect.provide(layerTest)),
+  );
+  it.effect("completes revived agents handed over by proc read and wait snapshots", () =>
+    Effect.gen(function* () {
+      const fake = yield* makeFakePi;
+      yield* fake.emit({
+        type: "ready",
+        protocolVersion: 1,
+        supportedProtocolVersions: [1, 2],
+      });
+      const { runtime, takeEvent } = yield* openRuntime(
+        fake,
+        "default",
+        THREAD_ID,
+        SESSION_ID,
+        undefined,
+        OMP_DIALECT,
+      );
+      const providerThread = yield* runtime.ensureThread({
+        threadId: THREAD_ID,
+        modelSelection: modelSelection("default"),
+        runtimePolicy,
+      });
+      type SubagentTurnItem = Extract<
+        Extract<ProviderAdapterV2Event, { type: "turn_item.updated" }>["turnItem"],
+        { type: "subagent" }
+      >;
+      const subagentItem = (event: ProviderAdapterV2Event): SubagentTurnItem | undefined =>
+        event.type === "turn_item.updated" && event.turnItem.type === "subagent"
+          ? event.turnItem
+          : undefined;
+      const emitProgress = (id: string, label: string, index: number, status: string) =>
+        fake.emit({
+          type: "subagent_progress",
+          payload: {
+            index,
+            agent: "task",
+            task: `inspect ${label}`,
+            parentToolCallId: "call_task",
+            progress: {
+              id,
+              displayLabel: label,
+              agent: "task",
+              status,
+              task: `inspect ${label}`,
+            },
+          },
+        });
+      yield* startTurn(runtime, providerThread);
+      yield* fake.takeRequest("prompt");
+      yield* fake.emit({ type: "agent_start" });
+      yield* emitProgress("StandardsCallers", "StandardsCallers", 0, "running");
+      yield* takeEvent(
+        (event) =>
+          subagentItem(event)?.nativeAgentId === "StandardsCallers" &&
+          subagentItem(event)?.status === "running",
+      );
+      yield* emitProgress("StandardsCallers", "StandardsCallers", 0, "completed");
+      yield* takeEvent(
+        (event) =>
+          subagentItem(event)?.nativeAgentId === "StandardsCallers" &&
+          subagentItem(event)?.status === "completed",
+      );
+      yield* emitProgress("StandardsCallers-2", "StandardsCallers", 0, "running");
+      yield* takeEvent(
+        (event) =>
+          subagentItem(event)?.nativeAgentId === "StandardsCallers-2" &&
+          subagentItem(event)?.status === "running",
+      );
+      yield* emitProgress("WaitJob-2", "WaitJob", 1, "running");
+      yield* takeEvent(
+        (event) =>
+          subagentItem(event)?.nativeAgentId === "WaitJob-2" &&
+          subagentItem(event)?.status === "running",
+      );
+
+      yield* fake.emit({
+        type: "tool_execution_start",
+        toolCallId: "call_proc_read",
+        toolName: "read",
+        args: { path: "proc://StandardsCallers-2" },
+      });
+      yield* fake.emit({
+        type: "tool_execution_end",
+        toolCallId: "call_proc_read",
+        toolName: "read",
+        isError: false,
+        result: {
+          content: [
+            {
+              type: "text",
+              text: "## Completed (1)\n\n### StandardsCallers-2 [task] — completed\nLabel: StandardsCallers\nAgent: history://StandardsCallers\nDelivery: handed over by this snapshot",
+            },
+          ],
+        },
+      });
+      yield* fake.emit({
+        type: "tool_execution_start",
+        toolCallId: "call_wait",
+        toolName: "wait",
+        args: { ids: ["WaitJob-2"] },
+      });
+      yield* fake.emit({
+        type: "tool_execution_end",
+        toolCallId: "call_wait",
+        toolName: "wait",
+        isError: false,
+        result: {
+          content: [
+            {
+              type: "text",
+              text: "## Still Running (1)\n\n- `StandardsCallers-2` [task] — StandardsCallers — 6m54s · 3 req\n\n## Completed (1)\n\n### WaitJob-2 [task] — completed\nLabel: WaitJob\nAgent: history://WaitJob",
+            },
+          ],
+        },
+      });
+      yield* fake.emit({ type: "notice", message: "after-proc-snapshot" });
+      const completed = new Map<string, SubagentTurnItem>();
+      let sentinelSeen = false;
+      while (!sentinelSeen) {
+        const event = yield* takeEvent(() => true);
+        const item = subagentItem(event);
+        if (
+          item?.status === "completed" &&
+          (item.nativeAgentId === "StandardsCallers-2" || item.nativeAgentId === "WaitJob-2")
+        ) {
+          completed.set(item.nativeAgentId, item);
+        }
+        sentinelSeen =
+          event.type === "turn_item.updated" &&
+          event.turnItem.type === "system_notice" &&
+          event.turnItem.message === "after-proc-snapshot";
+      }
+      assert.equal(completed.get("StandardsCallers-2")?.status, "completed");
+      assert.isNotNull(completed.get("StandardsCallers-2")?.completedAt);
+      assert.equal(completed.get("WaitJob-2")?.status, "completed");
+      assert.isNotNull(completed.get("WaitJob-2")?.completedAt);
+    }).pipe(Effect.scoped, Effect.provide(layerTest)),
+  );
   it.effect("terminalizes requested OMP tasks after a validation error before launch", () =>
     Effect.gen(function* () {
       const fake = yield* makeFakePi;

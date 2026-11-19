@@ -205,7 +205,7 @@ const sessionCookieOptions = (request: HttpServerRequest.HttpServerRequest) => (
   httpOnly: true,
   path: "/",
   sameSite: "lax" as const,
-  secure: Option.exists(requestUrl(request), (url) => url.protocol === "https:"),
+  secure: Option.exists(HttpServerRequest.toURL(request), (url) => url.protocol === "https:"),
 });
 
 const appendSessionCookie = (

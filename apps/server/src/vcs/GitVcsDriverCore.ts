@@ -66,10 +66,11 @@ const REVIEW_DIFF_FILE_MAX_OUTPUT_BYTES = 1024 * 1024;
 // prefixes. A repository or global diff.noprefix or diff.mnemonicPrefix would
 // otherwise leak into the patch and leave every parsed file unnamed.
 export const PATCH_RENDER_PREFIX_ARGS = ["--src-prefix=a/", "--dst-prefix=b/"] as const;
-// Shared by review previews and status totals, so the Changes row matches the Changes view.
+// Review previews use plumbing to avoid refreshing the real index; -M keeps rename detection
+// aligned with Changes totals.
 const REVIEW_DIFF_ARGS = [
-  "diff",
-  "--find-renames",
+  "diff-index",
+  "-M",
   "--no-color",
   "--no-ext-diff",
   "--no-textconv",
@@ -413,15 +414,6 @@ function parseTrackingBranchByUpstreamRef(stdout: string, upstreamRef: string): 
   }
 
   return null;
-}
-
-function deriveLocalBranchNameFromRemoteRef(branchName: string): string | null {
-  const separatorIndex = branchName.indexOf("/");
-  if (separatorIndex <= 0 || separatorIndex === branchName.length - 1) {
-    return null;
-  }
-  const localBranch = branchName.slice(separatorIndex + 1).trim();
-  return localBranch.length > 0 ? localBranch : null;
 }
 
 function gitCommandContext(
@@ -979,28 +971,30 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
         );
         const env = {
           ...process.env,
-          // Status polling runs beside the user's own git commands; without this,
-          // `git status` takes index.lock to save its refreshed index.
+          // Avoid optional index refreshes during background Git reads.
           GIT_OPTIONAL_LOCKS: "0",
           ...input.env,
           ...trace2Monitor.env,
         };
+        const spawnError = (cause: unknown) =>
+          new GitCommandError({
+            ...gitCommandContext(commandInput),
+            detail: "Failed to spawn Git process.",
+            cause,
+          });
         const child = yield* commandSpawner
           .spawn(
             ChildProcess.make("git", commandInput.args, {
               cwd: commandInput.cwd,
               env: { ...env, ...windowsLongPathConfigEnv(hostPlatform, env) },
+              // SIGTERM first lets git remove lock files; SIGKILL ends one that ignores it.
+              forceKillAfter: "1 second",
             }),
           )
           .pipe(
-            Effect.mapError(
-              (cause) =>
-                new GitCommandError({
-                  ...gitCommandContext(commandInput),
-                  detail: "Failed to spawn Git process.",
-                  cause,
-                }),
-            ),
+            Effect.mapError(spawnError),
+            // Synchronous spawn throws arrive as defects rather than typed errors.
+            Effect.catchDefect((cause) => Effect.fail(spawnError(cause))),
           );
 
         const [stdout, stderr, exitCode] = yield* Effect.all(
@@ -2308,8 +2302,11 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
       yield* runGit(
         "GitVcsDriver.commit.addSelected",
         cwd,
-        [...config, "--literal-pathspecs", "add", "-A", "--", ...filePaths],
-        env ? { env } : {},
+        [...config, "add", "-A", "--pathspec-from-file=-", "--pathspec-file-nul"],
+        {
+          ...(env ? { env } : {}),
+          stdin: filePaths.map((file) => `:(top,literal)${file}\0`).join(""),
+        },
       );
     } else {
       yield* runGit(
@@ -2931,11 +2928,12 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
         detail: "Too many untracked files to count.",
       });
     }
+    // Plumbing avoids refreshing the index; -M preserves review-preview rename detection.
     const readNumstat = (ref: string) =>
       executeGit(
         "GitVcsDriver.readBranchChangeTotals",
         cwd,
-        [...REVIEW_DIFF_ARGS, "--numstat", "-z", ref, "--"],
+        ["diff-index", "-M", "--numstat", "-z", ref, "--"],
         {
           allowNonZeroExit: true,
           maxOutputBytes: REVIEW_METADATA_MAX_OUTPUT_BYTES,
@@ -4132,7 +4130,7 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
         ? yield* executeGit(
             "GitVcsDriver.switchRef.localTrackingBranch",
             input.cwd,
-            ["for-each-ref", "--format=%(refname:short)\t%(upstream:short)", "refs/heads"],
+            ["for-each-ref", "--format=%(refname:lstrip=2)\t%(upstream)", "refs/heads"],
             {
               timeoutMs: 5_000,
               allowNonZeroExit: true,
@@ -4140,35 +4138,19 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
           ).pipe(
             Effect.map((result) =>
               result.exitCode === 0
-                ? parseTrackingBranchByUpstreamRef(result.stdout, input.refName)
+                ? parseTrackingBranchByUpstreamRef(result.stdout, `refs/remotes/${input.refName}`)
                 : null,
             ),
           )
         : null;
 
-      const localTrackedBranchCandidate = deriveLocalBranchNameFromRemoteRef(input.refName);
-      const localTrackedBranchTargetExists =
-        remoteExists && localTrackedBranchCandidate
-          ? yield* executeGit(
-              "GitVcsDriver.switchRef.localTrackedBranchTargetExists",
-              input.cwd,
-              ["show-ref", "--verify", "--quiet", `refs/heads/${localTrackedBranchCandidate}`],
-              {
-                timeoutMs: 5_000,
-                allowNonZeroExit: true,
-              },
-            ).pipe(Effect.map((result) => result.exitCode === 0))
-          : false;
-
       const checkoutArgs = localInputExists
         ? ["checkout", input.refName]
-        : remoteExists && !localTrackingBranch && localTrackedBranchTargetExists
-          ? ["checkout", input.refName]
-          : remoteExists && !localTrackingBranch
-            ? ["checkout", "--track", input.refName]
-            : remoteExists && localTrackingBranch
-              ? ["checkout", localTrackingBranch]
-              : ["checkout", input.refName];
+        : remoteExists && !localTrackingBranch
+          ? ["checkout", "--track", input.refName]
+          : remoteExists && localTrackingBranch
+            ? ["checkout", localTrackingBranch]
+            : ["checkout", input.refName];
 
       // A stale ref must not turn into a path checkout that discards local edits.
       yield* executeGit("GitVcsDriver.switchRef.checkout", input.cwd, [...checkoutArgs, "--"], {

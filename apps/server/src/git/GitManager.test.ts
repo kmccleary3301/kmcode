@@ -3858,7 +3858,7 @@ it.layer(layerGitManagerTest)("GitManager", (it) => {
       yield* runGit(repoDir, ["commit", "-m", "Lookup after create"]);
       yield* runGit(repoDir, ["push", "-u", "origin", "feature/lookup-after-create"]);
 
-      const { service: github } = createFakeSourceControlProvider();
+      const { service: github } = createGitHubProviderWithFakeGh();
       let created = false;
       const { manager } = yield* makeManager({
         sourceControlProvider: {

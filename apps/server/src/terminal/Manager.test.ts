@@ -1,3 +1,5 @@
+import { deriveProviderInstanceConfigMap } from "../provider/ProviderInstanceRegistryHydration.ts";
+
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, it } from "@effect/vitest";
 import {
@@ -3062,6 +3064,7 @@ it.layer(
       });
 
       const error = yield* TerminalManager.resolveProviderInstanceTerminalEnvironment({
+        deriveProviderInstanceConfigMap,
         serverSettings,
         path,
         rawProviderInstanceId: providerInstanceId,
@@ -3105,6 +3108,7 @@ it.layer(
       const path = yield* Path.Path;
       const serverSettings = yield* ServerSettings.ServerSettingsService;
       const environment = yield* TerminalManager.resolveProviderInstanceTerminalEnvironment({
+        deriveProviderInstanceConfigMap,
         serverSettings,
         path,
         rawProviderInstanceId: "configured_home",
@@ -3132,6 +3136,7 @@ it.layer(
       const path = yield* Path.Path;
       const serverSettings = yield* ServerSettings.ServerSettingsService;
       const environment = yield* TerminalManager.resolveProviderInstanceTerminalEnvironment({
+        deriveProviderInstanceConfigMap,
         serverSettings,
         path,
         rawProviderInstanceId: "codex",
@@ -3154,6 +3159,7 @@ it.layer(
       const path = yield* Path.Path;
       const serverSettings = yield* ServerSettings.ServerSettingsService;
       const environment = yield* TerminalManager.resolveProviderInstanceTerminalEnvironment({
+        deriveProviderInstanceConfigMap,
         serverSettings,
         path,
         rawProviderInstanceId: "claudeAgent",
@@ -3176,6 +3182,7 @@ it.layer(
       const path = yield* Path.Path;
       const serverSettings = yield* ServerSettings.ServerSettingsService;
       const environment = yield* TerminalManager.resolveProviderInstanceTerminalEnvironment({
+        deriveProviderInstanceConfigMap,
         serverSettings,
         path,
         rawProviderInstanceId: "codex",
@@ -3203,6 +3210,7 @@ it.layer(
       const path = yield* Path.Path;
       const serverSettings = yield* ServerSettings.ServerSettingsService;
       const error = yield* TerminalManager.resolveProviderInstanceTerminalEnvironment({
+        deriveProviderInstanceConfigMap,
         serverSettings,
         path,
         rawProviderInstanceId: "codex_unknown",
@@ -3244,6 +3252,7 @@ it.layer(
         historyByteLimit: 8,
         resolveProviderInstanceEnvironment: (rawProviderInstanceId, env) =>
           TerminalManager.resolveProviderInstanceTerminalEnvironment({
+            deriveProviderInstanceConfigMap,
             serverSettings,
             path,
             rawProviderInstanceId,

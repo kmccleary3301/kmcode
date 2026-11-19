@@ -254,6 +254,7 @@ import * as PairingGrantStore from "./auth/PairingGrantStore.ts";
 import * as SessionStore from "./auth/SessionStore.ts";
 import { failEnvironmentAuthInvalid, failEnvironmentInternal } from "./auth/http.ts";
 import * as RelayClient from "@t3tools/shared/relayClient";
+import * as NodeSqliteClient from "@t3tools/shared/nodeSqliteClient";
 import {
   sameUsageLimitCommandCoverage,
   withUsageLimitsCommands,
@@ -1015,7 +1016,7 @@ export const subscribeOrchestrationV2Shell = Effect.fn("ws.orchestrationV2.subsc
       },
     );
     const loadSnapshot = Effect.fn("ws.orchestrationV2.loadShellSnapshot")(function* () {
-      const base = yield* sql.withTransaction(
+      const base = yield* NodeSqliteClient.withReadSnapshot(sql)(
         Effect.gen(function* () {
           const threads = yield* threadManagement.getShellSnapshot({ location: "active" });
           return buildActiveShellSnapshot({

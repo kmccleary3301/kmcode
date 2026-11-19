@@ -32,6 +32,26 @@ import { SqlError, classifySqliteError } from "effect/sql/SqlError";
 const TransactionAcquire = Context.Reference<
   { restore: typeof Effect.interruptible | undefined } | undefined
 >("@t3tools/shared/nodeSqliteClient/TransactionAcquire", { defaultValue: () => undefined });
+// The reader a read snapshot pinned for the current fiber; `owner` keeps one client's
+// snapshot from leaking into another client's statements.
+const ReadSnapshotReader = Context.Reference<
+  { readonly owner: object; readonly connection: Connection } | undefined
+>("@t3tools/shared/nodeSqliteClient/ReadSnapshotReader", { defaultValue: () => undefined });
+
+type ReadSnapshot = <A, E, R>(effect: Effect.Effect<A, E, R>) => Effect.Effect<A, E | SqlError, R>;
+const readSnapshots = new WeakMap<Client.SqlClient, ReadSnapshot>();
+
+/**
+ * Runs `effect` against one consistent read snapshot. On a client with the reader pool,
+ * the snapshot is a read transaction on a reserved reader worker, so a multi-statement read
+ * neither blocks the main thread nor holds the write lock. Other clients use a transaction.
+ */
+export const withReadSnapshot =
+  (sql: Client.SqlClient): ReadSnapshot =>
+  (effect) => {
+    const snapshot = readSnapshots.get(sql);
+    return snapshot === undefined ? sql.withTransaction(effect) : snapshot(effect);
+  };
 
 const ATTR_DB_SYSTEM_NAME = "db.system.name";
 type StatementMode = "rows" | "raw" | "values";
@@ -1121,6 +1141,8 @@ const make = Effect.fn("makeWithDatabase")(function* (
           Effect.map(makeReader(options, readerPool), (acquire) => ({
             acquire,
             claims: 0,
+            // Held by a read snapshot: plain reads must not join its transaction.
+            reserved: false,
           })),
         )
       : [];
@@ -1170,9 +1192,9 @@ const make = Effect.fn("makeWithDatabase")(function* (
       ? writerBorrower(onWrite)
       : Effect.flatMap(isPlainRead(sql), (plain) => {
           if (!plain) return writerBorrower(onWrite);
-          let slot = readers[0]!;
+          let slot = readers.find((candidate) => !candidate.reserved)!;
           for (const candidate of readers) {
-            if (candidate.claims < slot.claims) slot = candidate;
+            if (!candidate.reserved && candidate.claims < slot.claims) slot = candidate;
           }
           slot.claims++;
           return Effect.uninterruptibleMask((restore) =>
@@ -1201,41 +1223,48 @@ const make = Effect.fn("makeWithDatabase")(function* (
             ),
           );
         });
+  const readerOwner = {};
   const borrower: Borrower =
     readers.length === 0
       ? writerBorrower
       : (use) =>
-          use(
-            identity<Connection>({
-              execute: (sql, params, rowTransform) =>
-                routed(
-                  sql,
-                  params,
-                  (run) => (rowTransform ? Effect.map(run("rows"), rowTransform) : run("rows")),
-                  (writer) => writer.execute(sql, params, rowTransform),
-                ),
-              executeRaw: (sql, params) =>
-                routed(
-                  sql,
-                  params,
-                  (run) => run("raw"),
-                  (writer) => writer.executeRaw(sql, params),
-                ),
-              executeValues: (sql, params) =>
-                routed(
-                  sql,
-                  params,
-                  (run) => run("values"),
-                  (writer) => writer.executeValues(sql, params),
-                ),
-              executeValuesUnprepared: (sql, params) =>
-                writerBorrower((writer) => writer.executeValuesUnprepared(sql, params)),
-              executeUnprepared: (sql, params, rowTransform) =>
-                writerBorrower((writer) => writer.executeUnprepared(sql, params, rowTransform)),
-              executeStream: (sql, params, rowTransform) =>
-                connection.executeStream(sql, params, rowTransform),
-            }),
-          );
+          Effect.withFiber((fiber) => {
+            const pinned = fiber.getRef(ReadSnapshotReader);
+            if (pinned !== undefined && pinned.owner === readerOwner) {
+              return use(pinned.connection);
+            }
+            return use(
+              identity<Connection>({
+                execute: (sql, params, rowTransform) =>
+                  routed(
+                    sql,
+                    params,
+                    (run) => (rowTransform ? Effect.map(run("rows"), rowTransform) : run("rows")),
+                    (writer) => writer.execute(sql, params, rowTransform),
+                  ),
+                executeRaw: (sql, params) =>
+                  routed(
+                    sql,
+                    params,
+                    (run) => run("raw"),
+                    (writer) => writer.executeRaw(sql, params),
+                  ),
+                executeValues: (sql, params) =>
+                  routed(
+                    sql,
+                    params,
+                    (run) => run("values"),
+                    (writer) => writer.executeValues(sql, params),
+                  ),
+                executeValuesUnprepared: (sql, params) =>
+                  writerBorrower((writer) => writer.executeValuesUnprepared(sql, params)),
+                executeUnprepared: (sql, params, rowTransform) =>
+                  writerBorrower((writer) => writer.executeUnprepared(sql, params, rowTransform)),
+                executeStream: (sql, params, rowTransform) =>
+                  connection.executeStream(sql, params, rowTransform),
+              }),
+            );
+          });
   const transactionAcquirer = Effect.uninterruptibleMask((restore) => {
     const fiber = Fiber.getCurrent()!;
     const scope = Context.getUnsafe(fiber.context, Scope.Scope);
@@ -1264,7 +1293,67 @@ const make = Effect.fn("makeWithDatabase")(function* (
     transformRows,
   });
   const withTransaction = client.withTransaction;
-  return Object.assign(client, {
+  // Snapshots leave one reader for plain reads, so they never fall back to the writer.
+  const snapshotPermits = yield* Semaphore.make(Math.max(readers.length - 1, 0));
+  const readSnapshot: ReadSnapshot = (effect) =>
+    Effect.flatMap(Effect.serviceOption(client.transactionService), (transaction) => {
+      // Inside a writer transaction or an outer snapshot, statements already share one view.
+      if (Option.isSome(transaction)) return effect;
+      if (
+        readers.length > 0 &&
+        Fiber.getCurrent()?.getRef(ReadSnapshotReader)?.owner === readerOwner
+      ) {
+        return effect;
+      }
+      if (readers.length < 2 || readerPool.unavailable) return client.withTransaction(effect);
+      return snapshotPermits
+        .withPermits(1)(
+          Effect.uninterruptibleMask((restore) => {
+            let slot = readers.find((candidate) => !candidate.reserved)!;
+            for (const candidate of readers) {
+              if (!candidate.reserved && candidate.claims < slot.claims) slot = candidate;
+            }
+            // Reads claimed before this point were claimed after their own fiber's writes, and
+            // this snapshot starts later, so a reader that joins it still sees those writes.
+            slot.reserved = true;
+            slot.claims++;
+            return Effect.flatMap(restore(slot.acquire), (reader) => {
+              if (reader === undefined) return restore(client.withTransaction(effect));
+              const control = (statement: "BEGIN" | "COMMIT" | "ROLLBACK") =>
+                reader.executeUnprepared(statement, [], undefined);
+              // BEGIN stays uninterruptible: the worker runs it even if this fiber stops waiting,
+              // and an unclosed snapshot would serve stale reads to every later plain read.
+              return Effect.andThen(
+                control("BEGIN"),
+                restore(
+                  Effect.provideService(effect, ReadSnapshotReader, {
+                    owner: readerOwner,
+                    connection: reader,
+                  }),
+                ).pipe(
+                  Effect.onExit((exit) =>
+                    control(Exit.isSuccess(exit) ? "COMMIT" : "ROLLBACK").pipe(
+                      Effect.catch(() => control("ROLLBACK")),
+                      Effect.catch((cause) =>
+                        Effect.logWarning("SQLite read snapshot did not close cleanly", { cause }),
+                      ),
+                    ),
+                  ),
+                ),
+              );
+            }).pipe(
+              Effect.ensuring(
+                Effect.sync(() => {
+                  slot.reserved = false;
+                  slot.claims--;
+                }),
+              ),
+            );
+          }),
+        )
+        .pipe(Effect.withSpan("sql.readSnapshot"));
+    });
+  const result = Object.assign(client, {
     withTransaction: <A, E, R>(effect: Effect.Effect<A, E, R>) =>
       Effect.uninterruptibleMask((restore) => {
         const pending: { restore: typeof Effect.interruptible | undefined } = { restore };
@@ -1277,6 +1366,8 @@ const make = Effect.fn("makeWithDatabase")(function* (
         );
       }),
   });
+  readSnapshots.set(result, readSnapshot);
+  return result;
 });
 
 export const layer = (config: SqliteClientConfig): Layer.Layer<Client.SqlClient, SqlError> =>

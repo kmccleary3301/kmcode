@@ -356,6 +356,72 @@ it.effect("spreads concurrent reads across the worker pool", () =>
   }).pipe(Effect.provide(NodeServices.layer)),
 );
 
+it.effect("keeps a read snapshot consistent without holding the writer", () =>
+  Effect.gen(function* () {
+    const { filename } = yield* makeTempDatabase;
+    yield* Effect.gen(function* () {
+      const sql = yield* SqlClient.SqlClient;
+      const readValue = sql<{ value: number }>`SELECT value FROM counters WHERE id = 1`.pipe(
+        Effect.map((rows) => rows[0]?.value),
+      );
+      const opened = yield* Deferred.make<void>();
+      const release = yield* Deferred.make<void>();
+      const snapshot = yield* Effect.forkChild(
+        SqliteClient.withReadSnapshot(sql)(
+          Effect.gen(function* () {
+            const first = yield* readValue;
+            yield* Deferred.succeed(opened, undefined);
+            yield* Deferred.await(release);
+            return [first, yield* readValue];
+          }),
+        ),
+        { startImmediately: true },
+      );
+      yield* Deferred.await(opened);
+
+      // The write commits while the snapshot is open, and a plain read sees it.
+      yield* sql`UPDATE counters SET value = 1 WHERE id = 1`;
+      assert.equal(yield* readValue, 1);
+
+      yield* Deferred.succeed(release, undefined);
+      assert.deepEqual(yield* Fiber.join(snapshot), [0, 0]);
+      assert.equal(yield* SqliteClient.withReadSnapshot(sql)(readValue), 1);
+    }).pipe(Effect.provide(SqliteClient.layer({ filename, readerConnection: true })));
+  }).pipe(Effect.provide(NodeServices.layer)),
+);
+
+it.effect("serves plain reads while every read snapshot slot is held", () =>
+  Effect.gen(function* () {
+    const { filename } = yield* makeTempDatabase;
+    yield* Effect.gen(function* () {
+      const sql = yield* SqlClient.SqlClient;
+      const release = yield* Deferred.make<void>();
+      const held = yield* Effect.forEach(Array.from({ length: 3 }), () =>
+        Effect.gen(function* () {
+          const opened = yield* Deferred.make<void>();
+          const fiber = yield* Effect.forkChild(
+            SqliteClient.withReadSnapshot(sql)(
+              sql`SELECT value FROM counters WHERE id = 1`.pipe(
+                Effect.andThen(Deferred.succeed(opened, undefined)),
+                Effect.andThen(Deferred.await(release)),
+              ),
+            ),
+            { startImmediately: true },
+          );
+          yield* Deferred.await(opened);
+          return fiber;
+        }),
+      );
+
+      yield* sql`UPDATE counters SET value = 2 WHERE id = 1`;
+      assert.deepEqual(yield* sql`SELECT value FROM counters WHERE id = 1`.values, [[2]]);
+
+      yield* Deferred.succeed(release, undefined);
+      yield* Effect.forEach(held, Fiber.join);
+    }).pipe(Effect.provide(SqliteClient.layer({ filename, readerConnection: true })));
+  }).pipe(Effect.provide(NodeServices.layer)),
+);
+
 it.effect.each([
   { failure: "a crash", failWith: "reader start failed", silent: false },
   { failure: "a startup timeout", failWith: null, silent: true },

@@ -165,7 +165,11 @@ const hasLargeBinding = (params: ReadonlyArray<unknown>): boolean => {
     return true;
   }
 };
+// Reader workers cannot share a writer's lock unless the database is in WAL mode.
+const NOT_WAL = "ERR_SQLITE_NOT_WAL";
 const READER_POOL_SIZE = 4;
+const READER_RETRY_DELAY = Duration.seconds(1);
+const READER_RETRY_MAX_DELAY = Duration.minutes(1);
 
 const sqliteWorkerSource = `
 const { parentPort, workerData } = require("node:worker_threads");
@@ -180,7 +184,11 @@ try {
   if (workerData.requireWal) {
     next.exec("PRAGMA cache_size = -262144;");
     const mode = String(next.prepare("PRAGMA journal_mode").get().journal_mode).toLowerCase();
-    if (mode !== "wal") throw new Error("database uses journal_mode " + mode + ", not wal");
+    if (mode !== "wal") {
+      throw Object.assign(new Error("database uses journal_mode " + mode + ", not wal"), {
+        code: ${JSON.stringify(NOT_WAL)},
+      });
+    }
   }
   db = next;
   parentPort.postMessage({ type: "ready" });
@@ -188,6 +196,7 @@ try {
   parentPort.postMessage({
     type: "unavailable",
     message: String(error && error.message ? error.message : error),
+    code: error && error.code,
   });
 }
 const statements = new Map();
@@ -279,7 +288,7 @@ interface SqliteWorkerRequest {
 
 type SqliteWorkerStartup =
   | { readonly type: "ready" }
-  | { readonly type: "unavailable"; readonly message: string };
+  | { readonly type: "unavailable"; readonly message: string; readonly code?: unknown };
 type SqliteWorkerControlReply =
   | { readonly type: "closed" }
   | { readonly type: "closeError"; readonly message: string };
@@ -346,7 +355,7 @@ const rawFromWorker = (reply: SqliteWorkerResult): Effect.Effect<unknown, SqlErr
 
 const makeReader = Effect.fnUntraced(function* (
   options: SqliteClientConfig,
-  pool: { unavailable: boolean },
+  pool: { unavailable: boolean; retrying: boolean; permanentFailure?: string },
 ) {
   let current:
     | {
@@ -485,6 +494,8 @@ const makeReader = Effect.fnUntraced(function* (
     return current;
   };
 
+  const scope = yield* Effect.scope;
+  const context = yield* Effect.context<never>();
   yield* Effect.addFinalizer(() =>
     Effect.promise(async () => {
       await current?.worker.terminate();
@@ -492,45 +503,110 @@ const makeReader = Effect.fnUntraced(function* (
   );
 
   const startupTimeout = Duration.seconds(10);
-  const turnOff = (reader: typeof current, reason: string) =>
-    Effect.suspend(() => {
+
+  function turnOff(
+    reader: typeof current,
+    reason: string,
+    permanent = false,
+  ): Effect.Effect<undefined> {
+    return Effect.suspend(() => {
       if (reader !== undefined) {
         if (current === reader) current = undefined;
         void reader.worker.terminate();
       }
+      if (permanent) pool.permanentFailure = reason;
       if (pool.unavailable) return Effect.succeed(undefined);
       pool.unavailable = true;
+      const retry = permanent
+        ? Effect.void
+        : Effect.sync(() => {
+            if (pool.retrying) return false;
+            pool.retrying = true;
+            return true;
+          }).pipe(
+            Effect.flatMap((shouldRetry) =>
+              shouldRetry
+                ? Effect.forkIn(recover(READER_RETRY_DELAY), scope, {
+                    startImmediately: true,
+                  }).pipe(Effect.asVoid)
+                : Effect.void,
+            ),
+          );
       return Effect.logWarning("SQLite reader worker unavailable; reads use the writer", {
         reason,
-      }).pipe(Effect.as(undefined));
+      }).pipe(
+        Effect.andThen(retry),
+        Effect.updateContext((_: Context.Context<never>) => context),
+        Effect.as(undefined),
+      );
     });
+  }
 
-  return Effect.suspend((): Effect.Effect<Connection | undefined> => {
-    if (pool.unavailable) return Effect.succeed(undefined);
-    let reader: NonNullable<typeof current>;
-    try {
-      reader = current ?? start();
-    } catch (cause) {
-      return turnOff(undefined, String(cause));
-    }
-    return Effect.flatMap(
-      Effect.timeoutOption(
-        Effect.promise(() => reader.started),
-        startupTimeout,
-      ),
-      (startup): Effect.Effect<Connection | undefined> =>
-        pool.unavailable || current !== reader
-          ? Effect.succeed(undefined)
-          : Option.isSome(startup) && startup.value.type === "ready"
-            ? Effect.succeed(reader.connection)
-            : turnOff(
-                reader,
-                Option.isSome(startup) && startup.value.type === "unavailable"
-                  ? startup.value.message
-                  : `worker did not open the database within ${Duration.toMillis(startupTimeout)} ms`,
-              ),
+  function acquire(retry: boolean): Effect.Effect<Connection | undefined> {
+    return Effect.suspend(() => {
+      if (pool.permanentFailure !== undefined || (pool.unavailable && !retry)) {
+        return Effect.succeed(undefined);
+      }
+      let reader: NonNullable<typeof current>;
+      try {
+        reader = current ?? start();
+      } catch (cause) {
+        return turnOff(undefined, String(cause));
+      }
+      return Effect.flatMap(
+        Effect.timeoutOption(
+          Effect.promise(() => reader.started),
+          startupTimeout,
+        ),
+        (startup): Effect.Effect<Connection | undefined> => {
+          if (!retry && pool.unavailable) return Effect.succeed(undefined);
+          if (Option.isSome(startup) && startup.value.type === "ready") {
+            return current === reader
+              ? Effect.succeed(reader.connection)
+              : Effect.succeed(undefined);
+          }
+          const unavailable =
+            Option.isSome(startup) && startup.value.type === "unavailable"
+              ? startup.value
+              : undefined;
+          return turnOff(
+            reader,
+            unavailable?.message ??
+              `worker did not open the database within ${Duration.toMillis(startupTimeout)} ms`,
+            unavailable?.code === NOT_WAL,
+          );
+        },
+      );
+    });
+  }
+
+  function recover(delay: Duration.Duration): Effect.Effect<void> {
+    return Effect.sleep(delay).pipe(
+      Effect.andThen(acquire(true)),
+      Effect.flatMap((reader) => {
+        if (reader !== undefined) {
+          return Effect.sync(() => {
+            pool.unavailable = false;
+            pool.retrying = false;
+          }).pipe(
+            Effect.andThen(
+              Effect.logInfo("SQLite reader worker available again; reads use the reader workers"),
+            ),
+          );
+        }
+        if (pool.permanentFailure !== undefined) {
+          pool.retrying = false;
+          return Effect.logInfo(
+            "SQLite reader worker retries stopped permanently; reads use the writer",
+            { reason: pool.permanentFailure },
+          );
+        }
+        return recover(Duration.min(Duration.times(delay, 2), READER_RETRY_MAX_DELAY));
+      }),
     );
-  });
+  }
+
+  return acquire(false);
 });
 
 const makeWorkerConnection = Effect.fnUntraced(function* (options: SqliteClientConfig) {
@@ -545,9 +621,7 @@ const makeWorkerConnection = Effect.fnUntraced(function* (options: SqliteClientC
             ? "workerConnection cannot be combined with checkpointWorker"
             : undefined;
   if (invalidConfiguration !== undefined) {
-    return yield* Effect.fail(
-      workerSqlError({ operation: "open", message: invalidConfiguration }),
-    );
+    return yield* Effect.fail(workerSqlError({ operation: "open", message: invalidConfiguration }));
   }
 
   const worker = yield* Effect.try({
@@ -557,9 +631,7 @@ const makeWorkerConnection = Effect.fnUntraced(function* (options: SqliteClientC
         workerData: {
           filename: options.filename,
           prepareCacheSize: options.prepareCacheSize ?? 200,
-          prepareCacheTtlMs: Duration.toMillis(
-            options.prepareCacheTTL ?? Duration.minutes(10),
-          ),
+          prepareCacheTtlMs: Duration.toMillis(options.prepareCacheTTL ?? Duration.minutes(10)),
           readOnly: false,
           allowExtension: options.allowExtension ?? false,
           requireWal: false,
@@ -654,7 +726,10 @@ const makeWorkerConnection = Effect.fnUntraced(function* (options: SqliteClientC
   );
 
   const startupTimeout = Duration.seconds(10);
-  const startup = yield* Effect.timeoutOption(Effect.promise(() => started), startupTimeout);
+  const startup = yield* Effect.timeoutOption(
+    Effect.promise(() => started),
+    startupTimeout,
+  );
   if (Option.isNone(startup)) {
     return yield* Effect.fail(
       workerSqlError({
@@ -1034,9 +1109,12 @@ const make = Effect.fn("makeWithDatabase")(function* (
     ? yield* makeWorkerConnection(options)
     : yield* makeConnection();
   const { connection, checkpoint } = connectionSetup;
-  const isPlainRead =
-    "isPlainRead" in connectionSetup ? connectionSetup.isPlainRead : undefined;
-  const readerPool = { unavailable: false };
+  const isPlainRead = "isPlainRead" in connectionSetup ? connectionSetup.isPlainRead : undefined;
+  const readerPool: {
+    unavailable: boolean;
+    retrying: boolean;
+    permanentFailure?: string;
+  } = { unavailable: false, retrying: false };
   const readers =
     options.readerConnection && isFileDatabase && options.readonly !== true
       ? yield* Effect.forEach(Array.from({ length: READER_POOL_SIZE }), () =>

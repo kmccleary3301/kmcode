@@ -8,10 +8,12 @@ import {
   ThreadId,
   type OrchestrationV2Checkpoint,
   type OrchestrationV2ConversationMessage,
+  type OrchestrationV2ThreadProjection,
 } from "@t3tools/contracts";
 import * as DateTime from "effect/DateTime";
 import { describe, expect, it } from "vite-plus/test";
 
+import { v2Projection } from "./orchestrationV2TestFixtures.ts";
 import { deriveThreadCheckpointSummaries } from "./threadCheckpoints.ts";
 
 function checkpoint(
@@ -57,6 +59,20 @@ function message(
   };
 }
 
+function threadProjection(
+  checkpoints: OrchestrationV2ThreadProjection["checkpoints"],
+  messages: OrchestrationV2ThreadProjection["messages"],
+): OrchestrationV2ThreadProjection {
+  return { ...v2Projection, checkpoints, messages };
+}
+
+function deriveSummaries(
+  checkpoints: OrchestrationV2ThreadProjection["checkpoints"],
+  messages: OrchestrationV2ThreadProjection["messages"],
+) {
+  return deriveThreadCheckpointSummaries(threadProjection(checkpoints, messages));
+}
+
 describe("deriveThreadCheckpointSummaries", () => {
   it("preserves checkpoint order, status, file references and ISO dates while filtering null keys", () => {
     const files = Object.freeze([
@@ -75,7 +91,7 @@ describe("deriveThreadCheckpointSummaries", () => {
       checkpoint("no-run", { runId: null }),
       ...eligible.slice(2),
     ]);
-    const summaries = deriveThreadCheckpointSummaries({ checkpoints, messages: [] });
+    const summaries = deriveSummaries(checkpoints, []);
 
     expect(summaries).toEqual(
       eligible.map((entry) => ({
@@ -104,10 +120,10 @@ describe("deriveThreadCheckpointSummaries", () => {
       message("a", "system-tail", { role: "system" }),
       message("a", "unscoped-tail", { runId: null }),
     ]);
-    const summaries = deriveThreadCheckpointSummaries({
-      checkpoints: [checkpoint("b"), checkpoint("a"), checkpoint("b", { appRunOrdinal: 3 })],
+    const summaries = deriveSummaries(
+      [checkpoint("b"), checkpoint("a"), checkpoint("b", { appRunOrdinal: 3 })],
       messages,
-    });
+    );
 
     expect(summaries.map((summary) => summary.assistantMessageId)).toEqual([
       "b-last",
@@ -126,14 +142,14 @@ describe("deriveThreadCheckpointSummaries", () => {
   });
 
   it("returns null for absent runs and runs containing only user or system messages", () => {
-    const summaries = deriveThreadCheckpointSummaries({
-      checkpoints: [checkpoint("absent"), checkpoint("user-only"), checkpoint("system-only")],
-      messages: [
+    const summaries = deriveSummaries(
+      [checkpoint("absent"), checkpoint("user-only"), checkpoint("system-only")],
+      [
         message("other", "other-assistant"),
         message("user-only", "user", { role: "user" }),
         message("system-only", "system", { role: "system" }),
       ],
-    });
+    );
     expect(summaries.map((summary) => summary.assistantMessageId)).toEqual([null, null, null]);
   });
 
@@ -143,10 +159,10 @@ describe("deriveThreadCheckpointSummaries", () => {
     const last = (
       id === undefined ? withoutId : { ...withoutId, id }
     ) as OrchestrationV2ConversationMessage;
-    const summaries = deriveThreadCheckpointSummaries({
-      checkpoints: [checkpoint("a"), checkpoint("a")],
-      messages: [message("a", "earlier-valid-id"), last],
-    });
+    const summaries = deriveSummaries(
+      [checkpoint("a"), checkpoint("a")],
+      [message("a", "earlier-valid-id"), last],
+    );
     expect(summaries.map((summary) => summary.assistantMessageId)).toEqual([null, null]);
   });
 
@@ -161,6 +177,7 @@ describe("deriveThreadCheckpointSummaries", () => {
   ])("does not read messages with no eligible checkpoints: %j", ({ checkpoints }) => {
     expect(
       deriveThreadCheckpointSummaries({
+        ...v2Projection,
         checkpoints,
         get messages(): ReadonlyArray<OrchestrationV2ConversationMessage> {
           throw new Error("Ineligible checkpoints must not read message history");
@@ -172,22 +189,15 @@ describe("deriveThreadCheckpointSummaries", () => {
   it("rebuilds associations for message and checkpoint replacements without retaining stale IDs", () => {
     const original = message("a", "original");
     const checkpoints = [checkpoint("a")];
-    const first = deriveThreadCheckpointSummaries({ checkpoints, messages: [original] });
+    const first = deriveSummaries(checkpoints, [original]);
     expect(first[0]?.assistantMessageId).toBe("original");
     expect(
-      deriveThreadCheckpointSummaries({
-        checkpoints,
-        messages: [original, message("a", "replacement")],
-      })[0]?.assistantMessageId,
+      deriveSummaries(checkpoints, [original, message("a", "replacement")])[0]?.assistantMessageId,
     ).toBe("replacement");
+    expect(deriveSummaries(checkpoints, [])[0]?.assistantMessageId).toBeNull();
     expect(
-      deriveThreadCheckpointSummaries({ checkpoints, messages: [] })[0]?.assistantMessageId,
-    ).toBeNull();
-    expect(
-      deriveThreadCheckpointSummaries({
-        checkpoints: [checkpoint("b")],
-        messages: [original, message("b", "new-checkpoint")],
-      })[0]?.assistantMessageId,
+      deriveSummaries([checkpoint("b")], [original, message("b", "new-checkpoint")])[0]
+        ?.assistantMessageId,
     ).toBe("new-checkpoint");
     expect(first[0]?.assistantMessageId).toBe("original");
   });
@@ -199,10 +209,10 @@ describe("deriveThreadCheckpointSummaries", () => {
         throw new Error("Tail checkpoints must not traverse older history");
       },
     }));
-    const summaries = deriveThreadCheckpointSummaries({
-      checkpoints: [checkpoint("latest"), checkpoint("latest")],
-      messages: [...history, message("latest", "latest-answer")],
-    });
+    const summaries = deriveSummaries(
+      [checkpoint("latest"), checkpoint("latest")],
+      [...history, message("latest", "latest-answer")],
+    );
     expect(summaries.map((summary) => summary.assistantMessageId)).toEqual([
       "latest-answer",
       "latest-answer",
@@ -216,10 +226,10 @@ describe("deriveThreadCheckpointSummaries", () => {
         throw new Error("Unrequested runs must not be indexed");
       },
     }));
-    const summaries = deriveThreadCheckpointSummaries({
-      checkpoints: [checkpoint("requested")],
-      messages: [message("requested", "requested-answer"), ...unrelated],
-    });
+    const summaries = deriveSummaries(
+      [checkpoint("requested")],
+      [message("requested", "requested-answer"), ...unrelated],
+    );
     expect(summaries[0]?.assistantMessageId).toBe("requested-answer");
   });
 
@@ -243,10 +253,10 @@ describe("deriveThreadCheckpointSummaries", () => {
             throw new Error("Checkpoint summaries must not read message bodies");
           },
         }));
-      const summaries = deriveThreadCheckpointSummaries({
-        checkpoints: Array.from({ length: count }, (_, index) => checkpoint(`run-${index}`)),
+      const summaries = deriveSummaries(
+        Array.from({ length: count }, (_, index) => checkpoint(`run-${index}`)),
         messages,
-      });
+      );
 
       expect(summaries.map((summary) => summary.assistantMessageId)).toEqual(
         Array.from({ length: count }, (_, index) => `assistant-${index}`),

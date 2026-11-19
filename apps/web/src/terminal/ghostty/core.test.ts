@@ -1,3 +1,4 @@
+// @vitest-environment jsdom
 import { afterEach, describe, expect, it, vi } from "vite-plus/test";
 import { DEFAULT_MAX_TERMINAL_BUFFER_BYTES } from "@t3tools/contracts";
 import {
@@ -110,6 +111,81 @@ describe("GhosttyTerminalCore snapshots", () => {
     cores.clear();
     vi.restoreAllMocks();
   });
+
+  const makeKeyboardEvent = (input: {
+    readonly code: string;
+    readonly key: string;
+    readonly ctrlKey?: boolean;
+    readonly shiftKey?: boolean;
+    readonly numLock?: boolean;
+  }): KeyboardEvent => {
+    const { numLock = false, ...eventInit } = input;
+    const event = new KeyboardEvent("keydown", eventInit);
+    Object.defineProperty(event, "getModifierState", {
+      value: (modifier: string) => modifier === "NumLock" && numLock,
+    });
+    return event;
+  };
+
+  const keypadCases: Array<{
+    readonly mode?: string;
+    readonly code: string;
+    readonly key: string;
+    readonly numLock?: boolean;
+    readonly expected: string;
+  }> = [
+    { code: "Numpad1", key: "End", expected: "\x1b[F" },
+    { code: "Numpad5", key: "Clear", expected: "\x1b[E" },
+    { code: "Numpad8", key: "ArrowUp", expected: "\x1b[A" },
+    { code: "NumpadDecimal", key: "Delete", expected: "\x1b[3~" },
+    { mode: "\x1b[?1h", code: "Numpad8", key: "ArrowUp", expected: "\x1bOA" },
+    { mode: "\x1b[>1u", code: "Numpad8", key: "ArrowUp", expected: "\x1b[57419u" },
+    {
+      mode: "\x1b=\x1b[?1035l",
+      code: "Numpad8",
+      key: "8",
+      numLock: true,
+      expected: "\x1bOx",
+    },
+    { mode: "\x1b[>1u", code: "Numpad8", key: "8", numLock: true, expected: "8" },
+  ];
+
+  it.each(keypadCases)(
+    "encodes keypad key $key with physical code '$code'",
+    async ({ mode = "", code, key, numLock = false, expected }) => {
+      const core = await createCore();
+      core.write(mode);
+      expect(core.encodeKey(makeKeyboardEvent({ code, key, numLock }))).toBe(expected);
+    },
+  );
+
+  const modifiedF3Cases: Array<{
+    readonly mode: string;
+    readonly ctrlKey?: boolean;
+    readonly shiftKey?: boolean;
+    readonly expected: string;
+  }> = [
+    { mode: "", ctrlKey: true, expected: "\x1b[13;5~" },
+    { mode: "\x1b[?1h\x1b=", ctrlKey: true, expected: "\x1b[1;5R" },
+    { mode: "\x1b[?1h\x1b=", shiftKey: true, expected: "\x1b[1;2R" },
+    {
+      mode: "\x1b[?1h\x1b=\x1b[?1l\x1b>",
+      ctrlKey: true,
+      expected: "\x1b[13;5~",
+    },
+    { mode: "\x1b[>1u", ctrlKey: true, expected: "\x1b[13;5~" },
+  ];
+
+  it.each(modifiedF3Cases)(
+    "encodes modified F3 as $expected after $mode",
+    async ({ mode, ctrlKey = false, shiftKey = false, expected }) => {
+      const core = await createCore();
+      core.write(mode);
+      expect(core.encodeKey(makeKeyboardEvent({ code: "F3", key: "F3", ctrlKey, shiftKey }))).toBe(
+        expected,
+      );
+    },
+  );
 
   it("preserves styles, wide cells, and selection after shared memory grows", async () => {
     const core = await createCore();

@@ -1,7 +1,7 @@
 import {
   type GhosttyKeyboardLayoutMap,
   ghosttyConsumedMods,
-  ghosttyKeyForCode,
+  ghosttyKeyForEvent,
   ghosttyUnshiftedCodepoint,
   loadGhosttyKeyboardLayoutMap,
 } from "./keyCodes";
@@ -176,6 +176,8 @@ export interface GhosttyMouseInput {
   readonly paddingBottom: number;
   readonly anyButtonPressed: boolean;
 }
+// Keep modified F3 compatible with terminfo only in keypad-transmit mode.
+const MODIFIED_F3 = /^\x1b\[13;(\d+)~$/;
 
 const decoder = new TextDecoder();
 const encoder = new TextEncoder();
@@ -508,7 +510,7 @@ export class GhosttyTerminalCore {
       this.keyEvent,
       action === "release" ? 0 : event.repeat ? 2 : 1,
     );
-    this.runtime.call("ghostty_key_event_set_key", this.keyEvent, ghosttyKeyForCode(event.code));
+    this.runtime.call("ghostty_key_event_set_key", this.keyEvent, ghosttyKeyForEvent(event));
     const mods =
       (event.shiftKey ? 1 : 0) |
       (event.ctrlKey ? 1 << 1 : 0) |
@@ -548,7 +550,23 @@ export class GhosttyTerminalCore {
     );
     this.runtime.call("ghostty_wasm_free_usize", written);
     if (textPointer !== 0) this.runtime.free(textPointer, textBytes.length);
-    return encoded;
+    return MODIFIED_F3.test(encoded) && this.modeEnabled(66) && this.kittyKeyboardFlags() === 0
+      ? encoded.replace(MODIFIED_F3, "\x1b[1;$1R")
+      : encoded;
+  }
+
+  private kittyKeyboardFlags(): number {
+    this.runtime.bytes(this.scratch, 1)[0] = 0;
+    this.runtime.call("ghostty_terminal_get", this.terminal, 8, this.scratch);
+    return this.runtime.bytes(this.scratch, 1)[0]!;
+  }
+
+  private modeEnabled(mode: number): boolean {
+    this.runtime.bytes(this.scratch, 1)[0] = 0;
+    return (
+      this.runtime.call("ghostty_terminal_mode_get", this.terminal, mode, this.scratch) ===
+        GHOSTTY_SUCCESS && this.runtime.bytes(this.scratch, 1)[0] !== 0
+    );
   }
 
   encodePaste(data: string): string {

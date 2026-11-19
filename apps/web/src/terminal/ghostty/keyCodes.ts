@@ -188,6 +188,28 @@ export function ghosttyKeyForCode(code: string): number {
   return codeToGhosttyKey.get(code) ?? 0;
 }
 
+const NUMPAD_NAVIGATION_KEYS: Readonly<Record<string, number>> = {
+  ArrowDown: ghosttyKeyForCode("NumpadArrowDown"),
+  ArrowLeft: ghosttyKeyForCode("NumpadArrowLeft"),
+  ArrowRight: ghosttyKeyForCode("NumpadArrowRight"),
+  ArrowUp: ghosttyKeyForCode("NumpadArrowUp"),
+  Clear: ghosttyKeyForCode("NumpadBegin"),
+  Delete: ghosttyKeyForCode("NumpadDelete"),
+  End: ghosttyKeyForCode("NumpadEnd"),
+  Home: ghosttyKeyForCode("NumpadHome"),
+  Insert: ghosttyKeyForCode("NumpadInsert"),
+  PageDown: ghosttyKeyForCode("NumpadPageDown"),
+  PageUp: ghosttyKeyForCode("NumpadPageUp"),
+};
+
+export function ghosttyKeyForEvent(event: Pick<KeyboardEvent, "code" | "key">): number {
+  if (event.code.startsWith("Numpad") && Object.hasOwn(NUMPAD_NAVIGATION_KEYS, event.key)) {
+    const numpadKey = NUMPAD_NAVIGATION_KEYS[event.key];
+    if (numpadKey !== undefined) return numpadKey;
+  }
+  return ghosttyKeyForCode(event.code) || ghosttyKeyForCode(event.key);
+}
+
 export interface GhosttyKeyboardLayoutMap {
   get(code: string): string | undefined;
 }

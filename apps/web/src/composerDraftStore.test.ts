@@ -84,7 +84,9 @@ import {
   partializeComposerDraftStoreState,
   useComposerDraftStore,
   DraftId,
+  hydrateImagesFromPersisted,
 } from "./composerDraftStore";
+import { readComposerImageBytes } from "./components/chat/composerAttachmentFiles";
 import { shouldAcknowledgeComposerModelSelectionOverride } from "./components/ChatView.logic";
 import { removeLocalStorageItem, setLocalStorageItem } from "./hooks/useLocalStorage";
 import { insertInlineContextReference } from "./lib/composerContextReferences";
@@ -102,13 +104,13 @@ function makeImage(input: {
   name?: string;
   mimeType?: string;
   sizeBytes?: number;
-  lastModified?: number;
+  fill?: number;
 }): ComposerImageAttachment {
   const name = input.name ?? "image.png";
   const mimeType = input.mimeType ?? "image/png";
   const sizeBytes = input.sizeBytes ?? 4;
   const lastModified = input.lastModified ?? 1_700_000_000_000;
-  const file = new File([new Uint8Array(sizeBytes).fill(1)], name, {
+  const file = new File([new Uint8Array(sizeBytes).fill(input.fill ?? 1)], name, {
     type: mimeType,
     lastModified,
   });
@@ -289,7 +291,7 @@ describe("composerDraftStore addImages", () => {
     URL.revokeObjectURL = originalRevokeObjectUrl;
   });
 
-  it("deduplicates identical images in one batch by file signature", () => {
+  it("deduplicates byte-identical images in one batch", async () => {
     const first = makeImage({
       id: "img-1",
       previewUrl: "blob:first",
@@ -306,6 +308,7 @@ describe("composerDraftStore addImages", () => {
       sizeBytes: 12,
       lastModified: 12345,
     });
+    await Promise.all([first, duplicate].map(({ file }) => readComposerImageBytes(file)));
 
     useComposerDraftStore.getState().addImages(threadRef, [first, duplicate]);
 
@@ -336,7 +339,7 @@ describe("composerDraftStore addImages", () => {
     expect(revokeSpy).not.toHaveBeenCalled();
   });
 
-  it("deduplicates against existing images across calls by file signature", () => {
+  it("keeps distinct image bytes and deduplicates a byte-identical restored image", async () => {
     const first = makeImage({
       id: "img-a",
       previewUrl: "blob:a",
@@ -345,21 +348,33 @@ describe("composerDraftStore addImages", () => {
       sizeBytes: 9,
       lastModified: 777,
     });
-    const duplicateLater = makeImage({
-      id: "img-b",
-      previewUrl: "blob:b",
+    const distinct = makeImage({
+      id: "img-distinct",
+      previewUrl: "blob:distinct",
       name: "same.png",
       mimeType: "image/png",
       sizeBytes: 9,
-      lastModified: 999,
+      lastModified: 777,
+      fill: 2,
     });
+    await Promise.all([first, distinct].map(({ file }) => readComposerImageBytes(file)));
+    const store = useComposerDraftStore.getState();
+    expect(store.addImages(threadRef, [first, distinct])).toEqual(["img-a", "img-distinct"]);
 
-    expect(useComposerDraftStore.getState().addImage(threadRef, first)).toBe(true);
-    expect(useComposerDraftStore.getState().addImage(threadRef, duplicateLater)).toBe(false);
+    const duplicateLater = hydrateImagesFromPersisted([
+      {
+        id: "img-b",
+        name: "same.png",
+        mimeType: "image/png",
+        sizeBytes: 9,
+        dataUrl: `data:image/png;base64,${btoa(String.fromCharCode(...new Uint8Array(9).fill(1)))}`,
+      },
+    ])[0];
+    if (!duplicateLater) throw new Error("Expected the persisted image to hydrate");
+    expect(store.addImages(threadRef, [duplicateLater])).toEqual([]);
 
     const draft = draftFor(threadId, TEST_ENVIRONMENT_ID);
-    expect(draft?.images.map((image) => image.id)).toEqual(["img-a"]);
-    expect(revokeSpy).toHaveBeenCalledWith("blob:b");
+    expect(draft?.images.map((image) => image.id)).toEqual(["img-a", "img-distinct"]);
   });
 
   it("returns false when addImage receives an existing image id", () => {
@@ -3626,7 +3641,7 @@ describe("composerDraftStore attachment references", () => {
     resetComposerDraftStore();
   });
 
-  it("reports which attachments it accepted so only those get chips", () => {
+  it("reports which attachments it accepted so only those get chips", async () => {
     const store = useComposerDraftStore.getState();
     const file = {
       type: "file" as const,
@@ -3641,12 +3656,12 @@ describe("composerDraftStore attachment references", () => {
     expect(store.addFiles(threadRef, [file])).toEqual(["file-1"]);
     expect(store.addFiles(threadRef, [{ ...file, id: "file-2" }])).toEqual([]);
     const image = makeImage({ id: "img-1", previewUrl: "blob:img-1", name: "shot.png" });
+    const duplicate = makeImage({ id: "img-2", previewUrl: "blob:img-2", name: "shot.png" });
+    await Promise.all(
+      [image, duplicate].map(({ file: imageFile }) => readComposerImageBytes(imageFile)),
+    );
     expect(store.addImages(threadRef, [image])).toEqual(["img-1"]);
-    expect(
-      store.addImages(threadRef, [
-        makeImage({ id: "img-2", previewUrl: "blob:img-2", name: "shot.png" }),
-      ]),
-    ).toEqual([]);
+    expect(store.addImages(threadRef, [duplicate])).toEqual([]);
   });
 
   it("strips references when an image or file is removed", () => {

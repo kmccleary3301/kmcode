@@ -365,6 +365,7 @@ import {
   getComposerPromptInjectionState,
   getComposerProviderState,
 } from "./chat/composerProviderState";
+import { readComposerImageBytes } from "./chat/composerAttachmentFiles";
 import { confirmTerminalClose, isTerminalCloseConfirmPending } from "../lib/terminalCloseConfirm";
 import { isPreviewFocused } from "../lib/previewFocus";
 import { getTerminalFocusOwner } from "../lib/terminalFocus";
@@ -7002,7 +7003,10 @@ export default function ChatView(props: ChatViewProps) {
         // the live edge keeps following.
         const handlePointerDown = (event: PointerEvent) => {
           if (event.target === scrollNode) {
-            if (contentScrollsUp()) {
+            const scrollbarHit =
+              scrollNode.getBoundingClientRect().right - event.clientX <=
+              Math.max(16, scrollNode.offsetWidth - scrollNode.clientWidth);
+            if (scrollbarHit && contentScrollsUp()) {
               handleManualNavigation();
             }
             return;
@@ -8894,6 +8898,7 @@ export default function ChatView(props: ChatViewProps) {
             restoredFiles.push({ ...attachment, type: "file" });
           }
         });
+        await Promise.all(images.map(({ file }) => readComposerImageBytes(file)));
         store.addImages(composerDraftTarget, images, { allowDuplicates: true });
         store.addFiles(composerDraftTarget, restoredFiles, { allowDuplicates: true });
         if (currentRouteThreadKeyRef.current === routeThreadKey) {
@@ -9210,16 +9215,28 @@ export default function ChatView(props: ChatViewProps) {
     if (
       !readEnvironmentScope(environmentId, AuthOrchestrationOperateScope) ||
       !activeThread ||
-      isSendBusy ||
       isConnecting ||
       isRevertingCheckpoint ||
       !clientSettingsHydrated ||
       threadDetailLoading ||
       environmentChangeRef.current !== null ||
-      sendInFlightRef.current ||
       feedbackUploadsInFlightRef.current.has(routeThreadKey)
     ) {
       notifyDirectAnnotationAttached();
+      return;
+    }
+    if (isSendBusy || sendInFlightRef.current) {
+      if (directAnnotation) {
+        notifyDirectAnnotationAttached();
+      } else {
+        toastManager.add(
+          stackedThreadToast({
+            type: "info",
+            title: "Still sending your previous message.",
+            description: "Send again once it goes through or fails.",
+          }),
+        );
+      }
       return;
     }
     if (needsLoadBalancing) {

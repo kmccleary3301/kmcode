@@ -176,6 +176,7 @@ import {
   isPreviewableComposerVideo,
   normalizeComposerImageFileMimeType,
   shouldHandleComposerAttachmentPaste,
+  readComposerImageBytes,
 } from "./composerAttachmentFiles";
 import {
   readAttachmentUpload,
@@ -3347,6 +3348,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
         return;
       }
       const file = new File([blob], record.name, { type: record.mimeType || blob.type });
+      if (record.kind === "image") await readComposerImageBytes(file);
       // The draft these bytes belong to may have been sent or switched away from while they
       // downloaded. Dropping them here keeps them out of whatever draft is open now.
       if (attachmentTargetKeyRef.current !== importTargetKey) return;
@@ -6008,6 +6010,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
           continue;
         }
         const attachmentFile = compressed.file;
+        await readComposerImageBytes(attachmentFile);
         const previewUrl = URL.createObjectURL(attachmentFile);
         nextImages.push({
           type: "image",

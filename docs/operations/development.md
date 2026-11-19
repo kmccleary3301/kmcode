@@ -281,7 +281,11 @@ the child reports no tool of its own, the line shows its thread's newest
 running step. A `t3_thread_wait` call draws as a one-row wait tree for the
 thread it waits on, titled and timed from that delegated child. A finished
 turn folds to "Worked for …" with its step count and edit totals; the answer,
-handoffs, and runtime warnings or errors stay visible.
+handoffs, and runtime warnings or errors stay visible. When the answer is a
+short sign-off after a fuller reply (an agent checking off todos after it
+answered, say), the fuller reply stays visible above it, with its own copy
+button: either only todo updates and thoughts separate the two, or the reply
+is at least 800 characters and twice the sign-off, within two other steps.
 
 Every step sits on one icon column: the Working header, thoughts, tool rows,
 group headers and their members all place a 14px glyph at the same x and start

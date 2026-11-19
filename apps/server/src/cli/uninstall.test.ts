@@ -36,7 +36,7 @@ it.layer(NodeServices.layer)("t3 uninstall launcher", (it) => {
   );
 });
 
-it.live.runIf(HostProcess.Platform.defaultValue() === "win32")(
+it.live.runIf(HostProcessPlatform.defaultValue() === "win32")(
   "t3 uninstall has cmd.exe remove the runtime directory, preserving spaces and literal environment-variable syntax",
   () =>
     Effect.gen(function* () {

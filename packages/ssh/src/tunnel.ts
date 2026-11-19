@@ -58,6 +58,7 @@ import {
 const SSH_READY_TIMEOUT_MS = 20_000;
 const TUNNEL_SHUTDOWN_TIMEOUT_MS = 2_000;
 const REMOTE_LAUNCH_TIMEOUT_MS = 90_000;
+const SSH_TUNNEL_READY_PROBE_TIMEOUT_MS = 5_000;
 const TUNNEL_STDERR_TAIL_CHARS = 16_384;
 
 export interface SshEnvironmentManagerOptions {
@@ -740,7 +741,11 @@ const makeSshEnvironmentManager = Effect.fn("ssh/tunnel.SshEnvironmentManager.ma
       return "ssh process exited";
     }
     const readiness = yield* Effect.exit(
-      waitForHttpReady({ baseUrl: entry.httpBaseUrl, timeoutMs: 2_000 }),
+      waitForHttpReady({
+        baseUrl: entry.httpBaseUrl,
+        timeoutMs: SSH_TUNNEL_READY_PROBE_TIMEOUT_MS,
+        probeTimeoutMs: SSH_TUNNEL_READY_PROBE_TIMEOUT_MS,
+      }),
     );
     return Exit.isSuccess(readiness) ? undefined : readiness.cause;
   });

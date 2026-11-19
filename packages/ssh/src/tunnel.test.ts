@@ -1486,6 +1486,62 @@ net.Server.prototype.listen = function (port, host, callback) {
     }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
   );
 
+  it.effect("reuses a healthy forward when readiness takes over 2.5 seconds", () =>
+    Effect.gen(function* () {
+      const reconnectProbed = yield* Deferred.make<void>();
+      const forwardReplaced = yield* Deferred.make<void>();
+      const responseMs = 2_500;
+      let forwards = 0;
+      let connected = false;
+      const spawner = ChildProcessSpawner.make((command) =>
+        commandArgs(command).includes("-N")
+          ? Effect.sync(() => ++forwards).pipe(
+              Effect.flatMap((count) =>
+                count === 1
+                  ? Effect.void
+                  : Deferred.succeed(forwardReplaced, undefined).pipe(Effect.asVoid),
+              ),
+              Effect.as(makeRunningProcess(() => undefined)),
+            )
+          : Effect.succeed(makeSuccessfulProcess('{"remotePort":3773}\n')),
+      );
+      const httpClient = HttpClient.make((request) =>
+        Effect.gen(function* () {
+          if (connected) {
+            yield* Deferred.succeed(reconnectProbed, undefined);
+            yield* Effect.sleep(Duration.millis(responseMs));
+          }
+          return HttpClientResponse.fromWeb(request, new Response("", { status: 200 }));
+        }),
+      );
+      const layer = Layer.mergeAll(
+        NodeServices.layer,
+        Layer.succeed(ChildProcessSpawner.ChildProcessSpawner, spawner),
+        Layer.succeed(HttpClient.HttpClient, httpClient),
+        Layer.succeed(NetService.NetService, testNetService),
+        SshAuth.SshPasswordPrompt.disabledLayer,
+        SshTunnel.SshEnvironmentManager.layer({ resolveCliRunner: Effect.succeed(ARCHIVE) }),
+        TestClock.layer(),
+      );
+      const target = { alias: "devbox", hostname: "devbox", username: null, port: null };
+
+      yield* Effect.gen(function* () {
+        const manager = yield* SshTunnel.SshEnvironmentManager;
+        const initial = yield* manager.ensureEnvironment(target);
+        connected = true;
+        const reconnect = yield* Effect.forkChild(manager.ensureEnvironment(target));
+        yield* Deferred.await(reconnectProbed);
+        yield* TestClock.adjust(Duration.seconds(60));
+        const outcome = yield* Effect.raceFirst(
+          Fiber.join(reconnect).pipe(Effect.map((environment) => environment.httpBaseUrl)),
+          Deferred.await(forwardReplaced).pipe(Effect.as("replaced the forward")),
+        );
+
+        assert.equal(outcome, initial.httpBaseUrl);
+        assert.equal(forwards, 1);
+      }).pipe(Effect.provide(layer), Effect.scoped);
+    }),
+  );
   it.effect("rebuilds an exited SSH tunnel without probing its stale forward", () =>
     Effect.gen(function* () {
       let forwards = 0;
@@ -1593,7 +1649,7 @@ net.Server.prototype.listen = function (port, host, callback) {
         unresponsive = true;
         const drop = yield* Effect.forkChild(manager.dropUnresponsiveTunnels);
         yield* Deferred.await(probeStarted);
-        yield* TestClock.adjust(Duration.seconds(2));
+        yield* TestClock.adjust(Duration.seconds(6));
         yield* Fiber.join(drop);
         assert.equal(kills, 1);
         assert.equal(stops, 0);
@@ -1652,7 +1708,7 @@ net.Server.prototype.listen = function (port, host, callback) {
         stale = true;
         const reconnect = yield* Effect.forkChild(manager.ensureEnvironment(target));
         yield* Deferred.await(probeStarted);
-        yield* TestClock.adjust("2 seconds");
+        yield* TestClock.adjust(Duration.seconds(6));
         yield* Fiber.join(reconnect);
         assert.equal(forwards, 2);
         assert.equal(kills, 1);

@@ -1,7 +1,8 @@
+// @vitest-environment jsdom
 import { EnvironmentId, type ThreadPullRequestLink } from "@t3tools/contracts";
-import { expect, it, vi } from "vite-plus/test";
+import { act, create, type ReactTestRenderer } from "react-test-renderer";
+import { afterEach, expect, it, vi } from "vite-plus/test";
 
-import { render } from "../../test/render";
 import { AppAtomRegistryProvider } from "../rpc/atomRegistry";
 import { makeThreadFixture } from "../test-fixtures";
 import { ThreadRowLeadingStatus } from "./ThreadStatusIndicators";
@@ -16,6 +17,14 @@ vi.mock(import("../state/entities"), async (original) => ({
       [environmentId, { environment: { capabilities: { threadPullRequests: true } } }],
     ])) as never,
 }));
+
+let renderer: ReactTestRenderer | undefined;
+
+afterEach(async () => {
+  if (renderer) await act(async () => renderer!.unmount());
+  renderer = undefined;
+  vi.unstubAllGlobals();
+});
 
 it("updates palette PR status from linked snapshots without a legacy link or branch PR", async () => {
   const link: ThreadPullRequestLink = {
@@ -48,19 +57,27 @@ it("updates palette PR status from linked snapshots without a legacy link or bra
       />
     </AppAtomRegistryProvider>
   );
-  await using screen = await render(row(link));
-  await expect.element(screen.getByLabelText("PR #7 - Merged: Linked change")).toBeVisible();
-  await expect.element(screen.getByLabelText("PR #7, status pending")).not.toBeInTheDocument();
+  const hasLabel = (label: string) =>
+    renderer!.root.findAllByProps({ "aria-label": label }).length > 0;
 
-  await screen.rerender(row({ ...link, snapshot: null }));
-  await expect.element(screen.getByLabelText("PR #7, status pending")).toBeVisible();
-  await expect
-    .element(screen.getByLabelText("PR #7 - Merged: Linked change"))
-    .not.toBeInTheDocument();
+  vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+  await act(async () => {
+    renderer = create(row(link));
+  });
+  expect(hasLabel("PR #7 - Merged: Linked change")).toBe(true);
+  expect(hasLabel("PR #7, status pending")).toBe(false);
 
-  await screen.rerender(
-    row({ ...link, snapshot: { ...link.snapshot!, state: "open", isDraft: true } }),
-  );
-  await expect.element(screen.getByLabelText("PR #7 - Draft: Linked change")).toBeVisible();
-  await expect.element(screen.getByLabelText("PR #7, status pending")).not.toBeInTheDocument();
+  await act(async () => {
+    renderer!.update(row({ ...link, snapshot: null }));
+  });
+  expect(hasLabel("PR #7, status pending")).toBe(true);
+  expect(hasLabel("PR #7 - Merged: Linked change")).toBe(false);
+
+  await act(async () => {
+    renderer!.update(
+      row({ ...link, snapshot: { ...link.snapshot!, state: "open", isDraft: true } }),
+    );
+  });
+  expect(hasLabel("PR #7 - Draft: Linked change")).toBe(true);
+  expect(hasLabel("PR #7, status pending")).toBe(false);
 });

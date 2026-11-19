@@ -16,6 +16,7 @@ import {
 import * as Effect from "effect/Effect";
 import * as Option from "effect/Option";
 import * as Result from "effect/Result";
+import * as Semaphore from "effect/Semaphore";
 import * as Schema from "effect/Schema";
 import { AsyncResult, Atom, AtomRegistry } from "effect/reactivity";
 
@@ -28,6 +29,8 @@ import { createEnvironmentQueryAtomFamily } from "./runtime.ts";
 const ASSET_URL_REFRESH_INTERVAL_MS = 30 * 60_000;
 const ASSET_URL_STALE_TIME_MS = 5 * 60_000;
 const ASSET_URL_IDLE_TTL_MS = 60 * 60_000;
+
+export const ASSET_URL_MAX_IN_FLIGHT = 6;
 
 export class InvalidAssetCollectionKeyError extends Schema.TaggedError<InvalidAssetCollectionKeyError>()(
   "InvalidAssetCollectionKeyError",
@@ -107,15 +110,26 @@ export function createAssetEnvironmentAtoms<R, E>(
     readonly httpBaseUrl: string;
   } | null>,
 ) {
+  // A thread can need many URLs at once, so cap requests independently per environment.
+  const mintLimits = new Map<EnvironmentId, Semaphore.Semaphore>();
+  const mint = (environmentId: EnvironmentId, input: AssetCreateUrlInput) => {
+    let limit = mintLimits.get(environmentId);
+    if (limit === undefined) {
+      limit = Semaphore.makeUnsafe(ASSET_URL_MAX_IN_FLIGHT);
+      mintLimits.set(environmentId, limit);
+    }
+    return request(WS_METHODS.assetsCreateUrl, input).pipe(limit.withPermit);
+  };
   const execute = Effect.fn("assets.createUrl")(function* (input: AssetCreateUrlInput) {
-    const result = yield* request(WS_METHODS.assetsCreateUrl, input).pipe(Effect.result);
+    const supervisor = yield* EnvironmentSupervisor.EnvironmentSupervisor;
+    const result = yield* mint(supervisor.target.environmentId, input).pipe(Effect.result);
     if (Result.isSuccess(result)) return result.success;
     const error = result.failure;
     const resource = input.resource;
     const local = localMediaEnvironment
       ? (yield* AtomRegistry.AtomRegistry).get(localMediaEnvironment)
       : null;
-    const supervisor = yield* EnvironmentSupervisor.EnvironmentSupervisor;
+
     if (
       !local ||
       local.environmentId === supervisor.target.environmentId ||
@@ -130,10 +144,7 @@ export function createAssetEnvironmentAtoms<R, E>(
     )
       return yield* error;
     const registry = yield* EnvironmentRegistry.EnvironmentRegistry;
-    const asset = yield* registry.run(
-      local.environmentId,
-      request(WS_METHODS.assetsCreateUrl, input),
-    );
+    const asset = yield* registry.run(local.environmentId, mint(local.environmentId, input));
     // Callers resolve against the thread's server, so preserve the local server's origin.
     return { ...asset, relativeUrl: new URL(asset.relativeUrl, local.httpBaseUrl).href };
   });

@@ -711,7 +711,7 @@ export const make = Effect.gen(function* PortDiscoveryMake() {
     return groups;
   };
 
-  const probeWebServers = Effect.fn("PortDiscovery.probeWebServers")(function* (
+  const probeWebServers = Effect.fnUntraced(function* (
     servers: ReadonlyArray<DiscoveredLocalServer>,
     configuredUrls: ReadonlyArray<string>,
   ) {
@@ -799,7 +799,7 @@ export const make = Effect.gen(function* PortDiscoveryMake() {
         platform: hostPlatform,
       }).pipe(Effect.as(null));
 
-  const scanUnlocked = Effect.fn("PortDiscovery.scanUnlocked")(function* (
+  const scanUnlocked = Effect.fnUntraced(function* (
     configuredUrls: ReadonlyArray<string>,
     forceRefreshOwners = false,
   ) {
@@ -884,19 +884,18 @@ export const make = Effect.gen(function* PortDiscoveryMake() {
     return yield* probeWebServers(fromProc ?? (yield* probeCommonPorts()), configuredUrls);
   });
 
-  const scanSnapshot = Effect.fn("PortDiscovery.scanSnapshot")(
-    (configuredUrls: ReadonlyArray<string>, forceRefreshOwners = false) =>
-      scanSemaphore.withPermits(1)(scanUnlocked(configuredUrls, forceRefreshOwners)),
-  );
+  const scanSnapshot = (configuredUrls: ReadonlyArray<string>, forceRefreshOwners = false) =>
+    scanSemaphore.withPermits(1)(scanUnlocked(configuredUrls, forceRefreshOwners));
 
   const scanOnce: PortDiscovery["Service"]["scan"] = (configuredUrls = []) => {
     const normalized = normalizeConfiguredUrls(configuredUrls);
     return scanSnapshot(normalized).pipe(
       Effect.map((snapshot) => projectWebProbeSnapshot(snapshot, normalized)),
+      Effect.withSpan("PortDiscovery.scan"),
     );
   };
 
-  const pollTick = Effect.fn("PortDiscovery.pollTick")(
+  const pollTick = Effect.fnUntraced(
     function* () {
       const configuredUrls = [
         ...new Set(

@@ -459,11 +459,13 @@ effectIt.effect("stops probing a subscriber's configured paths after its scope c
   }).pipe(Effect.scoped, Effect.provide(layer));
 });
 
-effectIt.effect("writes no poll span while no client retains the scanner", () => {
+effectIt.effect("keeps idle port polling untraced and traces explicit scans", () => {
   let pollSpans = 0;
+  let scanSpans = 0;
   const tracer = Tracer.make({
     span: (options) => {
       if (options.name === "PortDiscovery.pollTick") pollSpans += 1;
+      if (options.name === "PortDiscovery.scan") scanSpans += 1;
       return new Tracer.NativeSpan(options);
     },
   });
@@ -475,7 +477,10 @@ effectIt.effect("writes no poll span while no client retains the scanner", () =>
     expect(pollSpans).toBe(0);
 
     yield* scanner.retain;
-    expect(pollSpans).toBe(1);
+    expect(pollSpans).toBe(0);
+
+    yield* scanner.scan();
+    expect(scanSpans).toBe(1);
   }).pipe(Effect.scoped, Effect.provide(layer), Effect.withTracer(tracer));
 });
 

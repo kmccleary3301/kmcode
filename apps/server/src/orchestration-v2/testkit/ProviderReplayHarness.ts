@@ -388,6 +388,7 @@ export function layerWithRegistry<Error>(
         layerCheckpointServiceProvided,
         layerEventSinkProvided,
         IdAllocator.layer,
+        ThreadCommandExecutor.layer,
         layerProviderEventIngestorProvided,
         layerServerSettings,
       ),

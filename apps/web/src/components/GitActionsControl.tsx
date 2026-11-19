@@ -1125,7 +1125,7 @@ export default function GitActionsControl({
   );
   const vcsActionState = useAtomValue(vcsActionManager.stateAtom(sourceControlScope));
   const visibleInlineSuccess = inlineSuccess?.scopeKey === successScopeKey ? inlineSuccess : null;
-  let runGitActionWithToast: (input: RunGitActionWithToastInput) => Promise<void>;
+  let runGitActionWithToast: (input: RunGitActionWithToastInput) => Promise<boolean>;
 
   useEffect(() => {
     if (!inlineSuccess) return;
@@ -1338,7 +1338,7 @@ export default function GitActionsControl({
           !isLocalDraftThread &&
           !readEnvironmentScope(activeEnvironmentId, AuthOrchestrationOperateScope))
       )
-        return;
+        return false;
       const actionStatus = statusOverride ?? gitStatusForActions;
       const actionBranch = actionStatus?.refName ?? null;
       const actionIsDefaultBranch = featureBranch ? false : isDefaultRef;
@@ -1358,7 +1358,7 @@ export default function GitActionsControl({
           action !== "commit_push" &&
           action !== "commit_push_pr"
         ) {
-          return;
+          return false;
         }
         setPendingDefaultBranchAction({
           action,
@@ -1368,7 +1368,7 @@ export default function GitActionsControl({
           ...(onConfirmed ? { onConfirmed } : {}),
           ...(filePaths ? { filePaths } : {}),
         });
-        return;
+        return false;
       }
       onConfirmed?.();
       setInlineSuccess(null);
@@ -1390,7 +1390,7 @@ export default function GitActionsControl({
 
       if (result._tag === "Failure") {
         if (isAtomCommandInterrupted(result)) {
-          return;
+          return false;
         }
 
         const error = squashAtomCommandFailure(result);
@@ -1404,7 +1404,7 @@ export default function GitActionsControl({
             ...(scopedToastData !== undefined ? { data: scopedToastData } : {}),
           }),
         );
-        return;
+        return false;
       }
 
       const actionResult = result.value;
@@ -1415,7 +1415,7 @@ export default function GitActionsControl({
           description: actionResult.toast.description ?? null,
           scopeKey: successScopeKey,
         });
-        return;
+        return true;
       }
       let resultToastId: GitActionToastId | null = null;
       const closeResultToast = () => {
@@ -1477,6 +1477,7 @@ export default function GitActionsControl({
           data: successToastData,
         });
       }
+      return true;
     },
   );
 
@@ -1506,6 +1507,10 @@ export default function GitActionsControl({
       skipDefaultBranchPrompt: true,
     });
   };
+  const restoreDialogCommitMessageOnFailure = (commitMessage: string) => (committed: boolean) => {
+    if (committed || !commitMessage) return;
+    setDialogCommitMessage((current) => current || commitMessage);
+  };
 
   const runDialogActionOnNewBranch = () => {
     if (!canChangeThreadBranch || !isCommitDialogOpen) return;
@@ -1522,7 +1527,7 @@ export default function GitActionsControl({
       ...(!allSelected ? { filePaths: selectedFiles.map((f) => f.path) } : {}),
       featureBranch: true,
       skipDefaultBranchPrompt: true,
-    });
+    }).then(restoreDialogCommitMessageOnFailure(commitMessage));
   };
 
   const runQuickAction = () => {
@@ -1618,7 +1623,7 @@ export default function GitActionsControl({
       action: "commit",
       ...(commitMessage ? { commitMessage } : {}),
       ...(!allSelected ? { filePaths: selectedFiles.map((f) => f.path) } : {}),
-    });
+    }).then(restoreDialogCommitMessageOnFailure(commitMessage));
   };
 
   const openChangedFileInEditor = useCallback(

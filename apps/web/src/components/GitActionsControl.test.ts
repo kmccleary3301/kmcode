@@ -6,6 +6,7 @@ import {
 } from "@t3tools/contracts";
 import * as Cause from "effect/Cause";
 import { AsyncResult } from "effect/reactivity";
+import { isValidElement, type ReactElement, type ReactNode } from "react";
 import { beforeEach, describe, expect, it, vi } from "vite-plus/test";
 
 const state = vi.hoisted(() => ({
@@ -18,14 +19,30 @@ const state = vi.hoisted(() => ({
   commits: 0,
   metadataRequests: [] as { environmentId: string; branch: string }[],
   afterGitAction: undefined as (() => void) | undefined,
-  run: null as ((input: { action: "commit"; featureBranch?: boolean }) => Promise<void>) | null,
+  actionFails: false,
+  hookStates: [] as unknown[],
+  hookIndex: 0,
+  isStateInitializer: (value: unknown): value is () => unknown => typeof value === "function",
+  isStateUpdater: (value: unknown): value is (previous: unknown) => unknown =>
+    typeof value === "function",
+  run: null as ((input: { action: "commit"; featureBranch?: boolean }) => Promise<boolean>) | null,
 }));
-
 vi.mock("react", async (importOriginal) => ({
   ...(await importOriginal<typeof import("react")>()),
   useCallback: (callback: unknown) => callback,
   useMemo: (factory: () => unknown) => factory(),
-  useState: (initial: unknown) => [typeof initial === "function" ? initial() : initial, () => {}],
+  useState: (initial: unknown) => {
+    const index = state.hookIndex++;
+    if (index >= state.hookStates.length) {
+      state.hookStates.push(state.isStateInitializer(initial) ? initial() : initial);
+    }
+    return [
+      state.hookStates[index],
+      (next: unknown) => {
+        state.hookStates[index] = state.isStateUpdater(next) ? next(state.hookStates[index]) : next;
+      },
+    ];
+  },
   useRef: (current: unknown) => ({ current }),
   useEffect: () => {},
   useEffectEvent: (callback: typeof state.run) => {
@@ -111,8 +128,11 @@ vi.mock("~/lib/sourceControlActions", () => ({
       state.commits += 1;
       if (featureBranch) state.branch = "feature";
       state.afterGitAction?.();
+      if (state.actionFails) {
+        return { _tag: "Failure" as const, cause: Cause.fail(new Error("Commit failed")) };
+      }
       return {
-        _tag: "Success",
+        _tag: "Success" as const,
         value: {
           branch: featureBranch
             ? { status: "created", name: "feature" }
@@ -170,16 +190,38 @@ vi.mock("./AnimatedHeight", () => ({ AnimatedHeight: "AnimatedHeight" }));
 
 import GitActionsControl from "./GitActionsControl";
 
-function renderActions() {
-  GitActionsControl({
+function renderComponent() {
+  state.hookIndex = 0;
+  return GitActionsControl({
     gitCwd: "/repo",
     activeThreadRef: {
       environmentId: EnvironmentId.make("environment"),
       threadId: ThreadId.make("thread"),
     },
   });
+}
+
+function renderActions() {
+  renderComponent();
   if (!state.run) throw new Error("Git action missing");
   return state.run;
+}
+
+function findElement<T extends { readonly children?: ReactNode }>(
+  node: ReactNode,
+  type: string,
+  matches: (props: T) => boolean = () => true,
+): ReactElement<T> | null {
+  if (Array.isArray(node)) {
+    for (const child of node) {
+      const found = findElement(child, type, matches);
+      if (found) return found;
+    }
+    return null;
+  }
+  if (!isValidElement<T>(node)) return null;
+  if (node.type === type && matches(node.props)) return node;
+  return findElement(node.props.children, type, matches);
 }
 
 describe("Git actions while thread details load", () => {
@@ -193,6 +235,9 @@ describe("Git actions while thread details load", () => {
     state.commits = 0;
     state.metadataRequests = [];
     state.afterGitAction = undefined;
+    state.actionFails = false;
+    state.hookStates = [];
+    state.hookIndex = 0;
     state.run = null;
   });
 
@@ -281,6 +326,41 @@ describe("Git actions while thread details load", () => {
 
     expect(state.commits).toBe(1);
     expect(state.branch).toBe("main");
+  });
+
+  it("restores the typed commit message after a failed commit", async () => {
+    state.actionFails = true;
+    let tree = renderComponent();
+    const dialog = findElement<{
+      readonly children?: ReactNode;
+      readonly onOpenChange?: (open: boolean) => void;
+    }>(tree, "Dialog");
+    dialog?.props.onOpenChange?.(true);
+
+    tree = renderComponent();
+    const messageField = findElement<{
+      readonly children?: ReactNode;
+      readonly value?: string;
+      readonly onChange?: (event: { readonly target: { readonly value: string } }) => void;
+    }>(tree, "Textarea");
+    messageField?.props.onChange?.({ target: { value: "Keep this commit message" } });
+
+    tree = renderComponent();
+    const commitButton = findElement<{
+      readonly children?: ReactNode;
+      readonly onClick?: (event: null) => void;
+    }>(tree, "Button", (props) => props.children === "Commit");
+    commitButton?.props.onClick?.(null);
+    await Promise.resolve();
+    await Promise.resolve();
+
+    tree = renderComponent();
+    expect(
+      findElement<{
+        readonly children?: ReactNode;
+        readonly value?: string;
+      }>(tree, "Textarea")?.props.value,
+    ).toBe("Keep this commit message");
   });
 
   it("keeps feature-branch commits available for a local draft", async () => {

@@ -55,6 +55,7 @@ import * as ProviderEventIngestor from "./ProviderEventIngestor.ts";
 import type { ProjectionStoreV2Error } from "./ProjectionStore.ts";
 import { makeProviderFailure, makeProviderFailureTurnItem } from "./ProviderFailure.ts";
 import * as RunFinalizationService from "./RunFinalizationService.ts";
+import * as ThreadCommandExecutor from "./ThreadCommandExecutor.ts";
 import { userFacingDatabaseErrorMessage } from "./UserFacingErrors.ts";
 
 export interface ProviderEventRoutingState {
@@ -647,6 +648,7 @@ export const layer: Layer.Layer<
   | ProviderEventIngestor.ProviderEventIngestorV2
   | ServerSettings.ServerSettingsService
   | McpAppModelContext.McpAppModelContext
+  | ThreadCommandExecutor.ThreadCommandExecutor
 > = Layer.effect(
   RunExecutionServiceV2,
   Effect.gen(function* () {
@@ -657,6 +659,7 @@ export const layer: Layer.Layer<
     const serverSettings = yield* ServerSettings.ServerSettingsService;
     const mcpAppModelContext = yield* McpAppModelContext.McpAppModelContext;
     const finalizationObserver = yield* RunFinalizationService.RunFinalizationObserver;
+    const threadCommands = yield* ThreadCommandExecutor.ThreadCommandExecutor;
 
     const writeFinalRunEvents = (input: {
       readonly run: OrchestrationV2Run;
@@ -1101,6 +1104,7 @@ export const layer: Layer.Layer<
               }
             });
           const rootTerminalSeen = yield* Ref.make(false);
+          let rootTurnOwnershipChecked = false;
           const rootRunFinalized = yield* Ref.make(false);
           const providerThreadOwnerLost = yield* Ref.make(false);
           const activeChildProviderTurns = yield* Ref.make<ReadonlySet<ProviderTurnId>>(new Set());
@@ -1361,55 +1365,101 @@ export const layer: Layer.Layer<
                   DateTime.toEpochMillis(yield* DateTime.now),
                 );
                 if (deliveredEvent) {
-                  // Root provider_thread.updated always uses an ownership gate:
-                  // pre-terminal writeIfRunCurrent (attempt still running), or
-                  // post-terminal writeIfProviderThreadOwner so late roster
-                  // clears still land while this attempt owns the run and this
-                  // run owns lastRunOrdinal.
                   const rootTerminalAlreadySeen = yield* Ref.get(rootTerminalSeen);
                   const isRootProviderThreadUpdate =
                     event.type === "provider_thread.updated" &&
                     event.providerThread.id === input.providerThread.id;
-                  const storedEvents = yield* providerEventIngestor.ingestNormalized({
-                    analyticsContext: {
-                      modelSelection: input.modelSelection,
-                      runtimeMode: input.runtimePolicy.runtimeMode,
-                      interactionMode: input.runtimePolicy.interactionMode,
-                    },
-                    providerSessionId: input.providerSessionId,
-                    providerInstanceId: input.run.providerInstanceId,
-                    threadId: input.run.threadId,
-                    runId: input.run.id,
-                    nodeId: input.rootNode.id,
-                    event: deliveredEvent,
-                    ...(isRootProviderThreadUpdate
-                      ? rootTerminalAlreadySeen
-                        ? {
-                            writeIfProviderThreadOwner: {
-                              providerThreadId: input.providerThread.id,
-                              runId: input.run.id,
-                              activeAttemptId: input.attempt.id,
-                              expectedLastRunOrdinal: input.run.ordinal,
-                            },
-                          }
-                        : {
-                            writeIfRunCurrent: {
-                              runId: input.run.id,
-                              activeAttemptId: input.attempt.id,
-                              expectedStatus: "running" as const,
-                            },
-                          }
-                      : {}),
+                  const ingestDelivered = Effect.gen(function* () {
+                    const storedEvents = yield* providerEventIngestor.ingestNormalized({
+                      analyticsContext: {
+                        modelSelection: input.modelSelection,
+                        runtimeMode: input.runtimePolicy.runtimeMode,
+                        interactionMode: input.runtimePolicy.interactionMode,
+                      },
+                      providerSessionId: input.providerSessionId,
+                      providerInstanceId: input.run.providerInstanceId,
+                      threadId: input.run.threadId,
+                      runId: input.run.id,
+                      nodeId: input.rootNode.id,
+                      event: deliveredEvent,
+                      ...(isRootProviderThreadUpdate
+                        ? rootTerminalAlreadySeen
+                          ? {
+                              writeIfProviderThreadOwner: {
+                                providerThreadId: input.providerThread.id,
+                                runId: input.run.id,
+                                activeAttemptId: input.attempt.id,
+                                expectedLastRunOrdinal: input.run.ordinal,
+                              },
+                            }
+                          : {
+                              writeIfRunCurrent: {
+                                runId: input.run.id,
+                                activeAttemptId: input.attempt.id,
+                                expectedStatus: "running" as const,
+                              },
+                            }
+                        : {}),
+                    });
+                    const count = storedEvents.length;
+                    if (isRootProviderThreadUpdate && rootTerminalAlreadySeen && count === 0) {
+                      // Ownership lost (or thread row missing). Stop pinning the
+                      // stream on this run's background probe.
+                      yield* Ref.set(providerThreadOwnerLost, true);
+                    }
+                    return count;
                   });
-                  storedEventCount = storedEvents.length;
-                  if (
-                    isRootProviderThreadUpdate &&
-                    rootTerminalAlreadySeen &&
-                    storedEventCount === 0
-                  ) {
-                    // Ownership lost (or thread row missing). Stop pinning the
-                    // stream on this run's background probe.
-                    yield* Ref.set(providerThreadOwnerLost, true);
+                  const startedRootTurn =
+                    event.type === "provider_turn.updated" &&
+                    event.providerTurn.runAttemptId === input.attempt.id &&
+                    event.providerTurn.providerThreadId === input.providerThread.id &&
+                    !isTerminalProviderTurnStatus(event.providerTurn.status) &&
+                    !rootTurnOwnershipChecked
+                      ? event.providerTurn
+                      : undefined;
+                  const shouldStartProviderTurn = input.shouldStartProviderTurn;
+                  if (startedRootTurn !== undefined && shouldStartProviderTurn !== undefined) {
+                    const { stored, ownership } = yield* threadCommands.withLock(
+                      input.run.threadId,
+                      Effect.gen(function* () {
+                        const stored = yield* ingestDelivered;
+                        const ownership = yield* shouldStartProviderTurn().pipe(
+                          Effect.map((owned) => ({ owned, checked: true as const })),
+                          Effect.catch((cause) =>
+                            Effect.logWarning(
+                              "orchestration V2 could not recheck provider-turn ownership after start",
+                              { runId: input.run.id, cause },
+                            ).pipe(Effect.as({ owned: false, checked: false as const })),
+                          ),
+                        );
+                        return { stored, ownership };
+                      }),
+                    );
+                    storedEventCount = stored;
+                    if (ownership.checked) {
+                      rootTurnOwnershipChecked = true;
+                    }
+                    if (!ownership.owned) {
+                      yield* Ref.get(latestProviderThread).pipe(
+                        Effect.flatMap((providerThread) =>
+                          input.session.interruptTurn({
+                            providerThread,
+                            providerTurnId: startedRootTurn.id,
+                          }),
+                        ),
+                        Effect.catchCauseIf(
+                          (cause) => !Cause.hasInterruptsOnly(cause),
+                          (cause) =>
+                            Effect.logWarning(
+                              "orchestration V2 failed to interrupt a provider turn that started after Stop",
+                              { runId: input.run.id, cause },
+                            ),
+                        ),
+                        Effect.forkDetach,
+                      );
+                    }
+                  } else {
+                    storedEventCount = yield* ingestDelivered;
                   }
                 }
                 if (event.type === "provider_thread.updated") {

@@ -173,6 +173,7 @@ const layerRunExecutionServiceProvided = RunExecutionService.layer.pipe(
       layerCheckpointServiceProvided,
       layerEventSinkProvided,
       IdAllocator.layer,
+      ThreadCommandExecutor.layer,
       layerProviderEventIngestorProvided,
     ),
   ),

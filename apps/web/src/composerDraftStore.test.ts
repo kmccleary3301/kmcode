@@ -109,10 +109,8 @@ function makeImage(input: {
   const name = input.name ?? "image.png";
   const mimeType = input.mimeType ?? "image/png";
   const sizeBytes = input.sizeBytes ?? 4;
-  const lastModified = input.lastModified ?? 1_700_000_000_000;
   const file = new File([new Uint8Array(sizeBytes).fill(input.fill ?? 1)], name, {
     type: mimeType,
-    lastModified,
   });
   return {
     type: "image",
@@ -298,7 +296,6 @@ describe("composerDraftStore addImages", () => {
       name: "same.png",
       mimeType: "image/png",
       sizeBytes: 12,
-      lastModified: 12345,
     });
     const duplicate = makeImage({
       id: "img-2",
@@ -306,7 +303,6 @@ describe("composerDraftStore addImages", () => {
       name: "same.png",
       mimeType: "image/png",
       sizeBytes: 12,
-      lastModified: 12345,
     });
     await Promise.all([first, duplicate].map(({ file }) => readComposerImageBytes(file)));
 
@@ -346,7 +342,6 @@ describe("composerDraftStore addImages", () => {
       name: "same.png",
       mimeType: "image/png",
       sizeBytes: 9,
-      lastModified: 777,
     });
     const distinct = makeImage({
       id: "img-distinct",
@@ -354,7 +349,6 @@ describe("composerDraftStore addImages", () => {
       name: "same.png",
       mimeType: "image/png",
       sizeBytes: 9,
-      lastModified: 777,
       fill: 2,
     });
     await Promise.all([first, distinct].map(({ file }) => readComposerImageBytes(file)));

@@ -1,8 +1,15 @@
+// @vitest-environment jsdom
+
+import { EnvironmentRegistry } from "@t3tools/client-runtime/connection";
 import { EnvironmentId, WS_METHODS } from "@t3tools/contracts";
 import { describe, expect, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
+import * as Layer from "effect/Layer";
+import * as SubscriptionRef from "effect/SubscriptionRef";
+import * as TestClock from "effect/testing/TestClock";
 
 import {
+  layer,
   observeBackgroundActivitySubscription,
   retainedBackgroundScopes,
   wasRecentlyInteracted,
@@ -68,5 +75,32 @@ describe("wasRecentlyInteracted", () => {
 
       yield* Effect.all([releaseFirst, releaseSecond]);
     }),
+  );
+});
+
+describe("layer", () => {
+  it.effect("keeps reporting after a report never settles", () =>
+    Effect.gen(function* () {
+      const entries = yield* SubscriptionRef.make(
+        new Map([[EnvironmentId.make("environment-reporter-test"), {}]]),
+      );
+      let calls = 0;
+      const registry = EnvironmentRegistry.EnvironmentRegistry.of({
+        entries,
+        run: () => {
+          calls += 1;
+          return calls === 1 ? Effect.never : Effect.void;
+        },
+      } as unknown as EnvironmentRegistry.EnvironmentRegistry["Service"]);
+
+      yield* Layer.build(
+        layer.pipe(Layer.provide(Layer.succeed(EnvironmentRegistry.EnvironmentRegistry, registry))),
+      );
+      yield* TestClock.adjust("1 second");
+      expect(calls).toBe(1);
+
+      yield* TestClock.adjust("25 seconds");
+      expect(calls).toBe(2);
+    }).pipe(Effect.scoped),
   );
 });

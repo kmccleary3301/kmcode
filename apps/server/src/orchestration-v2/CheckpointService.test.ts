@@ -7,7 +7,7 @@ import {
   RunId,
   ThreadId,
   type OrchestrationV2CheckpointScope,
-  VcsProcessTimeoutError,
+  VcsProcessExitError,
 } from "@t3tools/contracts";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
@@ -39,11 +39,12 @@ it.effect.each([false, true, "interrupt"] as const)(
         ? Effect.interrupt
         : lookupFails
           ? Effect.fail(
-              new VcsProcessTimeoutError({
+              new VcsProcessExitError({
                 operation: "test.ref",
                 command: "git",
                 cwd: "/repo",
-                timeoutMs: 30000,
+                exitCode: 128,
+                detail: "fatal: bad config line 1 in file .git/config",
               }),
             )
           : Effect.succeed(true),
@@ -95,11 +96,68 @@ it.effect.each([false, true, "interrupt"] as const)(
           ordinalWithinScope: 2,
         }),
       );
-      assert.equal(baseline.status, lookupFails ? "missing" : "ready");
+      assert.equal(baseline.status, lookupFails ? "error" : "ready");
       assert.deepEqual(hasCheckpointRef.mock.calls[0]?.[0], {
         cwd: scope.cwd,
         checkpointRef: baseline.ref,
       });
     }).pipe(Effect.provide(layerTest));
   },
+);
+
+it.effect("records a repository probe failure as an error checkpoint, not a missing one", () =>
+  Effect.gen(function* () {
+    const scope: OrchestrationV2CheckpointScope = {
+      id: CheckpointScopeId.make("checkpoint-scope:probe-failure"),
+      threadId: ThreadId.make("thread:probe-failure"),
+      runId: RunId.make("run:probe-failure:1"),
+      nodeId: NodeId.make("node:probe-failure:1"),
+      parentScopeId: null,
+      providerThreadId: ProviderThreadId.make("provider-thread:probe-failure"),
+      kind: "root_run",
+      ordinalWithinParent: 0,
+      advancesAppRunCount: true,
+      cwd: "/repo/bad-config",
+      createdAt: DateTime.makeUnsafe("2026-07-28T00:00:00.000Z"),
+    };
+    const layerTest = CheckpointService.layer.pipe(
+      Layer.provide(
+        Layer.mergeAll(
+          IdAllocator.layer,
+          Layer.mock(CheckpointStore.CheckpointStore)({
+            isGitRepository: () =>
+              Effect.fail(
+                new VcsProcessExitError({
+                  operation: "GitVcsDriver.detectRepository",
+                  command: "git",
+                  cwd: scope.cwd,
+                  exitCode: 128,
+                  detail: "fatal: bad config line 1 in file .git/config",
+                }),
+              ),
+          }),
+        ),
+      ),
+      Layer.provideMerge(NodeCrypto.layer),
+    );
+
+    const statuses = yield* Effect.gen(function* () {
+      const checkpoints = yield* CheckpointService.CheckpointServiceV2;
+      const baseline = yield* checkpoints.materializeBaselineCheckpoint({
+        scope,
+        ordinalWithinScope: 0,
+      });
+      const turn = yield* checkpoints.capture({
+        scope,
+        ordinalWithinScope: 1,
+        runId: scope.runId!,
+        nodeId: scope.nodeId!,
+        appRunOrdinal: 1,
+        capturedAt: scope.createdAt,
+      });
+      return { baseline: baseline.status, turn: turn.status };
+    }).pipe(Effect.provide(layerTest));
+
+    assert.deepEqual(statuses, { baseline: "error", turn: "error" });
+  }),
 );

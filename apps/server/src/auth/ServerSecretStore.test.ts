@@ -143,6 +143,50 @@ const layerConcurrentCreateSecretStore = () =>
     Layer.provide(layerServerConfig()),
     Layer.provideMerge(layerConcurrentReadMissFileSystem),
   );
+const layerConcurrentEmptyRepairFileSystem = (firstReturned: Deferred.Deferred<void>) =>
+  Layer.effect(
+    FileSystem.FileSystem,
+    Effect.gen(function* () {
+      const fileSystem = yield* FileSystem.FileSystem;
+      const readCountRef = yield* Ref.make(0);
+      const removeCountRef = yield* Ref.make(0);
+      const readBarrier = yield* Deferred.make<void>();
+      const isSecretPath = (path: string) => /[\\/]session-signing-key\.bin$/.test(path);
+
+      return {
+        ...fileSystem,
+        readFile: (path) =>
+          isSecretPath(path)
+            ? Ref.updateAndGet(readCountRef, (count) => count + 1).pipe(
+                Effect.flatMap((count) =>
+                  count > 2
+                    ? fileSystem.readFile(path)
+                    : Effect.gen(function* () {
+                        if (count === 2) yield* Deferred.succeed(readBarrier, void 0);
+                        yield* Deferred.await(readBarrier);
+                        return yield* fileSystem.readFile(path);
+                      }),
+                ),
+              )
+            : fileSystem.readFile(path),
+        remove: (path, options) =>
+          isSecretPath(path)
+            ? Ref.updateAndGet(removeCountRef, (count) => count + 1).pipe(
+                Effect.flatMap((count) =>
+                  count > 1 ? Deferred.await(firstReturned) : Effect.void,
+                ),
+                Effect.flatMap(() => fileSystem.remove(path, options)),
+              )
+            : fileSystem.remove(path, options),
+      } satisfies FileSystem.FileSystem;
+    }),
+  ).pipe(Layer.provide(NodeServices.layer));
+
+const layerConcurrentEmptyRepairSecretStore = (firstReturned: Deferred.Deferred<void>) =>
+  ServerSecretStore.layer.pipe(
+    Layer.provide(layerServerConfig()),
+    Layer.provideMerge(layerConcurrentEmptyRepairFileSystem(firstReturned)),
+  );
 
 it.layer(NodeServices.layer)("ServerSecretStore.layer", (it) => {
   it.effect("returns Option.none when a secret file does not exist", () =>
@@ -164,6 +208,40 @@ it.layer(NodeServices.layer)("ServerSecretStore.layer", (it) => {
 
       assert.deepEqual(Array.from(second), Array.from(first));
     }).pipe(Effect.provide(layerServerSecretStore())),
+  );
+
+  it.effect("replaces an empty persisted secret with a fresh random one", () =>
+    Effect.gen(function* () {
+      const secretStore = yield* ServerSecretStore.ServerSecretStore;
+      yield* secretStore.set("session-signing-key", new Uint8Array());
+
+      const secret = yield* secretStore.getOrCreateRandom("session-signing-key", 32);
+      const persisted = yield* secretStore.get("session-signing-key");
+
+      assert.equal(secret.byteLength, 32);
+      assert.deepEqual(Array.from(Option.getOrThrow(persisted)), Array.from(secret));
+    }).pipe(Effect.provide(layerServerSecretStore())),
+  );
+
+  it.effect("keeps the repaired secret when concurrent callers find it empty", () =>
+    Effect.gen(function* () {
+      const firstReturned = yield* Deferred.make<void>();
+      yield* Effect.gen(function* () {
+        const secretStore = yield* ServerSecretStore.ServerSecretStore;
+        yield* secretStore.set("session-signing-key", new Uint8Array());
+        const getOrCreate = secretStore
+          .getOrCreateRandom("session-signing-key", 32)
+          .pipe(Effect.tap(() => Deferred.succeed(firstReturned, void 0)));
+
+        const [first, second] = yield* Effect.all([getOrCreate, getOrCreate], {
+          concurrency: "unbounded",
+        });
+        const persisted = Option.getOrThrow(yield* secretStore.get("session-signing-key"));
+
+        assert.deepEqual(Array.from(first), Array.from(persisted));
+        assert.deepEqual(Array.from(second), Array.from(persisted));
+      }).pipe(Effect.provide(layerConcurrentEmptyRepairSecretStore(firstReturned)));
+    }),
   );
 
   it.effect("returns the persisted secret when concurrent creators race", () =>

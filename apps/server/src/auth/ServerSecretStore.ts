@@ -8,6 +8,7 @@ import * as Path from "effect/Path";
 import * as Predicate from "effect/Predicate";
 import * as PlatformError from "effect/PlatformError";
 import * as Schema from "effect/Schema";
+import * as Semaphore from "effect/Semaphore";
 
 import * as ServerConfig from "../config.ts";
 
@@ -170,6 +171,9 @@ export const make = Effect.gen(function* () {
   );
 
   const resolveSecretPath = (name: string) => path.join(serverConfig.secretsDir, `${name}.bin`);
+  const emptySecretRepair = yield* Semaphore.make(1);
+  const isMissingOrNonEmpty = (secret: Option.Option<Uint8Array>) =>
+    Option.isNone(secret) || secret.value.byteLength > 0;
 
   const get: ServerSecretStore["Service"]["get"] = (name) =>
     fileSystem.readFile(resolveSecretPath(name)).pipe(
@@ -249,6 +253,17 @@ export const make = Effect.gen(function* () {
 
   const getOrCreateRandom: ServerSecretStore["Service"]["getOrCreateRandom"] = (name, bytes) =>
     get(name).pipe(
+      // Recheck under a permit so callers that saw an empty file cannot remove a repaired key.
+      Effect.filterOrElse(isMissingOrNonEmpty, () =>
+        emptySecretRepair.withPermits(1)(
+          get(name).pipe(
+            Effect.filterOrElse(isMissingOrNonEmpty, () =>
+              remove(name).pipe(Effect.as(Option.none<Uint8Array>())),
+            ),
+            Effect.uninterruptible,
+          ),
+        ),
+      ),
       Effect.flatMap(
         Option.match({
           onSome: Effect.succeed,

@@ -30,7 +30,7 @@ const layerHostRuntime = (env: Record<string, string> = {}) =>
     ConfigProvider.layer(ConfigProvider.fromEnv({ env })),
   );
 
-function makeHandle(exitCode = 0) {
+function makeHandle(exitCode = 0, output = "") {
   return ChildProcessSpawner.makeHandle({
     pid: ChildProcessSpawner.ProcessId(100),
     exitCode: Effect.succeed(ChildProcessSpawner.ExitCode(exitCode)),
@@ -38,7 +38,7 @@ function makeHandle(exitCode = 0) {
     kill: () => Effect.void,
     unref: Effect.succeed(Effect.void),
     stdin: Sink.drain,
-    stdout: Stream.empty,
+    stdout: output.length > 0 ? Stream.make(new TextEncoder().encode(output)) : Stream.empty,
     stderr: Stream.empty,
     all: Stream.empty,
     getInputFd: () => Sink.drain,
@@ -56,15 +56,18 @@ const layerHttpClient = (bytes: Uint8Array) =>
     ),
   );
 
-const layerSpawner = (commands: Array<string>) =>
+const layerSpawner = (commands: Array<string>, versions: Readonly<Record<string, string>> = {}) =>
   Layer.succeed(
     ChildProcessSpawner.ChildProcessSpawner,
     ChildProcessSpawner.make((command) =>
       Effect.sync(() => {
-        commands.push(ChildProcess.isStandardCommand(command) ? command.command : "piped-command");
-        // The pinned Windows executable rejects --version but accepts the version subcommand.
+        const standardCommand = ChildProcess.isStandardCommand(command) ? command : undefined;
+        commands.push(standardCommand?.command ?? "piped-command");
+        const versionProbe = standardCommand?.args[0] === "version";
+        const version = standardCommand ? versions[standardCommand.command] : undefined;
         return makeHandle(
-          ChildProcess.isStandardCommand(command) && command.args.includes("--version") ? 1 : 0,
+          standardCommand?.args.includes("--version") ? 1 : 0,
+          versionProbe ? `cloudflared version ${version ?? RelayClient.CLOUDFLARED_VERSION}\n` : "",
         );
       }),
     ),
@@ -127,6 +130,64 @@ describe("RelayClient", () => {
         ),
       ),
   );
+
+  it.effect.skipIf(windowsHost)("rejects cloudflared versions below the security minimum", () => {
+    const versions: Record<string, string> = {};
+    return Effect.gen(function* () {
+      const fileSystem = yield* FileSystem.FileSystem;
+      const baseDir = yield* fileSystem.makeTempDirectoryScoped({
+        prefix: "t3-cloudflared-version-test-",
+      });
+      const oldDir = `${baseDir}/old`;
+      const currentDir = `${baseDir}/current`;
+      const oldPath = `${oldDir}/cloudflared`;
+      const currentPath = `${currentDir}/cloudflared`;
+      versions[oldPath] = "2026.10.2";
+      versions[currentPath] = RelayClient.CLOUDFLARED_MIN_VERSION;
+      yield* fileSystem.makeDirectory(oldDir);
+      yield* fileSystem.makeDirectory(currentDir);
+      for (const executablePath of [oldPath, currentPath]) {
+        yield* fileSystem.writeFileString(executablePath, "cloudflared");
+        yield* fileSystem.chmod(executablePath, 0o755);
+      }
+      const manager = yield* RelayClient.makeCloudflaredRelayClient({ baseDir });
+      const pathResult = yield* manager.resolve.pipe(
+        Effect.provideService(
+          ConfigProvider.ConfigProvider,
+          ConfigProvider.fromEnv({ env: { PATH: `${oldDir}:${currentDir}` } }),
+        ),
+      );
+      expect(pathResult).toEqual({
+        status: "available",
+        executablePath: currentPath,
+        source: "path",
+        version: RelayClient.CLOUDFLARED_MIN_VERSION,
+      });
+
+      const overrideResult = yield* manager.resolve.pipe(
+        Effect.provideService(
+          ConfigProvider.ConfigProvider,
+          ConfigProvider.fromEnv({
+            env: { PATH: currentDir, T3CODE_CLOUDFLARED_PATH: oldPath },
+          }),
+        ),
+      );
+      expect(overrideResult).toEqual({
+        status: "missing",
+        version: RelayClient.CLOUDFLARED_VERSION,
+      });
+    }).pipe(
+      Effect.scoped,
+      Effect.provide(
+        Layer.mergeAll(
+          NodeServices.layer,
+          layerHttpClient(new Uint8Array()),
+          layerSpawner([], versions),
+          layerHostRuntime(),
+        ),
+      ),
+    );
+  });
 
   it.effect.skipIf(windowsHost)(
     "downloads, verifies, validates, and atomically installs the managed executable",
@@ -239,7 +300,8 @@ describe("RelayClient", () => {
         concurrency: "unbounded",
       });
       expect(second).toEqual(first);
-      expect(commands).toHaveLength(1);
+      // One installed-binary probe and one downloaded-binary validation.
+      expect(commands).toHaveLength(2);
     }).pipe(
       Effect.scoped,
       Effect.provide(

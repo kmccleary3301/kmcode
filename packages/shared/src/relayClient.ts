@@ -1,5 +1,6 @@
 // @effect-diagnostics-next-line nodeBuiltinImport:off -- FileSystem.remove cannot remove an empty directory nonrecursively.
 import * as NodeFSP from "node:fs/promises";
+import * as Cache from "effect/Cache";
 import * as Clock from "effect/Clock";
 import type {
   RelayClientInstallProgressEvent,
@@ -9,7 +10,9 @@ import * as Config from "effect/Config";
 import * as Context from "effect/Context";
 import * as Crypto from "effect/Crypto";
 import * as Data from "effect/Data";
+import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
+import * as Exit from "effect/Exit";
 import * as Hex from "effect/encoding/Hex";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
@@ -20,9 +23,25 @@ import * as Semaphore from "effect/Semaphore";
 import { HttpClient, HttpClientRequest, HttpClientResponse } from "effect/http";
 import { ChildProcess, ChildProcessSpawner } from "effect/process";
 import { HostProcessArchitecture, HostProcessPlatform } from "./hostProcess.ts";
+import { compareSemverVersions, parseSemver } from "./semver.ts";
 
 export const CLOUDFLARED_VERSION = "2026.10.4";
+export const CLOUDFLARED_MIN_VERSION = "2026.10.3";
 const CLOUDFLARED_PATH_ENV_NAME = "T3CODE_CLOUDFLARED_PATH";
+
+const VERSION_PROBE_TIMEOUT = "10 seconds";
+const VERSION_PATTERN = /\b(\d{4}\.\d{1,2}\.\d+)\b/u;
+
+function parseCloudflaredVersionOutput(output: string): string | null {
+  const version = VERSION_PATTERN.exec(output)?.[1];
+  return version !== undefined && parseSemver(version) !== null ? version : null;
+}
+
+class VersionProbeKey extends Data.Class<{
+  readonly executablePath: string;
+  readonly size: number;
+  readonly mtimeMillis: number;
+}> {}
 
 export type RelayClientExecutableSource = "override" | "managed" | "path";
 
@@ -238,12 +257,54 @@ export const makeCloudflaredRelayClient = Effect.fn("cloudflared.make")(function
     executableFileName(platform),
   );
 
-  const isExecutableFile = Effect.fn("cloudflared.isExecutableFile")(function* (
+  const runVersionProbe = Effect.fn("cloudflared.runVersionProbe")(function* (
     executablePath: string,
   ) {
+    return yield* spawner
+      .string(
+        ChildProcess.make(executablePath, ["version"], {
+          stdin: "ignore",
+          stderr: "ignore",
+        }),
+      )
+      .pipe(
+        Effect.map(parseCloudflaredVersionOutput),
+        Effect.timeoutOption(VERSION_PROBE_TIMEOUT),
+        Effect.map(Option.getOrNull),
+        Effect.orElseSucceed(() => null),
+      );
+  });
+  const versionCache = yield* Cache.makeWith(
+    (key: VersionProbeKey) => runVersionProbe(key.executablePath),
+    {
+      capacity: 16,
+      timeToLive: (exit) =>
+        Exit.isSuccess(exit) && exit.value !== null ? Duration.infinity : Duration.zero,
+    },
+  );
+  const probeVersion = Effect.fn("cloudflared.probeVersion")(function* (executablePath: string) {
     const info = yield* fileSystem.stat(executablePath).pipe(Effect.option);
-    if (Option.isNone(info) || info.value.type !== "File") return false;
-    return platform === "win32" || (info.value.mode & 0o111) !== 0;
+    if (Option.isNone(info) || info.value.type !== "File") return null;
+    if (platform !== "win32" && (info.value.mode & 0o111) === 0) return null;
+    return yield* Cache.get(
+      versionCache,
+      new VersionProbeKey({
+        executablePath,
+        size: Number(info.value.size),
+        mtimeMillis: Option.getOrUndefined(info.value.mtime)?.getTime() ?? 0,
+      }),
+    );
+  });
+  const compatibleCandidate = Effect.fn("cloudflared.compatibleCandidate")(function* (
+    executablePath: string,
+    source: RelayClientExecutableSource,
+    expectedVersion?: string,
+  ) {
+    const version = yield* probeVersion(executablePath);
+    if (version === null || compareSemverVersions(version, CLOUDFLARED_MIN_VERSION) < 0)
+      return null;
+    if (expectedVersion !== undefined && version !== expectedVersion) return null;
+    return { status: "available", executablePath, source, version } satisfies AvailableRelayClient;
   });
 
   const resolvePathExecutable = Effect.gen(function* () {
@@ -255,7 +316,8 @@ export const makeCloudflaredRelayClient = Effect.fn("cloudflared.make")(function
       const trimmed = directory.trim().replace(/^"|"$/gu, "");
       if (trimmed.length === 0) continue;
       const candidate = path.join(trimmed, executableFileName(platform));
-      if (yield* isExecutableFile(candidate)) return candidate;
+      const compatible = yield* compatibleCandidate(candidate, "path");
+      if (compatible) return compatible;
     }
     return null;
   });
@@ -263,32 +325,17 @@ export const makeCloudflaredRelayClient = Effect.fn("cloudflared.make")(function
   const resolve: RelayClientShape["resolve"] = Effect.gen(function* () {
     const config = yield* loadCloudflaredConfig;
     if (Option.isSome(config.executableOverride)) {
-      return (yield* isExecutableFile(config.executableOverride.value))
-        ? {
-            status: "available",
-            executablePath: config.executableOverride.value,
-            source: "override",
-            version: CLOUDFLARED_VERSION,
-          }
-        : { status: "missing", version: CLOUDFLARED_VERSION };
+      return (
+        (yield* compatibleCandidate(config.executableOverride.value, "override")) ?? {
+          status: "missing",
+          version: CLOUDFLARED_VERSION,
+        }
+      );
     }
-    if (yield* isExecutableFile(managedPath)) {
-      return {
-        status: "available",
-        executablePath: managedPath,
-        source: "managed",
-        version: CLOUDFLARED_VERSION,
-      };
-    }
+    const managed = yield* compatibleCandidate(managedPath, "managed", CLOUDFLARED_VERSION);
+    if (managed) return managed;
     const pathExecutable = yield* resolvePathExecutable;
-    if (pathExecutable) {
-      return {
-        status: "available",
-        executablePath: pathExecutable,
-        source: "path",
-        version: CLOUDFLARED_VERSION,
-      };
-    }
+    if (pathExecutable) return pathExecutable;
     return releaseAsset
       ? { status: "missing", version: CLOUDFLARED_VERSION }
       : {

@@ -1539,6 +1539,142 @@ describe("deriveMessagesTimelineRows", () => {
     expect(rows.map((row) => row.id)).toEqual(["turn-fold:turn-1", "assistant-final-entry"]);
   });
 
+  describe("a full reply followed by a short sign-off", () => {
+    const runId = RunId.make("turn-reply");
+    const at = (second: number) => `2026-01-01T00:00:${String(second).padStart(2, "0")}Z`;
+    const assistant = (id: string, second: number, text: string): TimelineEntry => ({
+      id: `${id}-entry`,
+      kind: "message",
+      createdAt: at(second),
+      message: {
+        id: MessageId.make(id),
+        role: "assistant",
+        text,
+        runId,
+        createdAt: at(second),
+        updatedAt: at(second),
+        streaming: false,
+      },
+    });
+    const step = (id: string, second: number): TimelineEntry => ({
+      id,
+      kind: "work",
+      createdAt: at(second),
+      entry: { id, createdAt: at(second), runId, label: "Ran command", tone: "tool" },
+    });
+    const thought = (id: string, second: number): TimelineEntry => ({
+      id,
+      kind: "work",
+      createdAt: at(second),
+      entry: {
+        id,
+        createdAt: at(second),
+        runId,
+        label: "Thought",
+        tone: "thinking",
+        itemType: "reasoning",
+        detail: "Close the remaining todos.",
+      },
+    });
+    const todoDone = (id: string, second: number): TimelineEntry => ({
+      id,
+      kind: "work",
+      createdAt: at(second),
+      entry: {
+        id,
+        createdAt: at(second),
+        runId,
+        label: "todo",
+        tone: "tool",
+        itemType: "dynamic_tool",
+        projectedItem: {
+          item: {
+            id,
+            type: "dynamic_tool",
+            toolName: "todo",
+            runId,
+            status: "completed",
+            details: {
+              phases: [{ name: "Work", tasks: [{ content: "Reply", status: "completed" }] }],
+            },
+          },
+        } as OrchestrationV2ProjectedTurnItem,
+      },
+    });
+    const rowsFor = (timelineEntries: ReadonlyArray<TimelineEntry>) =>
+      deriveMessagesTimelineRows({
+        timelineEntries,
+        isWorking: false,
+        activeTurnStartedAt: null,
+        turnDiffSummaries: [],
+        supportsConversationRollback: false,
+      });
+    const tail = assistant("tail", 30, "All todo items are closed; the reply above stands.");
+    const longReply = (second: number) =>
+      assistant("reply", second, `Findings. ${"The verifier rejects stale mtimes. ".repeat(30)}`);
+
+    it("keeps the reply visible when only todo updates sit before the tail", () => {
+      const rows = rowsFor([
+        step("work-1", 1),
+        assistant(
+          "reply",
+          10,
+          "Survey written. Egress and reward quality are the two open decisions.",
+        ),
+        thought("thought-1", 11),
+        todoDone("todo-1", 12),
+        todoDone("todo-2", 13),
+        tail,
+      ]);
+
+      expect(rows.map((row) => row.id)).toEqual([
+        "turn-fold:turn-reply",
+        "reply-entry",
+        "tail-entry",
+      ]);
+      const reply = rows.find((row) => row.id === "reply-entry");
+      expect(reply?.kind === "message" && reply.showAssistantCopyButton).toBe(true);
+    });
+
+    it("keeps a long reply within two steps of the tail and folds it beyond that", () => {
+      expect(
+        rowsFor([
+          step("work-1", 1),
+          longReply(10),
+          step("work-2", 11),
+          step("work-3", 12),
+          tail,
+        ]).map((row) => row.id),
+      ).toEqual(["turn-fold:turn-reply", "reply-entry", "tail-entry"]);
+
+      expect(
+        rowsFor([
+          step("work-1", 1),
+          longReply(10),
+          step("work-2", 11),
+          step("work-3", 12),
+          step("work-4", 13),
+          tail,
+        ]).map((row) => row.id),
+      ).toEqual(["turn-fold:turn-reply", "tail-entry"]);
+    });
+
+    it("folds the earlier message when the tail after the todos is the answer", () => {
+      const rows = rowsFor([
+        step("work-1", 1),
+        assistant("reply", 10, "Closing out the todos."),
+        todoDone("todo-1", 12),
+        assistant(
+          "tail",
+          30,
+          "Survey written. Egress and reward quality are the two open decisions, and both block the verifier runs.",
+        ),
+      ]);
+
+      expect(rows.map((row) => row.id)).toEqual(["turn-fold:turn-reply", "tail-entry"]);
+    });
+  });
+
   it("derives a sane duration for a steer-superseded turn with one instant commentary message", () => {
     // A steer ends the previous turn early: its only message completes the
     // instant it is created, and trailing work entries land after it. The

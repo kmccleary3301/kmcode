@@ -923,6 +923,8 @@ interface TurnFold {
   createdAt: string;
   hiddenEntryIds: ReadonlySet<string>;
   label: string;
+  /** An earlier, fuller reply that stays visible beside the terminal tail. */
+  keptReplyMessageId?: string;
   diffStats?: DiffStats;
   activityGroup?: TimelineActivityGroup;
 }
@@ -1365,6 +1367,51 @@ function deriveActivityBoundaryRows(input: {
   };
 }
 
+/** Steps a fuller reply may sit behind before the terminal message buries it. */
+const BURIED_REPLY_MAX_TRAILING_STEPS = 2;
+/** Below this, an earlier message is commentary, not a reply worth surfacing. */
+const BURIED_REPLY_MIN_CHARS = 800;
+
+/**
+ * Agents often answer in full, then get nudged into a little more work (OMP's
+ * todo reminder has them check items off) and sign off with a one-line tail.
+ * Folding everything before that tail would bury the real reply, so find it:
+ * walking back from the terminal message, a longer assistant message reached
+ * through todo updates alone, or a long one (at least twice the tail) within
+ * a couple of other steps. Reasoning is not a step; shorter assistant messages
+ * are. Returns the reply's index, or null when the tail is the answer.
+ */
+function findBuriedReplyIndex(
+  entries: ReadonlyArray<TimelineEntry>,
+  terminalIndex: number,
+): number | null {
+  const terminal = entries[terminalIndex];
+  if (terminal?.kind !== "message") return null;
+  const tailLength = terminal.message.text.trim().length;
+  let steps = 0;
+  let crossedTodoUpdate = false;
+  for (let index = terminalIndex - 1; index >= 0; index -= 1) {
+    const entry = entries[index];
+    if (entry === undefined) return null;
+    if (entry.kind === "work" && entry.entry.itemType === "reasoning") continue;
+    if (timelineEntryPlan(entry) !== undefined) {
+      crossedTodoUpdate = true;
+      continue;
+    }
+    if (entry.kind === "message") {
+      // A steer or other user input in between makes the tail its own answer.
+      if (entry.message.role !== "assistant") return null;
+      const length = entry.message.text.trim().length;
+      const throughTodosOnly = crossedTodoUpdate && steps === 0;
+      const longReply = length >= BURIED_REPLY_MIN_CHARS && length >= 2 * tailLength;
+      if (length > tailLength && (throughTodosOnly || longReply)) return index;
+    }
+    steps += 1;
+    if (steps > BURIED_REPLY_MAX_TRAILING_STEPS) return null;
+  }
+  return null;
+}
+
 /**
  * Settled turns fold activity before their terminal assistant message behind
  * a "Worked for ..." row. Ordinary trailing work joins the fold, while failures
@@ -1487,8 +1534,11 @@ function deriveTurnFolds(input: {
     const terminalEntryIndex = group.terminalEntry
       ? group.entries.findIndex((entry) => entry.id === group.terminalEntry?.id)
       : group.entries.length;
+    const keptReplyIndex =
+      group.terminalEntry === null ? null : findBuriedReplyIndex(group.entries, terminalEntryIndex);
+    const keptReply = keptReplyIndex === null ? undefined : group.entries[keptReplyIndex];
     for (const [index, entry] of group.entries.entries()) {
-      if (entry.id === group.terminalEntry?.id) {
+      if (entry.id === group.terminalEntry?.id || entry.id === keptReply?.id) {
         continue;
       }
       const isCompaction =
@@ -1623,6 +1673,7 @@ function deriveTurnFolds(input: {
       hiddenEntryIds,
       label: fold.label,
       ...(fold.diffStats ? { diffStats: fold.diffStats } : {}),
+      ...(keptReply?.kind === "message" ? { keptReplyMessageId: keptReply.message.id } : {}),
       ...(activityGroup === undefined ? {} : { activityGroup }),
     });
   }
@@ -2021,6 +2072,12 @@ export function deriveMessagesTimelineRows(input: {
           liveChildEntryIds: activityDecisions.liveChildEntryIds,
           ...(input.activityGroups === undefined ? {} : { activityGroups: input.activityGroups }),
         });
+  // A reply kept visible above its terminal tail is an answer too: give it
+  // the same metadata and copy affordance.
+  const keptReplyMessageIds = new Set<string>();
+  for (const fold of foldsByAnchorEntryId.values()) {
+    if (fold.keptReplyMessageId !== undefined) keptReplyMessageIds.add(fold.keptReplyMessageId);
+  }
   const activityBoundaryRows = deriveActivityBoundaryRows({
     timelineEntries,
     activityGroups: input.activityGroups ?? [],
@@ -2919,7 +2976,8 @@ export function deriveMessagesTimelineRows(input: {
     // settles so commentary doesn't flash timestamps mid-work.
     const showAssistantMeta =
       timelineEntry.message.role === "assistant" &&
-      terminalAssistantMessageIds.has(timelineEntry.message.id) &&
+      (terminalAssistantMessageIds.has(timelineEntry.message.id) ||
+        keptReplyMessageIds.has(timelineEntry.message.id)) &&
       !assistantResponseStillInProgress;
 
     nextRows.push({

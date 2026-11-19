@@ -235,4 +235,45 @@ describe("ssh command", () => {
       }
     }).pipe(Effect.provide(layerProcess));
   });
+  it.effect("keeps redacted output the command emitted before timing out", () => {
+    const spawner = ChildProcessSpawner.make(() =>
+      Effect.succeed(
+        ChildProcessSpawner.makeHandle({
+          pid: ChildProcessSpawner.ProcessId(123),
+          stdout: Stream.concat(
+            Stream.make(encoder.encode('PROGRESS: extracting\n{"credential":"pairing-secret"}\n')),
+            Stream.never,
+          ),
+          stderr: Stream.concat(
+            Stream.make(encoder.encode("REMOTE: waiting for archive extraction\n")),
+            Stream.never,
+          ),
+          all: Stream.empty,
+          exitCode: Effect.never,
+          isRunning: Effect.succeed(true),
+          kill: () => Effect.void,
+          stdin: Sink.drain,
+          getInputFd: () => Sink.drain,
+          getOutputFd: () => Stream.empty,
+          unref: Effect.succeed(Effect.void),
+        }),
+      ),
+    );
+    const layerSpawner = Layer.succeed(ChildProcessSpawner.ChildProcessSpawner, spawner);
+    const layerProcess = Layer.mergeAll(NodeServices.layer, layerSpawner, TestClock.layer());
+
+    return Effect.gen(function* () {
+      const fiber = yield* runSshCommand(
+        { alias: "devbox", hostname: "devbox", username: null, port: null },
+        { remoteCommandArgs: ["sh", "-s"], timeoutMs: 1_000 },
+      ).pipe(Effect.flip, Effect.forkChild);
+      yield* TestClock.adjust(Duration.seconds(1));
+      const failure = yield* Fiber.join(fiber);
+
+      assert.instanceOf(failure, SshCommandError);
+      assert.equal(failure.exitCode, null);
+      assert.equal(failure.stdout, 'PROGRESS: extracting\n{"credential":"[redacted]"}\n');
+      assert.equal(failure.stderr, "REMOTE: waiting for archive extraction\n");
+    }).pipe(Effect.provide(layerProcess));
+  });
 });

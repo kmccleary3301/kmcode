@@ -268,55 +268,56 @@ export const layer: Layer.Layer<
      * only when the log is unchanged; a changed log rescans retained history to
      * rebuild per-entity first/latest state before advancing the settled checkpoint.
      */
-    const compactEventStore = (options?: CompactionOptions) => Effect.gen(function* () {
-      const checkpointRows = yield* sql<{ readonly last_sequence: number }>`
+    const compactEventStore = (options?: CompactionOptions) =>
+      Effect.gen(function* () {
+        const checkpointRows = yield* sql<{ readonly last_sequence: number }>`
         SELECT last_sequence
         FROM orchestration_v2_projection_metadata
         WHERE projection_name = ${COMPACTION_CHECKPOINT_NAME}
         LIMIT 1
       `;
-      const compactedThroughSequence = checkpointRows[0]?.last_sequence ?? 0;
-      const latestProjectionSequence = yield* eventStore.latestSequence();
-      const settledBefore = DateTime.formatIso(
-        DateTime.subtract(yield* DateTime.now, {
-          minutes: COMPACTION_SETTLE_HORIZON_MINUTES,
-        }),
-      );
-      const bounds = yield* sql<{
-        readonly latest_event_sequence: number;
-        readonly receipt_row_id: number;
-      }>`
+        const compactedThroughSequence = checkpointRows[0]?.last_sequence ?? 0;
+        const latestProjectionSequence = yield* eventStore.latestSequence();
+        const settledBefore = DateTime.formatIso(
+          DateTime.subtract(yield* DateTime.now, {
+            minutes: COMPACTION_SETTLE_HORIZON_MINUTES,
+          }),
+        );
+        const bounds = yield* sql<{
+          readonly latest_event_sequence: number;
+          readonly receipt_row_id: number;
+        }>`
         SELECT
           COALESCE((SELECT MAX(sequence) FROM orchestration_events), 0) AS latest_event_sequence,
           COALESCE((SELECT MAX(rowid) FROM orchestration_command_receipts), 0) AS receipt_row_id
       `;
-      const latestEventSequence = bounds[0]?.latest_event_sequence ?? 0;
-      const scanEventLog = latestEventSequence > compactedThroughSequence;
-      let scanThroughSequence = latestEventSequence;
-      let throughReceiptRowId = bounds[0]?.receipt_row_id ?? 0;
-      const retainedThreadIds = new Set<string>();
-      const retainedEntityKeys = new Set<string>();
-      const retainedSubagentDeliveryKeys = new Set<string>();
-      const latestTurnItemSequences = new Map<string, number>();
-      const oldestTurnItemSequences = new Map<string, number>();
-      let minimumRecentSequence: number | null = null;
-      let scannedEventCount = 0;
-      let eventPageCount = 0;
-      let deletedEventCount = 0;
-      let deletedReceiptCount = 0;
+        const latestEventSequence = bounds[0]?.latest_event_sequence ?? 0;
+        const scanEventLog = latestEventSequence > compactedThroughSequence;
+        let scanThroughSequence = latestEventSequence;
+        let throughReceiptRowId = bounds[0]?.receipt_row_id ?? 0;
+        const retainedThreadIds = new Set<string>();
+        const retainedEntityKeys = new Set<string>();
+        const retainedSubagentDeliveryKeys = new Set<string>();
+        const latestTurnItemSequences = new Map<string, number>();
+        const oldestTurnItemSequences = new Map<string, number>();
+        let minimumRecentSequence: number | null = null;
+        let scannedEventCount = 0;
+        let eventPageCount = 0;
+        let deletedEventCount = 0;
+        let deletedReceiptCount = 0;
 
-      while (scanEventLog && scanThroughSequence > 0) {
-        const rows = yield* sql<{
-          readonly sequence: number;
-          readonly application_event_version: number;
-          readonly aggregate_kind: string;
-          readonly stream_id: string;
-          readonly event_type: string;
-          readonly entity_id: string | null;
-          readonly imported_legacy_thread: number;
-          readonly is_settled: number;
-          readonly carries_completion_delivery: number;
-        }>`
+        while (scanEventLog && scanThroughSequence > 0) {
+          const rows = yield* sql<{
+            readonly sequence: number;
+            readonly application_event_version: number;
+            readonly aggregate_kind: string;
+            readonly stream_id: string;
+            readonly event_type: string;
+            readonly entity_id: string | null;
+            readonly imported_legacy_thread: number;
+            readonly is_settled: number;
+            readonly carries_completion_delivery: number;
+          }>`
           SELECT
             event.sequence,
             event.application_event_version,
@@ -359,64 +360,63 @@ export const layer: Layer.Layer<
           ORDER BY event.sequence DESC
           LIMIT ${COMPACTION_PAGE_SIZE}
         `;
-        if (rows.length === 0) break;
-        scannedEventCount += rows.length;
-        eventPageCount += 1;
+          if (rows.length === 0) break;
+          scannedEventCount += rows.length;
+          eventPageCount += 1;
 
-        const obsolete: number[] = [];
-        for (const row of rows) {
-          if (row.is_settled === 0) {
-            minimumRecentSequence =
-              minimumRecentSequence === null
-                ? row.sequence
-                : Math.min(minimumRecentSequence, row.sequence);
-            continue;
-          }
-          if (row.imported_legacy_thread === 1) {
-            obsolete.push(row.sequence);
-            continue;
-          }
-          if (row.application_event_version === 2) {
-            if (
-              row.aggregate_kind === "thread" &&
-              supersedableThreadEventTypes.has(row.event_type)
-            ) {
-              if (retainedThreadIds.has(row.stream_id)) obsolete.push(row.sequence);
-              else retainedThreadIds.add(row.stream_id);
-            } else if (
-              row.aggregate_kind === "thread" &&
-              supersedableSnapshotEventTypes.has(row.event_type) &&
-              row.entity_id !== null
-            ) {
-              const key = encodeEntityKey([row.event_type, row.stream_id, row.entity_id]);
-              if (row.event_type === "turn-item.updated") {
-                const previousOldest = oldestTurnItemSequences.get(key);
-                if (previousOldest === undefined) {
-                  latestTurnItemSequences.set(key, row.sequence);
-                } else if (previousOldest !== latestTurnItemSequences.get(key)) {
-                  obsolete.push(previousOldest);
+          const obsolete: number[] = [];
+          for (const row of rows) {
+            if (row.is_settled === 0) {
+              minimumRecentSequence =
+                minimumRecentSequence === null
+                  ? row.sequence
+                  : Math.min(minimumRecentSequence, row.sequence);
+              continue;
+            }
+            if (row.imported_legacy_thread === 1) {
+              obsolete.push(row.sequence);
+              continue;
+            }
+            if (row.application_event_version === 2) {
+              if (
+                row.aggregate_kind === "thread" &&
+                supersedableThreadEventTypes.has(row.event_type)
+              ) {
+                if (retainedThreadIds.has(row.stream_id)) obsolete.push(row.sequence);
+                else retainedThreadIds.add(row.stream_id);
+              } else if (
+                row.aggregate_kind === "thread" &&
+                supersedableSnapshotEventTypes.has(row.event_type) &&
+                row.entity_id !== null
+              ) {
+                const key = encodeEntityKey([row.event_type, row.stream_id, row.entity_id]);
+                if (row.event_type === "turn-item.updated") {
+                  const previousOldest = oldestTurnItemSequences.get(key);
+                  if (previousOldest === undefined) {
+                    latestTurnItemSequences.set(key, row.sequence);
+                  } else if (previousOldest !== latestTurnItemSequences.get(key)) {
+                    obsolete.push(previousOldest);
+                  }
+                  oldestTurnItemSequences.set(key, row.sequence);
+                } else if (row.event_type === "subagent.updated") {
+                  const isLatest = !retainedEntityKeys.has(key);
+                  const isLatestDelivery =
+                    row.carries_completion_delivery === 1 && !retainedSubagentDeliveryKeys.has(key);
+                  if (isLatest) retainedEntityKeys.add(key);
+                  if (isLatestDelivery) retainedSubagentDeliveryKeys.add(key);
+                  if (!isLatest && !isLatestDelivery) obsolete.push(row.sequence);
+                } else if (retainedEntityKeys.has(key)) {
+                  obsolete.push(row.sequence);
+                } else {
+                  retainedEntityKeys.add(key);
                 }
-                oldestTurnItemSequences.set(key, row.sequence);
-              } else if (row.event_type === "subagent.updated") {
-                const isLatest = !retainedEntityKeys.has(key);
-                const isLatestDelivery =
-                  row.carries_completion_delivery === 1 &&
-                  !retainedSubagentDeliveryKeys.has(key);
-                if (isLatest) retainedEntityKeys.add(key);
-                if (isLatestDelivery) retainedSubagentDeliveryKeys.add(key);
-                if (!isLatest && !isLatestDelivery) obsolete.push(row.sequence);
-              } else if (retainedEntityKeys.has(key)) {
-                obsolete.push(row.sequence);
-              } else {
-                retainedEntityKeys.add(key);
               }
             }
           }
-        }
 
-        yield* Effect.yieldNow;
-        if (obsolete.length > 0) {
-          const deletedRows = yield* sql<{ readonly sequence: number }>`
+          yield* Effect.yieldNow;
+          if (obsolete.length > 0) {
+            const deletedRows = yield* sql<{ readonly sequence: number }>`
             DELETE FROM orchestration_events
             WHERE sequence IN ${sql.in(obsolete)}
               AND sequence <> ${latestProjectionSequence}
@@ -429,33 +429,32 @@ export const layer: Layer.Layer<
               )
             RETURNING sequence
           `;
-          deletedEventCount += deletedRows.length;
-          yield* Effect.yieldNow;
-        }
-        if (eventPageCount % COMPACTION_PROGRESS_PAGE_INTERVAL === 0) {
-          yield* Effect.logInfo("Orchestration event compaction progress", {
-            rowsScanned: scannedEventCount,
-            rowsDeleted: deletedEventCount,
-            currentSequence: rows.at(-1)?.sequence,
-          });
+            deletedEventCount += deletedRows.length;
+            yield* Effect.yieldNow;
+          }
+          if (eventPageCount % COMPACTION_PROGRESS_PAGE_INTERVAL === 0) {
+            yield* Effect.logInfo("Orchestration event compaction progress", {
+              rowsScanned: scannedEventCount,
+              rowsDeleted: deletedEventCount,
+              currentSequence: rows.at(-1)?.sequence,
+            });
+          }
+
+          if (rows.length < COMPACTION_PAGE_SIZE) break;
+          scanThroughSequence = (rows.at(-1)?.sequence ?? 1) - 1;
+          if (options?.paceBetweenPages !== false) {
+            yield* Effect.sleep(COMPACTION_PAGE_DELAY);
+          }
         }
 
-        if (rows.length < COMPACTION_PAGE_SIZE) break;
-        scanThroughSequence =
-          (rows.at(-1)?.sequence ?? 1) - 1;
-        if (options?.paceBetweenPages !== false) {
-          yield* Effect.sleep(COMPACTION_PAGE_DELAY);
-        }
-      }
+        const settledThroughSequence =
+          minimumRecentSequence === null
+            ? latestEventSequence
+            : Math.max(compactedThroughSequence, minimumRecentSequence - 1);
 
-      const settledThroughSequence =
-        minimumRecentSequence === null
-          ? latestEventSequence
-          : Math.max(compactedThroughSequence, minimumRecentSequence - 1);
-
-      if (settledThroughSequence > compactedThroughSequence) {
-        const checkpointUpdatedAt = DateTime.formatIso(yield* DateTime.now);
-        yield* sql`
+        if (settledThroughSequence > compactedThroughSequence) {
+          const checkpointUpdatedAt = DateTime.formatIso(yield* DateTime.now);
+          yield* sql`
           INSERT INTO orchestration_v2_projection_metadata (
             projection_name,
             schema_version,
@@ -473,16 +472,16 @@ export const layer: Layer.Layer<
             last_sequence = excluded.last_sequence,
             updated_at = excluded.updated_at
         `;
-      }
+        }
 
-      // Legacy receipts are removable only after transcript import completes.
-      // Page before LIMIT, and revisit them each pass so interrupted deletes retry.
-      while (throughReceiptRowId > 0) {
-        const rows = yield* sql<{
-          readonly row_id: number;
-          readonly command_id: string;
-          readonly imported_legacy_thread: number;
-        }>`
+        // Legacy receipts are removable only after transcript import completes.
+        // Page before LIMIT, and revisit them each pass so interrupted deletes retry.
+        while (throughReceiptRowId > 0) {
+          const rows = yield* sql<{
+            readonly row_id: number;
+            readonly command_id: string;
+            readonly imported_legacy_thread: number;
+          }>`
           SELECT
             receipt.rowid AS row_id,
             receipt.command_id,
@@ -500,42 +499,44 @@ export const layer: Layer.Layer<
           ORDER BY receipt.rowid DESC
           LIMIT ${COMPACTION_PAGE_SIZE}
         `;
-        const obsolete = rows
-          .filter((row) => row.imported_legacy_thread === 1)
-          .map((row) => row.command_id);
-        yield* Effect.yieldNow;
-        if (obsolete.length > 0) {
-          yield* sql`DELETE FROM orchestration_command_receipts WHERE command_id IN ${sql.in(obsolete)}`;
-          deletedReceiptCount += obsolete.length;
+          const obsolete = rows
+            .filter((row) => row.imported_legacy_thread === 1)
+            .map((row) => row.command_id);
           yield* Effect.yieldNow;
+          if (obsolete.length > 0) {
+            yield* sql`DELETE FROM orchestration_command_receipts WHERE command_id IN ${sql.in(obsolete)}`;
+            deletedReceiptCount += obsolete.length;
+            yield* Effect.yieldNow;
+          }
+          throughReceiptRowId = (rows.at(-1)?.row_id ?? 1) - 1;
+          if (rows.length < COMPACTION_PAGE_SIZE) break;
+          if (options?.paceBetweenPages !== false) {
+            yield* Effect.sleep(COMPACTION_PAGE_DELAY);
+          }
         }
-        throughReceiptRowId = (rows.at(-1)?.row_id ?? 1) - 1;
-        if (rows.length < COMPACTION_PAGE_SIZE) break;
-        if (options?.paceBetweenPages !== false) {
-          yield* Effect.sleep(COMPACTION_PAGE_DELAY);
-        }
-      }
 
-      const freelistRows = yield* sql<{ readonly freelist_count: number }>`PRAGMA freelist_count`;
-      const pageSizeRows = yield* sql<{ readonly page_size: number }>`PRAGMA page_size`;
-      const reclaimableBytes =
-        (freelistRows[0]?.freelist_count ?? 0) * (pageSizeRows[0]?.page_size ?? 0);
+        const freelistRows = yield* sql<{ readonly freelist_count: number }>`PRAGMA freelist_count`;
+        const pageSizeRows = yield* sql<{ readonly page_size: number }>`PRAGMA page_size`;
+        const reclaimableBytes =
+          (freelistRows[0]?.freelist_count ?? 0) * (pageSizeRows[0]?.page_size ?? 0);
 
-      return {
-        scannedEventCount,
-        deletedEventCount,
-        deletedReceiptCount,
-        reclaimableBytes,
-      };
-    });
+        return {
+          scannedEventCount,
+          deletedEventCount,
+          deletedReceiptCount,
+          reclaimableBytes,
+        };
+      });
     return ProjectionMaintenanceV2.of({
       verify: mapError("verify")(verify),
       rebuild: mapError("rebuild")(rebuild),
-      compactEventStore: (options) =>
-        mapError("compact event store")(compactEventStore(options)),
+      compactEventStore: (options) => mapError("compact event store")(compactEventStore(options)),
     });
   }),
 );
+const COMPACTION_FIRST_PASS_DELAY = Duration.minutes(30);
+const COMPACTION_INTERVAL = Duration.hours(6);
+
 export const layerCompactionWorker = Layer.effectDiscard(
   Effect.gen(function* () {
     const maintenance = yield* ProjectionMaintenanceV2;
@@ -543,9 +544,12 @@ export const layerCompactionWorker = Layer.effectDiscard(
       const exit = yield* Effect.exit(maintenance.compactEventStore());
       if (Exit.isFailure(exit)) {
         if (Cause.hasInterrupts(exit.cause)) return yield* Effect.failCause(exit.cause);
-        yield* Effect.logWarning("Orchestration event compaction failed; retrying on next interval", {
-          cause: Cause.pretty(exit.cause),
-        });
+        yield* Effect.logWarning(
+          "Orchestration event compaction failed; retrying on next interval",
+          {
+            cause: Cause.pretty(exit.cause),
+          },
+        );
         return;
       }
 
@@ -557,9 +561,12 @@ export const layerCompactionWorker = Layer.effectDiscard(
       });
     });
 
+    // A pass rescans the whole event log whenever it changed, which on a live server is
+    // always: on km-dev that is 3.2M rows to delete about 0.2%, and back-to-back passes
+    // kept the disk busy enough to stall the server. Superseded events only cost space.
     yield* forkParked(
-      Effect.sleep(Duration.minutes(3)).pipe(
-        Effect.andThen(compactOnce.pipe(Effect.repeat(Schedule.spaced(Duration.minutes(10))))),
+      Effect.sleep(COMPACTION_FIRST_PASS_DELAY).pipe(
+        Effect.andThen(compactOnce.pipe(Effect.repeat(Schedule.spaced(COMPACTION_INTERVAL)))),
       ),
     );
   }),

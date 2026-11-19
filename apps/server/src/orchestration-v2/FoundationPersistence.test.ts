@@ -788,11 +788,7 @@ it.layer(NodeServices.layer)("worker-backed event compaction", (it) => {
       const mainDatabase = SqlitePersistence.layerFromPath(databasePath);
       const mainEventStore = EventStore.layer.pipe(Layer.provide(mainDatabase));
       const mainProjectionStore = ProjectionStore.layer.pipe(Layer.provide(mainDatabase));
-      const mainStores = Layer.mergeAll(
-        mainDatabase,
-        mainEventStore,
-        mainProjectionStore,
-      );
+      const mainStores = Layer.mergeAll(mainDatabase, mainEventStore, mainProjectionStore);
       const mainEventSink = EventSink.layer.pipe(Layer.provide(mainStores));
 
       const workerDatabase = NodeSqliteClient.layer({
@@ -801,11 +797,7 @@ it.layer(NodeServices.layer)("worker-backed event compaction", (it) => {
       });
       const workerEventStore = EventStore.layer.pipe(Layer.provide(workerDatabase));
       const workerProjectionStore = ProjectionStore.layer.pipe(Layer.provide(workerDatabase));
-      const workerStores = Layer.mergeAll(
-        workerDatabase,
-        workerEventStore,
-        workerProjectionStore,
-      );
+      const workerStores = Layer.mergeAll(workerDatabase, workerEventStore, workerProjectionStore);
       const workerStoresAndMaintenance = Layer.fresh(
         ProjectionMaintenance.layer.pipe(Layer.provideMerge(workerStores)),
       );
@@ -962,7 +954,9 @@ it.layer(NodeServices.layer)("worker-backed event compaction", (it) => {
         for (let revision = 0; revision < 3; revision += 1) {
           const eventId = `event:worker-compaction:message:${revision}`;
           messageEventIds.push(eventId);
-          events.push(makeMessageEvent(eventId, messageId, `Message revision ${revision}`, settledAt));
+          events.push(
+            makeMessageEvent(eventId, messageId, `Message revision ${revision}`, settledAt),
+          );
           const updatedAt = DateTime.add(settledAt, { seconds: revision });
           const attemptEventId = `event:worker-compaction:attempt:${revision}`;
           runAttemptEventIds.push(attemptEventId);
@@ -1110,9 +1104,7 @@ it.layer(NodeServices.layer)("worker-backed event compaction", (it) => {
           },
         });
 
-        events.push(
-          ...Array.from({ length: 501 }, (_, index) => makeSettledThreadVisit(index)),
-        );
+        events.push(...Array.from({ length: 501 }, (_, index) => makeSettledThreadVisit(index)));
         events.push({
           id: EventId.make(activeRunEventId),
           type: "run.updated",
@@ -1251,9 +1243,7 @@ it.layer(NodeServices.layer)("worker-backed event compaction", (it) => {
               .map(({ messageEventId }) => messageEventId),
           ];
           assert.deepEqual(
-            (yield* readRetainedEventIds(candidateMessageEventIds)).map(
-              (row) => row.event_id,
-            ),
+            (yield* readRetainedEventIds(candidateMessageEventIds)).map((row) => row.event_id),
             [snapshot.messageEventId],
           );
           const candidateTurnItemEventIds = [
@@ -1263,22 +1253,17 @@ it.layer(NodeServices.layer)("worker-backed event compaction", (it) => {
               .map(({ turnItemEventId }) => turnItemEventId),
           ];
           assert.deepEqual(
-            (yield* readRetainedEventIds(candidateTurnItemEventIds)).map(
-              (row) => row.event_id,
-            ),
+            (yield* readRetainedEventIds(candidateTurnItemEventIds)).map((row) => row.event_id),
             [turnItemEventIds[0], snapshot.turnItemEventId],
           );
-          assert.deepEqual(
-            yield* projectionStore.getThreadProjection(threadId),
-            beforePass,
-          );
+          assert.deepEqual(yield* projectionStore.getThreadProjection(threadId), beforePass);
           assert.deepEqual(yield* readTurnItemPositions(), beforeItemPositions);
         }
 
         const beforeRebuild = yield* projectionStore.getThreadProjection(threadId);
-        const retainedSubagentEventIds = (
-          yield* readRetainedEventIds(subagentEventIds)
-        ).map((row) => row.event_id);
+        const retainedSubagentEventIds = (yield* readRetainedEventIds(subagentEventIds)).map(
+          (row) => row.event_id,
+        );
         assert.include(retainedSubagentEventIds, subagentEventIds[1]);
         assert.include(retainedSubagentEventIds, subagentEventIds[2]);
 
@@ -1288,7 +1273,6 @@ it.layer(NodeServices.layer)("worker-backed event compaction", (it) => {
       }).pipe(Effect.provide(layer));
     }),
   );
-
 });
 
 it.layer(layerTest)("orchestration V2 foundation persistence", (it) => {
@@ -3216,6 +3200,63 @@ it.layer(layerTest)("orchestration V2 foundation persistence", (it) => {
       );
       assert.equal(yield* Ref.get(executionCount), 0);
     }),
+  );
+
+  it.effect("fails an effect this build cannot decode and claims the thread's next effect", () =>
+    Effect.gen(function* () {
+      const outbox = yield* EffectOutbox.EffectOutboxV2;
+      const sql = yield* SqlClient.SqlClient;
+      const nowIso = DateTime.formatIso(yield* DateTime.now);
+      const workerId = "undecodable-worker";
+      const commandId = CommandId.make("command:foundation-undecodable");
+      const threadId = ThreadId.make("thread:foundation-undecodable");
+      yield* sql`
+        INSERT INTO orchestration_v2_effect_outbox (
+          effect_id, command_id, thread_id, effect_type, payload_json, status,
+          available_at, created_at, updated_at
+        )
+        VALUES (
+          'effect:foundation-undecodable:a', ${commandId}, ${threadId}, 'future-effect.kind',
+          '{"type":"future-effect.kind"}', 'pending', ${nowIso}, ${nowIso}, ${nowIso}
+        )
+      `;
+      yield* outbox.enqueue([
+        {
+          id: "effect:foundation-undecodable:b",
+          commandId,
+          threadId,
+          request: { type: "provider-turn.start", runId: RunId.make("run:foundation-undecodable") },
+        },
+      ]);
+
+      const claimed = yield* outbox.claimNext({ workerId, leaseDurationMs: 30_000 });
+      const rows = yield* sql<{
+        readonly effect_id: string;
+        readonly status: string;
+        readonly lease_owner: string | null;
+        readonly last_error: string | null;
+      }>`
+        SELECT effect_id, status, lease_owner, last_error
+        FROM orchestration_v2_effect_outbox
+        WHERE thread_id = ${threadId}
+        ORDER BY effect_id
+      `;
+      assert.deepEqual(rows, [
+        {
+          effect_id: "effect:foundation-undecodable:a",
+          status: "failed",
+          lease_owner: null,
+          last_error: "This server build cannot decode the future-effect.kind effect.",
+        },
+        {
+          effect_id: "effect:foundation-undecodable:b",
+          status: "running",
+          lease_owner: workerId,
+          last_error: null,
+        },
+      ]);
+      assert.equal(Option.getOrUndefined(claimed)?.id, "effect:foundation-undecodable:b");
+    }).pipe(Effect.provide(layerIsolatedOutbox)),
   );
 
   it.effect("allows only one worker to claim an available effect", () =>

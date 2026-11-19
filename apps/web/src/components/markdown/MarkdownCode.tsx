@@ -12,7 +12,7 @@ import React, {
 } from "react";
 import type { InlineNodeViewProps, NodeViewProps } from "@stream-mdx/react";
 import { resolveInlineCodeFileLinkMeta } from "../../markdown-links";
-import { getClientSettings } from "../../hooks/useSettings";
+import { useClientSettings } from "../../hooks/useSettings";
 import { cn } from "../../lib/utils";
 import { RenderErrorBoundary } from "../RenderErrorBoundary";
 import { SvgGraphic, standaloneSvgImageUrl } from "../chat/SvgGraphic";
@@ -208,7 +208,9 @@ function MarkdownCodeBlock({
   children: ReactNode;
 }) {
   const [copied, setCopied] = useState(false);
-  const [wrapped, setWrapped] = useState(() => getClientSettings().wordWrap);
+  const defaultWrapped = useClientSettings((settings) => settings.wordWrap);
+  const [wrapOverride, setWrapOverride] = useState<boolean | null>(null);
+  const wrapped = wrapOverride ?? defaultWrapped;
   const copiedTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const wrapLabel = wrapped ? "Disable line wrap" : "Wrap lines";
   const copyLabel = copied ? "Copied" : "Copy code";
@@ -302,7 +304,7 @@ function MarkdownCodeBlock({
                     variant={wrapped ? "secondary" : "ghost-muted"}
                     size="icon-xs"
                     aria-pressed={wrapped}
-                    onClick={() => setWrapped((value) => !value)}
+                    onClick={() => setWrapOverride(!wrapped)}
                     aria-label={wrapLabel}
                   />
                 }

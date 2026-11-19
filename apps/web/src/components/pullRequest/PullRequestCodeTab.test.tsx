@@ -15,6 +15,7 @@ type DiffPageAtom = Atom.Writable<AsyncResult.AsyncResult<PullRequestDiffResult>
 
 const state = vi.hoisted(() => ({
   pages: new Map<string | null, DiffPageAtom>(),
+  wordWrap: false,
 }));
 
 vi.mock("~/state/pullRequests", () => ({
@@ -26,7 +27,7 @@ vi.mock("~/hooks/useSettings", () => ({
   useClientSettings: () => ({
     diffFilesCollapsed: false,
     diffLayout: "unified",
-    wordWrap: false,
+    wordWrap: state.wordWrap,
     diffIgnoreWhitespace: false,
   }),
   useUpdateClientSettings: () => () => {},
@@ -120,7 +121,25 @@ vi.mock("../ui/tooltip", () => {
   return { Tooltip: Wrapper, TooltipPopup: Wrapper, TooltipTrigger: Trigger };
 });
 vi.mock("../ui/toggle-group", () => ({
-  Toggle: ({ children }: { children?: ReactNode }) => <button>{children}</button>,
+  Toggle: ({
+    children,
+    "aria-label": ariaLabel,
+    pressed,
+    onPressedChange,
+  }: {
+    children?: ReactNode;
+    "aria-label"?: string;
+    pressed?: boolean;
+    onPressedChange?: (pressed: boolean) => void;
+  }) => (
+    <button
+      aria-label={ariaLabel}
+      aria-pressed={pressed}
+      onClick={() => onPressedChange?.(!pressed)}
+    >
+      {children}
+    </button>
+  ),
   ToggleGroup: ({ children }: { children?: ReactNode }) => <>{children}</>,
 }));
 vi.mock("../ui/checkbox", () => ({ Checkbox: () => null }));
@@ -196,6 +215,53 @@ afterEach(() => {
   disposeRegistry?.();
   disposeRegistry = null;
   state.pages.clear();
+  state.wordWrap = false;
+});
+it("follows a changed word wrap default while mounted", async () => {
+  const registry = AtomRegistry.make();
+  disposeRegistry = () => registry.dispose();
+  state.pages.set(
+    null,
+    Atom.make<AsyncResult.AsyncResult<PullRequestDiffResult>>(
+      AsyncResult.success(page("first.ts", "FIRST", null)),
+    ),
+  );
+  await act(async () => {
+    renderer = create(
+      <RegistryContext.Provider value={registry}>
+        <PullRequestCodeTab
+          environmentId={environmentId}
+          reference={reference}
+          detail={detail}
+          selectedCommitOid={null}
+          onSelectedCommitChange={() => {}}
+          onRefresh={() => {}}
+        />
+      </RegistryContext.Provider>,
+    );
+  });
+  expect(
+    renderer!.root.findByProps({ "aria-label": "Enable diff line wrapping" }).props.pressed,
+  ).toBe(false);
+
+  state.wordWrap = true;
+  await act(async () => {
+    renderer!.update(
+      <RegistryContext.Provider value={registry}>
+        <PullRequestCodeTab
+          environmentId={environmentId}
+          reference={reference}
+          detail={detail}
+          selectedCommitOid={null}
+          onSelectedCommitChange={() => {}}
+          onRefresh={() => {}}
+        />
+      </RegistryContext.Provider>,
+    );
+  });
+  expect(
+    renderer!.root.findByProps({ "aria-label": "Disable diff line wrapping" }).props.pressed,
+  ).toBe(true);
 });
 
 function page(path: string, value: string, nextCursor: string | null): PullRequestDiffResult {

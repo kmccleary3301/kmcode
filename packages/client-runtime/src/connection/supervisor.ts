@@ -638,6 +638,9 @@ export const make = Effect.fn("EnvironmentSupervisor.make")(function* (
     }
   };
 
+  const isForegroundProbe = (next: SupervisorSignal) =>
+    next._tag === "Wakeup" && next.reason === "application-active";
+
   // Holds a connected lease until it must end, and returns whether to restart
   // the retry ladder. Returning to the app, an explicit retry, and the network
   // reporting offline all probe the live session instead of replacing it, so a
@@ -679,9 +682,11 @@ export const make = Effect.fn("EnvironmentSupervisor.make")(function* (
         continue;
       }
       yield* Ref.set(probeUnanswered, true);
-      const probe = yield* Effect.forkChild(lease.session.probe);
+      let probe = yield* Effect.forkChild(lease.session.probe);
+      // A busy server can miss one foreground probe while the socket is healthy.
+      let toleratesMiss = isForegroundProbe(next);
       // Monotonic nanoseconds, so a wall-clock correction cannot move the deadline.
-      const deadline =
+      let deadline =
         (yield* Clock.monotonicTimeNanos) + Duration.toNanosUnsafe(CONNECTION_PROBE_TIMEOUT);
       for (;;) {
         const remaining = deadline - (yield* Clock.monotonicTimeNanos);
@@ -695,6 +700,14 @@ export const make = Effect.fn("EnvironmentSupervisor.make")(function* (
           ),
         ]);
         if (probeEvent._tag === "TimedOut") {
+          if (toleratesMiss) {
+            toleratesMiss = false;
+            yield* Fiber.interrupt(probe);
+            probe = yield* Effect.forkChild(lease.session.probe);
+            deadline =
+              (yield* Clock.monotonicTimeNanos) + Duration.toNanosUnsafe(CONNECTION_PROBE_TIMEOUT);
+            continue;
+          }
           yield* Fiber.interrupt(probe);
           return yield* new ConnectionTransientError({
             reason: "timeout",
@@ -712,6 +725,9 @@ export const make = Effect.fn("EnvironmentSupervisor.make")(function* (
         if (endDuringProbe !== undefined) {
           yield* Fiber.interrupt(probe);
           return endDuringProbe === "reset";
+        }
+        if (questionsConnection(probeEvent.signal) && !isForegroundProbe(probeEvent.signal)) {
+          toleratesMiss = false;
         }
       }
     }

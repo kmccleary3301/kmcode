@@ -1283,10 +1283,14 @@ describe("EnvironmentSupervisor", () => {
     }).pipe(Effect.provide(TestClock.layer())),
   );
 
-  it.effect("quickly times out a stalled desktop foreground probe", () =>
+  it.effect("keeps a live session after one missed desktop foreground probe", () =>
     Effect.gen(function* () {
+      const probeCount = yield* Ref.make(0);
       const harness = yield* makeHarness({
-        probe: (attempt) => (attempt === 1 ? Effect.never : Effect.void),
+        probe: () =>
+          Ref.updateAndGet(probeCount, (count) => count + 1).pipe(
+            Effect.flatMap((call) => (call === 1 ? Effect.never : Effect.void)),
+          ),
       });
       const supervisor = yield* EnvironmentSupervisor.make(TARGET_ENTRY, {
         initiallyDesired: true,
@@ -1295,14 +1299,64 @@ describe("EnvironmentSupervisor", () => {
       yield* awaitState(supervisor.state, (state) => state.phase === "connected");
       yield* harness.wake("application-active");
       yield* TestClock.adjust("2999 millis");
-      expect(yield* Ref.get(harness.sessionCount)).toBe(1);
       yield* TestClock.adjust("1 milli");
-      yield* awaitState(
-        supervisor.state,
-        (state) => state.phase === "connected" && state.generation === 2 && state.attempt === 1,
-      );
+      yield* Effect.yieldNow;
+
+      expect(yield* Ref.get(probeCount)).toBe(2);
+      expect(yield* Ref.get(harness.sessionCount)).toBe(1);
+      expect(yield* Ref.get(harness.releaseCount)).toBe(0);
+      expect(yield* SubscriptionRef.get(supervisor.state)).toMatchObject({
+        phase: "connected",
+        generation: 1,
+      });
+    }).pipe(Effect.provide(TestClock.layer())),
+  );
+
+  it.effect("replaces a session when both desktop foreground probes time out", () =>
+    Effect.gen(function* () {
+      const harness = yield* makeHarness({ probe: () => Effect.never });
+      const supervisor = yield* EnvironmentSupervisor.make(TARGET_ENTRY, {
+        initiallyDesired: true,
+      }).pipe(Effect.provide(harness.dependencies));
+
+      yield* awaitState(supervisor.state, (state) => state.phase === "connected");
+      yield* harness.wake("application-active");
+      yield* TestClock.adjust("3 seconds");
+      yield* Effect.yieldNow;
+      expect(yield* Ref.get(harness.sessionCount)).toBe(1);
+      expect(yield* Ref.get(harness.releaseCount)).toBe(0);
+
+      yield* TestClock.adjust("3 seconds");
+      yield* Effect.yieldNow;
+      expect(yield* Ref.get(harness.sessionCount)).toBe(2);
+      expect(yield* Ref.get(harness.releaseCount)).toBe(1);
+      expect(yield* SubscriptionRef.get(supervisor.state)).toMatchObject({
+        phase: "connected",
+        generation: 2,
+      });
+    }).pipe(Effect.provide(TestClock.layer())),
+  );
+
+  it.effect("does not forgive a foreground probe miss when an explicit retry arrives", () =>
+    Effect.gen(function* () {
+      const probeStarted = yield* Deferred.make<void>();
+      const harness = yield* makeHarness({
+        probe: () => Deferred.succeed(probeStarted, undefined).pipe(Effect.andThen(Effect.never)),
+      });
+      const supervisor = yield* EnvironmentSupervisor.make(TARGET_ENTRY, {
+        initiallyDesired: true,
+      }).pipe(Effect.provide(harness.dependencies));
+
+      yield* awaitState(supervisor.state, (state) => state.phase === "connected");
+      yield* harness.wake("application-active");
+      yield* Deferred.await(probeStarted);
+      yield* TestClock.adjust("2 seconds");
+      yield* supervisor.retryNow;
+      yield* TestClock.adjust("1 second");
+      yield* Effect.yieldNow;
 
       expect(yield* Ref.get(harness.sessionCount)).toBe(2);
+      expect(yield* Ref.get(harness.releaseCount)).toBe(1);
     }).pipe(Effect.provide(TestClock.layer())),
   );
 

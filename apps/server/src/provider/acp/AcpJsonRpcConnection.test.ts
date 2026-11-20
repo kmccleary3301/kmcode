@@ -1273,6 +1273,7 @@ describe("AcpSessionRuntime", () => {
 
       const listed = yield* runtime.listSessions();
       expect(listed.sessions.map((session) => session.sessionId)).toEqual(["mock-session-1"]);
+      yield* runtime.loadSession(started.sessionId);
 
       const forked = yield* runtime.forkSession(started.sessionId);
       expect(forked.sessionId).toBe("mock-session-1-fork");
@@ -1282,6 +1283,16 @@ describe("AcpSessionRuntime", () => {
       expect(resumed.sessionId).toBe("mock-session-1");
       yield* runtime.closeSession();
       yield* runtime.logout;
+
+      for (const method of ["session/new", "session/load", "session/fork", "session/resume"]) {
+        const setup = requestEvents.find(
+          (event) => event.method === method && event.status === "started",
+        );
+        expect(setup?.payload).toMatchObject({
+          additionalDirectories: ["/extra/workspace"],
+          _meta: { supportsFork: true },
+        });
+      }
 
       expect(
         requestEvents.find(
@@ -1293,6 +1304,7 @@ describe("AcpSessionRuntime", () => {
       ).toEqual(
         expect.arrayContaining([
           "session/list",
+          "session/load",
           "session/fork",
           "session/resume",
           "session/close",
@@ -1311,6 +1323,10 @@ describe("AcpSessionRuntime", () => {
             },
           },
           cwd: process.cwd(),
+          additionalDirectories: ["/extra/workspace"],
+          sessionMeta: (initializeResult) => ({
+            supportsFork: initializeResult.agentCapabilities?.sessionCapabilities?.fork != null,
+          }),
           clientInfo: { name: "t3-test", version: "0.0.0" },
           requestLogger: (event) =>
             Effect.sync(() => {

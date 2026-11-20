@@ -418,6 +418,31 @@ function isGoalCommand(message: {
   return message.attachments.length === 0 && /^\/goal(?:\s|$)/u.test(message.text.trim());
 }
 
+type GoalCommandType = "show" | "clear" | "pause" | "resume" | "set";
+
+function parseGoalCommand(message: {
+  readonly text: string;
+  readonly attachments: ReadonlyArray<ChatAttachment>;
+}): GoalCommandType | null {
+  if (message.attachments.length > 0) return null;
+  const match = /^\/goal(?:\s+([\s\S]*))?$/u.exec(message.text.trim());
+  if (match === null) return null;
+  switch ((match[1] ?? "").trim().toLowerCase()) {
+    case "":
+    case "edit":
+    case "show":
+      return "show";
+    case "clear":
+      return "clear";
+    case "pause":
+      return "pause";
+    case "resume":
+      return "resume";
+    default:
+      return "set";
+  }
+}
+
 const threadPullRequestLinksEqual = Schema.toEquivalence(Schema.NullOr(ThreadLinkedPullRequest));
 
 function commandThreadId(command: OrchestrationV2ServerCommand): ThreadId {
@@ -893,6 +918,46 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
             }),
         ),
       );
+
+  const goalDriverFor = Effect.fn("Orchestrator.goalDriverFor")(function* (
+    command: OrchestrationV2ServerCommand,
+    providerInstanceId: ProviderInstanceId,
+  ) {
+    const adapter = yield* providerAdapters.get(providerInstanceId).pipe(mapDispatchError(command));
+    const { driver } = adapter;
+    if (driver === "codex" || driver === "claudeAgent") return driver;
+    if (driver !== "opencode" && driver !== "antigravity") return undefined;
+    const capabilities = yield* adapter.getCapabilities().pipe(mapDispatchError(command));
+    return capabilities.turns.supportsNativeGoals === true ? driver : undefined;
+  });
+
+  const ensureGoalCommandSupported = Effect.fn("Orchestrator.ensureGoalCommandSupported")(
+    function* (
+      command: OrchestrationV2ServerCommand,
+      message: { readonly text: string; readonly attachments: ReadonlyArray<ChatAttachment> },
+      providerInstanceId: ProviderInstanceId,
+    ) {
+      const goalCommand = parseGoalCommand(message);
+      if (goalCommand === null || goalCommand === "set") return;
+      const driver = yield* goalDriverFor(command, providerInstanceId);
+      if (driver === "antigravity") {
+        return yield* new OrchestratorDispatchError({
+          commandId: command.commandId,
+          commandType: command.type,
+          cause:
+            "Antigravity accepts /goal followed by an objective. Interrupt the running turn, then ask Antigravity to stop the current goal.",
+        });
+      }
+      if ((goalCommand !== "pause" && goalCommand !== "resume") || driver !== "claudeAgent") {
+        return;
+      }
+      return yield* new OrchestratorDispatchError({
+        commandId: command.commandId,
+        commandType: command.type,
+        cause: "Claude goals cannot be paused or resumed. Send /goal clear to remove the goal.",
+      });
+    },
+  );
 
   const mapDelegatedCompletionError = <A, E, R>(effect: Effect.Effect<A, E, R>) =>
     effect.pipe(
@@ -5247,6 +5312,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         );
       }
       const modelSelection = command.modelSelection ?? projection.thread.modelSelection;
+      yield* ensureGoalCommandSupported(command, command, modelSelection.instanceId);
       const deliveryIntent =
         command.deliveryIntent ??
         (command.notification !== undefined || command.delegatedCompletion !== undefined
@@ -8309,6 +8375,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           cause: `Queued run ${queuedRun.id} is missing message or execution state.`,
         });
       }
+      yield* ensureGoalCommandSupported(command, queuedMessage, queuedRun.providerInstanceId);
       if (
         command.automaticDelivery !== true &&
         (queuedMessage.delegatedCompletion !== undefined ||
@@ -8983,6 +9050,14 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           cause: "Automatic completion deliveries cannot be edited.",
         });
       }
+      yield* ensureGoalCommandSupported(
+        command,
+        {
+          text: command.text,
+          attachments: command.attachments ?? queuedMessage.attachments,
+        },
+        queuedRun.providerInstanceId,
+      );
       const queuedTurnItem = projection.turnItems.find(
         (candidate) =>
           candidate.type === "user_message" && candidate.messageId === queuedMessage.id,

@@ -9,8 +9,10 @@ import {
   type OrchestrationV2Run,
   type OrchestrationV2RunAttempt,
   type OrchestrationV2TurnItem,
+  ProviderThreadId,
   RunId,
   ThreadId,
+  type OrchestrationV2ProviderCapabilities,
 } from "@t3tools/contracts";
 import * as Context from "effect/Context";
 import * as Cause from "effect/Cause";
@@ -70,6 +72,20 @@ const isProviderTurnStartError = Schema.is(ProviderTurnStartError);
 const refusedBeforePrompt = (error: unknown): boolean =>
   Predicate.isTagged(error, "ClaudeBackgroundWorkBlocksQueryReplacementError") ||
   (Predicate.hasProperty(error, "cause") && refusedBeforePrompt(error.cause));
+
+const isGoalCommandMessage = (message: {
+  readonly text: string;
+  readonly attachments: ReadonlyArray<unknown>;
+}): boolean => message.attachments.length === 0 && /^\/goal(?:\s|$)/u.test(message.text.trim());
+
+const supportsNativeGoalDriver = (
+  driver: string,
+  capabilities: OrchestrationV2ProviderCapabilities | undefined,
+): boolean =>
+  driver === "codex" ||
+  driver === "claudeAgent" ||
+  ((driver === "opencode" || driver === "antigravity") &&
+    capabilities?.turns.supportsNativeGoals === true);
 
 export interface ProviderTurnStartServiceV2Shape {
   /**
@@ -260,6 +276,15 @@ export const layer: Layer.Layer<
       const checkpointScope = projection.checkpointScopes.find(
         (candidate) => candidate.id === rootNode?.checkpointScopeId,
       );
+      const nativeGoalProviderThreadIds = new Set<ProviderThreadId>();
+      for (const candidate of projection.providerThreads) {
+        const providerSession = projection.providerSessions.find(
+          (session) => session.id === candidate.providerSessionId,
+        );
+        if (supportsNativeGoalDriver(candidate.driver, providerSession?.capabilities)) {
+          nativeGoalProviderThreadIds.add(candidate.id);
+        }
+      }
       const handoffs = projection.contextHandoffs.filter(
         (handoff) =>
           handoff.status === "ready" &&
@@ -275,8 +300,11 @@ export const layer: Layer.Layer<
                       projection.messages.some(
                         (message) =>
                           message.id === source.userMessageId &&
-                          message.attachments.length === 0 &&
-                          message.text.trim().toLowerCase() === "/compact",
+                          ((message.attachments.length === 0 &&
+                            message.text.trim().toLowerCase() === "/compact") ||
+                            (source.providerThreadId !== null &&
+                              nativeGoalProviderThreadIds.has(source.providerThreadId) &&
+                              isGoalCommandMessage(message))),
                       ))),
               ))),
       );
@@ -996,6 +1024,13 @@ export const layer: Layer.Layer<
         text: message.text,
         records: message.context?.records ?? [],
       });
+      // Native providers parse /goal from the prompt, so defer context handoffs and
+      // keep this message verbatim rather than prefixing it with server context.
+      const goalDriver = supportsNativeGoalDriver(
+        session.driver,
+        session.providerSession.capabilities,
+      );
+      const goalCommand = goalDriver && isGoalCommandMessage(message);
       // Delivered once: this run's provider turn marks the work as told. A
       // restart continuation is prompted by its own text or resumes natively.
       const noteContinuation = isRestartNoteContinuation(
@@ -1011,8 +1046,9 @@ export const layer: Layer.Layer<
           projection.messages
             .filter(
               (candidate) =>
-                candidate.attachments.length === 0 &&
-                candidate.text.trim().toLowerCase() === "/compact",
+                (candidate.attachments.length === 0 &&
+                  candidate.text.trim().toLowerCase() === "/compact") ||
+                (goalDriver && isGoalCommandMessage(candidate)),
             )
             .map((candidate) => candidate.id),
         ),
@@ -1172,7 +1208,7 @@ export const layer: Layer.Layer<
                 ];
           const delivery = yield* deliverContextHandoffs({
             handoffs: [...effectiveHandoffs, ...retryHandoff],
-            deferInline: compact,
+            deferInline: compact || goalCommand,
             providerThread: runningProviderThread,
             budget: Effect.gen(function* () {
               return handoffBudget({
@@ -1229,7 +1265,10 @@ export const layer: Layer.Layer<
             ...(noteContinuation ? promptedInput : turnInput),
             message: {
               ...turnInput.message,
-              text: context === "" ? userText : `${context}\n\nUser message:\n${userText}`,
+              text:
+                context === "" || goalCommand
+                  ? userText
+                  : `${context}\n\nUser message:\n${userText}`,
             },
           }).pipe(
             // A pending marker would make the next turn abandon this native

@@ -21,22 +21,22 @@ import * as Schema from "effect/Schema";
 import * as Scope from "effect/Scope";
 import * as Sink from "effect/Sink";
 import * as Stream from "effect/Stream";
+import * as TestClock from "effect/testing/TestClock";
 import { HttpClient, HttpClientResponse } from "effect/http";
 import * as ChildProcessSpawner from "effect/process/ChildProcessSpawner";
 
 import * as AntigravityInstallation from "./AntigravityInstallation.ts";
 import { ANTIGRAVITY_AUTH_BROWSER_MARKER } from "./antigravityAuthSupport.ts";
-import {
-  resolveAntigravityReleaseAsset,
-  type AntigravityReleaseAsset,
-} from "./antigravityRelease.ts";
+import { type AntigravityReleaseAsset } from "./antigravityRelease.ts";
+import * as ModelManifest from "./ModelManifest.ts";
 
 import antigravityInitialize from "../../../../packages/effect-acp/test/fixtures/antigravity-initialize.json" with { type: "json" };
 
 const serverContents = "antigravity runtime\n";
 const harnessContents = "local harness\n";
 const previousReleaseId = "1".repeat(64);
-const previousVersion = "fixture-old";
+const previousVersion = "1.3.0";
+const withdrawnStatuses: ReadonlyArray<"broken" | "unsupported"> = ["broken", "unsupported"];
 const encodeJsonString = Schema.encodeSync(Schema.fromJsonString(Schema.Unknown));
 
 // Small ZIPs made with Python's zipfile module. The unsafe entries are intentional.
@@ -63,6 +63,8 @@ const zipFixtures = {
 // mechanics, which are the same on every platform.
 const hostPlatform: NodeJS.Platform =
   HostProcessPlatform.defaultValue() === "win32" ? "win32" : "linux";
+const nativeTestPlatforms: ReadonlyArray<NodeJS.Platform> =
+  hostPlatform === "win32" ? ["win32"] : ["win32", hostPlatform];
 const completeArchive = Buffer.from(
   hostPlatform === "win32" ? zipFixtures.windows : zipFixtures.complete,
   "base64",
@@ -137,6 +139,15 @@ interface HarnessOptions {
   readonly fileSystem?: FileSystem.FileSystem;
   readonly validate?: AntigravityInstallation.AntigravityInstallationOptions["validate"];
   readonly useDefaultValidation?: boolean;
+  readonly native?: boolean;
+  readonly nativeVersion?: string;
+  readonly nativeManifest?: (manifest: {
+    readonly version: string;
+    readonly url: string;
+    readonly sha512: string;
+  }) => unknown;
+  readonly updateChecksEnabled?: Effect.Effect<boolean>;
+  readonly manifest?: Effect.Effect<ModelManifest.ModelManifestData>;
 }
 
 const makeHarness = Effect.fn("test.makeAntigravityInstallation")(function* (
@@ -144,12 +155,16 @@ const makeHarness = Effect.fn("test.makeAntigravityInstallation")(function* (
 ) {
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
+  const crypto = yield* Crypto.Crypto;
   const baseDir =
     options.baseDir ?? (yield* fs.makeTempDirectoryScoped({ prefix: "t3-agy-test-" }));
   const platform = options.platform ?? hostPlatform;
   const archive = options.archive ?? completeArchive;
-  const asset =
-    options.asset === undefined ? yield* releaseAsset(archive, platform) : options.asset;
+  const asset = options.native
+    ? null
+    : options.asset === undefined
+      ? yield* releaseAsset(archive, platform)
+      : options.asset;
   const managedDirectory = path.join(baseDir, "tools", "antigravity-acp", `${platform}-x64`);
   if (options.previous) {
     yield* writeRelease(managedDirectory, {
@@ -178,7 +193,10 @@ const makeHarness = Effect.fn("test.makeAntigravityInstallation")(function* (
   });
   const installation = yield* AntigravityInstallation.makeAntigravityInstallation({
     baseDir,
-    releaseAsset: asset,
+    ...(options.native ? {} : { releaseAsset: asset }),
+    ...(options.updateChecksEnabled === undefined
+      ? {}
+      : { updateChecksEnabled: options.updateChecksEnabled }),
     ...(options.useDefaultValidation
       ? {}
       : {
@@ -192,11 +210,32 @@ const makeHarness = Effect.fn("test.makeAntigravityInstallation")(function* (
     Effect.provideService(HostProcessPlatform, platform),
     Effect.provideService(HostProcessArchitecture, "x64"),
     Effect.provideService(HostProcessEnvironment, { PATH: options.path ?? "" }),
+    Effect.provideService(ModelManifest.ModelManifest, {
+      current: options.manifest ?? Effect.succeed(ModelManifest.BUNDLED_MODEL_MANIFEST),
+      refresh: Effect.succeed(ModelManifest.BUNDLED_MODEL_MANIFEST),
+      forceRefresh: Effect.succeed(ModelManifest.BUNDLED_MODEL_MANIFEST),
+      refreshInBackground: Effect.void,
+    }),
     Effect.provideService(
       HttpClient.HttpClient,
       HttpClient.make((request) =>
-        Effect.sync(() => {
+        Effect.gen(function* () {
           requests.push(request.url);
+          if (request.url.includes("/manifests/")) {
+            const version = options.nativeVersion ?? "1.5.7";
+            const os = platform === "darwin" ? "mac" : platform === "win32" ? "windows" : "linux";
+            const folder = platform === "win32" ? "windows-x64" : `${platform}-x64`;
+            const extension = platform === "win32" ? "exe" : "tar.gz";
+            const manifest = {
+              version,
+              url: `https://storage.googleapis.com/antigravity-public/antigravity-cli/${version}-123/${folder}/cli_${os}_x64.${extension}`,
+              sha512: Hex.encode(yield* crypto.digest("SHA-512", archive).pipe(Effect.orDie)),
+            };
+            return HttpClientResponse.fromWeb(
+              request,
+              Response.json(options.nativeManifest?.(manifest) ?? manifest),
+            );
+          }
           const response = HttpClientResponse.fromWeb(
             request,
             new Response(null, {
@@ -244,6 +283,9 @@ const expectPreviousRelease = Effect.fn("test.expectPreviousAntigravityRelease")
     path.join(installation.managedDirectory, "versions", previousReleaseId),
   );
   expect(yield* fs.readFileString(resolved.executablePath)).toBe(serverContents);
+  if (resolved.harnessPath === null) {
+    return yield* Effect.die("Expected the previous legacy release harness.");
+  }
   expect(yield* fs.readFileString(resolved.harnessPath)).toBe(harnessContents);
   expect((yield* installation.state).installedVersion).toBe(previousVersion);
 });
@@ -288,6 +330,9 @@ it.layer(NodeServices.layer)("Antigravity installation", (it) => {
       expect(validation?.version).toBe("fixture-new");
       if (!validation) return yield* Effect.die("Expected runtime validation.");
       expect(yield* fs.readFileString(validation.executable.executablePath)).toBe(serverContents);
+      if (validation.executable.harnessPath === null) {
+        return yield* Effect.die("Expected the legacy runtime harness.");
+      }
       expect(yield* fs.readFileString(validation.executable.harnessPath)).toBe(harnessContents);
 
       yield* Deferred.succeed(finishValidation, undefined);
@@ -300,6 +345,9 @@ it.layer(NodeServices.layer)("Antigravity installation", (it) => {
       yield* Deferred.await(stagingReleased);
       const selected = yield* installation.resolve();
       expect(selected).toMatchObject({ source: "managed", version: "fixture-new" });
+      if (selected.harnessPath === null) {
+        return yield* Effect.die("Expected the newly installed legacy runtime harness.");
+      }
       expect(path.dirname(selected.harnessPath)).toBe(path.dirname(selected.executablePath));
       expect(yield* fs.readFileString(selected.executablePath)).toBe(serverContents);
       expect(yield* fs.readFileString(selected.harnessPath)).toBe(harnessContents);
@@ -308,6 +356,231 @@ it.layer(NodeServices.layer)("Antigravity installation", (it) => {
       );
       expect(requests).toEqual([(yield* releaseAsset()).url]);
     }),
+  );
+
+  it.effect.each(nativeTestPlatforms)(
+    "migrates legacy installs to the managed agy CLI without removing pinned versions (%s)",
+    (platform) =>
+      Effect.gen(function* () {
+        const tarArchive = Buffer.from(
+          "H4sIAAAAAAACE+3RMQ7CQAwEQNe8Ik8wgYj3XIFQCiiOCxK/56CJRA9CYqZZrxsXLpc2n2q5ze0en5LdYZpe2b1n5rhf5+d+m+MuY8j4guXaSu3n4z+V9f9DXXo5HzcBAAAAAAAAAADAz3sA56lbdQAoAAA=",
+          "base64",
+        );
+        const archive = platform === "win32" ? Buffer.from(serverContents) : tarArchive;
+        const harness = yield* makeHarness({
+          native: true,
+          archive,
+          platform,
+          previous: true,
+          updateChecksEnabled: Effect.succeed(false),
+        });
+        const started = yield* harness.installation.start;
+        expect(started.phase).toBe("downloading");
+        const completed = yield* terminalState(harness.installation);
+        expect(completed).toMatchObject({
+          phase: "succeeded",
+          installedVersion: "1.5.7",
+          totalBytes: null,
+        });
+        yield* Deferred.await(harness.stagingReleased);
+        const selected = yield* harness.installation.resolve();
+        expect(selected).toMatchObject({
+          source: "managed",
+          version: "1.5.7",
+          harnessPath: null,
+        });
+        expect(selected.executablePath).toMatch(
+          platform === "win32" ? /agy\.exe$/u : /antigravity$/u,
+        );
+        expect(yield* harness.fs.readFileString(selected.executablePath)).toBe(serverContents);
+        expect(
+          yield* harness.fs.exists(
+            harness.path.join(harness.installation.managedDirectory, "versions", previousReleaseId),
+          ),
+        ).toBe(true);
+        expect(harness.validations.map(({ executable }) => executable.harnessPath)).toEqual([null]);
+
+        const olderRelease = yield* makeHarness({
+          baseDir: harness.baseDir,
+          native: true,
+          nativeVersion: "1.5.6",
+          archive,
+          platform,
+          updateChecksEnabled: Effect.succeed(false),
+        });
+        const revalidated = yield* olderRelease.installation.start;
+        expect(revalidated).toMatchObject({
+          phase: "verifying",
+          version: "1.5.7",
+          installedVersion: "1.5.7",
+        });
+        expect(yield* terminalState(olderRelease.installation)).toMatchObject({
+          phase: "succeeded",
+          installedVersion: "1.5.7",
+        });
+        expect(olderRelease.requests.some((url) => url.includes("storage.googleapis.com"))).toBe(
+          false,
+        );
+      }),
+  );
+
+  it.effect.each([true, false])(
+    "checks for CLI updates in the background only when enabled and lets explicit installs bypass the interval (%s)",
+    (enabled) =>
+      Effect.gen(function* () {
+        const harness = yield* makeHarness({
+          native: true,
+          archive: Buffer.from(serverContents),
+          platform: "win32",
+          updateChecksEnabled: Effect.succeed(enabled),
+        });
+        const manifestRequests = () =>
+          harness.requests.filter((url) => url.includes("/manifests/")).length;
+
+        yield* harness.installation.checkForUpdate;
+        yield* harness.installation.checkForUpdate;
+        expect(manifestRequests()).toBe(enabled ? 1 : 0);
+        if (enabled) {
+          yield* TestClock.adjust("1 hour");
+          yield* harness.installation.checkForUpdate;
+          expect(manifestRequests()).toBe(2);
+        }
+
+        yield* harness.installation.start;
+        expect(yield* terminalState(harness.installation)).toMatchObject({
+          phase: "succeeded",
+          installedVersion: "1.5.7",
+        });
+        expect(manifestRequests()).toBe(enabled ? 3 : 1);
+      }),
+  );
+
+  it.effect.skipIf(hostPlatform === "win32")(
+    "rejects unsafe native CLI tar archives without replacing the legacy installation",
+    () =>
+      Effect.gen(function* () {
+        const archives = [
+          "H4sIAAAAAAACE+3OMQqDQBAFUI/iCYxZJPdZMIRtFHQN5PYOKbW2EN5j4P9iYCZPtXyW/C3111ylD69h+Gc45rk/U4r1NnXdI2be6lrG90XPbWvNS5xvAAAAAAAAAAAA4D523kNDtgAoAAA=",
+          "H4sIAAAAAAACE+3RMQ7CMBAEQNe8Ii8IBhzxHhcIpYDCcSLxewwNiJ4IiZlmb6+54vp+m691PJe8jPUWviI2x2F4ZvOZMe7Ta37sdzGlQ+hiWME81Vza+fCf3p7flbmVy2kTAAAAAAAAAAAA+Hl3jhn2/wAoAAA=",
+          "H4sIAAAAAAACE+3TPQrCQBAG0K09RY4wRoPn2UJCClOsG8Hbu6YJ2CtI3mvmp5li+PJcp7Hkx1Sf6VuiuQzDWpvPGtGft/69P0Z/itRF+oHlXnNp59M+5e3/XVnacLseEnv8v/zLv/wDAAAAAAAAAPyZF/c+VksAKAAA",
+        ];
+        for (const encodedArchive of archives) {
+          const harness = yield* makeHarness({
+            native: true,
+            archive: Buffer.from(encodedArchive, "base64"),
+            platform: "linux",
+            previous: true,
+            updateChecksEnabled: Effect.succeed(false),
+          });
+          yield* harness.installation.start;
+          expect(yield* terminalState(harness.installation)).toMatchObject({ phase: "failed" });
+          expect(harness.validations).toEqual([]);
+          yield* expectPreviousRelease(harness.installation);
+        }
+      }),
+  );
+
+  it.effect.each([
+    {
+      name: "a foreign download URL",
+      startsInBackground: false,
+      nativeManifest: (manifest: { version: string; url: string; sha512: string }) => ({
+        ...manifest,
+        url: "https://example.com/antigravity.tar.gz",
+      }),
+    },
+    {
+      name: "a malformed checksum",
+      startsInBackground: false,
+      nativeManifest: (manifest: { version: string; url: string; sha512: string }) => ({
+        ...manifest,
+        sha512: "not-a-sha512",
+      }),
+    },
+    {
+      name: "a checksum that does not match the download",
+      startsInBackground: true,
+      nativeManifest: (manifest: { version: string; url: string; sha512: string }) => ({
+        ...manifest,
+        sha512: "0".repeat(128),
+      }),
+    },
+  ])("rejects $name while preserving the legacy installation", (testCase) =>
+    Effect.gen(function* () {
+      const harness = yield* makeHarness({
+        native: true,
+        nativeManifest: testCase.nativeManifest,
+        archive: Buffer.from(serverContents),
+        platform: "win32",
+        previous: true,
+        updateChecksEnabled: Effect.succeed(false),
+      });
+      const started = yield* Effect.result(harness.installation.start);
+      if (started._tag === "Success") {
+        expect(testCase.startsInBackground).toBe(true);
+        expect(yield* terminalState(harness.installation)).toMatchObject({ phase: "failed" });
+      } else {
+        expect(testCase.startsInBackground).toBe(false);
+      }
+      expect(harness.validations).toEqual([]);
+      yield* expectPreviousRelease(harness.installation);
+    }),
+  );
+
+  it.effect.each(withdrawnStatuses)(
+    "blocks newly installed and already active CLI releases marked %s",
+    (status) =>
+      Effect.gen(function* () {
+        let currentManifest = ModelManifest.BUNDLED_MODEL_MANIFEST;
+        const withdrawnManifest: ModelManifest.ModelManifestData = {
+          ...ModelManifest.BUNDLED_MODEL_MANIFEST,
+          compatibility: [
+            {
+              driver: "antigravity",
+              t3CodeRange: ">=0.0.0",
+              ranges: [{ range: ">=1.5.7 <2.0.0", status }],
+            },
+          ],
+        };
+        const manifest = Effect.sync(() => currentManifest);
+        const archive = Buffer.from(serverContents);
+        const previous = yield* makeHarness({
+          native: true,
+          archive,
+          platform: "win32",
+          previous: true,
+          manifest,
+          updateChecksEnabled: Effect.succeed(false),
+          validate: (_executable, version) =>
+            Effect.sync(() => {
+              if (version === "1.5.7") currentManifest = withdrawnManifest;
+            }),
+        });
+        yield* previous.installation.start;
+        expect(yield* terminalState(previous.installation)).toMatchObject({ phase: "failed" });
+        yield* expectPreviousRelease(previous.installation);
+
+        currentManifest = ModelManifest.BUNDLED_MODEL_MANIFEST;
+        const replacement = yield* makeHarness({
+          baseDir: previous.baseDir,
+          native: true,
+          archive,
+          platform: "win32",
+          manifest,
+          updateChecksEnabled: Effect.succeed(false),
+        });
+        yield* replacement.installation.start;
+        expect(yield* terminalState(replacement.installation)).toMatchObject({
+          phase: "succeeded",
+          installedVersion: "1.5.7",
+        });
+
+        currentManifest = withdrawnManifest;
+        const resolution = yield* Effect.result(replacement.installation.resolve());
+        expect(resolution._tag).toBe("Failure");
+        const refresh = yield* Effect.result(replacement.installation.start);
+        expect(refresh._tag).toBe("Failure");
+      }),
   );
 
   it.effect.each([
@@ -824,6 +1097,9 @@ it.layer(NodeServices.layer)("Antigravity installation", (it) => {
       Effect.gen(function* () {
         const { installation, baseDir, fs, path } = yield* makeHarness({ previous: true });
         const previous = yield* installation.resolve();
+        if (previous.harnessPath === null) {
+          return yield* Effect.die("Expected the incomplete legacy runtime harness.");
+        }
         yield* fs.remove(previous.harnessPath);
         const externalDirectory = path.join(baseDir, "external");
         yield* fs.makeDirectory(externalDirectory);
@@ -955,28 +1231,4 @@ it.layer(NodeServices.layer)("Antigravity installation", (it) => {
       expect(requests).toEqual([]);
     }),
   );
-
-  it("resolves all supported platform release assets including Intel Mac", () => {
-    const supportedPlatforms: Array<{ readonly platform: NodeJS.Platform; readonly arch: string }> =
-      [
-        { platform: "darwin", arch: "arm64" },
-        { platform: "darwin", arch: "x64" },
-        { platform: "linux", arch: "x64" },
-        { platform: "linux", arch: "arm64" },
-        { platform: "win32", arch: "x64" },
-        { platform: "win32", arch: "arm64" },
-      ];
-
-    for (const { platform, arch } of supportedPlatforms) {
-      const asset = resolveAntigravityReleaseAsset(platform, arch);
-      expect(asset).not.toBeNull();
-      expect(asset?.version).toBe("1.3.0");
-      expect(asset?.url).toContain("1.3.0");
-      expect(asset?.archiveBytes).toBeGreaterThan(0);
-      expect(asset?.executable.bytes).toBeGreaterThan(0);
-      expect(asset?.harness.bytes).toBeGreaterThan(0);
-    }
-
-    expect(resolveAntigravityReleaseAsset("freebsd", "x64")).toBeNull();
-  });
 });

@@ -99,7 +99,6 @@ const layerProviderInstanceRegistry = ProviderInstanceRegistryHydration.layer.pi
   Layer.provide(
     Layer.mergeAll(
       layerServerConfig.pipe(Layer.provide(layerPlatformTest)),
-      layerServerSettings,
       ServerSecretStore.layer.pipe(
         Layer.provide(layerServerConfig),
         Layer.provide(layerPlatformTest),
@@ -115,7 +114,6 @@ const layerProviderInstanceRegistry = ProviderInstanceRegistryHydration.layer.pi
         ProviderEventLoggers.ProviderEventLoggers,
         ProviderEventLoggers.NoOpProviderEventLoggers,
       ),
-      ModelManifest.layerTest,
       AntigravityInstallation.AntigravityInstallation.layer.pipe(
         Layer.provide(layerServerConfig.pipe(Layer.provide(layerPlatformTest))),
         Layer.provide(FetchHttpClient.layer),
@@ -131,7 +129,7 @@ const layerProviderInstanceRegistry = ProviderInstanceRegistryHydration.layer.pi
         ),
       }),
       ThreadLiveOverlay.layer,
-    ),
+    ).pipe(Layer.provideMerge(layerServerSettings), Layer.provideMerge(ModelManifest.layerTest)),
   ),
 );
 

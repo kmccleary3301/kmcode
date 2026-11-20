@@ -31,6 +31,7 @@ import {
   type RuntimeRequestId,
   type ThreadTokenUsageSnapshot,
   type ThreadId,
+  type TurnTokenUsage,
 } from "@t3tools/contracts";
 import { modelSelectionsEqual } from "@t3tools/shared/model";
 import { type SelfInvocation, selfInvocationArgs } from "@t3tools/shared/nodeRuntime";
@@ -217,8 +218,31 @@ export interface AcpAdapterV2ExtensionContext {
 export interface AcpAdapterV2Flavor {
   /** Interprets provider-specific prompt errors before they cross into orchestration. */
   readonly promptFailure?: (cause: unknown) => OrchestrationV2ProviderFailure;
+  readonly buildPrompt?: (input: {
+    readonly text: string;
+    readonly attachments: ReadonlyArray<ChatAttachment>;
+    readonly resolveAttachmentPath: (attachment: ChatAttachment) => string | null;
+    readonly promptCapabilities: EffectAcpSchema.AgentCapabilities["promptCapabilities"];
+    readonly agentVersion: string | undefined;
+    readonly currentModel: { readonly id: string; readonly name: string | undefined } | undefined;
+  }) => Effect.Effect<ReadonlyArray<EffectAcpSchema.ContentBlock>, EffectAcpErrors.AcpError>;
+  /**
+   * Runs before `session/prompt`. The returned check sees a prompt the agent ended
+   * without an error or cancel, and reports a failure its stop reason hid. A reported
+   * failure restarts the runtime before the next turn.
+   */
+  readonly watchPromptOutcome?: (
+    sessionId: string,
+  ) => Effect.Effect<
+    (
+      result: EffectAcpSchema.PromptResponse,
+    ) => Effect.Effect<OrchestrationV2ProviderFailure | undefined>
+  >;
   readonly driver: ProviderDriverKind;
   readonly capabilities: OrchestrationV2ProviderCapabilities;
+  readonly supportsNativeGoals?: Effect.Effect<boolean>;
+  /** Agents that support HTTP MCP can connect to T3's endpoint without the stdio bridge. */
+  readonly mcpOverHttp?: boolean;
   readonly clientCapabilitiesMeta?: Record<string, boolean>;
   readonly normalizeSessionUpdate?: (
     notification: EffectAcpSchema.SessionNotification,
@@ -315,6 +339,17 @@ export interface AcpAdapterV2Flavor {
   readonly subagentsIdleOnTurnCompletion?: boolean;
   readonly supportsCompaction?: boolean;
   readonly runtimeHarness?: string;
+  /** Report normalized ACP usage only for agents that report prompt-level token usage. */
+  readonly reportsPerTurnPromptUsage?: boolean;
+  /** Gemini-style usage: inputTokens excludes cachedReadTokens and outputTokens excludes thoughtTokens. */
+  readonly geminiPromptUsage?: boolean;
+  /**
+   * True when the negotiated session system prompt already carries T3's PR-linking instructions.
+   * Must use the same negotiated check that sent them on session setup.
+   */
+  readonly sessionCarriesPullRequestLinking?: (
+    initializeResult: EffectAcpSchema.InitializeResponse,
+  ) => boolean;
   readonly registerExtensions?: (
     context: AcpAdapterV2ExtensionContext,
   ) => Effect.Effect<void, EffectAcpErrors.AcpError>;
@@ -440,6 +475,42 @@ export function acpSupportsImagePrompts(input: {
   readonly negotiatedImage?: boolean | undefined;
 }): boolean {
   return input.flavorSupportsImagePrompts === true || input.negotiatedImage === true;
+}
+
+/** Normalizes ACP's optional prompt usage into the provider-turn usage contract. */
+export function acpPerTurnPromptUsage(
+  usage: EffectAcpSchema.Usage | null | undefined,
+  hasSubagents: boolean,
+  terminalStatus: OrchestrationV2ProviderTurn["status"],
+  geminiUsage = false,
+): TurnTokenUsage {
+  if (usage == null) {
+    return { usageScope: "main_agent", usageStatus: "unavailable", hasSubagents };
+  }
+  const inputTokens = geminiUsage
+    ? usage.inputTokens + (usage.cachedReadTokens ?? 0)
+    : usage.inputTokens;
+  const outputTokens = geminiUsage
+    ? usage.outputTokens + (usage.thoughtTokens ?? 0)
+    : usage.outputTokens;
+  const clampSubset = (value: number | null | undefined, parent: number) =>
+    value == null ? undefined : Math.min(value, parent);
+  const cachedInputTokens = clampSubset(usage.cachedReadTokens, inputTokens);
+  const cacheCreationTokens = clampSubset(
+    usage.cachedWriteTokens,
+    inputTokens - (cachedInputTokens ?? 0),
+  );
+  const reasoningTokens = clampSubset(usage.thoughtTokens, outputTokens);
+  return {
+    usageScope: "main_agent",
+    usageStatus: terminalStatus === "completed" ? "complete" : "partial",
+    hasSubagents,
+    inputTokens,
+    outputTokens,
+    ...(cachedInputTokens === undefined ? {} : { cachedInputTokens }),
+    ...(cacheCreationTokens === undefined ? {} : { cacheCreationTokens }),
+    ...(reasoningTokens === undefined ? {} : { reasoningTokens }),
+  };
 }
 
 /** Keeps provider-derived ids distinct when two configured ACP instances reuse native ids. */
@@ -683,21 +754,26 @@ interface AcpMcpContext {
   readonly authorization?: string;
 }
 
-function acpMcpContext(threadId: ThreadId | null, self: SelfInvocation): AcpMcpContext {
+function acpMcpContext(
+  threadId: ThreadId | null,
+  self: SelfInvocation,
+  mcpOverHttp = false,
+): AcpMcpContext {
   if (threadId === null) return { servers: [], acpServers: [] };
   const session = McpProviderSession.readMcpProviderSession(threadId);
   if (session === undefined) {
     return { servers: [], acpServers: [] };
   }
-  // Stdio is ACP's required baseline MCP transport. Agents that advertise
-  // optional http support still routinely fail to wire injected http servers
-  // through to their backend (codex-acp 1.2.0 and pi-acp both drop them), so
-  // every ACP session gets the `t3 acp-mcp-bridge` stdio server, which
-  // forwards JSON-RPC to T3's authenticated MCP endpoint. The credential
-  // travels via environment variables, never the command line.
-  return {
-    servers: [
-      {
+  // Agents known to support HTTP MCP connect directly. Other agents get ACP's
+  // required stdio transport, which forwards to T3's authenticated endpoint.
+  const server: EffectAcpSchema.McpServer = mcpOverHttp
+    ? {
+        type: "http",
+        name: "t3-code",
+        url: session.endpoint,
+        headers: [{ name: "Authorization", value: session.authorizationHeader }],
+      }
+    : {
         name: "t3-code",
         command: self.command,
         args: [...selfInvocationArgs(self, ["acp-mcp-bridge"])],
@@ -706,9 +782,10 @@ function acpMcpContext(threadId: ThreadId | null, self: SelfInvocation): AcpMcpC
           { name: "T3_ACP_MCP_ENDPOINT", value: session.endpoint },
           { name: "T3_ACP_MCP_AUTHORIZATION", value: session.authorizationHeader },
         ],
-      },
-    ],
-    acpServers: [{ type: "acp", name: "t3-code", serverId: "t3-code" }],
+      };
+  return {
+    servers: [server],
+    acpServers: mcpOverHttp ? [] : [{ type: "acp", name: "t3-code", serverId: "t3-code" }],
     endpoint: session.endpoint,
     authorization: session.authorizationHeader,
     processEnvironment: {
@@ -727,8 +804,8 @@ function acpMcpServers(
   return acpMcpContext(threadId, self).servers;
 }
 
-function acpMcpActivation(threadId: ThreadId | null, self: SelfInvocation) {
-  const context = acpMcpContext(threadId, self);
+function acpMcpActivation(threadId: ThreadId | null, self: SelfInvocation, mcpOverHttp = false) {
+  const context = acpMcpContext(threadId, self, mcpOverHttp);
   return { mcpServers: context.servers, acpMcpServers: context.acpServers };
 }
 
@@ -942,13 +1019,44 @@ function structuredFileChanges(toolCall: AcpToolCallState) {
 const ACP_V1_DIFF_MAX_EDITS = 1_000;
 
 /**
+ * A `snippet` patch has no known location. Keep its recorded text, so no view numbers it
+ * from line 1.
+ */
+export function acpToolCallSnippetEdit(content: unknown) {
+  if (!Array.isArray(content)) return undefined;
+  const diffs = content.flatMap((entry) => {
+    const diff = unknownRecord(entry);
+    return diff?.type === "diff" ? [diff] : [];
+  });
+  const diff = diffs.length === 1 ? diffs[0] : undefined;
+  if (diff === undefined || unknownRecord(diff.patch)?.format !== "snippet") return undefined;
+  return typeof diff.oldText === "string" && typeof diff.newText === "string"
+    ? { oldStr: diff.oldText, newStr: diff.newText }
+    : undefined;
+}
+
+/**
+ * No preview when a flavor marked a diff `omitted` (too large) or `snippet` (line unknown);
+ * the checkpoint diff shows it.
+ */
+function acpToolCallDiffUnpreviewable(content: unknown): boolean {
+  return (
+    Array.isArray(content) &&
+    content.some((entry) => {
+      const format = unknownRecord(unknownRecord(entry)?.patch)?.format;
+      return format === "omitted" || format === "snippet";
+    })
+  );
+}
+
+/**
  * Patch text for a tool call's diff content. ACP v2 diffs carry it as
  * `patch.text`. ACP v1 diffs carry `oldText`/`newText` instead (`oldText`
  * null or absent for a new file), and agents that negotiate v1 still send
  * that shape, so the patch is built from the two sides.
  */
 export function acpToolCallDiffPatch(content: unknown): string | undefined {
-  if (!Array.isArray(content)) return undefined;
+  if (!Array.isArray(content) || acpToolCallDiffUnpreviewable(content)) return undefined;
   const diffs = content.flatMap((entry) => {
     const diff = unknownRecord(entry);
     return diff?.type === "diff" ? [diff] : [];
@@ -1165,6 +1273,7 @@ interface ActiveAcpTurn {
       }
     | undefined;
   contextUsage: ThreadTokenUsageSnapshot | null;
+  promptUsage?: EffectAcpSchema.Usage | null;
   nativeMetadata: OrchestrationV2ProviderThreadNativeMetadata | null;
   readonly tools: Map<string, AcpToolCallState>;
   /** Streamed tool updates skipped since the last persisted one. */
@@ -1500,11 +1609,21 @@ export function makeAcpAdapterV2(
   const continuationRequests = options.continuationRequests;
   const postSettleContinuationEnabled =
     flavor.enablePostSettleContinuation === true && continuationRequests !== undefined;
+  const readCapabilities = Effect.gen(function* () {
+    if (flavor.supportsNativeGoals === undefined) return flavor.capabilities;
+    return {
+      ...flavor.capabilities,
+      turns: {
+        ...flavor.capabilities.turns,
+        supportsNativeGoals: yield* flavor.supportsNativeGoals,
+      },
+    };
+  });
 
   return ProviderAdapter.ProviderAdapterV2.of({
     instanceId: options.instanceId,
     driver,
-    getCapabilities: () => Effect.succeed(flavor.capabilities),
+    getCapabilities: () => readCapabilities,
     planSelectionTransition: (input) => Effect.succeed(acpSelectionTransition(input)),
     openSession: Effect.fn("AcpAdapterV2.openSession")(
       function* (input: ProviderAdapter.ProviderAdapterV2OpenSessionInput) {
@@ -2103,7 +2222,7 @@ export function makeAcpAdapterV2(
           onTermination: AcpAdapterV2RuntimeInput["onTermination"] = () =>
             handleRuntimeTerminationAtGeneration(runtimeGeneration),
         ): AcpAdapterV2RuntimeInput => {
-          const mcpContext = acpMcpContext(threadId, self);
+          const mcpContext = acpMcpContext(threadId, self, flavor.mcpOverHttp === true);
           return {
             cwd: input.runtimePolicy.cwd ?? process.cwd(),
             runtimePolicy: input.runtimePolicy,
@@ -3297,6 +3416,8 @@ export function makeAcpAdapterV2(
           const rawInput = toolCall.data.rawInput;
           const rawOutput = toolCall.data.rawOutput ?? toolCall.data.content;
           const changes = structuredFileChanges(toolCall);
+          const snippetEdit = acpToolCallSnippetEdit(toolCall.data.content);
+          const unpreviewableDiff = acpToolCallDiffUnpreviewable(toolCall.data.content);
           const path = changes[0]?.path ?? pathFromToolCall(toolCall);
           const diffText =
             acpToolCallDiffPatch(toolCall.data.content) ?? textFromUnknown(rawOutput);
@@ -3382,7 +3503,8 @@ export function makeAcpAdapterV2(
               type: "file_change",
               fileName: changes[0]!.path,
               changes,
-              ...(diffText === undefined ? {} : { diffStr: diffText }),
+              ...(snippetEdit ??
+                (unpreviewableDiff || diffText === undefined ? {} : { diffStr: diffText })),
             };
           } else {
             switch (toolCall.kind) {
@@ -3469,7 +3591,8 @@ export function makeAcpAdapterV2(
                   ...base,
                   type: "file_change",
                   fileName: path ?? toolCall.title ?? "File change",
-                  ...(diffText === undefined ? {} : { diffStr: diffText }),
+                  ...(snippetEdit ??
+                    (unpreviewableDiff || diffText === undefined ? {} : { diffStr: diffText })),
                 };
                 break;
               case "fetch": {
@@ -6040,8 +6163,12 @@ export function makeAcpAdapterV2(
           threadId: ThreadId | null,
           scope: Scope.Scope,
         ) {
-          const mcpContext = acpMcpContext(threadId, self);
-          if (mcpContext.endpoint === undefined || mcpContext.authorization === undefined) {
+          const mcpContext = acpMcpContext(threadId, self, flavor.mcpOverHttp === true);
+          if (
+            mcpContext.endpoint === undefined ||
+            mcpContext.authorization === undefined ||
+            mcpContext.acpServers.length === 0
+          ) {
             return undefined;
           }
           const mcpBridge = yield* makeAcpMcpOverAcpBridge({
@@ -6278,7 +6405,9 @@ export function makeAcpAdapterV2(
         yield* Ref.set(activeSessionId, started.sessionId);
         yield* Ref.set(activeSessionSetup, started);
         rememberTerminalEnvironment(started.sessionId, input.threadId);
-        const capabilities = negotiatedCapabilities(flavor.capabilities, started);
+        yield* runtime.drainEvents;
+        const baseCapabilities = yield* readCapabilities;
+        const capabilities = negotiatedCapabilities(baseCapabilities, started);
         const canLoadSession = started.initializeResult.agentCapabilities?.loadSession === true;
         const canResumeSession =
           started.initializeResult.agentCapabilities?.sessionCapabilities?.resume != null;
@@ -6298,7 +6427,7 @@ export function makeAcpAdapterV2(
           if (initialFailure !== undefined) {
             return yield* initialFailure;
           }
-          const activationOptions = acpMcpActivation(threadId, self);
+          const activationOptions = acpMcpActivation(threadId, self, flavor.mcpOverHttp === true);
           prepareTerminalEnvironment(threadId, sessionId);
           const activated = canLoadSession
             ? yield* runtime.loadSession(sessionId, activationOptions)
@@ -6588,6 +6717,16 @@ export function makeAcpAdapterV2(
           status,
           startedAt: context.startedAt,
           completedAt,
+          ...(flavor.reportsPerTurnPromptUsage === true
+            ? {
+                turnTokenUsage: acpPerTurnPromptUsage(
+                  context.promptUsage,
+                  context.subagents.size > 0,
+                  status,
+                  flavor.geminiPromptUsage === true,
+                ),
+              }
+            : {}),
         });
 
         const terminalizeOpenRunOwnedItems = Effect.fnUntraced(function* (
@@ -6620,10 +6759,11 @@ export function makeAcpAdapterV2(
 
         const terminalizeOpenForegroundTools = Effect.fnUntraced(function* (
           context: ActiveAcpTurn,
+          status: "completed" | "failed",
         ) {
           for (const tool of context.tools.values()) {
             if (!acpCompletedTurnShouldTerminalizeTool(tool, flavor)) continue;
-            yield* emitTool(context, tool, "completed");
+            yield* emitTool(context, tool, status);
           }
         });
 
@@ -6668,7 +6808,7 @@ export function makeAcpAdapterV2(
             }
           }
           if (settledStatus === "completed") {
-            yield* terminalizeOpenForegroundTools(context);
+            yield* terminalizeOpenForegroundTools(context, "completed");
           } else if (settledStatus === "interrupted") {
             // Direct Stop terminalizes every visible run-owned item. restart_active
             // keeps live subagent lineages for in-process replacement carryover.
@@ -6872,44 +7012,73 @@ export function makeAcpAdapterV2(
               ? {}
               : { previousState: previousInstructionState }),
           });
-          if (text.length > 0) {
-            prompt.push({ type: "text", text });
-          }
-          const imageAttachments = turnInput.message.attachments.filter(
-            isProviderNativeImageAttachment,
-          );
-          if (imageAttachments.length > 0 && !supportsImagePrompts) {
-            return yield* new ProviderAdapter.ProviderAdapterProtocolError({
-              driver,
-              detail: "ACP driver did not negotiate image prompt support",
+          const sessionSetup = yield* Ref.get(activeSessionSetup);
+          if (flavor.buildPrompt !== undefined) {
+            const configOptions = yield* runtime.getConfigOptions;
+            const modelOption = configOptions.find((option) => option.category === "model");
+            const currentModel =
+              modelOption?.type !== "select" || typeof modelOption.currentValue !== "string"
+                ? undefined
+                : {
+                    id: modelOption.currentValue,
+                    name: modelOption.options
+                      .flatMap((choice) => ("value" in choice ? [choice] : choice.options))
+                      .find((choice) => choice.value === modelOption.currentValue)?.name,
+                  };
+            const blocks = yield* flavor.buildPrompt({
+              text,
+              attachments: turnInput.message.attachments,
+              resolveAttachmentPath: (attachment) =>
+                resolveAttachmentPath({
+                  attachmentsDir: serverConfig.attachmentsDir,
+                  attachment,
+                }),
+              promptCapabilities:
+                sessionSetup?.initializeResult.agentCapabilities?.promptCapabilities,
+              agentVersion: sessionSetup?.initializeResult.agentInfo?.version ?? undefined,
+              currentModel,
             });
-          }
-          for (const attachment of imageAttachments) {
-            const path = resolveAttachmentPath({
-              attachmentsDir: serverConfig.attachmentsDir,
-              attachment: attachment as ChatAttachment,
-            });
-            if (path === null) {
+            for (const block of blocks) prompt.push(block);
+          } else {
+            if (text.length > 0) {
+              prompt.push({ type: "text", text });
+            }
+            const imageAttachments = turnInput.message.attachments.filter(
+              isProviderNativeImageAttachment,
+            );
+            if (imageAttachments.length > 0 && !supportsImagePrompts) {
               return yield* new ProviderAdapter.ProviderAdapterProtocolError({
                 driver,
-                detail: `Invalid attachment id '${attachment.id}'`,
+                detail: "ACP driver did not negotiate image prompt support",
               });
             }
-            const bytes = yield* fileSystem.readFile(path).pipe(
-              Effect.mapError(
-                (cause) =>
-                  new ProviderAdapter.ProviderAdapterProtocolError({
-                    driver,
-                    detail: `Failed to read attachment '${attachment.id}'`,
-                    payload: cause,
-                  }),
-              ),
-            );
-            prompt.push({
-              type: "image",
-              data: Buffer.from(bytes).toString("base64"),
-              mimeType: attachment.mimeType,
-            });
+            for (const attachment of imageAttachments) {
+              const path = resolveAttachmentPath({
+                attachmentsDir: serverConfig.attachmentsDir,
+                attachment,
+              });
+              if (path === null) {
+                return yield* new ProviderAdapter.ProviderAdapterProtocolError({
+                  driver,
+                  detail: `Invalid attachment id '${attachment.id}'`,
+                });
+              }
+              const bytes = yield* fileSystem.readFile(path).pipe(
+                Effect.mapError(
+                  (cause) =>
+                    new ProviderAdapter.ProviderAdapterProtocolError({
+                      driver,
+                      detail: `Failed to read attachment '${attachment.id}'`,
+                      payload: cause,
+                    }),
+                ),
+              );
+              prompt.push({
+                type: "image",
+                data: Buffer.from(bytes).toString("base64"),
+                mimeType: attachment.mimeType,
+              });
+            }
           }
           if (prompt.length === 0) {
             return yield* new ProviderAdapter.ProviderAdapterProtocolError({
@@ -6926,6 +7095,9 @@ export function makeAcpAdapterV2(
                 McpProviderSession.readMcpProviderSession(turnInput.threadId)?.capabilities?.has(
                   "aperture",
                 ) === true,
+              pullRequestLinking:
+                sessionSetup === null ||
+                flavor.sessionCarriesPullRequestLinking?.(sessionSetup.initializeResult) !== true,
             }),
           });
           return { prompt, instructionState: text === messageText ? undefined : instructionState };
@@ -7243,6 +7415,10 @@ export function makeAcpAdapterV2(
               return;
             }
             const promptGeneration = yield* Ref.get(runtimeCallbackGeneration);
+            const watchPromptOutcome =
+              flavor.watchPromptOutcome === undefined
+                ? undefined
+                : yield* flavor.watchPromptOutcome(requestedSessionId);
             yield* runtime.prompt({ prompt: promptParts!.prompt }).pipe(
               Effect.tap(() =>
                 Ref.update(promptInstructionStates, (current) => {
@@ -7263,6 +7439,28 @@ export function makeAcpAdapterV2(
                   promptGeneration,
                   Effect.gen(function* () {
                     if (context.finalized) return;
+                    context.promptUsage = result.usage ?? null;
+                    const reportedFailure =
+                      !context.interrupted &&
+                      result.stopReason !== "error" &&
+                      result.stopReason !== "cancelled" &&
+                      watchPromptOutcome !== undefined
+                        ? yield* watchPromptOutcome(result)
+                        : undefined;
+                    if (reportedFailure !== undefined) {
+                      yield* Ref.set(runtimeRestartRequired, true);
+                    }
+                    const failure = context.interrupted
+                      ? undefined
+                      : (reportedFailure ??
+                        (result.stopReason === "error"
+                          ? makeProviderFailure({ class: "provider_error" })
+                          : undefined));
+                    if (failure !== undefined) {
+                      yield* terminalizeOpenForegroundTools(context, "failed");
+                      yield* finalizeTurn(context, "failed", failure);
+                      return;
+                    }
                     const status =
                       result.stopReason === "cancelled"
                         ? context.interrupted
@@ -7928,7 +8126,11 @@ export function makeAcpAdapterV2(
                     prepareTerminalEnvironment(snapshotInput.providerThread.appThreadId, sessionId);
                     const activated = yield* runtime.loadSession(
                       sessionId,
-                      acpMcpActivation(snapshotInput.providerThread.appThreadId, self),
+                      acpMcpActivation(
+                        snapshotInput.providerThread.appThreadId,
+                        self,
+                        flavor.mcpOverHttp === true,
+                      ),
                     );
                     rememberTerminalEnvironment(
                       activated.sessionId,
@@ -8091,7 +8293,7 @@ export function makeAcpAdapterV2(
                   prepareTerminalEnvironment(forkInput.targetThreadId);
                   const forked = yield* runtime.forkSession(
                     sourceSessionId,
-                    acpMcpActivation(forkInput.targetThreadId, self),
+                    acpMcpActivation(forkInput.targetThreadId, self, flavor.mcpOverHttp === true),
                   );
                   rememberTerminalEnvironment(forked.sessionId, forkInput.targetThreadId);
                   yield* Ref.set(activeSessionId, forked.sessionId);

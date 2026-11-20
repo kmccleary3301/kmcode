@@ -1,0 +1,207 @@
+// @effect-diagnostics nodeBuiltinImport:off -- node:sqlite and lstat read the native session log.
+import * as NodeFSP from "node:fs/promises";
+import * as NodePath from "node:path";
+import * as NodeSqlite from "node:sqlite";
+
+import type { OrchestrationV2ProviderFailure } from "@t3tools/contracts";
+import { makeProviderFailure } from "../../orchestration-v2/ProviderFailure.ts";
+import * as DateTime from "effect/DateTime";
+import * as Effect from "effect/Effect";
+import * as Option from "effect/Option";
+import * as Schema from "effect/Schema";
+import type * as EffectAcpSchema from "effect-acp/compat";
+
+import { antigravityManagedPath, antigravityProfileRoot } from "./AntigravityProfilePaths.ts";
+
+const ERROR_STEP_TYPE = 17;
+const MAX_ERROR_PAYLOAD_BYTES = 16_384;
+const API_ERROR = /Error (\d{3}), Message: (.+?), Status: ([A-Z_]+)/s;
+const QUOTA_EXHAUSTED = /\breason:QUOTA_EXHAUSTED\b/;
+const RESET_TIMESTAMP = /\bquotaResetTimeStamp:([^\s\]]+)/;
+const RESET_DELAY = /\bquotaResetDelay:((?:\d+(?:\.\d+)?(?:ns|us|µs|μs|ms|h|m|s))+)(?=[\s\]])/;
+const RETRY_DELAY = /\bretryDelay:((?:\d+(?:\.\d+)?(?:ns|us|µs|μs|ms|h|m|s))+)(?=[\s\]])/;
+const GO_DURATION_PART = /(\d+(?:\.\d+)?)(ns|us|µs|μs|ms|h|m|s)/g;
+const GO_DURATION_UNIT_MS: Record<string, number> = {
+  ns: 1e-6,
+  us: 1e-3,
+  µs: 1e-3,
+  μs: 1e-3,
+  ms: 1,
+  s: 1_000,
+  m: 60_000,
+  h: 3_600_000,
+};
+const NATIVE_SESSION_ID = /^[\w-]+$/;
+
+interface LastStep {
+  readonly type: number;
+  readonly payload: Uint8Array | null;
+}
+
+class AntigravitySessionLogError extends Schema.TaggedError<AntigravitySessionLogError>()(
+  "AntigravitySessionLogError",
+  { cause: Schema.Defect() },
+) {
+  override get message(): string {
+    return "Could not read the Antigravity session log.";
+  }
+}
+
+const sessionLogError = (cause: unknown) => new AntigravitySessionLogError({ cause });
+
+const readSteps = <A>(file: string, read: (database: NodeSqlite.DatabaseSync) => A) =>
+  Effect.try({
+    try: () => {
+      const database = new NodeSqlite.DatabaseSync(file, { readOnly: true });
+      try {
+        database.exec("PRAGMA busy_timeout = 100");
+        const hasSteps =
+          database
+            .prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'steps'")
+            .get() !== undefined;
+        return hasSteps ? read(database) : undefined;
+      } finally {
+        database.close();
+      }
+    },
+    catch: sessionLogError,
+  });
+
+const lastStepIndex = (database: NodeSqlite.DatabaseSync) => {
+  const index = database.prepare("SELECT max(idx) AS idx FROM steps").get()?.idx;
+  return typeof index === "number" ? index : -1;
+};
+
+const lastStepAfter =
+  (index: number) =>
+  (database: NodeSqlite.DatabaseSync): LastStep | undefined => {
+    const row = database
+      .prepare(
+        `SELECT step_type AS type, substr(step_payload, 1, ?) AS payload
+         FROM steps WHERE idx > ? ORDER BY idx DESC LIMIT 1`,
+      )
+      .get(MAX_ERROR_PAYLOAD_BYTES, index);
+    if (typeof row?.type !== "number") return undefined;
+    return { type: row.type, payload: row.payload instanceof Uint8Array ? row.payload : null };
+  };
+
+function resetAtFrom(text: string, now: DateTime.Utc): string | undefined {
+  const timestamp = RESET_TIMESTAMP.exec(text)?.[1];
+  if (timestamp !== undefined && Option.isSome(DateTime.make(timestamp))) return timestamp;
+  const delay = RESET_DELAY.exec(text)?.[1] ?? RETRY_DELAY.exec(text)?.[1];
+  if (delay === undefined) return undefined;
+  let delayMs = 0;
+  for (const [, amount, unit] of delay.matchAll(GO_DURATION_PART)) {
+    delayMs += Number(amount) * (GO_DURATION_UNIT_MS[unit ?? ""] ?? 0);
+  }
+  return delayMs > 0 ? DateTime.formatIso(DateTime.add(now, { milliseconds: delayMs })) : undefined;
+}
+
+function turnFailure(
+  stopReason: EffectAcpSchema.StopReason,
+  step: LastStep | undefined,
+  now: DateTime.Utc,
+): OrchestrationV2ProviderFailure | undefined {
+  const errorText =
+    step?.type === ERROR_STEP_TYPE
+      ? new TextDecoder().decode(step.payload ?? new Uint8Array())
+      : undefined;
+  if (errorText === undefined && stopReason !== "refusal") return undefined;
+  const text = errorText ?? "";
+  const apiError = API_ERROR.exec(text);
+  if (stopReason === "refusal" || QUOTA_EXHAUSTED.test(text)) {
+    return makeProviderFailure({
+      class: "usage_limit",
+      message: "You have reached your Antigravity quota for this period.",
+      code: apiError?.[3] ?? "QUOTA_EXHAUSTED",
+      retryable: true,
+      resetAt: resetAtFrom(text, now) ?? null,
+    });
+  }
+  if (apiError === null) {
+    return makeProviderFailure({
+      class: "provider_error",
+      message: "Antigravity stopped this turn because of an error.",
+    });
+  }
+  const [, httpStatus, message, status] = apiError;
+  const rateLimited = httpStatus === "429" || status === "RESOURCE_EXHAUSTED";
+  return makeProviderFailure({
+    class: rateLimited ? "usage_limit" : "provider_error",
+    message: message?.trim() ?? "Antigravity stopped this turn because of an error.",
+    code: status ?? null,
+    retryable: rateLimited || Number(httpStatus) >= 500,
+    resetAt: resetAtFrom(text, now) ?? null,
+  });
+}
+
+const conversationSegments = ["antigravity-acp", "conversations"];
+
+/**
+ * Antigravity reports upstream API failures as chat text and `end_turn`. Its session log ends
+ * that turn with an error step. Read only new steps in this session's own unlinked database;
+ * without that evidence, a typed `refusal` still signals quota exhaustion.
+ */
+export const watchAntigravityPromptOutcome = Effect.fn("AntigravityTurnOutcome.watch")(function* (
+  profileDirectory: string,
+  sessionId: string,
+) {
+  const typedOnly = (result: EffectAcpSchema.PromptResponse) =>
+    DateTime.now.pipe(Effect.map((now) => turnFailure(result.stopReason, undefined, now)));
+  if (!NATIVE_SESSION_ID.test(sessionId)) return typedOnly;
+  const segments = [...conversationSegments, `${sessionId}.db`];
+  const before = yield* Effect.tryPromise({
+    try: async () => {
+      const root = await antigravityProfileRoot(profileDirectory);
+      if (root === undefined) return undefined;
+      if ((await antigravityManagedPath(root, conversationSegments, "directory")) === undefined) {
+        return undefined;
+      }
+      const database = await antigravityManagedPath(root, segments, "file");
+      if (database === undefined) {
+        const present = await NodeFSP.lstat(NodePath.join(root, ...segments)).then(
+          () => true,
+          () => false,
+        );
+        return present ? undefined : { root, identity: undefined, startIndex: -1 };
+      }
+      return { root, identity: database.info, startIndex: undefined };
+    },
+    catch: sessionLogError,
+  }).pipe(Effect.orElseSucceed(() => undefined));
+  if (before === undefined) {
+    yield* Effect.logWarning("The Antigravity session log is not this session's own file.");
+    return typedOnly;
+  }
+  const startIndex =
+    before.startIndex ??
+    (yield* readSteps(NodePath.join(before.root, ...segments), lastStepIndex).pipe(
+      Effect.map((index) => index ?? -1),
+      Effect.orElseSucceed(() => undefined),
+    ));
+  if (startIndex === undefined) {
+    yield* Effect.logWarning("Could not read the Antigravity session log before the prompt.");
+    return typedOnly;
+  }
+  return Effect.fn("AntigravityTurnOutcome.check")(function* (
+    result: EffectAcpSchema.PromptResponse,
+  ) {
+    const after = yield* Effect.tryPromise({
+      try: () => antigravityManagedPath(before.root, segments, "file"),
+      catch: sessionLogError,
+    }).pipe(Effect.orElseSucceed(() => undefined));
+    const sameFile =
+      after !== undefined &&
+      (before.identity === undefined ||
+        (after.info.dev === before.identity.dev && after.info.ino === before.identity.ino));
+    const step = sameFile
+      ? yield* readSteps(after.path, lastStepAfter(startIndex)).pipe(
+          Effect.tapError(() =>
+            Effect.logWarning("Could not read the Antigravity session log after the prompt."),
+          ),
+          Effect.orElseSucceed(() => undefined),
+        )
+      : undefined;
+    return turnFailure(result.stopReason, step, yield* DateTime.now);
+  });
+});

@@ -1,4 +1,5 @@
-const PULL_REQUEST_LINKING_INSTRUCTIONS = `<pull_request_linking>
+/** Session-invariant; a native system prompt may carry this once per session. */
+export const PULL_REQUEST_LINKING_INSTRUCTIONS = `<pull_request_linking>
 Link each PR you create, take over, or push to: one link_pull_request per PR, full URL, every stack layer, as your next call. Host tools do not link for you. If linking fails, say so. Skip PRs you only read or review, and PRs named only as background. Call watch_pull_request when asked to monitor or babysit, or when work you were asked to do, such as a merge, still waits on checks or reviews, even after an earlier unwatch. Finish any needed branch update and push first, then watch and end your turn. Otherwise act now or hand back. Delegated children never watch, even if the brief says babysit. After PR work, a child's last line is: PR <full URL>, head <SHA>, checks and reviews <state>. Links and watches persist across pushes. Never wait with sleep, loops, gh --watch, Monitor, or ScheduleWakeup. Before handback, call unwatch_pull_request on any PR you watch.
 </pull_request_linking>`;
 
@@ -26,6 +27,8 @@ export function buildRuntimeInstructions(runtime: {
   readonly modelName?: string | undefined;
   readonly reasoningEffort?: string | undefined;
   readonly aperture?: boolean | undefined;
+  /** False when the session's system prompt already carries the linking instructions. */
+  readonly pullRequestLinking?: boolean | undefined;
 }): string {
   const harness = toSingleLine(runtime.harness);
   const model = toSingleLine(runtime.model ?? "");
@@ -35,9 +38,11 @@ export function buildRuntimeInstructions(runtime: {
     modelName && modelName !== model ? `${modelName} (model slug: ${model})` : model;
   const modelInfo = model && model !== "auto" && model !== "default" ? `, as ${modelLabel}` : "";
   const effortInfo = effort ? ` with ${effort} reasoning effort` : "";
-  return `<runtime_info>In case you're asked: you are running in KM Code through the ${harness} harness${modelInfo}${effortInfo}. No need to mention this otherwise. You can embed images and videos in your response using Markdown with absolute file paths.</runtime_info>\n\n${FILE_LINK_INSTRUCTIONS}\n\n${PULL_REQUEST_LINKING_INSTRUCTIONS}${
-    runtime.aperture ? `\n\n${APERTURE_INSTRUCTIONS}` : ""
-  }`;
+  const runtimeInfo = `<runtime_info>In case you're asked: you are running in KM Code through the ${harness} harness${modelInfo}${effortInfo}. No need to mention this otherwise. You can embed images and videos in your response using Markdown with absolute file paths.</runtime_info>`;
+  const pullRequestLinking =
+    runtime.pullRequestLinking === false ? "" : `\n\n${PULL_REQUEST_LINKING_INSTRUCTIONS}`;
+  const aperture = runtime.aperture ? `\n\n${APERTURE_INSTRUCTIONS}` : "";
+  return `${runtimeInfo}\n\n${FILE_LINK_INSTRUCTIONS}${pullRequestLinking}${aperture}`;
 }
 
 function toSingleLine(value: string): string {

@@ -25,6 +25,7 @@ import type * as EffectAcpSchema from "effect-acp/compat";
 import * as ServerConfig from "../../config.ts";
 import type * as AcpSessionRuntime from "../../provider/acp/AcpSessionRuntime.ts";
 import { makeAntigravityAcpRuntime } from "../../provider/acp/AntigravityAcpSupport.ts";
+import { PULL_REQUEST_LINKING_INSTRUCTIONS } from "../../provider/RuntimeInstructions.ts";
 import * as IdAllocator from "../IdAllocator.ts";
 import { ProviderAdapterV2RuntimePolicy } from "../ProviderAdapter.ts";
 import {
@@ -163,6 +164,7 @@ describe("AntigravityAdapterV2 compaction", () => {
         new URL("../../../scripts/acp-mock-agent.ts", import.meta.url),
       );
       const instanceId = ProviderInstanceId.make("antigravity-compaction-test");
+      let sessionSystemPromptAppend: string | undefined;
       const adapter = makeAntigravityAdapterV2({
         instanceId,
         crypto,
@@ -171,8 +173,9 @@ describe("AntigravityAdapterV2 compaction", () => {
         path,
         idAllocator,
         serverConfig,
-        makeRuntime: (input) =>
-          makeAntigravityAcpRuntime({
+        makeRuntime: (input) => {
+          sessionSystemPromptAppend = input.sessionSystemPromptAppend;
+          return makeAntigravityAcpRuntime({
             ...input,
             childProcessSpawner,
             spawn: {
@@ -181,7 +184,8 @@ describe("AntigravityAdapterV2 compaction", () => {
               cwd: input.cwd,
               env: { T3_ACP_ANTIGRAVITY: "1" },
             },
-          }).pipe(Effect.provideService(Crypto.Crypto, crypto)),
+          }).pipe(Effect.provideService(Crypto.Crypto, crypto));
+        },
         withProcess: (_stop, task) => task,
         // @effect-diagnostics-next-line effectSucceedWithVoid:off - This optional result requires undefined, not the wider void type.
         defaultModel: Effect.succeed(undefined),
@@ -197,6 +201,7 @@ describe("AntigravityAdapterV2 compaction", () => {
         }),
       });
       assert.isUndefined(session.compactThread);
+      assert.equal(sessionSystemPromptAppend, PULL_REQUEST_LINKING_INSTRUCTIONS);
     }).pipe(Effect.provide(layerSession), Effect.scoped),
   );
 });

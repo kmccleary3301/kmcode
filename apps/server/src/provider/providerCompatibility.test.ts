@@ -170,22 +170,30 @@ describe("provider compatibility", () => {
     );
   });
 
-  it("recognizes Antigravity semver release tags while keeping dated candidates unknown", () => {
+  it("recognizes the managed Antigravity CLI compatibility range and release tags", () => {
     const antigravity = ProviderDriverKind.make("antigravity");
-    const taggedPolicy = {
-      ...policy,
+    const antigravityPolicy: ProviderCompatibilityPolicy = {
       driver: antigravity,
-      ranges: [{ range: "=2.0.0", status: "supported" as const }],
+      t3CodeRange: policy.t3CodeRange,
+      recommendedRange: ">=1.5.1 <2.0.0",
+      ranges: [
+        { range: ">=1.5.1 <2.0.0", status: "supported" },
+        { range: "=1.1.1", status: "supported" },
+      ],
     };
-    for (const [version, expected] of [
-      ["agy_acp_server_2.0.0", "supported"],
-      ["2.0.0", "supported"],
-      ["agy_acp_server_2.0.1", "unknown"],
-      ["agy_acp_server_2.0.0-beta.1", "unknown"],
+    const cases: ReadonlyArray<readonly [string, string]> = [
+      ["agy_acp_server_1.5.1", "supported"],
+      ["agy_acp_server_1.5.7", "supported"],
+      ["1.5.1", "supported"],
+      ["1.5.0", "unknown"],
+      ["agy_acp_server_2.0.0", "unknown"],
+      ["agy_acp_server_1.5.0-beta.1", "unknown"],
       ["agy_acp_server_20260818_01_RC01", "unknown"],
-    ] as const) {
+      ["1.1.1", "supported"],
+    ];
+    for (const [version, expected] of cases) {
       assert.strictEqual(
-        resolveProviderCompatibility([taggedPolicy], antigravity, version)?.status,
+        resolveProviderCompatibility([antigravityPolicy], antigravity, version)?.status,
         expected,
       );
     }

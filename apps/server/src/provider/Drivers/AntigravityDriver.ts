@@ -41,6 +41,7 @@ import {
   makeAntigravityAcpRuntime,
   type AntigravityAcpRuntimeInput,
 } from "../acp/AntigravityAcpSupport.ts";
+import { watchAntigravityPromptOutcome } from "../acp/AntigravityTurnOutcome.ts";
 import type { AcpSessionRuntime, AcpSessionRuntimeStartResult } from "../acp/AcpSessionRuntime.ts";
 import type { ServerProviderDraft } from "../providerSnapshot.ts";
 import {
@@ -236,6 +237,7 @@ export const AntigravityDriver: ProviderDriver<AntigravitySettings, AntigravityD
         );
         const runtime = yield* makeAntigravityAcpRuntime({
           ...input,
+          runtimeVersion: executable.version,
           authMethod: auth.authMethod,
           childProcessSpawner: spawner,
           spawn: buildAntigravityAcpSpawnInput({
@@ -415,6 +417,14 @@ export const AntigravityDriver: ProviderDriver<AntigravitySettings, AntigravityD
         makeRuntime,
         withProcess: authFlow.withProcess,
         defaultModel,
+        supportsNativeGoals: provider.snapshot.getSnapshot.pipe(
+          Effect.map(
+            (snapshot) =>
+              snapshot.slashCommands?.some((command) => command.name === "goal") === true,
+          ),
+        ),
+        watchPromptOutcome: (sessionId) =>
+          watchAntigravityPromptOutcome(profileDirectory, sessionId),
         onSessionStarted: provider.onSessionStarted,
         onSessionEvent: (event) => {
           if (event._tag === "ConfigOptionsUpdated") {

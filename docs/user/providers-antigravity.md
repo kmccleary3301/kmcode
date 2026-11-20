@@ -1,7 +1,7 @@
 # Antigravity
 
-T3 Code runs Google's official Antigravity ACP agent on your selected environment.
-It has its own sign-in, separate from the Antigravity IDE or CLI. Google controls
+KM Code runs Google's official Antigravity CLI on your selected environment with
+`agy acp`. Its sign-in profile is separate from your terminal or IDE. Google controls
 which models and account access are available through this agent.
 
 ## Set up Antigravity
@@ -51,26 +51,39 @@ account.
 
 ## Runtime installation
 
-Managed installation supports Apple Silicon macOS, Linux x64 or ARM64, and Windows
-x64 or ARM64. Intel Macs can connect to a supported remote environment. Allow
-several GB of free disk space, especially on Linux.
+Managed installation supports Apple Silicon and Intel macOS, Linux x64 or ARM64
+with glibc or musl, and Windows x64 or ARM64. Allow at least 1.25 GiB of free disk
+space to download and stage an update.
 
 ### Use a manual installation
 
-Download the archive for your environment from the [official ACP Registry][registry].
-Extract the ACP executable and its `localharness_external` helper into the same
-directory, at the same version. Make both executable on macOS or Linux; Windows
-uses `.exe` files.
-
-Set **Binary path** to the ACP executable on the environment and update it yourself.
-Leave the field blank to use the managed runtime, or a compatible executable on
+Install [Antigravity CLI](https://antigravity.google/docs/getting-started) on the
+environment. Set **Binary path** to its `agy` executable and update it yourself.
+Leave the field blank to use the managed CLI, or a compatible executable on
 `PATH` if no managed runtime is installed.
+
+## Update the managed runtime
+
+In web or desktop provider settings, choose **Update Antigravity** when an update
+is available. T3 Code checks Google's CLI release channel while provider update
+checks are enabled. Installing or reinstalling also checks that channel. A failed
+validation leaves the previous runtime available.
+
+After deploying a KM Code release with managed CLI support, update any existing
+managed ACP installation in provider settings, then choose **Refresh provider
+status**. New sessions use the CLI; sessions already running finish on their
+original runtime. A custom binary path keeps using the executable you selected.
+
+The provider profile stays in place during the update. Google may still ask you to
+sign in again; if prompted, sign in from provider settings.
 
 ## Models and threads
 
-The model list comes from your Antigravity account and can differ from other
-Antigravity apps. A resumed thread keeps its selected model. If access to that
-model ends, select another available model before continuing.
+The model list comes from your Antigravity account and may differ from other
+Antigravity apps. It can include Claude and GPT models when your plan has them.
+The model picker shows only the thinking levels supported by the selected model.
+A resumed thread keeps its selected model. If access to it ends, choose another
+available model before continuing.
 
 Use Antigravity's native `/plan` command for planning. T3 Code's separate Plan mode
 is unavailable. Tool approvals follow [Permission modes](./permission-modes.md).
@@ -95,16 +108,19 @@ Skills for every project go in `~/.gemini/config/skills` or
 `~/.gemini/antigravity-cli/skills`. Antigravity does not read `~/.agents/skills`,
 so a skill there only appears when the project itself is your home directory.
 
-Antigravity receives images directly. Every other attachment, including PDFs,
-text, audio, archives, and videos, is passed as a saved file path for the agent
-to inspect with its tools. A video path does not enable native video input.
+Antigravity receives images and audio directly, and reads PDFs and text files as
+documents. On macOS and Linux, the managed runtime sends MP4 videos up to 20 MiB
+to Gemini models as video. Other attachments, and videos for other models or
+platforms, are passed as a saved file path for the agent to inspect with its tools.
 
 ### Subagents
 
-Antigravity groups subagent activity into batches. You cannot open or control
-individual subagents, and an idle batch does not confirm that every child
-succeeded. See [agent work](./thread-sidebar.md#inspect-agent-work) for where to
-inspect activity.
+On web or desktop, open a batch and choose **Subagent work** to read each child's
+role, prompt, and recent steps. The view is read only: you cannot message or
+control individual subagents, and an idle batch does not confirm that every child
+succeeded. If Antigravity did not record which children a batch started, the view
+says so. See
+[agent work](./thread-sidebar.md#inspect-agent-work) for where to inspect activity.
 
 ## Accounts and removal
 
@@ -126,6 +142,16 @@ Before removing a managed runtime, disable its instances and cancel any active
 installation. Clear any explicit binary path pointing into that runtime. Removal
 is refused while the runtime is in use.
 
+## Run a native goal
+
+When your Antigravity runtime offers `/goal`, send `/goal` followed by a
+verifiable objective. Antigravity keeps working until it completes the goal or
+you cancel it.
+
+Use **Stop** to interrupt a running goal, then ask Antigravity to stop pursuing it
+before starting more work. Ordinary follow-ups wait until the running turn ends.
+T3 Code does not support Antigravity goal status, pause, resume, or clear commands.
+
 ## Check access and troubleshoot
 
 A server restart keeps your Google sign-in. The provider shows the saved account
@@ -139,5 +165,4 @@ If Google reports `SUBSCRIPTION_REQUIRED`, an account restriction, or a usage li
 follow the provider's message and any retry time. See [Google's account plans][plans]
 for eligibility.
 
-[registry]: https://github.com/agentclientprotocol/registry/blob/main/antigravity-acp/agent.json
 [plans]: https://antigravity.google/docs/plans

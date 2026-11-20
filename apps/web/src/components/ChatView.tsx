@@ -462,6 +462,7 @@ import { PullRequestThreadDialog } from "./PullRequestThreadDialog";
 import type { AssistantCitationRequest } from "./chat/AssistantCitationSource";
 import { MessagesTimeline, type MessagesTimelineHistoryControls } from "./chat/MessagesTimeline";
 import { ProviderSubagentBar } from "./chat/ProviderSubagentBar";
+import { NativeChildWorkDialog } from "./chat/NativeChildWorkDialog";
 import {
   deriveTimelineActivityGroups,
   mergeActivityRowsIntoVisibleItems,
@@ -12193,6 +12194,14 @@ export default function ChatView(props: ChatViewProps) {
                                   : null
                               }
                               onOpenAgents={addAgentsSurface}
+                              actions={
+                                selectedProviderEntry?.driverKind === "antigravity" ? (
+                                  <NativeChildWorkDialog
+                                    environmentId={environmentId}
+                                    threadId={threadId}
+                                  />
+                                ) : null
+                              }
                               liveContent={activeSubagentLiveContent}
                               liveViewRateLimited={liveViewRateLimited}
                             />

@@ -10,6 +10,21 @@ describe("buildRuntimeInstructions", () => {
     expect(instructions).not.toContain("list_thread_pull_requests");
   });
 
+  it("omits PR-linking instructions only when the session already carries them", () => {
+    const carried = buildRuntimeInstructions({
+      harness: "Antigravity",
+      model: "gemini-3.8-flash",
+      pullRequestLinking: false,
+    });
+
+    expect(carried).toContain("through the Antigravity harness, as gemini-3.8-flash.");
+    expect(carried).toContain("<file_links>");
+    expect(carried).not.toContain("<pull_request_linking>");
+    expect(buildRuntimeInstructions({ harness: "Antigravity" })).toContain(
+      "<pull_request_linking>",
+    );
+  });
+
   it("adds Aperture instructions only when the capability is enabled", () => {
     const withoutAperture = buildRuntimeInstructions({ harness: "Codex", aperture: false });
     const withAperture = buildRuntimeInstructions({ harness: "Codex", aperture: true });

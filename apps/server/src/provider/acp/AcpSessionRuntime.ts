@@ -129,6 +129,10 @@ export interface AcpSessionRuntimeOptions {
   readonly mcpServers?: ReadonlyArray<EffectAcpSchema.McpServer>;
   /** Extra workspace roots the agent may read and write besides `cwd`. */
   readonly additionalDirectories?: ReadonlyArray<string>;
+  /** Session `_meta`, chosen from the negotiated agent before each session setup or activation. */
+  readonly sessionMeta?: (
+    initializeResult: EffectAcpSchema.InitializeResponse,
+  ) => EffectAcpSchema.NewSessionRequest["_meta"] | undefined;
   /** Transforms provider stdout before protocol parsing and protocol logging. */
   readonly transformStdout?: EffectAcpClient.AcpClientOptions["transformStdout"];
   /** Normalizes provider-specific fields before notification queues or runtime state retain them. */
@@ -2225,6 +2229,16 @@ export const make = (
       return activationOptions?.mcpServers ?? options.mcpServers ?? [];
     };
 
+    const sessionSetupFields = (initializeResult: EffectAcpSchema.InitializeResponse) => {
+      const meta = options.sessionMeta?.(initializeResult);
+      return {
+        ...(options.additionalDirectories?.length
+          ? { additionalDirectories: options.additionalDirectories }
+          : {}),
+        ...(meta == null ? {} : { _meta: meta }),
+      };
+    };
+
     const startOnce = Effect.gen(function* () {
       const initializeResult = yield* initialize;
 
@@ -2279,9 +2293,7 @@ export const make = (
           | EffectAcpSchema.LoadSessionResponse
           | EffectAcpSchema.NewSessionResponse
           | EffectAcpSchema.ResumeSessionResponse;
-        const additionalDirectories = options.additionalDirectories?.length
-          ? { additionalDirectories: options.additionalDirectories }
-          : {};
+        const setupFields = sessionSetupFields(initializeResult);
         if (options.resumeSessionId) {
           sessionId = options.resumeSessionId;
           if (
@@ -2291,7 +2303,7 @@ export const make = (
             const loadPayload = {
               sessionId,
               cwd: options.cwd,
-              ...additionalDirectories,
+              ...setupFields,
               mcpServers: sessionMcpServers(initializeResult),
             } satisfies EffectAcpSchema.LoadSessionRequest;
             sessionSetupResult = yield* runLoadSessionWithReplayIdle(loadPayload, initializeResult);
@@ -2299,7 +2311,7 @@ export const make = (
             const resumePayload = {
               sessionId,
               cwd: options.cwd,
-              ...additionalDirectories,
+              ...setupFields,
               mcpServers: sessionMcpServers(initializeResult),
             } satisfies EffectAcpSchema.ResumeSessionRequest;
             sessionSetupResult = yield* runLoggedRequest(
@@ -2317,7 +2329,7 @@ export const make = (
           const createPayload = {
             cwd: options.cwd,
             mcpServers: sessionMcpServers(initializeResult),
-            ...additionalDirectories,
+            ...setupFields,
           } satisfies EffectAcpSchema.NewSessionRequest;
           const created = yield* runLoggedRequest(
             "session/new",
@@ -2528,6 +2540,7 @@ export const make = (
             const requestPayload = {
               sessionId,
               cwd: options.cwd,
+              ...sessionSetupFields(started.initializeResult),
               mcpServers: sessionMcpServers(started.initializeResult, activationOptions),
             } satisfies EffectAcpSchema.LoadSessionRequest;
             return runLoadSessionWithReplayIdle(requestPayload, started.initializeResult);
@@ -2540,6 +2553,7 @@ export const make = (
             const requestPayload = {
               sessionId,
               cwd: options.cwd,
+              ...sessionSetupFields(started.initializeResult),
               mcpServers: sessionMcpServers(started.initializeResult, activationOptions),
             } satisfies EffectAcpSchema.ResumeSessionRequest;
             return runLoggedRequest(
@@ -2556,6 +2570,7 @@ export const make = (
             const requestPayload = {
               sessionId,
               cwd: options.cwd,
+              ...sessionSetupFields(started.initializeResult),
               mcpServers: sessionMcpServers(started.initializeResult, activationOptions),
             } satisfies EffectAcpSchema.ForkSessionRequest;
             return runLoggedRequest(

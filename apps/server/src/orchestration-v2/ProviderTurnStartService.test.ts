@@ -76,6 +76,7 @@ it("does not commit running state when inherited background routing cannot be re
     nodes: [{ id: rootNodeId, checkpointScopeId }],
     attempts: [{ id: attemptId }],
     providerThreads: [{ id: providerThreadId, providerSessionId }],
+    providerSessions: [],
     messages: [{ id: messageId, text: "Continue", attachments: [] }],
     checkpointScopes: [{ id: checkpointScopeId }],
     contextHandoffs: [],

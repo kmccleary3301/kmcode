@@ -5,6 +5,7 @@ import {
 import type { OrchestrationV2SubagentLiveContent } from "@t3tools/contracts";
 import { isOrchestrationV2WorkActive } from "@t3tools/contracts";
 import { ArrowUpLeftIcon, BotIcon } from "lucide-react";
+import type { ReactNode } from "react";
 import { useLayoutEffect, useRef } from "react";
 
 import type { ProviderInstanceEntry } from "../../providerInstances";
@@ -30,6 +31,7 @@ export function ProviderSubagentBar(props: {
   readonly status: ProviderSubagentStatus | null;
   readonly onOpenParent: (() => void) | null;
   readonly onOpenAgents?: (() => void) | null;
+  readonly actions?: ReactNode;
   readonly liveContent?: OrchestrationV2SubagentLiveContent | null;
   readonly liveViewRateLimited?: boolean;
 }) {
@@ -116,6 +118,7 @@ export function ProviderSubagentBar(props: {
         </span>
       ) : null}
       <span className="ms-auto shrink-0 text-muted-foreground max-sm:hidden">Runs on its own</span>
+      {props.actions}
       {props.onOpenAgents ? (
         <Button size="sm" variant="ghost" onClick={props.onOpenAgents}>
           <BotIcon className="size-4" />

@@ -390,6 +390,60 @@ describe("Antigravity tool results", () => {
     expect(JSON.stringify(event.rawPayload)).not.toContain("formatted_output");
   });
 
+  it("previews pending edits from their pre-edit file content", () => {
+    const path = "/workspace/app.ts";
+    const toolCall = normalizeAntigravityToolCall(
+      {
+        toolCallId: "edit-1",
+        kind: "edit",
+        status: "pending",
+        data: {
+          rawInput: { path, TargetContent: "old\n", ReplacementContent: "new\n" },
+        },
+      },
+      (requestedPath) => (requestedPath === path ? "old\n" : undefined),
+    );
+
+    expect(toolCall.data.content).toMatchObject([
+      {
+        type: "diff",
+        path,
+        patch: { text: expect.stringContaining("-old\n+new") },
+      },
+    ]);
+  });
+
+  it("keeps generic diff data when Antigravity edit data cannot produce a preview", () => {
+    const content = [{ type: "diff", path: "/workspace/app.ts", oldText: "old", newText: "new" }];
+    const toolCall = normalizeAntigravityToolCall({
+      toolCallId: "edit-2",
+      kind: "edit",
+      status: "pending",
+      data: { rawInput: { unsupported: true }, content },
+    });
+
+    expect(toolCall.data.content).toEqual(content);
+  });
+
+  it("marks unsafe pending edit previews omitted instead of replacing generic behavior", () => {
+    const path = "/workspace/app.ts";
+    const toolCall = normalizeAntigravityToolCall(
+      {
+        toolCallId: "edit-3",
+        kind: "edit",
+        status: "pending",
+        data: {
+          rawInput: { path, TargetContent: "old", ReplacementContent: "new\n" },
+        },
+      },
+      () => "old",
+    );
+
+    expect(toolCall.data.content).toMatchObject([
+      { type: "diff", path, patch: { format: "omitted" } },
+    ]);
+  });
+
   it("removes inline images while preserving valid tool content and the local image path", () => {
     const inlineImage = "inline-image-bytes".repeat(50_000);
     const notification = {

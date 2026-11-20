@@ -12,6 +12,11 @@ import type * as EffectAcpSchema from "effect-acp/compat";
 import * as AcpWireSchema from "effect-acp/schema-v1";
 
 import type { AcpToolCallState } from "./AcpRuntimeModel.ts";
+import {
+  ANTIGRAVITY_EDIT_DIFF_OMITTED,
+  antigravityEditPatch,
+  isAntigravitySnippetPatch,
+} from "./AntigravityEditLocation.ts";
 
 const TOOL_TEXT_LIMIT = 8_000;
 const TOOL_TEXT_TRUNCATED = "[Earlier output truncated]\n\n";
@@ -181,6 +186,11 @@ function boundText(text: string, limit = TOOL_TEXT_LIMIT): string {
     ? text
     : copyBoundedText(`${TOOL_TEXT_TRUNCATED}${text.slice(-limit)}`);
 }
+/** Keeps the tail of long tool text, as every bounded tool payload does. */
+export { boundText as boundAntigravityToolText };
+
+/** True when bounding cut some of this text. */
+export const isCutAntigravityToolText = (text: string) => text.includes(TOOL_TEXT_TRUNCATED);
 
 interface ToolPayloadBudget {
   nodes: number;
@@ -291,7 +301,10 @@ function localImagePath(imagePath: string | undefined): string | undefined {
   return /^[a-z][a-z\d+.-]*:/i.test(path) && !/^[a-z]:[\\/]/i.test(path) ? undefined : path;
 }
 
-export function normalizeAntigravityToolCall(toolCall: AcpToolCallState): AcpToolCallState {
+export function normalizeAntigravityToolCall(
+  toolCall: AcpToolCallState,
+  readPreEditFile?: (path: string) => string | undefined,
+): AcpToolCallState {
   const input = Option.getOrUndefined(decodeNativeToolFields(toolCall.data.rawInput));
   const output = Option.getOrUndefined(decodeNativeToolFields(toolCall.data.rawOutput));
   const nativeCommand =
@@ -331,6 +344,53 @@ export function normalizeAntigravityToolCall(toolCall: AcpToolCallState): AcpToo
       ...(aggregatedOutput !== undefined ? { aggregatedOutput } : {}),
       ...(exitCode !== undefined ? { exitCode } : {}),
     };
+  }
+  const locations = data.locations;
+  const rawInput = Predicate.isObject(data.rawInput) ? data.rawInput : undefined;
+  let editPath: string | undefined;
+  if (Array.isArray(locations)) {
+    for (const location of locations) {
+      if (!Predicate.isObject(location) || typeof location.path !== "string") continue;
+      const candidate = location.path.trim();
+      if (candidate.length > 0) {
+        editPath = candidate;
+        break;
+      }
+    }
+  }
+  if (editPath === undefined) {
+    const rawPath = rawInput?.path ?? rawInput?.filePath ?? rawInput?.file_path;
+    if (typeof rawPath === "string" && rawPath.trim().length > 0) {
+      editPath = rawPath.trim();
+    }
+  }
+  const hasExistingDiff =
+    Array.isArray(data.content) &&
+    data.content.some((entry) => Predicate.isObject(entry) && entry.type === "diff");
+  if (
+    kind === "edit" &&
+    toolCall.status === "pending" &&
+    editPath !== undefined &&
+    !hasExistingDiff
+  ) {
+    const patch = antigravityEditPatch({
+      path: editPath,
+      rawInput: data.rawInput,
+      locations,
+      ...(readPreEditFile === undefined ? {} : { readPreEditFile }),
+    });
+    if (patch !== undefined) {
+      const patchData =
+        patch === ANTIGRAVITY_EDIT_DIFF_OMITTED
+          ? { format: "omitted" }
+          : isAntigravitySnippetPatch(patch)
+            ? { format: "snippet" }
+            : { text: patch };
+      data.content = [
+        ...(Array.isArray(data.content) ? data.content : []),
+        { type: "diff", path: editPath, patch: patchData },
+      ];
+    }
   }
   return {
     ...toolCall,

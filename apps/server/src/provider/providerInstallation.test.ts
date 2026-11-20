@@ -60,6 +60,7 @@ const makeHarness = Effect.fn("providerInstallation.test.makeHarness")(function*
   } = {},
 ) {
   const calls: string[] = [];
+  const updateChecks: string[] = [];
   let protectedPaths: ReadonlyArray<string> = [];
   const configured = input.instance ?? instance();
   const router = yield* makeProviderInstallation().pipe(
@@ -80,6 +81,9 @@ const makeHarness = Effect.fn("providerInstallation.test.makeHarness")(function*
         }),
         Layer.mock(CodexInstallation.CodexInstallation)({
           managedDirectory: "/unused-managed-codex",
+          checkForUpdate: Effect.sync(() => {
+            updateChecks.push("codex");
+          }),
           start: Effect.sync(() => {
             calls.push("codex-start");
             return { ...state, driver: ProviderDriverKind.make("codex") };
@@ -98,6 +102,9 @@ const makeHarness = Effect.fn("providerInstallation.test.makeHarness")(function*
             }),
         }),
         Layer.mock(AntigravityInstallation.AntigravityInstallation)({
+          checkForUpdate: Effect.sync(() => {
+            updateChecks.push("antigravity");
+          }),
           managedDirectory: "/unused-managed-runtime",
           start: Effect.sync(() => {
             calls.push("start");
@@ -119,7 +126,7 @@ const makeHarness = Effect.fn("providerInstallation.test.makeHarness")(function*
       ),
     ),
   );
-  return { router, calls, protectedPaths: () => protectedPaths };
+  return { router, calls, updateChecks, protectedPaths: () => protectedPaths };
 });
 
 describe("provider installation routing", () => {
@@ -129,6 +136,18 @@ describe("provider installation routing", () => {
       yield* harness.router.start({ instanceId });
       assert.deepEqual(harness.calls, ["start"]);
     }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+  );
+  it.effect.each([true, false])(
+    "checks installation updates in the background only when enabled (%s)",
+    (enabled) =>
+      Effect.gen(function* () {
+        const harness = yield* makeHarness({
+          settings: { enableProviderUpdateChecks: enabled },
+        });
+        yield* Stream.runCollect(harness.router.subscribe({ instanceId }));
+        yield* Effect.yieldNow;
+        assert.deepEqual(harness.updateChecks, enabled ? ["antigravity"] : []);
+      }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
   );
 
   it.effect("rejects another driver and unknown instances before installation", () =>

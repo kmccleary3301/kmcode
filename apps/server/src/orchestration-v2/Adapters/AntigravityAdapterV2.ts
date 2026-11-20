@@ -15,6 +15,7 @@ import * as Scope from "effect/Scope";
 import * as EffectAcpErrors from "effect-acp/errors";
 
 import type { ServerConfig } from "../../config.ts";
+import { PULL_REQUEST_LINKING_INSTRUCTIONS } from "../../provider/RuntimeInstructions.ts";
 import type { AntigravityAuth } from "../../provider/AntigravityAuth.ts";
 import type * as AcpSessionRuntime from "../../provider/acp/AcpSessionRuntime.ts";
 import {
@@ -26,6 +27,7 @@ import {
   readAntigravityClientTextFile,
   writeAntigravityClientTextFile,
 } from "../../provider/acp/AntigravityClientFiles.ts";
+import { readAntigravityPreEditFile } from "../../provider/acp/AntigravityEditLocation.ts";
 import {
   antigravityApprovalOptions,
   antigravitySubagentOutput,
@@ -81,6 +83,9 @@ export interface AntigravityAdapterV2Options {
   readonly withProcess: AntigravityAuth["withProcess"];
   /** Model to select for the provider default alias, from the manifest. */
   readonly defaultModel: Effect.Effect<string | undefined>;
+  /** True when the installed agent exposes Antigravity's native `goal` command. */
+  readonly supportsNativeGoals?: Effect.Effect<boolean>;
+  readonly watchPromptOutcome?: AcpAdapterV2Flavor["watchPromptOutcome"];
   readonly onSessionStarted?: (
     started: AcpSessionRuntime.AcpSessionRuntimeStartResult,
     cwd: string,
@@ -140,6 +145,7 @@ export function makeAntigravityAcpAdapterFlavor(
             ...input,
             clientFileSystem: true,
             additionalDirectories: [options.serverConfig.attachmentsDir],
+            sessionSystemPromptAppend: PULL_REQUEST_LINKING_INSTRUCTIONS,
           }),
         )
         .pipe(Effect.provideService(Scope.Scope, scope));
@@ -167,6 +173,12 @@ export function makeAntigravityAcpAdapterFlavor(
     driver: ANTIGRAVITY_PROVIDER,
     runtimeHarness: "Antigravity",
     capabilities: AntigravityProviderCapabilitiesV2,
+    supportsNativeGoals: options.supportsNativeGoals ?? Effect.succeed(false),
+    // The CLI accepts T3's MCP endpoint directly, avoiding the stdio bridge.
+    mcpOverHttp: true,
+    ...(options.watchPromptOutcome === undefined
+      ? {}
+      : { watchPromptOutcome: options.watchPromptOutcome }),
     makeRuntime,
     // Loading history replays every tool call; resume restores the session
     // without the replay and is what the official client does.
@@ -219,7 +231,11 @@ export function makeAntigravityAcpAdapterFlavor(
         respond: (answers) => makeAntigravityUserInputResponse(request, answers),
       };
     },
-    normalizeToolCall: normalizeAntigravityToolCall,
+    normalizeToolCall: (toolCall) =>
+      normalizeAntigravityToolCall(
+        toolCall,
+        toolCall.status === "pending" ? readAntigravityPreEditFile : undefined,
+      ),
     extractSubagentUpdate: extractAntigravitySubagentUpdate,
     supportsImagePrompts: true,
     // ACP 1.3.0 treats /compact as ordinary model input.

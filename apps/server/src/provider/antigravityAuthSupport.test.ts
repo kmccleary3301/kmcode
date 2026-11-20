@@ -113,6 +113,27 @@ describe("Antigravity process environment", () => {
       },
     });
   });
+  it("launches the managed CLI with a private Gemini home and no legacy harness environment", () => {
+    const spawn = buildAntigravityAcpSpawnInput({
+      installation: { executablePath: "/usr/bin/agy", harnessPath: null },
+      profile,
+      cwd: "/project",
+      baseEnv: { PATH: "/usr/bin" },
+    });
+
+    expect(spawn).toMatchObject({
+      command: "/usr/bin/agy",
+      args: ["acp", "--gemini-dir", profile.geminiHome, "--app-data-dir", "antigravity-acp"],
+      cwd: "/project",
+      extendEnv: false,
+    });
+    expect(spawn.env).toMatchObject({
+      GEMINI_HOME: profile.geminiHome,
+      PATH: "/usr/bin",
+      TMPDIR: profile.tempDirectory,
+    });
+    expect(spawn.env).not.toHaveProperty("ANTIGRAVITY_HARNESS_PATH");
+  });
 
   it("passes only the configured method's credential and keeps the GCP pair out of the environment", () => {
     const baseEnv = { PATH: "/usr/bin", GOOGLE_API_KEY: "ambient-key" };

@@ -447,7 +447,7 @@ export const prepareAntigravityProfile = Effect.fn("prepareAntigravityProfile")(
 export function buildAntigravityAcpSpawnInput(input: {
   readonly installation: {
     readonly executablePath: string;
-    readonly harnessPath: string;
+    readonly harnessPath: string | null;
   };
   readonly profile: AntigravityProfile;
   readonly cwd: string;
@@ -458,7 +458,12 @@ export function buildAntigravityAcpSpawnInput(input: {
 }): AcpSpawnInput {
   return {
     command: input.installation.executablePath,
-    args: input.profile.platform === "linux" ? ["--uid="] : [],
+    args:
+      input.installation.harnessPath === null
+        ? ["acp", "--gemini-dir", input.profile.geminiHome, "--app-data-dir", "antigravity-acp"]
+        : input.profile.platform === "linux"
+          ? ["--uid="]
+          : [],
     cwd: input.cwd,
     env: {
       ...antigravityEnvironment(
@@ -467,7 +472,9 @@ export function buildAntigravityAcpSpawnInput(input: {
         input.auth ?? ANTIGRAVITY_PERSONAL_AUTH,
         input.runtimeTempDirectory,
       ),
-      ANTIGRAVITY_HARNESS_PATH: input.installation.harnessPath,
+      ...(input.installation.harnessPath === null
+        ? {}
+        : { ANTIGRAVITY_HARNESS_PATH: input.installation.harnessPath }),
     },
     extendEnv: false,
   };

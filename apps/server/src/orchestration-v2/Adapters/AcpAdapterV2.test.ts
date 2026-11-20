@@ -11,10 +11,12 @@ import * as NodePath from "node:path";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, describe, it } from "@effect/vitest";
 import {
+  ChatAttachmentId,
   CheckpointId,
   GrokSettings,
   EnvironmentId,
   MessageId,
+  type ChatAttachment,
   type ModelSelection,
   NodeId,
   ProjectId,
@@ -71,6 +73,7 @@ import {
   type ProviderAdapterV2Event,
   type ProviderAdapterV2TurnInput,
 } from "../ProviderAdapter.ts";
+import { makeProviderFailure } from "../ProviderFailure.ts";
 import type { ProviderContinuationRequest } from "../ProviderContinuationRequests.ts";
 import {
   AcpProviderCapabilitiesV2,
@@ -82,8 +85,10 @@ import {
   acpPostSettleMonitorPromptShouldSuppress,
   acpPostSettleWakeEvidence,
   acpPostSettleWakeShouldBuffer,
+  acpPerTurnPromptUsage,
   acpProjectedCommandExitCode,
   acpToolCallDiffPatch,
+  acpToolCallSnippetEdit,
   acpTurnStartShouldPreserveContinuation,
   makeAcpAdapterV2,
   type AcpAdapterV2ExtensionContext,
@@ -174,6 +179,69 @@ describe("acpToolCallDiffPatch", () => {
         { type: "diff", path: "/repo/big.ts", oldText: lines("old"), newText: lines("new") },
       ]),
     );
+  });
+});
+
+describe("acpToolCallSnippetEdit", () => {
+  it("keeps snippet text as an edit without inventing a line-numbered patch", () => {
+    const content = [
+      {
+        type: "diff",
+        oldText: "before",
+        newText: "after",
+        patch: { format: "snippet" },
+      },
+    ];
+    assert.deepEqual(acpToolCallSnippetEdit(content), { oldStr: "before", newStr: "after" });
+    assert.isUndefined(acpToolCallDiffPatch(content));
+  });
+
+  it("does not preview omitted patches", () => {
+    assert.isUndefined(
+      acpToolCallDiffPatch([{ type: "diff", patch: { format: "omitted", text: "not a preview" } }]),
+    );
+  });
+});
+
+describe("acpPerTurnPromptUsage", () => {
+  const usage = {
+    inputTokens: 10,
+    outputTokens: 4,
+    totalTokens: 14,
+    cachedReadTokens: 5,
+    cachedWriteTokens: 3,
+    thoughtTokens: 2,
+  };
+
+  it("normalizes provider token usage and marks partial failures", () => {
+    assert.deepEqual(acpPerTurnPromptUsage(usage, true, "failed"), {
+      usageScope: "main_agent",
+      usageStatus: "partial",
+      hasSubagents: true,
+      inputTokens: 10,
+      outputTokens: 4,
+      cachedInputTokens: 5,
+      cacheCreationTokens: 3,
+      reasoningTokens: 2,
+    });
+    assert.deepEqual(acpPerTurnPromptUsage(undefined, false, "completed"), {
+      usageScope: "main_agent",
+      usageStatus: "unavailable",
+      hasSubagents: false,
+    });
+  });
+
+  it("adds Gemini cached input and thought tokens to the respective totals", () => {
+    assert.deepEqual(acpPerTurnPromptUsage(usage, false, "completed", true), {
+      usageScope: "main_agent",
+      usageStatus: "complete",
+      hasSubagents: false,
+      inputTokens: 15,
+      outputTokens: 6,
+      cachedInputTokens: 5,
+      cacheCreationTokens: 3,
+      reasoningTokens: 2,
+    });
   });
 });
 
@@ -551,6 +619,7 @@ function makeTurnInput(input: {
   readonly messageCreatedBy?: "user" | "agent";
   readonly messageCreationSource?: "web" | "mobile" | "mcp" | "provider" | "server";
   readonly messageText?: string;
+  readonly attachments?: ReadonlyArray<ChatAttachment>;
 }): ProviderAdapterV2TurnInput {
   const ordinal = input.ordinal ?? 1;
   const suffix = `${input.threadId}:${ordinal}`;
@@ -596,7 +665,7 @@ function makeTurnInput(input: {
       creationSource: input.messageCreationSource ?? "web",
       messageId: MessageId.make(`message:${suffix}`),
       text: input.messageText ?? "test prompt",
-      attachments: [],
+      attachments: input.attachments ?? [],
     },
     modelSelection,
     runtimePolicy: input.runtimePolicy,
@@ -695,6 +764,135 @@ describe("AcpAdapterV2", () => {
       }).pipe(Effect.provide(layerTest), Effect.scoped),
   );
 
+  it.effect("passes prompt context and restarts after a hidden prompt failure", () =>
+    Effect.gen(function* () {
+      const path = yield* Path.Path;
+      const instanceId = ProviderInstanceId.make("acp-prompt-context");
+      const threadId = ThreadId.make("thread-acp-prompt-context");
+      const attachment = {
+        type: "file",
+        id: ChatAttachmentId.make("prompt-file"),
+        name: "brief.txt",
+        mimeType: "text/plain",
+        sizeBytes: 12,
+      } satisfies ChatAttachment;
+      const promptInputs: Array<Parameters<NonNullable<AcpAdapterV2Flavor["buildPrompt"]>>[0]> = [];
+      const runtimeOrdinals: number[] = [];
+      let outcomeChecks = 0;
+      const runtimePolicy = ProviderAdapterV2RuntimePolicy.make({
+        runtimeMode: "full-access",
+        interactionMode: "default",
+        cwd: process.cwd(),
+      });
+      const modelSelection = { instanceId, model: "default" } as const;
+      const adapter = makeAcpAdapterV2({
+        crypto: yield* Crypto.Crypto,
+        instanceId,
+        fileSystem: yield* FileSystem.FileSystem,
+        idAllocator: yield* IdAllocator.IdAllocatorV2,
+        serverConfig: yield* ServerConfig.ServerConfig,
+        selfInvocation: yield* resolveSelfInvocation(),
+        flavor: {
+          driver: ACP_TEST_DRIVER,
+          capabilities: AcpProviderCapabilitiesV2,
+          clientCapabilitiesMeta: { parameterizedModelPicker: true },
+          supportsNativeGoals: Effect.succeed(true),
+          buildPrompt: (input) =>
+            Effect.sync(() => {
+              promptInputs.push(input);
+              const blocks: ReadonlyArray<EffectAcpSchema.ContentBlock> = [
+                { type: "text", text: input.text },
+              ];
+              return blocks;
+            }),
+          watchPromptOutcome: () =>
+            Effect.succeed(() =>
+              Effect.sync(() => {
+                outcomeChecks += 1;
+                return outcomeChecks === 1
+                  ? makeProviderFailure({
+                      class: "provider_error",
+                      message: "Hidden prompt failure",
+                    })
+                  : undefined;
+              }),
+            ),
+          makeRuntime: makeMockRuntime({
+            childProcessSpawner: yield* ChildProcessSpawner.ChildProcessSpawner,
+            mockAgentPath: yield* path.fromFileUrl(
+              new URL("../../../scripts/acp-mock-agent.ts", import.meta.url),
+            ),
+            wrapRuntime: (runtime, runtimeOrdinal) => {
+              runtimeOrdinals.push(runtimeOrdinal);
+              return runtime;
+            },
+          }),
+        },
+      });
+      assert.equal((yield* adapter.getCapabilities()).turns.supportsNativeGoals, true);
+      const runtime = yield* adapter.openSession({
+        threadId,
+        providerSessionId: ProviderSessionId.make("session-acp-prompt-context"),
+        modelSelection,
+        runtimePolicy,
+      });
+      const providerThread = yield* runtime.ensureThread({
+        threadId,
+        modelSelection,
+        runtimePolicy,
+      });
+
+      yield* runtime.startTurn(
+        makeTurnInput({
+          threadId,
+          providerThread,
+          instanceId,
+          runtimePolicy,
+          now: yield* DateTime.now,
+          attachments: [attachment],
+        }),
+      );
+      const firstEvents = yield* runtime.events.pipe(
+        Stream.takeUntil((event) => event.type === "turn.terminal"),
+        Stream.runCollect,
+      );
+      const firstTerminal = firstEvents.find((event) => event.type === "turn.terminal");
+      assert.isDefined(firstTerminal);
+      if (firstTerminal?.type !== "turn.terminal") return yield* Effect.die("Missing terminal");
+      assert.equal(firstTerminal.status, "failed");
+      assert.equal(firstTerminal.failure?.message, "Hidden prompt failure");
+
+      yield* runtime.startTurn(
+        makeTurnInput({
+          threadId,
+          providerThread,
+          instanceId,
+          runtimePolicy,
+          now: yield* DateTime.now,
+          ordinal: 2,
+        }),
+      );
+      const secondEvents = yield* runtime.events.pipe(
+        Stream.takeUntil((event) => event.type === "turn.terminal"),
+        Stream.runCollect,
+      );
+      const secondTerminal = secondEvents.find((event) => event.type === "turn.terminal");
+      assert.isDefined(secondTerminal);
+      if (secondTerminal?.type !== "turn.terminal") return yield* Effect.die("Missing terminal");
+      assert.equal(secondTerminal.status, "completed");
+      assert.equal(outcomeChecks, 2);
+      assert.deepEqual(runtimeOrdinals, [1, 2]);
+      const promptInput = promptInputs[0];
+      assert.isDefined(promptInput);
+      if (promptInput === undefined) return yield* Effect.die("Missing prompt input");
+      assert.equal(promptInput.agentVersion, "0.0.0");
+      assert.deepEqual(promptInput.currentModel, { id: "default", name: "Auto" });
+      assert.deepEqual(promptInput.attachments, [attachment]);
+      assert.include(promptInput.text, "test prompt");
+      assert.isNotNull(promptInput.resolveAttachmentPath(attachment));
+    }).pipe(Effect.provide(layerTest), Effect.scoped),
+  );
+
   it("preserves legacy ids and scopes v2 ids by provider instance", () => {
     const instanceId = ProviderInstanceId.make("acp-identity-test");
     assert.equal(
@@ -777,6 +975,41 @@ describe("AcpAdapterV2", () => {
       assert.deepEqual(mcpServer.args, ["acp-mcp-bridge"]);
       assert.equal(runtimeInput?.processEnvironment?.T3_ACP_MCP_NODE, process.execPath);
       assert.equal(runtimeInput?.processEnvironment?.T3_ACP_MCP_ENTRYPOINT, undefined);
+      let httpRuntimeInput: AcpAdapterV2RuntimeInput | undefined;
+      const httpInstanceId = ProviderInstanceId.make("acp-test-http-mcp");
+      const httpAdapter = makeAcpAdapterV2({
+        crypto: yield* Crypto.Crypto,
+        instanceId: httpInstanceId,
+        flavor: {
+          driver: ACP_TEST_DRIVER,
+          capabilities: AcpProviderCapabilitiesV2,
+          mcpOverHttp: true,
+          makeRuntime: (input) =>
+            Effect.sync(() => {
+              httpRuntimeInput = input;
+            }).pipe(Effect.andThen(makeRuntime(input))),
+        },
+        fileSystem,
+        idAllocator,
+        serverConfig,
+        selfInvocation,
+      });
+      yield* httpAdapter.openSession({
+        threadId,
+        providerSessionId: ProviderSessionId.make("provider-session-acp-test-http-mcp"),
+        modelSelection: { instanceId: httpInstanceId, model: "default" },
+        runtimePolicy,
+      });
+
+      const httpServer = httpRuntimeInput?.mcpServers[0];
+      if (httpServer === undefined || !("type" in httpServer) || httpServer.type !== "http") {
+        return yield* Effect.die("ACP runtime must receive the t3-code HTTP MCP server");
+      }
+      assert.equal(httpServer.url, "http://127.0.0.1:43123/mcp");
+      assert.deepEqual(httpServer.headers, [
+        { name: "Authorization", value: "Bearer self-contained-mcp-bridge-token" },
+      ]);
+      assert.deepEqual(httpRuntimeInput?.acpMcpServers, []);
     }).pipe(Effect.provide(layerTest), Effect.scoped),
   );
 

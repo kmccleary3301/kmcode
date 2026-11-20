@@ -155,6 +155,12 @@ const stopEarlierBackgroundWork = ({
             Stream.runDrain,
             Effect.forkScoped,
           );
+        const failed =
+          stalledRun === "missing-session" || stalledRun === "missing-session-terminal"
+            ? yield* watch(
+                (event) => event.type === "run.updated" && event.payload.status === "failed",
+              )
+            : undefined;
         yield* orchestrator.dispatch({
           type: "thread.create",
           commandId: CommandId.make("create"),
@@ -225,14 +231,13 @@ const stopEarlierBackgroundWork = ({
           const attempt = before.attempts[0]!;
           if (stalledRun === "missing-session" || stalledRun === "missing-session-terminal") {
             const sessions = yield* ProviderSessionManager.ProviderSessionManagerV2;
-            const failed = yield* watch(
-              (event) => event.type === "run.updated" && event.payload.status === "failed",
-            );
             yield* sessions.release({
               providerSessionId: first.providerThread.providerSessionId!,
               reason: "runtime_error",
             });
-            yield* Fiber.join(failed);
+            if (failed !== undefined) {
+              yield* Fiber.join(failed);
+            }
             // Disk exhaustion can lose these terminal writes. Restore that stale state.
             yield* sink.write({
               events: [

@@ -1418,28 +1418,20 @@ export const layer: Layer.Layer<
                       ? event.providerTurn
                       : undefined;
                   const shouldStartProviderTurn = input.shouldStartProviderTurn;
-                  if (startedRootTurn !== undefined && shouldStartProviderTurn !== undefined) {
-                    const { stored, ownership } = yield* threadCommands.withLock(
+                  if (deliveredEvent && startedRootTurn !== undefined && shouldStartProviderTurn) {
+                    rootTurnOwnershipChecked = true;
+                    // Stop plans under this lock from stored turns. Storing the first turn and
+                    // rechecking the attempt under it means Stop either saw the turn or already
+                    // settled the run.
+                    const [stored, owned] = yield* threadCommands.withLock(
                       input.run.threadId,
-                      Effect.gen(function* () {
-                        const stored = yield* ingestDelivered;
-                        const ownership = yield* shouldStartProviderTurn().pipe(
-                          Effect.map((owned) => ({ owned, checked: true as const })),
-                          Effect.catch((cause) =>
-                            Effect.logWarning(
-                              "orchestration V2 could not recheck provider-turn ownership after start",
-                              { runId: input.run.id, cause },
-                            ).pipe(Effect.as({ owned: false, checked: false as const })),
-                          ),
-                        );
-                        return { stored, ownership };
-                      }),
+                      Effect.all([
+                        ingestDelivered,
+                        shouldStartProviderTurn().pipe(Effect.orElseSucceed(() => true)),
+                      ]),
                     );
                     storedEventCount = stored;
-                    if (ownership.checked) {
-                      rootTurnOwnershipChecked = true;
-                    }
-                    if (!ownership.owned) {
+                    if (!owned) {
                       yield* Ref.get(latestProviderThread).pipe(
                         Effect.flatMap((providerThread) =>
                           input.session.interruptTurn({
@@ -1455,7 +1447,6 @@ export const layer: Layer.Layer<
                               { runId: input.run.id, cause },
                             ),
                         ),
-                        Effect.forkDetach,
                       );
                     }
                   } else {
